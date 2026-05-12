@@ -70,7 +70,19 @@ http://WINDOWS_LAN_IP:5174
 
 After both apps login with the same account on that server, the Windows computer appears automatically in `Computers`.
 
+## TURN for hard networks
+
+The app uses WebRTC. Same-LAN connections usually work with STUN, but different networks, strict NAT, or Windows firewall rules can still block direct P2P. Configure a TURN server in `.env` when clients show ICE connection failures:
+
+```text
+STUN_URLS=stun:stun.l.google.com:19302
+TURN_URLS=turn:YOUR_TURN_HOST:3478
+TURN_USERNAME=your-username
+TURN_CREDENTIAL=your-password
+```
+
+To self-host TURN with Homebrew/coturn or Docker, use the setup in [`turn/`](turn/README.md).
+
 ## Smoothness notes
 
 This version uses WebRTC P2P with browser hardware acceleration where available. It is the correct base for smooth streaming without Sunshine/Moonlight, but true Parsec-grade game feel still needs native capture, GPU encode control, native input injection, and TURN/relay infrastructure for hard NAT cases.
-

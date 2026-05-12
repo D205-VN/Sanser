@@ -10,6 +10,7 @@ const PORT = Number(process.env.PORT || 5174);
 const HOST = process.env.HOST || "127.0.0.1";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const OFFLINE_AFTER_MS = 25000;
+const DEFAULT_STUN_URLS = "stun:stun.l.google.com:19302";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL
@@ -173,6 +174,27 @@ function publicUser(user) {
   };
 }
 
+function parseCsv(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function getIceServers() {
+  const stunUrls = parseCsv(process.env.STUN_URLS || DEFAULT_STUN_URLS);
+  const turnUrls = parseCsv(process.env.TURN_URLS);
+  const iceServers = [];
+  if (stunUrls.length) iceServers.push({ urls: stunUrls });
+  if (turnUrls.length) {
+    const turnServer = { urls: turnUrls };
+    if (process.env.TURN_USERNAME) turnServer.username = process.env.TURN_USERNAME;
+    if (process.env.TURN_CREDENTIAL) turnServer.credential = process.env.TURN_CREDENTIAL;
+    iceServers.push(turnServer);
+  }
+  return iceServers;
+}
+
 async function cleanOfflineDevices() {
   const cutoff = Date.now() - OFFLINE_AFTER_MS;
   await pool.query('UPDATE devices SET online = false WHERE online = true AND last_seen_at <= $1', [cutoff]);
@@ -292,6 +314,15 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/health") {
     sendJson(res, 200, { ok: true, now: Date.now() });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/config") {
+    const iceServers = getIceServers();
+    sendJson(res, 200, {
+      iceServers,
+      hasTurn: iceServers.some((server) => parseCsv(server.urls).some((item) => item.toLowerCase().startsWith("turn")))
+    });
     return;
   }
 

@@ -15,6 +15,10 @@ const appState = {
   pendingRequests: new Map(),
   heartbeatTimer: null,
   mouseTimer: 0,
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" }
+  ],
+  hasTurn: false,
   stats: {
     clientBytes: 0,
     clientAt: 0,
@@ -257,9 +261,18 @@ function enterApp(user) {
   accountEmail.textContent = user.email;
   authView.classList.add("is-hidden");
   appShell.classList.remove("is-hidden");
+  loadNetworkConfig().catch(() => {});
   connectEvents();
   refreshDevices();
   maybeAutoHost();
+}
+
+async function loadNetworkConfig() {
+  const config = await api("/api/config");
+  if (Array.isArray(config.iceServers) && config.iceServers.length) {
+    appState.iceServers = config.iceServers;
+  }
+  appState.hasTurn = Boolean(config.hasTurn);
 }
 
 async function logout() {
@@ -518,6 +531,7 @@ async function connectToDevice(deviceId) {
   if (!device || !device.online || device.sessionId === appState.sessionId) return;
 
   try {
+    await loadNetworkConfig().catch(() => {});
     showConnecting(device.name || 'máy chủ');
     streamStatus.textContent = "Đang kết nối...";
     $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
@@ -551,6 +565,7 @@ async function connectToDevice(deviceId) {
 
 async function startHostPeer(room) {
   if (appState.hostPeers.has(room.id)) return;
+  await loadNetworkConfig().catch(() => {});
   if (!appState.hostDevice) {
     await startHost({ capture: false });
   }
@@ -623,9 +638,7 @@ function createPeerConnection(room, role) {
     bundlePolicy: "max-bundle",
     rtcpMuxPolicy: "require",
     iceCandidatePoolSize: 4,
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" }
-    ]
+    iceServers: appState.iceServers
   });
   pc.pendingRemoteIce = [];
   pc.onicecandidate = (event) => {
@@ -640,7 +653,10 @@ function createPeerConnection(room, role) {
       hideConnecting();
       if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
       streamStatus.textContent = `Kết nối ${pc.iceConnectionState}`;
-      showToast('Không thể kết nối tới máy chủ! Vui lòng thử lại.', 'error');
+      const hint = appState.hasTurn
+        ? "Kiểm tra firewall Windows hoặc thử lại."
+        : "Nếu khác mạng LAN, cần cấu hình TURN server.";
+      showToast(`Không thể kết nối tới máy chủ! ${hint}`, 'error');
       cleanupClientPeer();
     }
   };
