@@ -237,6 +237,9 @@ function handleNativeLog(entry = {}) {
     if (/SNV1 H\.264 packet stream/i.test(line)) {
       $("#captureStatus").textContent = "Native host đang encode H.264";
     }
+    if (/SNINPUT target bounds/i.test(line)) {
+      $("#captureStatus").textContent = line.replace(/^.*SNINPUT target bounds/, "Input target");
+    }
     if (/SNINPUT control backchannel enabled/i.test(line)) {
       hostStats.textContent = "Native SNV | input backchannel hoạt động";
     }

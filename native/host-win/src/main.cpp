@@ -490,7 +490,19 @@ void handleModifierState(int keyCode, int modifiers) {
 void handleControlPayload(const std::string& json) {
   const std::string type = jsonStringValue(json, "type");
   if (type == "pointer-move") {
-    movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
+    const double x = jsonDoubleValue(json, "x");
+    const double y = jsonDoubleValue(json, "y");
+    const bool moved = movePointerNormalized(x, y);
+    static auto lastMoveLog = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastMoveLog > std::chrono::milliseconds(250)) {
+      lastMoveLog = now;
+      std::cerr << "SNINPUT_APPLIED pointer-move"
+                << " x=" << x
+                << " y=" << y
+                << " moved=" << (moved ? "yes" : "no")
+                << "\n";
+    }
   } else if (type == "pointer-down" || type == "pointer-up") {
     const double x = jsonDoubleValue(json, "x");
     const double y = jsonDoubleValue(json, "y");
@@ -778,6 +790,53 @@ int runEncodeMode(DesktopDuplicator& duplicator, const Options& options) {
   return 0;
 }
 
+#ifdef _WIN32
+void putPixelBgra(FrameBgra& frame, int x, int y, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+  if (x < 0 || y < 0 || x >= static_cast<int>(frame.width) || y >= static_cast<int>(frame.height)) return;
+  auto* pixel = frame.pixels.data()
+    + static_cast<std::size_t>(y) * frame.stride
+    + static_cast<std::size_t>(x) * 4;
+  pixel[0] = b;
+  pixel[1] = g;
+  pixel[2] = r;
+  pixel[3] = 255;
+}
+
+void drawSoftwareCursor(FrameBgra& frame, const DesktopDuplicator& duplicator) {
+  CURSORINFO cursorInfo{};
+  cursorInfo.cbSize = sizeof(cursorInfo);
+  if (!GetCursorInfo(&cursorInfo) || (cursorInfo.flags & CURSOR_SHOWING) == 0) return;
+
+  const int originX = cursorInfo.ptScreenPos.x - static_cast<int>(duplicator.left());
+  const int originY = cursorInfo.ptScreenPos.y - static_cast<int>(duplicator.top());
+  if (originX < -24 || originY < -24 ||
+      originX >= static_cast<int>(frame.width) ||
+      originY >= static_cast<int>(frame.height)) {
+    return;
+  }
+
+  std::vector<std::pair<int, int>> white;
+  for (int y = 0; y <= 16; ++y) {
+    const int maxX = std::min(8, y / 2 + 1);
+    for (int x = 0; x <= maxX; ++x) white.emplace_back(x, y);
+  }
+  for (int y = 11; y <= 22; ++y) {
+    for (int x = 3; x <= 5; ++x) white.emplace_back(x, y);
+  }
+
+  for (const auto& [x, y] : white) {
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) {
+        putPixelBgra(frame, originX + x + dx, originY + y + dy, 0, 0, 0);
+      }
+    }
+  }
+  for (const auto& [x, y] : white) {
+    putPixelBgra(frame, originX + x, originY + y, 255, 255, 255);
+  }
+}
+#endif
+
 int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   if (options.codec != VideoCodec::H264) {
     throw std::runtime_error("--encode-pipe currently supports h264 only.");
@@ -848,6 +907,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       std::cerr << "Timed out waiting for a changed frame.\n";
       continue;
     }
+#ifdef _WIN32
+    drawSoftwareCursor(frame, duplicator);
+#endif
 
     auto packets = encoder.encodeFrame(frame);
     for (const auto& packet : packets) {
