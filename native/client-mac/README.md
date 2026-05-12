@@ -52,6 +52,22 @@ npm run native:client-mac:decode-snv -- /path/to/capture_h264.snv
 
 The output reports parsed packets, keyframes, NAL units, submitted frames, decoded frames, and decode errors. `decodedFrames` greater than zero means VideoToolbox accepted the Windows native packet stream.
 
+## TCP SNV1 Listener
+
+Start the macOS native client as a TCP receiver:
+
+```bash
+npm run native:client-mac:listen-snv -- 7777 --max-packets 180
+```
+
+Then start the Windows native host with the Mac Tailscale IP:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect MAC_TAILSCALE_IP:7777
+```
+
+The Mac command decodes packets as they arrive and prints the same decode summary. This is Phase 6C's first network transport: TCP over Tailscale, before RTP/UDP/QUIC.
+
 ## Metal Render Test
 
 ```bash

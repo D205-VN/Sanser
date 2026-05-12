@@ -8,6 +8,7 @@
 #include <chrono>
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +19,11 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace {
 
@@ -73,6 +79,7 @@ void printHelp() {
   std::cout
     << "sanser-native-client --probe\n"
     << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
+    << "sanser-native-client --listen-snv PORT [--max-packets N]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
@@ -80,6 +87,7 @@ void printHelp() {
     << "Phase 5 prototype:\n"
     << "  --probe           Print VideoToolbox hardware decode and Metal availability\n"
     << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
+    << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --metal-test      Open a Metal window and log native input events to stdout\n"
     << "  --seconds N       Auto-close Metal test after N seconds; 0 keeps it open\n"
@@ -178,6 +186,21 @@ std::uint32_t readLe32(const std::vector<std::uint8_t>& data, std::size_t offset
        | (static_cast<std::uint32_t>(data[offset + 3]) << 24);
 }
 
+std::uint32_t readLe32Raw(const std::uint8_t* data) {
+  return static_cast<std::uint32_t>(data[0])
+       | (static_cast<std::uint32_t>(data[1]) << 8)
+       | (static_cast<std::uint32_t>(data[2]) << 16)
+       | (static_cast<std::uint32_t>(data[3]) << 24);
+}
+
+std::uint64_t readLe64Raw(const std::uint8_t* data) {
+  std::uint64_t value = 0;
+  for (int i = 0; i < 8; ++i) {
+    value |= static_cast<std::uint64_t>(data[i]) << (8 * i);
+  }
+  return value;
+}
+
 std::uint64_t readLe64(const std::vector<std::uint8_t>& data, std::size_t offset) {
   if (offset + 8 > data.size()) throw std::runtime_error("Unexpected EOF reading uint64.");
   std::uint64_t value = 0;
@@ -218,6 +241,26 @@ struct NalUnit {
   std::vector<std::uint8_t> bytes;
   std::uint8_t type = 0;
 };
+
+SnvPacket parseSnvHeader(const std::uint8_t* header, std::size_t headerSize) {
+  if (headerSize < 52) {
+    throw std::runtime_error("SNV1 header too small.");
+  }
+  if (std::memcmp(header, "SNV1", 4) != 0) {
+    throw std::runtime_error("Invalid SNV1 magic in stream.");
+  }
+
+  SnvPacket packet;
+  packet.codec = readLe32Raw(header + 8);
+  packet.packetFormat = readLe32Raw(header + 12);
+  packet.width = readLe32Raw(header + 16);
+  packet.height = readLe32Raw(header + 20);
+  packet.sequence = readLe64Raw(header + 24);
+  packet.timestampMicros = readLe64Raw(header + 32);
+  packet.durationMicros = readLe32Raw(header + 40);
+  packet.flags = readLe32Raw(header + 44);
+  return packet;
+}
 
 std::vector<SnvPacket> readSnvPackets(const std::string& file, std::uint64_t maxPackets) {
   std::ifstream input(file, std::ios::binary);
@@ -537,57 +580,206 @@ private:
   std::uint32_t decodedHeight_ = 0;
 };
 
+struct DecodeSummary {
+  std::uint64_t packets = 0;
+  std::uint64_t keyframes = 0;
+  std::uint64_t nalUnits = 0;
+  std::uint64_t skippedNoParameters = 0;
+  std::uint64_t skippedEmptySamples = 0;
+  std::uint64_t firstSequence = 0;
+  std::uint64_t lastSequence = 0;
+  bool hasFirstSequence = false;
+};
+
+void processSnvPacket(VtH264Decoder& decoder, DecodeSummary& summary, const SnvPacket& packet) {
+  if (packet.codec != 1) {
+    throw std::runtime_error("Only H.264 SNV1 codec packets are supported.");
+  }
+  if (!summary.hasFirstSequence) {
+    summary.firstSequence = packet.sequence;
+    summary.hasFirstSequence = true;
+  }
+  summary.lastSequence = packet.sequence;
+  summary.packets += 1;
+  if (packet.flags & 1) ++summary.keyframes;
+
+  const auto nals = parseNalUnits(packet.payload);
+  summary.nalUnits += nals.size();
+  decoder.observeParameterSets(nals);
+  if (!decoder.ready()) {
+    ++summary.skippedNoParameters;
+    return;
+  }
+
+  const auto sample = buildAvccSample(nals);
+  if (sample.empty()) {
+    ++summary.skippedEmptySamples;
+    return;
+  }
+  decoder.decode(packet, sample);
+}
+
+void printDecodeSummary(const std::string& label,
+                        const DecodeSummary& summary,
+                        const VtH264Decoder& decoder) {
+  std::cout << "{\n"
+            << "  \"source\": \"" << jsonEscape(label.c_str()) << "\",\n"
+            << "  \"packets\": " << summary.packets << ",\n"
+            << "  \"keyframes\": " << summary.keyframes << ",\n"
+            << "  \"nalUnits\": " << summary.nalUnits << ",\n"
+            << "  \"submittedFrames\": " << decoder.submittedFrames() << ",\n"
+            << "  \"decodedFrames\": " << decoder.decodedFrames() << ",\n"
+            << "  \"decodeErrors\": " << decoder.decodeErrors() << ",\n"
+            << "  \"skippedNoParameters\": " << summary.skippedNoParameters << ",\n"
+            << "  \"skippedEmptySamples\": " << summary.skippedEmptySamples << ",\n"
+            << "  \"firstSequence\": " << summary.firstSequence << ",\n"
+            << "  \"lastSequence\": " << summary.lastSequence << "\n"
+            << "}\n";
+}
+
 int decodeSnvFile(const std::string& file, std::uint64_t maxPackets) {
   @autoreleasepool {
     const auto packets = readSnvPackets(file, maxPackets);
     VtH264Decoder decoder;
-    std::uint64_t keyframes = 0;
-    std::uint64_t skippedNoParameters = 0;
-    std::uint64_t skippedEmptySamples = 0;
-    std::uint64_t nalUnits = 0;
+    DecodeSummary summary;
 
     for (const auto& packet : packets) {
-      if (packet.codec != 1) {
-        throw std::runtime_error("Only H.264 SNV1 codec packets are supported in Phase 6B.");
-      }
-      if (packet.flags & 1) ++keyframes;
-
-      const auto nals = parseNalUnits(packet.payload);
-      nalUnits += nals.size();
-      decoder.observeParameterSets(nals);
-      if (!decoder.ready()) {
-        ++skippedNoParameters;
-        continue;
-      }
-
-      const auto sample = buildAvccSample(nals);
-      if (sample.empty()) {
-        ++skippedEmptySamples;
-        continue;
-      }
-      decoder.decode(packet, sample);
+      processSnvPacket(decoder, summary, packet);
     }
 
     decoder.flush();
-
-    const SnvPacket* first = packets.empty() ? nullptr : &packets.front();
-    const SnvPacket* last = packets.empty() ? nullptr : &packets.back();
-    std::cout << "{\n"
-              << "  \"file\": \"" << jsonEscape(file.c_str()) << "\",\n"
-              << "  \"packets\": " << packets.size() << ",\n"
-              << "  \"keyframes\": " << keyframes << ",\n"
-              << "  \"nalUnits\": " << nalUnits << ",\n"
-              << "  \"submittedFrames\": " << decoder.submittedFrames() << ",\n"
-              << "  \"decodedFrames\": " << decoder.decodedFrames() << ",\n"
-              << "  \"decodeErrors\": " << decoder.decodeErrors() << ",\n"
-              << "  \"skippedNoParameters\": " << skippedNoParameters << ",\n"
-              << "  \"skippedEmptySamples\": " << skippedEmptySamples << ",\n"
-              << "  \"firstSequence\": " << (first ? first->sequence : 0) << ",\n"
-              << "  \"lastSequence\": " << (last ? last->sequence : 0) << "\n"
-              << "}\n";
+    printDecodeSummary(file, summary, decoder);
 
     if (decoder.decodedFrames() == 0) {
       std::cerr << "No frames decoded. The SNV file may not contain SPS/PPS in H.264 Annex B or AVCC form yet.\n";
+      return 2;
+    }
+  }
+  return 0;
+}
+
+bool readExactFd(int fd, void* target, std::size_t size) {
+  auto* cursor = static_cast<std::uint8_t*>(target);
+  std::size_t remaining = size;
+  while (remaining > 0) {
+    const ssize_t received = recv(fd, cursor, remaining, 0);
+    if (received == 0) return false;
+    if (received < 0) {
+      if (errno == EINTR) continue;
+      throw std::runtime_error("Socket receive failed.");
+    }
+    cursor += received;
+    remaining -= static_cast<std::size_t>(received);
+  }
+  return true;
+}
+
+bool readSnvPacketFromFd(int fd, SnvPacket& packet) {
+  std::array<std::uint8_t, 52> header{};
+  if (!readExactFd(fd, header.data(), header.size())) {
+    return false;
+  }
+  if (std::memcmp(header.data(), "SNV1", 4) != 0) {
+    throw std::runtime_error("Invalid SNV1 magic from TCP stream.");
+  }
+
+  const std::uint32_t headerSize = readLe32Raw(header.data() + 4);
+  if (headerSize < header.size()) {
+    throw std::runtime_error("Invalid SNV1 header size from TCP stream.");
+  }
+  packet = parseSnvHeader(header.data(), header.size());
+
+  if (headerSize > header.size()) {
+    std::vector<std::uint8_t> extraHeader(headerSize - header.size());
+    if (!readExactFd(fd, extraHeader.data(), extraHeader.size())) {
+      throw std::runtime_error("TCP stream ended inside SNV1 extended header.");
+    }
+  }
+
+  const std::uint32_t payloadSize = readLe32Raw(header.data() + 48);
+  packet.payload.resize(payloadSize);
+  if (payloadSize > 0 && !readExactFd(fd, packet.payload.data(), packet.payload.size())) {
+    throw std::runtime_error("TCP stream ended inside SNV1 payload.");
+  }
+  return true;
+}
+
+class ScopedFd {
+public:
+  explicit ScopedFd(int fd = -1) : fd_(fd) {}
+  ~ScopedFd() {
+    if (fd_ >= 0) close(fd_);
+  }
+
+  ScopedFd(const ScopedFd&) = delete;
+  ScopedFd& operator=(const ScopedFd&) = delete;
+
+  int get() const { return fd_; }
+  int release() {
+    const int fd = fd_;
+    fd_ = -1;
+    return fd;
+  }
+
+private:
+  int fd_ = -1;
+};
+
+int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
+  @autoreleasepool {
+    ScopedFd server(socket(AF_INET, SOCK_STREAM, 0));
+    if (server.get() < 0) {
+      throw std::runtime_error("Could not create TCP listener socket.");
+    }
+
+    int reuse = 1;
+    setsockopt(server.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons(port);
+    if (bind(server.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+      throw std::runtime_error("Could not bind TCP listener on port " + std::to_string(port));
+    }
+    if (listen(server.get(), 1) != 0) {
+      throw std::runtime_error("Could not listen on TCP port " + std::to_string(port));
+    }
+
+    std::cout << "SNV1 TCP listener ready on 0.0.0.0:" << port << "\n";
+    std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect MAC_TAILSCALE_IP:" << port << "\n";
+
+    sockaddr_in peerAddress{};
+    socklen_t peerLength = sizeof(peerAddress);
+    ScopedFd client(accept(server.get(), reinterpret_cast<sockaddr*>(&peerAddress), &peerLength));
+    if (client.get() < 0) {
+      throw std::runtime_error("TCP accept failed.");
+    }
+
+    char peerIp[INET_ADDRSTRLEN]{};
+    inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
+    std::cout << "SNV1 TCP client connected from " << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
+
+    VtH264Decoder decoder;
+    DecodeSummary summary;
+    while (maxPackets == 0 || summary.packets < maxPackets) {
+      SnvPacket packet;
+      if (!readSnvPacketFromFd(client.get(), packet)) {
+        break;
+      }
+      processSnvPacket(decoder, summary, packet);
+      if (summary.packets % 60 == 0) {
+        std::cout << "SNV1 TCP packets=" << summary.packets
+                  << " decoded=" << decoder.decodedFrames()
+                  << " errors=" << decoder.decodeErrors()
+                  << "\n";
+      }
+    }
+
+    decoder.flush();
+    printDecodeSummary("tcp-listen:" + std::to_string(port), summary, decoder);
+    if (decoder.decodedFrames() == 0) {
+      std::cerr << "No frames decoded from TCP stream yet.\n";
       return 2;
     }
   }
@@ -810,11 +1002,13 @@ int runMetalTest(double seconds) {
 struct Options {
   bool probe = false;
   bool decodeSnv = false;
+  bool listenSnv = false;
   bool metalTest = false;
   bool clipboardRead = false;
   bool clipboardWrite = false;
   bool help = false;
   std::uint64_t maxPackets = 0;
+  std::uint16_t listenPort = 0;
   double seconds = 5;
   std::string snvFile;
   std::string clipboardText;
@@ -835,6 +1029,12 @@ Options parseOptions(int argc, char** argv) {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --decode-snv");
       options.decodeSnv = true;
       options.snvFile = argv[++i];
+    } else if (arg == "--listen-snv") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --listen-snv");
+      const auto port = std::stoul(argv[++i]);
+      if (port == 0 || port > 65535) throw std::runtime_error("--listen-snv port must be 1-65535");
+      options.listenSnv = true;
+      options.listenPort = static_cast<std::uint16_t>(port);
     } else if (arg == "--max-packets") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --max-packets");
       options.maxPackets = static_cast<std::uint64_t>(std::stoull(argv[++i]));
@@ -869,6 +1069,7 @@ int main(int argc, char** argv) {
     }
     if (options.probe) return runProbe();
     if (options.decodeSnv) return decodeSnvFile(options.snvFile, options.maxPackets);
+    if (options.listenSnv) return listenSnvTcp(options.listenPort, options.maxPackets);
     if (options.clipboardRead) return clipboardRead();
     if (options.clipboardWrite) return clipboardWrite(options.clipboardText);
     if (options.metalTest) return runMetalTest(options.seconds);

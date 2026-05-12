@@ -116,6 +116,16 @@ The prototype writes BMP frames for validation, supports `--pipe --fps 60` to st
 npm run native:host-win:inspect-snv -- native-captures\capture_h264.snv
 ```
 
+The native host can also stream SNV1 over TCP to the Mac native client:
+
+```bash
+npm run native:client-mac:listen-snv -- 7777 --max-packets 180
+```
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect MAC_TAILSCALE_IP:7777
+```
+
 The app transport currently remains WebRTC with adaptive bitrate and split data channels. The next native integration step is rendering decoded frames through Metal, then moving the packets onto RTP or UDP/QUIC.
 
 ## Native macOS Client Prototype
@@ -129,6 +139,7 @@ npm run native:client-mac:configure
 npm run native:client-mac:build
 npm run native:client-mac:probe
 npm run native:client-mac:decode-snv -- /path/to/capture_h264.snv
+npm run native:client-mac:listen-snv -- 7777 --max-packets 180
 ./native/client-mac/build/sanser-native-client --metal-test --seconds 5
 ```
 

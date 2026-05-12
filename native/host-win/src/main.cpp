@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -12,16 +13,20 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #endif
 
 struct Options {
   std::filesystem::path outputDir = "captures";
   std::filesystem::path outputFile = "captures/capture_h264.mp4";
   std::filesystem::path packetFile;
+  std::string tcpConnect;
   std::uint32_t frames = 1;
   std::uint32_t intervalMs = 250;
   std::uint32_t adapterIndex = 0;
@@ -84,6 +89,9 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--packet-file") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --packet-file");
       options.packetFile = argv[++i];
+    } else if (arg == "--tcp-connect") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --tcp-connect");
+      options.tcpConnect = argv[++i];
     } else if (arg == "--frames") {
       options.frames = readUintArg(argc, argv, i, "--frames");
       options.framesProvided = true;
@@ -118,6 +126,7 @@ Options parseOptions(int argc, char** argv) {
         << "sanser-native-host --list-encoders\n"
         << "sanser-native-host --encode h264 --frames 300 --fps 60 --output-file captures/capture_h264.mp4\n"
         << "sanser-native-host --encode-pipe h264 --fps 60 --packet-file native-captures/capture.snv\n"
+        << "sanser-native-host --encode-pipe h264 --fps 60 --tcp-connect 100.x.y.z:7777\n"
         << "  --adapter N      DXGI adapter index, default 0\n"
         << "  --output N       DXGI output/monitor index, default 0\n"
         << "  --pipe           Write BGRA frames to stdout with SNF1 headers\n"
@@ -127,6 +136,7 @@ Options parseOptions(int argc, char** argv) {
         << "  --bitrate N      Target encode bitrate, default 28000000\n"
         << "  --output-file P  Encoded output file path\n"
         << "  --packet-file P  SNV1 packet output file; stdout is used when omitted\n"
+        << "  --tcp-connect H:P Connect to a TCP SNV1 receiver and stream packets\n"
         << "  --list-encoders  List Media Foundation hardware encoders\n"
         << "  --software-encoder Disable hardware transform request\n";
       std::exit(0);
@@ -142,6 +152,98 @@ std::uint64_t nowMicros() {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
+#ifdef _WIN32
+class WinsockRuntime {
+public:
+  WinsockRuntime() {
+    WSADATA data{};
+    const int result = WSAStartup(MAKEWORD(2, 2), &data);
+    if (result != 0) {
+      throw std::runtime_error("WSAStartup failed: " + std::to_string(result));
+    }
+  }
+
+  ~WinsockRuntime() {
+    WSACleanup();
+  }
+
+  WinsockRuntime(const WinsockRuntime&) = delete;
+  WinsockRuntime& operator=(const WinsockRuntime&) = delete;
+};
+
+class TcpClient {
+public:
+  explicit TcpClient(const std::string& endpoint) {
+    const auto separator = endpoint.rfind(':');
+    if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
+      throw std::runtime_error("--tcp-connect must be HOST:PORT");
+    }
+    const std::string host = endpoint.substr(0, separator);
+    const std::string port = endpoint.substr(separator + 1);
+
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* results = nullptr;
+    const int lookup = getaddrinfo(host.c_str(), port.c_str(), &hints, &results);
+    if (lookup != 0) {
+      throw std::runtime_error("getaddrinfo failed for " + endpoint + ": " + std::to_string(lookup));
+    }
+
+    for (addrinfo* item = results; item; item = item->ai_next) {
+      SOCKET candidate = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+      if (candidate == INVALID_SOCKET) continue;
+
+      if (connect(candidate, item->ai_addr, static_cast<int>(item->ai_addrlen)) == 0) {
+        socket_ = candidate;
+        break;
+      }
+
+      closesocket(candidate);
+    }
+    freeaddrinfo(results);
+
+    if (socket_ == INVALID_SOCKET) {
+      throw std::runtime_error("Could not connect to " + endpoint + ", WSA error " + std::to_string(WSAGetLastError()));
+    }
+
+    int noDelay = 1;
+    setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+  }
+
+  ~TcpClient() {
+    if (socket_ != INVALID_SOCKET) {
+      shutdown(socket_, SD_SEND);
+      closesocket(socket_);
+    }
+  }
+
+  TcpClient(const TcpClient&) = delete;
+  TcpClient& operator=(const TcpClient&) = delete;
+
+  void sendAll(const void* data, std::size_t size) {
+    const char* cursor = static_cast<const char*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0) {
+      const int chunk = remaining > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        ? std::numeric_limits<int>::max()
+        : static_cast<int>(remaining);
+      const int sent = send(socket_, cursor, chunk, 0);
+      if (sent == SOCKET_ERROR || sent == 0) {
+        throw std::runtime_error("TCP send failed, WSA error " + std::to_string(WSAGetLastError()));
+      }
+      cursor += sent;
+      remaining -= static_cast<std::size_t>(sent);
+    }
+  }
+
+private:
+  SOCKET socket_ = INVALID_SOCKET;
+};
+#endif
+
 void writePipeFrame(const FrameBgra& frame) {
   PipeFrameHeader header;
   header.width = frame.width;
@@ -155,12 +257,11 @@ void writePipeFrame(const FrameBgra& frame) {
   std::cout.flush();
 }
 
-void writeEncodedPacket(std::ostream& output,
-                        const EncodedVideoPacket& packet,
-                        std::uint32_t width,
-                        std::uint32_t height,
-                        std::uint64_t sequence,
-                        bool hardware) {
+std::vector<std::uint8_t> makeEncodedPacketBytes(const EncodedVideoPacket& packet,
+                                                 std::uint32_t width,
+                                                 std::uint32_t height,
+                                                 std::uint64_t sequence,
+                                                 bool hardware) {
   EncodedPacketHeader header;
   header.width = width;
   header.height = height;
@@ -170,8 +271,22 @@ void writeEncodedPacket(std::ostream& output,
   header.flags = (packet.keyframe ? 1u : 0u) | (hardware ? 2u : 0u);
   header.payloadSize = static_cast<std::uint32_t>(packet.payload.size());
 
-  output.write(reinterpret_cast<const char*>(&header), sizeof(header));
-  output.write(reinterpret_cast<const char*>(packet.payload.data()), packet.payload.size());
+  std::vector<std::uint8_t> bytes(sizeof(header) + packet.payload.size());
+  std::memcpy(bytes.data(), &header, sizeof(header));
+  if (!packet.payload.empty()) {
+    std::memcpy(bytes.data() + sizeof(header), packet.payload.data(), packet.payload.size());
+  }
+  return bytes;
+}
+
+void writeEncodedPacket(std::ostream& output,
+                        const EncodedVideoPacket& packet,
+                        std::uint32_t width,
+                        std::uint32_t height,
+                        std::uint64_t sequence,
+                        bool hardware) {
+  const auto bytes = makeEncodedPacketBytes(packet, width, height, sequence, hardware);
+  output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
 int runPipeMode(DesktopDuplicator& duplicator, const Options& options) {
@@ -242,10 +357,25 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   if (options.codec != VideoCodec::H264) {
     throw std::runtime_error("--encode-pipe currently supports h264 only.");
   }
+  if (!options.tcpConnect.empty() && !options.packetFile.empty()) {
+    throw std::runtime_error("Use either --tcp-connect or --packet-file, not both.");
+  }
 
   std::unique_ptr<std::ofstream> packetFile;
   std::ostream* output = &std::cout;
-  if (!options.packetFile.empty()) {
+#ifdef _WIN32
+  std::unique_ptr<WinsockRuntime> winsock;
+  std::unique_ptr<TcpClient> tcpClient;
+#endif
+
+  if (!options.tcpConnect.empty()) {
+#ifdef _WIN32
+    winsock = std::make_unique<WinsockRuntime>();
+    tcpClient = std::make_unique<TcpClient>(options.tcpConnect);
+#else
+    throw std::runtime_error("--tcp-connect is currently implemented for Windows host builds.");
+#endif
+  } else if (!options.packetFile.empty()) {
     if (options.packetFile.has_parent_path()) {
       std::filesystem::create_directories(options.packetFile.parent_path());
     }
@@ -271,7 +401,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
             << duplicator.width() << "x" << duplicator.height()
             << " @ " << options.fps << " FPS, " << options.bitrate << " bps, "
             << (encoder.usingHardware() ? "hardware encoder" : "software encoder")
-            << (options.packetFile.empty() ? " -> stdout" : " -> " + options.packetFile.string())
+            << (!options.tcpConnect.empty()
+                  ? " -> tcp " + options.tcpConnect
+                  : (options.packetFile.empty() ? " -> stdout" : " -> " + options.packetFile.string()))
             << "\n";
 
   const auto frameDelay = options.fps > 0
@@ -293,14 +425,26 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
     auto packets = encoder.encodeFrame(frame);
     for (const auto& packet : packets) {
-      writeEncodedPacket(*output,
-                         packet,
-                         duplicator.width(),
-                         duplicator.height(),
-                         sequence++,
-                         encoder.usingHardware());
+      const auto bytes = makeEncodedPacketBytes(packet,
+                                                duplicator.width(),
+                                                duplicator.height(),
+                                                sequence++,
+                                                encoder.usingHardware());
+#ifdef _WIN32
+      if (tcpClient) {
+        tcpClient->sendAll(bytes.data(), bytes.size());
+      } else
+#endif
+      {
+        output->write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+      }
     }
-    output->flush();
+#ifdef _WIN32
+    if (!tcpClient)
+#endif
+    {
+      output->flush();
+    }
     ++capturedFrames;
 
     if (options.intervalMs > 0) {
@@ -312,14 +456,26 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
   auto packets = encoder.finish();
   for (const auto& packet : packets) {
-    writeEncodedPacket(*output,
-                       packet,
-                       duplicator.width(),
-                       duplicator.height(),
-                       sequence++,
-                       encoder.usingHardware());
+    const auto bytes = makeEncodedPacketBytes(packet,
+                                              duplicator.width(),
+                                              duplicator.height(),
+                                              sequence++,
+                                              encoder.usingHardware());
+#ifdef _WIN32
+    if (tcpClient) {
+      tcpClient->sendAll(bytes.data(), bytes.size());
+    } else
+#endif
+    {
+      output->write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
   }
-  output->flush();
+#ifdef _WIN32
+  if (!tcpClient)
+#endif
+  {
+    output->flush();
+  }
 
   std::cerr << "SNV1 packet stream wrote " << sequence << " packet(s).\n";
   return 0;
