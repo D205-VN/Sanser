@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld("sanserNative", {
   status() {
     return ipcRenderer.invoke("sanser:native-status");
   },
+  networkInfo() {
+    return ipcRenderer.invoke("sanser:native-network-info");
+  },
   startClient(options) {
     return ipcRenderer.invoke("sanser:native-start-client", options || {});
   },

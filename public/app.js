@@ -700,12 +700,15 @@ async function connectNativeToDevice(device) {
     appState.nativeClientConnected = false;
 
     await window.sanserNative.startClient({ port, logInput: true });
+    const networkInfo = await window.sanserNative.networkInfo?.().catch(() => null);
+    const clientIp = chooseNativeClientIp(device, networkInfo?.addresses || []);
+    const endpointLabel = clientIp ? `${clientIp}:${port}` : `auto:${port}`;
 
     appState._connectTimeout = setTimeout(() => {
       if (!appState.nativeClientConnected) {
         hideConnecting();
-        streamStatus.textContent = "Native renderer đang chờ host";
-        showToast("Native listener đã mở, nhưng Windows host chưa connect vào.", "warning", 5000);
+        streamStatus.textContent = `Native renderer đang chờ host (${endpointLabel})`;
+        showToast(`Native listener đã mở tại ${endpointLabel}, nhưng Windows host chưa connect vào.`, "warning", 6000);
       }
     }, 15000);
 
@@ -717,12 +720,13 @@ async function connectNativeToDevice(device) {
         quality: readClientQuality(),
         native: {
           transport: "snv-tcp",
+          clientIp,
           port
         }
       }
     });
     appState.clientRoom = data.room;
-    streamStatus.textContent = `Native renderer chờ ${device.name || "host"} connect`;
+    streamStatus.textContent = `Native renderer chờ ${device.name || "host"} connect (${endpointLabel})`;
     emptyStream.classList.add("is-hidden");
     $(".stream-dock").classList.add("is-visible");
   } catch (error) {
@@ -735,6 +739,47 @@ async function connectNativeToDevice(device) {
     connectError.textContent = error.message || "Native connection failed";
     streamStatus.textContent = "Chờ kết nối";
   }
+}
+
+function chooseNativeClientIp(device, addresses) {
+  const usable = (addresses || []).filter((entry) => entry?.address && !entry.address.startsWith("127."));
+  if (!usable.length) return "";
+
+  const hostIp = String(device.ip || "");
+  const sameSubnet = usable.find((entry) => ipv4SameSubnet(entry.address, hostIp, entry.netmask));
+  if (sameSubnet) return sameSubnet.address;
+
+  if (/^100\./.test(hostIp)) {
+    const tailscale = usable.find((entry) => /^100\./.test(entry.address));
+    if (tailscale) return tailscale.address;
+  }
+
+  if (/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(hostIp)) {
+    const lan = usable.find((entry) => /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(entry.address));
+    if (lan) return lan.address;
+  }
+
+  return usable[0].address;
+}
+
+function ipv4SameSubnet(left, right, netmask) {
+  const a = ipv4ToInt(left);
+  const b = ipv4ToInt(right);
+  const mask = ipv4ToInt(netmask);
+  if (a === null || b === null || mask === null) return false;
+  return (a & mask) === (b & mask);
+}
+
+function ipv4ToInt(value) {
+  const parts = String(value || "").split(".");
+  if (parts.length !== 4) return null;
+  let result = 0;
+  for (const part of parts) {
+    const number = Number(part);
+    if (!Number.isInteger(number) || number < 0 || number > 255) return null;
+    result = (result << 8) | number;
+  }
+  return result >>> 0;
 }
 
 async function startNativeHostForRoom(room) {

@@ -1,5 +1,6 @@
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { spawn, spawnSync } = require("child_process");
 const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session, shell } = require("electron");
 const { startServer } = require("../server");
@@ -273,6 +274,7 @@ function installInputHandler() {
 
 function installNativeHandlers() {
   ipcMain.handle("sanser:native-status", () => nativeStatus());
+  ipcMain.handle("sanser:native-network-info", () => nativeNetworkInfo());
   ipcMain.handle("sanser:native-start-client", (_event, options = {}) => startNativeClient(options));
   ipcMain.handle("sanser:native-stop-client", () => stopNativeProcess("client"));
   ipcMain.handle("sanser:native-start-host", (_event, options = {}) => startNativeHost(options));
@@ -401,6 +403,39 @@ function nativeStatus() {
     host: processStatus("host"),
     logs: nativeLogs
   };
+}
+
+function nativeNetworkInfo() {
+  return {
+    platform: process.platform,
+    addresses: localNetworkAddresses()
+  };
+}
+
+function localNetworkAddresses() {
+  const interfaces = os.networkInterfaces();
+  const addresses = [];
+  for (const [name, entries] of Object.entries(interfaces)) {
+    for (const entry of entries || []) {
+      if (entry.internal || entry.family !== "IPv4") continue;
+      addresses.push({
+        name,
+        address: entry.address,
+        netmask: entry.netmask,
+        cidr: entry.cidr || "",
+        priority: networkAddressPriority(name, entry.address)
+      });
+    }
+  }
+  return addresses.sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name));
+}
+
+function networkAddressPriority(name, address) {
+  if (/^100\./.test(address)) return 90;
+  if (/^(en|eth|wi-fi|wlan|ethernet)/i.test(name)) return 70;
+  if (/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(address)) return 60;
+  if (/^(utun|tailscale)/i.test(name)) return 50;
+  return 10;
 }
 
 function processStatus(role) {
