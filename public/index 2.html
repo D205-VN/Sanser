@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GameRemote</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="auth-view" id="authView">
+      <section class="auth-panel">
+        <div class="brand-lockup">
+          <div class="brand-mark">GR</div>
+          <div>
+            <h1>GameRemote</h1>
+            <p>Low-latency game streaming</p>
+          </div>
+        </div>
+
+        <div class="auth-tabs" role="tablist" aria-label="Auth mode">
+          <button class="auth-tab is-active" id="loginTab" type="button">Login</button>
+          <button class="auth-tab" id="registerTab" type="button">Register</button>
+        </div>
+
+        <form id="authForm" class="auth-form">
+          <label class="field register-only is-hidden">
+            <span>Name</span>
+            <input id="nameInput" autocomplete="name" placeholder="Dung Nguyen">
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="emailInput" type="email" autocomplete="email" placeholder="you@example.com">
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="6+ characters">
+          </label>
+          <button class="primary-action" type="submit" id="authSubmit">Login</button>
+          <p class="form-error" id="authError"></p>
+        </form>
+      </section>
+    </main>
+
+    <main class="app-shell is-hidden" id="appShell">
+      <aside class="sidebar">
+        <div class="brand-lockup small">
+          <div class="brand-mark">GR</div>
+          <div>
+            <h1>GameRemote</h1>
+            <p id="userLabel">Offline</p>
+          </div>
+        </div>
+        <nav class="nav-list" aria-label="Main navigation">
+          <button class="nav-item is-active" data-view="computersView" type="button">My Computers</button>
+          <button class="nav-item" data-view="hostView" type="button">Host Mode</button>
+          <button class="nav-item" data-view="settingsView" type="button">Settings</button>
+        </nav>
+        <button class="ghost-action" id="logoutButton" type="button">Logout</button>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Direct WebRTC stream</p>
+            <h2 id="viewTitle">My Computers</h2>
+          </div>
+          <div class="server-state">
+            <span class="state-dot" id="serverDot"></span>
+            <span id="serverState">Connecting</span>
+          </div>
+        </header>
+
+        <section class="view is-active" id="computersView">
+          <div class="split-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h3>Online Computers</h3>
+                  <p>Same account, PIN protected</p>
+                </div>
+                <button class="secondary-action" id="refreshDevices" type="button">Refresh</button>
+              </div>
+              <div class="device-list" id="deviceList"></div>
+            </section>
+
+            <section class="panel connect-panel">
+              <div class="panel-heading">
+                <div>
+                  <h3>Connect</h3>
+                  <p id="selectedDeviceLabel">No computer selected</p>
+                </div>
+              </div>
+              <div class="connect-form">
+                <label class="field">
+                  <span>PIN</span>
+                  <input id="pinInput" inputmode="numeric" maxlength="6" placeholder="000000">
+                </label>
+                <div class="quality-row">
+                  <label class="field">
+                    <span>Resolution</span>
+                    <select id="clientResolution">
+                      <option value="720p">720p</option>
+                      <option value="1080p" selected>1080p</option>
+                      <option value="1440p">1440p</option>
+                      <option value="low-latency">Low latency</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>FPS</span>
+                    <input id="clientFps" type="number" min="30" max="120" step="10" value="60">
+                  </label>
+                  <label class="field">
+                    <span>Bitrate Mbps</span>
+                    <input id="clientBitrate" type="number" min="4" max="120" step="1" value="35">
+                  </label>
+                </div>
+                <button class="primary-action" id="connectButton" type="button">Connect</button>
+                <p class="form-error" id="connectError"></p>
+              </div>
+            </section>
+          </div>
+
+          <section class="stream-stage panel">
+            <div class="stage-toolbar">
+              <div>
+                <h3>Stream</h3>
+                <p id="streamStatus">Idle</p>
+              </div>
+              <div class="toolbar-actions">
+                <button class="secondary-action" id="focusInputButton" type="button">Focus Input</button>
+                <button class="danger-action" id="disconnectButton" type="button">Disconnect</button>
+              </div>
+            </div>
+            <div class="video-shell" id="videoShell" tabindex="0">
+              <video id="remoteVideo" playsinline autoplay></video>
+              <div class="empty-stream" id="emptyStream">
+                <strong>No active stream</strong>
+                <span>Choose an online computer and connect with PIN.</span>
+              </div>
+              <div class="stats-overlay" id="clientStats">FPS -- | -- Mbps | RTT -- ms</div>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="hostView">
+          <div class="split-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h3>This Computer</h3>
+                  <p id="hostStatus">Offline</p>
+                </div>
+                <div class="host-actions">
+                  <button class="primary-action" id="startHostButton" type="button">Go Online</button>
+                  <button class="danger-action" id="stopHostButton" type="button">Stop</button>
+                </div>
+              </div>
+
+              <div class="host-grid">
+                <label class="field">
+                  <span>Computer Name</span>
+                  <input id="hostName" placeholder="Dung-Windows-PC">
+                </label>
+                <label class="field">
+                  <span>GPU</span>
+                  <input id="hostGpu" placeholder="RTX 3060">
+                </label>
+                <label class="toggle-row">
+                  <input id="autoAccept" type="checkbox" checked>
+                  <span>Auto accept valid PIN</span>
+                </label>
+              </div>
+
+              <div class="pin-card">
+                <span>Pair PIN</span>
+                <strong id="hostPin">------</strong>
+                <button class="secondary-action" id="newPinButton" type="button">New PIN</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h3>Host Preview</h3>
+                  <p id="captureStatus">Screen capture inactive</p>
+                </div>
+                <button class="secondary-action" id="captureButton" type="button">Capture Screen</button>
+              </div>
+              <video class="preview-video" id="hostPreview" autoplay muted playsinline></video>
+              <div class="stats-strip" id="hostStats">Outbound FPS -- | -- Mbps</div>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h3>Connection Requests</h3>
+                <p>PIN verified before requests arrive</p>
+              </div>
+            </div>
+            <div class="request-list" id="requestList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="settingsView">
+          <section class="panel settings-panel">
+            <div class="panel-heading">
+              <div>
+                <h3>Streaming Preset</h3>
+                <p>Applied to new connections</p>
+              </div>
+            </div>
+            <div class="settings-grid">
+              <label class="field">
+                <span>Codec Preference</span>
+                <select id="codecPreference">
+                  <option value="H264" selected>H.264</option>
+                  <option value="VP9">VP9</option>
+                  <option value="VP8">VP8</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Mouse Sample Rate</span>
+                <select id="mouseRate">
+                  <option value="30">30 Hz</option>
+                  <option value="60" selected>60 Hz</option>
+                  <option value="120">120 Hz</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Transport</span>
+                <select id="transportMode">
+                  <option value="p2p" selected>WebRTC P2P</option>
+                </select>
+              </label>
+            </div>
+            <div class="latency-target">
+              <span>Target profile</span>
+              <strong>60 FPS, direct UDP, adaptive bitrate</strong>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

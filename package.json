@@ -1,0 +1,70 @@
+{
+  "name": "gameremote-parsec-like",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Single-app Parsec-like remote game streaming prototype with WebRTC.",
+  "main": "desktop/main.js",
+  "scripts": {
+    "dev": "node server.js",
+    "desktop": "electron .",
+    "start": "electron .",
+    "check": "node --check server.js && node --check public/app.js && node --check desktop/main.js",
+    "dist:win": "electron-builder --win portable --x64",
+    "dist:win:installer": "electron-builder --win nsis --x64",
+    "dist:mac": "electron-builder --mac zip --arm64",
+    "dist:both": "npm run dist:mac && npm run dist:win"
+  },
+  "keywords": [
+    "webrtc",
+    "game-streaming",
+    "remote-desktop"
+  ],
+  "author": "",
+  "license": "UNLICENSED",
+  "build": {
+    "appId": "com.gameremote.desktop",
+    "productName": "GameRemote",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**/*",
+      "public/**/*",
+      "server.js",
+      "package.json",
+      "README.md"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "requestedExecutionLevel": "asInvoker",
+      "artifactName": "${productName}-Windows-${version}-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        "zip"
+      ],
+      "category": "public.app-category.utilities",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "artifactName": "${productName}-macOS-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-Windows-${version}-portable-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1"
+  }
+}

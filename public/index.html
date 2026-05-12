@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GameRemote</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="auth-view" id="authView">
+      <section class="auth-panel">
+        <div class="auth-brand">
+          <span class="gem-logo"></span>
+          <div>
+            <h1>GameRemote</h1>
+            <p>Low latency desktop mode</p>
+          </div>
+        </div>
+
+        <div class="auth-tabs" role="tablist" aria-label="Auth mode">
+          <button class="auth-tab is-active" id="loginTab" type="button">Login</button>
+          <button class="auth-tab" id="registerTab" type="button">Register</button>
+        </div>
+
+        <form class="auth-form" id="authForm">
+          <label class="field register-only is-hidden">
+            <span>Name</span>
+            <input id="nameInput" autocomplete="name" placeholder="TanDung">
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="emailInput" type="email" autocomplete="email" placeholder="you@example.com">
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="6+ characters">
+          </label>
+          <button class="primary-action" id="authSubmit" type="submit">Login</button>
+          <p class="form-error" id="authError"></p>
+        </form>
+      </section>
+    </main>
+
+    <main class="app-shell is-hidden" id="appShell">
+      <aside class="rail">
+        <button class="rail-item is-active" data-view="computersView" type="button" title="Computers" aria-label="Computers">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H4V5Zm2 2v6h12V7H6Zm2 11h8v2H8v-2Zm-3 2h14v2H5v-2Z"/></svg>
+        </button>
+        <button class="rail-item" data-view="settingsView" type="button" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m19.4 13.5 1.5 1.2-2 3.5-1.9-.8a7.7 7.7 0 0 1-1.7 1l-.3 2.1h-4l-.3-2.1a7.7 7.7 0 0 1-1.7-1l-1.9.8-2-3.5 1.5-1.2a7.1 7.1 0 0 1 0-2l-1.5-1.2 2-3.5 1.9.8a7.7 7.7 0 0 1 1.7-1l.3-2.1h4l.3 2.1a7.7 7.7 0 0 1 1.7 1l1.9-.8 2 3.5-1.5 1.2a7.1 7.1 0 0 1 0 2ZM13 15.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg>
+        </button>
+        <button class="rail-item" data-view="hostView" type="button" title="Host" aria-label="Host">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v4h2v14H5V7h2V3Zm2 2v2h6V5H9Zm-2 4v10h10V9H7Zm2 2h6v2H9v-2Zm0 4h6v2H9v-2Z"/></svg>
+        </button>
+        <button class="rail-item muted" type="button" title="Help" aria-label="Help">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 17h2v2h-2v-2Zm1-14a8 8 0 1 1 0 16 8 8 0 0 1 0-16Zm0 2a6 6 0 1 0 0 12 6 6 0 0 0 0-12Zm0 2.5c1.7 0 3 1 3 2.5 0 1-.5 1.7-1.5 2.3-.7.4-.9.7-.9 1.4v.3h-2v-.4c0-1.2.4-1.9 1.5-2.6.7-.4.9-.7.9-1.1 0-.6-.4-.9-1.1-.9-.8 0-1.3.5-1.4 1.3l-1.9-.3c.3-1.6 1.5-2.5 3.4-2.5Z"/></svg>
+        </button>
+        <button class="rail-item logout" id="logoutButton" type="button" title="Logout" aria-label="Logout">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9v2H7v14h7v2H5V3Zm11.6 5.4L21.2 13l-4.6 4.6-1.4-1.4 2.2-2.2H10v-2h7.4l-2.2-2.2 1.4-1.4Z"/></svg>
+        </button>
+      </aside>
+
+      <section class="main-stage">
+        <header class="account-bar">
+          <div class="server-state">
+            <span class="state-dot" id="serverDot"></span>
+            <span id="serverState">Connecting</span>
+          </div>
+          <div class="account-pill">
+            <span class="gem-logo small"></span>
+            <strong id="userLabel">Offline</strong>
+          </div>
+        </header>
+
+        <section class="view is-active" id="computersView">
+          <div class="page-head">
+            <h1>Computers</h1>
+            <p>Connect to your computers in low latency desktop mode.</p>
+          </div>
+          <div class="rule"></div>
+          <div class="computer-tools">
+            <label class="search-box">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 0 1 5.1 10.5l4 4-1.4 1.4-4-4A6.5 6.5 0 1 1 10.5 4Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z"/></svg>
+              <input id="computerSearch" placeholder="Search Hosts and Computers">
+            </label>
+            <button class="link-action" id="refreshDevices" type="button">Reload</button>
+          </div>
+
+          <section class="computer-vault">
+            <div class="computer-list" id="deviceList"></div>
+          </section>
+
+          <section class="stream-dock">
+            <div class="dock-head">
+              <div>
+                <h2>Stream</h2>
+                <p id="streamStatus">Idle</p>
+              </div>
+              <div class="dock-actions">
+                <button class="secondary-action" id="focusInputButton" type="button">Focus Input</button>
+                <button class="danger-action" id="disconnectButton" type="button">Disconnect</button>
+              </div>
+            </div>
+            <div class="video-shell" id="videoShell" tabindex="0">
+              <video id="remoteVideo" playsinline autoplay></video>
+              <div class="empty-stream" id="emptyStream">
+                <strong>No active stream</strong>
+                <span id="selectedDeviceLabel">Choose an online computer.</span>
+              </div>
+              <div class="stats-overlay" id="clientStats">FPS -- | -- Mbps | RTT -- ms</div>
+            </div>
+            <p class="form-error" id="connectError"></p>
+          </section>
+
+          <footer class="join-bar">
+            <input disabled placeholder="Join with a share link or Peer ID.">
+            <button disabled type="button">Join</button>
+          </footer>
+        </section>
+
+        <section class="view" id="hostView">
+          <div class="page-head">
+            <h1>Host</h1>
+            <p>Manage this computer and its streaming state.</p>
+          </div>
+          <div class="rule"></div>
+
+          <div class="host-layout">
+            <section class="dark-panel">
+              <div class="panel-head">
+                <div>
+                  <h2>This Computer</h2>
+                  <p id="hostStatus">Offline</p>
+                </div>
+                <div class="button-row">
+                  <button class="primary-action" id="startHostButton" type="button">Go Online</button>
+                  <button class="danger-action" id="stopHostButton" type="button">Stop</button>
+                </div>
+              </div>
+              <div class="settings-stack compact">
+                <label class="setting-row">
+                  <span>
+                    <strong>Computer Name</strong>
+                    <small>Displayed on other devices using this account.</small>
+                  </span>
+                  <input id="hostName" placeholder="LAPTOP-MO1H2EFV">
+                </label>
+                <label class="setting-row">
+                  <span>
+                    <strong>GPU</strong>
+                    <small>Shown on the computer card.</small>
+                  </span>
+                  <input id="hostGpu" placeholder="RTX 3060">
+                </label>
+                <label class="setting-row">
+                  <span>
+                    <strong>Auto Accept Same Account</strong>
+                    <small>Connections from your account start immediately.</small>
+                  </span>
+                  <select id="autoAccept">
+                    <option value="on" selected>On</option>
+                    <option value="off">Off</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+
+            <section class="dark-panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Preview</h2>
+                  <p id="captureStatus">Screen capture inactive</p>
+                </div>
+                <button class="secondary-action" id="captureButton" type="button">Capture Screen</button>
+              </div>
+              <video class="preview-video" id="hostPreview" autoplay muted playsinline></video>
+              <div class="stats-strip" id="hostStats">Outbound FPS -- | -- Mbps</div>
+            </section>
+          </div>
+
+          <section class="dark-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Connections</h2>
+                <p>Same-account sessions are accepted automatically.</p>
+              </div>
+            </div>
+            <div class="request-list" id="requestList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="settingsView">
+          <div class="page-head settings-head">
+            <div>
+              <h1>Settings</h1>
+              <p>Customize your GameRemote experience.</p>
+            </div>
+            <span>Version 0.1.0</span>
+          </div>
+          <div class="rule"></div>
+
+          <nav class="settings-tabs" aria-label="Settings sections">
+            <button class="settings-tab is-active" data-settings-tab="clientSettings" type="button">Client</button>
+            <button class="settings-tab" data-settings-tab="hostSettings" type="button">Host</button>
+            <button class="settings-tab" data-settings-tab="networkSettings" type="button">Network</button>
+            <button class="settings-tab" data-settings-tab="hotkeySettings" type="button">Hotkeys</button>
+            <button class="settings-tab" data-settings-tab="gamepadSettings" type="button">Gamepad</button>
+            <button class="settings-tab" data-settings-tab="experimentalSettings" type="button">Experimental</button>
+            <button class="settings-tab" data-settings-tab="accountSettings" type="button">Account</button>
+          </nav>
+
+          <section class="settings-pane is-active" id="clientSettings">
+            <h2>Client Settings</h2>
+            <div class="settings-stack">
+              <label class="setting-row">
+                <span>
+                  <strong>Resolution</strong>
+                  <small>Client stream size.</small>
+                </span>
+                <select id="clientResolution">
+                  <option value="720p">720p</option>
+                  <option value="1080p" selected>1080p</option>
+                  <option value="1440p">1440p</option>
+                  <option value="low-latency">Low Latency</option>
+                </select>
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>FPS</strong>
+                  <small>Higher values need a stronger network.</small>
+                </span>
+                <input id="clientFps" type="number" min="30" max="120" step="10" value="60">
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>Bitrate</strong>
+                  <small>Mbps sent from the host.</small>
+                </span>
+                <input id="clientBitrate" type="number" min="4" max="120" step="1" value="35">
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>Overlay</strong>
+                  <small>Performance stats while connected.</small>
+                </span>
+                <select id="overlayMode">
+                  <option value="on" selected>On</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-pane" id="hostSettings">
+            <h2>Host Settings</h2>
+            <div class="settings-stack">
+              <label class="setting-row">
+                <span>
+                  <strong>Hosting</strong>
+                  <small>This computer appears after login.</small>
+                </span>
+                <select id="hostEnabled">
+                  <option value="on" selected>On</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>Host FPS</strong>
+                  <small>Capture target frame rate.</small>
+                </span>
+                <input id="hostFps" type="number" min="30" max="120" step="10" value="60">
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>Host Bitrate</strong>
+                  <small>Default Mbps for new sessions.</small>
+                </span>
+                <input id="hostBitrate" type="number" min="4" max="120" step="1" value="35">
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>Video Codec</strong>
+                  <small>Preferred WebRTC encoder.</small>
+                </span>
+                <select id="codecPreference">
+                  <option value="H264" selected>H.264</option>
+                  <option value="VP9">VP9</option>
+                  <option value="VP8">VP8</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-pane" id="networkSettings">
+            <h2>Network Settings</h2>
+            <div class="settings-stack">
+              <label class="setting-row">
+                <span>
+                  <strong>Server URL</strong>
+                  <small>Use the same URL on macOS and Windows.</small>
+                </span>
+                <input id="serverUrlInput" placeholder="Local server">
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>Transport</strong>
+                  <small>Direct UDP when NAT allows it.</small>
+                </span>
+                <select id="transportMode">
+                  <option value="p2p" selected>WebRTC P2P</option>
+                </select>
+              </label>
+              <label class="setting-row">
+                <span>
+                  <strong>Mouse Sample Rate</strong>
+                  <small>Remote input update rate.</small>
+                </span>
+                <select id="mouseRate">
+                  <option value="30">30 Hz</option>
+                  <option value="60" selected>60 Hz</option>
+                  <option value="120">120 Hz</option>
+                </select>
+              </label>
+              <div class="setting-row action-row">
+                <span>
+                  <strong>Apply Network</strong>
+                  <small id="serverUrlLabel">Using local embedded server.</small>
+                </span>
+                <button class="secondary-action" id="applyServerButton" type="button">Apply</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-pane" id="hotkeySettings">
+            <h2>Hotkey Settings</h2>
+            <div class="settings-stack">
+              <label class="setting-row">
+                <span><strong>Disconnect Hotkey</strong><small>Ends the active session.</small></span>
+                <input id="disconnectHotkey" value="Ctrl+Shift+D">
+              </label>
+              <label class="setting-row">
+                <span><strong>Overlay Hotkey</strong><small>Toggles performance stats.</small></span>
+                <input id="overlayHotkey" value="Ctrl+Shift+O">
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-pane" id="gamepadSettings">
+            <h2>Gamepad Settings</h2>
+            <div class="settings-stack">
+              <label class="setting-row">
+                <span><strong>Gamepad Passthrough</strong><small>Forward browser gamepad events.</small></span>
+                <select id="gamepadMode">
+                  <option value="on" selected>On</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+              <label class="setting-row">
+                <span><strong>Vibration</strong><small>Client haptics.</small></span>
+                <select id="vibrationMode">
+                  <option value="off" selected>Off</option>
+                  <option value="on">On</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-pane" id="experimentalSettings">
+            <h2>Experimental Settings</h2>
+            <div class="settings-stack">
+              <label class="setting-row">
+                <span><strong>Prefer Low Latency</strong><small>Maintains framerate under pressure.</small></span>
+                <select id="lowLatencyMode">
+                  <option value="on" selected>On</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+              <label class="setting-row">
+                <span><strong>Stats Overlay</strong><small>Shows RTT, bitrate, FPS, packet loss.</small></span>
+                <select id="statsMode">
+                  <option value="on" selected>On</option>
+                  <option value="off">Off</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-pane" id="accountSettings">
+            <h2>Account Settings</h2>
+            <div class="settings-stack">
+              <div class="setting-row">
+                <span><strong>Signed In</strong><small id="accountEmail">Offline</small></span>
+                <button class="danger-action" id="accountLogoutButton" type="button">Logout</button>
+              </div>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
