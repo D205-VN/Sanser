@@ -240,6 +240,9 @@ function handleNativeLog(entry = {}) {
     if (/SNINPUT control backchannel enabled/i.test(line)) {
       hostStats.textContent = "Native SNV | input backchannel hoạt động";
     }
+    if (/SNINPUT_APPLIED/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNINPUT_APPLIED/, "Input");
+    }
   }
 }
 
@@ -712,7 +715,7 @@ async function connectNativeToDevice(device) {
     $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
     appState.nativeClientConnected = false;
 
-    await window.sanserNative.startClient({ port, logInput: true });
+    await window.sanserNative.startClient({ port, logInput: true, fullscreen: true, hideCursor: true });
     const networkInfo = await window.sanserNative.networkInfo?.().catch(() => null);
     const clientIp = chooseNativeClientIp(device, networkInfo?.addresses || []);
     const endpointLabel = clientIp ? `${clientIp}:${port}` : `auto:${port}`;

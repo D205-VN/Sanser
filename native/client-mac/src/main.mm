@@ -84,7 +84,7 @@ void printHelp() {
     << "sanser-native-client --probe\n"
     << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
     << "sanser-native-client --listen-snv PORT [--max-packets N]\n"
-    << "sanser-native-client --listen-render-snv PORT [--max-packets N] [--log-input]\n"
+    << "sanser-native-client --listen-render-snv PORT [--max-packets N] [--log-input] [--fullscreen] [--hide-cursor]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
@@ -96,6 +96,8 @@ void printHelp() {
     << "  --listen-render-snv P Listen over TCP, render with Metal, send native input back\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --log-input       Print each native input event for debugging\n"
+    << "  --fullscreen      Open the Metal renderer fullscreen\n"
+    << "  --hide-cursor     Hide the local cursor while the renderer is open\n"
     << "  --metal-test      Open a Metal window and log native input events to stdout\n"
     << "  --seconds N       Auto-close Metal test after N seconds; 0 keeps it open\n"
     << "  --clipboard-read  Print macOS pasteboard text\n"
@@ -1350,7 +1352,7 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
   }
 }
 
-int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets) {
+int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets, bool fullscreen, bool hideCursor) {
   @autoreleasepool {
     id<MTLDevice> device = defaultMetalDevice();
     if (!device) {
@@ -1370,6 +1372,8 @@ int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets) {
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
     [window setTitle:@"Sanser Native Client - SNV1 Metal Render"];
+    [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary
+                                  | NSWindowCollectionBehaviorFullScreenAllowsTiling];
 
     SanserMetalView* view = [[SanserMetalView alloc] initWithFrame:frame device:device];
     [view setColorPixelFormat:MTLPixelFormatBGRA8Unorm];
@@ -1388,6 +1392,12 @@ int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets) {
     [window makeKeyAndOrderFront:nil];
     [window makeFirstResponder:view];
     [NSApp activateIgnoringOtherApps:YES];
+    if (fullscreen) {
+      [window toggleFullScreen:nil];
+    }
+    if (hideCursor) {
+      [NSCursor hide];
+    }
 
     auto inputSender = std::make_shared<NativeInputSender>();
     gNativeInputSender = inputSender;
@@ -1399,7 +1409,12 @@ int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets) {
     worker.detach();
 
     std::cout << "Metal video renderer running on " << nsStringToUtf8([device name]) << "\n";
+    std::cout << "Native renderer mode fullscreen=" << boolText(fullscreen)
+              << " hideCursor=" << boolText(hideCursor) << "\n";
     [NSApp run];
+    if (hideCursor) {
+      [NSCursor unhide];
+    }
   }
   return 0;
 }
@@ -1467,6 +1482,8 @@ struct Options {
   bool clipboardRead = false;
   bool clipboardWrite = false;
   bool logInput = false;
+  bool fullscreen = false;
+  bool hideCursor = false;
   bool help = false;
   std::uint64_t maxPackets = 0;
   std::uint16_t listenPort = 0;
@@ -1510,6 +1527,10 @@ Options parseOptions(int argc, char** argv) {
       options.metalTest = true;
     } else if (arg == "--log-input") {
       options.logInput = true;
+    } else if (arg == "--fullscreen") {
+      options.fullscreen = true;
+    } else if (arg == "--hide-cursor") {
+      options.hideCursor = true;
     } else if (arg == "--clipboard-read") {
       options.clipboardRead = true;
     } else if (arg == "--clipboard-write") {
@@ -1541,7 +1562,7 @@ int main(int argc, char** argv) {
     if (options.probe) return runProbe();
     if (options.decodeSnv) return decodeSnvFile(options.snvFile, options.maxPackets);
     if (options.listenSnv) return listenSnvTcp(options.listenPort, options.maxPackets);
-    if (options.listenRenderSnv) return runVideoRenderTcp(options.listenRenderPort, options.maxPackets);
+    if (options.listenRenderSnv) return runVideoRenderTcp(options.listenRenderPort, options.maxPackets, options.fullscreen, options.hideCursor);
     if (options.clipboardRead) return clipboardRead();
     if (options.clipboardWrite) return clipboardWrite(options.clipboardText);
     if (options.metalTest) return runMetalTest(options.seconds);

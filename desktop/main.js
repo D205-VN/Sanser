@@ -297,6 +297,8 @@ function startNativeClient(options = {}) {
   const args = ["--listen-render-snv", String(port)];
   if (maxPackets > 0) args.push("--max-packets", String(maxPackets));
   if (options.logInput !== false) args.push("--log-input");
+  if (options.fullscreen !== false) args.push("--fullscreen");
+  if (options.hideCursor !== false) args.push("--hide-cursor");
 
   nativeProcesses.client = spawnNativeProcess("client", executable, args);
   return nativeStatus();

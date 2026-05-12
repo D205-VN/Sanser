@@ -458,15 +458,24 @@ void handleControlPayload(const std::string& json) {
   if (type == "pointer-move") {
     movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
   } else if (type == "pointer-down" || type == "pointer-up") {
-    movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
+    const double x = jsonDoubleValue(json, "x");
+    const double y = jsonDoubleValue(json, "y");
+    movePointerNormalized(x, y);
     sendMouseButton(jsonIntValue(json, "button"), type == "pointer-down");
+    std::cerr << "SNINPUT_APPLIED " << type
+              << " button=" << jsonIntValue(json, "button")
+              << " x=" << x
+              << " y=" << y
+              << "\n";
   } else if (type == "wheel") {
     movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
     sendWheel(jsonDoubleValue(json, "dy"));
+    std::cerr << "SNINPUT_APPLIED wheel dy=" << jsonDoubleValue(json, "dy") << "\n";
   } else if (type == "key-down" || type == "key-up") {
     const WORD virtualKey = macKeyCodeToVirtualKey(jsonIntValue(json, "keyCode", -1),
                                                    jsonStringValue(json, "key"));
     sendVirtualKey(virtualKey, type == "key-down");
+    std::cerr << "SNINPUT_APPLIED " << type << " vk=" << virtualKey << "\n";
   } else if (type == "modifiers") {
     handleModifierState(jsonIntValue(json, "keyCode", -1), jsonIntValue(json, "modifiers", 0));
   } else if (type == "clipboard") {

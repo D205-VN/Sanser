@@ -144,7 +144,7 @@ npm run native:client-mac:listen-render-snv -- 7777 --max-packets 180
 ./native/client-mac/build/sanser-native-client --metal-test --seconds 5
 ```
 
-The desktop app can now launch this native path when Settings -> Network -> Transport is set to `Native SNV`. The Mac client opens the Metal render listener, sends its listener endpoint through the app server, and the Windows host spawns `sanser-native-host --tcp-connect` automatically. Electron remains the account/device/control shell; native code owns capture, H.264 encode, Metal render, and the SNINPUT backchannel.
+The desktop app can now launch this native path when Settings -> Network -> Transport is set to `Native SNV`. The Mac client opens the Metal render listener fullscreen, sends its listener endpoint through the app server, and the Windows host spawns `sanser-native-host --tcp-connect` automatically. Electron remains the account/device/control shell; native code owns capture, H.264 encode, Metal render, and the SNINPUT backchannel. When Windows applies input, the Host view reports `SNINPUT_APPLIED ...` status lines.
 
 For manual testing, keep using:
 
