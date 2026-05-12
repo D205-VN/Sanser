@@ -110,3 +110,18 @@ npm run native:host-win:build
 ```
 
 The prototype writes BMP frames for validation, supports `--pipe --fps 60` to stream BGRA frames to stdout, and has a Media Foundation H.264 file-encode prototype. The app transport currently remains WebRTC with adaptive bitrate and split data channels. The later transport step is moving native encoded packets onto RTP first, then a custom UDP/QUIC transport with a jitter buffer.
+
+## Native macOS Client Prototype
+
+The first Phase 5 native client prototype lives in `native/client-mac`. It probes VideoToolbox hardware decode support, opens a Metal render test window, logs native input events, and validates native clipboard read/write.
+
+On macOS:
+
+```bash
+npm run native:client-mac:configure
+npm run native:client-mac:build
+npm run native:client-mac:probe
+./native/client-mac/build/sanser-native-client --metal-test --seconds 5
+```
+
+This does not replace the Electron/WebRTC client view yet. The next native-client step is receiving realtime encoded frames from the Windows native host, decoding them with VideoToolbox, then rendering decoded `CVPixelBuffer` frames as Metal textures.
