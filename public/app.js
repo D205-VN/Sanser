@@ -795,7 +795,7 @@ async function connectNativeToDevice(device) {
     $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
     appState.nativeClientConnected = false;
 
-    await window.sanserNative.startClient({ port, logInput: true, fullscreen: true, hideCursor: true });
+    await window.sanserNative.startClient({ port, logInput: true, fullscreen: true, hideCursor: true, relativeMouse: true });
     const networkInfo = await window.sanserNative.networkInfo?.().catch(() => null);
     const clientIp = chooseNativeClientIp(device, networkInfo?.addresses || []);
     const endpointLabel = clientIp ? `${clientIp}:${port}` : `auto:${port}`;

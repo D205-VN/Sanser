@@ -16,6 +16,7 @@ add_executable(sanser-native-client
 )
 
 find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
 find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
 find_library(METAL_FRAMEWORK Metal REQUIRED)
@@ -25,6 +26,7 @@ find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
 
 target_link_libraries(sanser-native-client PRIVATE
   ${COCOA_FRAMEWORK}
+  ${COREGRAPHICS_FRAMEWORK}
   ${COREMEDIA_FRAMEWORK}
   ${COREVIDEO_FRAMEWORK}
   ${METAL_FRAMEWORK}

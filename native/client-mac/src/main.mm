@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -84,7 +85,7 @@ void printHelp() {
     << "sanser-native-client --probe\n"
     << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
     << "sanser-native-client --listen-snv PORT [--max-packets N]\n"
-    << "sanser-native-client --listen-render-snv PORT [--max-packets N] [--log-input] [--fullscreen] [--hide-cursor]\n"
+    << "sanser-native-client --listen-render-snv PORT [--max-packets N] [--log-input] [--fullscreen] [--hide-cursor] [--relative-mouse]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
@@ -98,6 +99,7 @@ void printHelp() {
     << "  --log-input       Print each native input event for debugging\n"
     << "  --fullscreen      Open the Metal renderer fullscreen\n"
     << "  --hide-cursor     Hide the local cursor while the renderer is open\n"
+    << "  --relative-mouse  Grab macOS mouse movement and send relative dx/dy input\n"
     << "  --metal-test      Open a Metal window and log native input events to stdout\n"
     << "  --seconds N       Auto-close Metal test after N seconds; 0 keeps it open\n"
     << "  --clipboard-read  Print macOS pasteboard text\n"
@@ -211,6 +213,37 @@ private:
 
 std::shared_ptr<NativeInputSender> gNativeInputSender;
 bool gLogInputEvents = false;
+bool gRelativeMouse = false;
+bool gMouseGrabbed = false;
+
+const char* jsonBool(bool value) {
+  return value ? "true" : "false";
+}
+
+double backingScaleForView(NSView* view) {
+  NSWindow* window = [view window];
+  if (window) return std::max<double>([window backingScaleFactor], 1.0);
+  NSScreen* screen = [NSScreen mainScreen];
+  return screen ? std::max<double>([screen backingScaleFactor], 1.0) : 1.0;
+}
+
+void setRelativeMouseGrab(bool enabled) {
+  if (gMouseGrabbed == enabled) return;
+  const CGError error = CGAssociateMouseAndMouseCursorPosition(enabled ? false : true);
+  if (error == kCGErrorSuccess) {
+    gMouseGrabbed = enabled;
+    std::cout << "SNINPUT mouse grab " << (enabled ? "enabled" : "disabled") << "\n";
+  } else {
+    std::cerr << "SNINPUT mouse grab failed: CGError " << error << "\n";
+  }
+}
+
+void restoreRelativeMouseGrab() {
+  if (!gMouseGrabbed) return;
+  CGAssociateMouseAndMouseCursorPosition(true);
+  gMouseGrabbed = false;
+  std::cout << "SNINPUT mouse grab disabled\n";
+}
 
 bool sendNativeInputJson(const std::string& json) {
   const bool sent = gNativeInputSender && gNativeInputSender->sendJson(json);
@@ -231,7 +264,8 @@ std::string pointerJsonFromPoint(const char* type,
                                  NSView* view,
                                  NSInteger button,
                                  CGFloat dx,
-                                 CGFloat dy) {
+                                 CGFloat dy,
+                                 bool relative) {
   const NSRect bounds = [view bounds];
   const double width = std::max<double>(bounds.size.width, 1.0);
   const double height = std::max<double>(bounds.size.height, 1.0);
@@ -244,18 +278,24 @@ std::string pointerJsonFromPoint(const char* type,
       << ",\"button\":" << button
       << ",\"dx\":" << dx
       << ",\"dy\":" << dy
+      << ",\"relative\":" << jsonBool(relative)
       << "}";
   return out.str();
 }
 
 std::string pointerEventJson(const char* type, NSEvent* event, NSView* view) {
   const NSPoint point = [view convertPoint:[event locationInWindow] fromView:nil];
+  const bool wheel = std::strcmp(type, "wheel") == 0;
+  const double scale = backingScaleForView(view);
+  const CGFloat dx = wheel ? [event scrollingDeltaX] : [event deltaX] * scale;
+  const CGFloat dy = wheel ? [event scrollingDeltaY] : -[event deltaY] * scale;
   return pointerJsonFromPoint(type,
                               point,
                               view,
                               [event buttonNumber],
-                              [event scrollingDeltaX],
-                              [event scrollingDeltaY]);
+                              dx,
+                              dy,
+                              gRelativeMouse);
 }
 
 std::string keyEventJson(const char* type, NSEvent* event) {
@@ -1031,10 +1071,13 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
     return;
   }
 
+  const double scale = backingScaleForView(self);
+  const CGFloat dx = _hasPolledPoint ? static_cast<CGFloat>((point.x - _lastPolledPoint.x) * scale) : 0;
+  const CGFloat dy = _hasPolledPoint ? static_cast<CGFloat>((_lastPolledPoint.y - point.y) * scale) : 0;
   _lastPolledPoint = point;
   _hasPolledPoint = YES;
   [[self window] makeFirstResponder:self];
-  sendNativeInputJson(pointerJsonFromPoint("pointer-move", point, self, 0, 0, 0));
+  sendNativeInputJson(pointerJsonFromPoint("pointer-move", point, self, 0, dx, dy, gRelativeMouse));
 }
 
 - (void)keyDown:(NSEvent*)event {
@@ -1442,13 +1485,18 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
   }
 }
 
-int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets, bool fullscreen, bool hideCursor) {
+int runVideoRenderTcp(std::uint16_t port,
+                      std::uint64_t maxPackets,
+                      bool fullscreen,
+                      bool hideCursor,
+                      bool relativeMouse) {
   @autoreleasepool {
     id<MTLDevice> device = defaultMetalDevice();
     if (!device) {
       throw std::runtime_error("Metal is not available on this Mac.");
     }
 
+    gRelativeMouse = relativeMouse;
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
@@ -1488,6 +1536,32 @@ int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets, bool fullscr
     if (hideCursor) {
       [NSCursor hide];
     }
+    if (relativeMouse) {
+      setRelativeMouseGrab(true);
+    }
+
+    id resignObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidResignActiveNotification
+                                                                           object:nil
+                                                                            queue:[NSOperationQueue mainQueue]
+                                                                       usingBlock:^(NSNotification* notification) {
+                                                                         (void)notification;
+                                                                         restoreRelativeMouseGrab();
+                                                                       }];
+    id activeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidBecomeActiveNotification
+                                                                          object:nil
+                                                                           queue:[NSOperationQueue mainQueue]
+                                                                      usingBlock:^(NSNotification* notification) {
+                                                                        (void)notification;
+                                                                        if (gRelativeMouse) setRelativeMouseGrab(true);
+                                                                      }];
+    id closeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification
+                                                                          object:window
+                                                                           queue:[NSOperationQueue mainQueue]
+                                                                      usingBlock:^(NSNotification* notification) {
+                                                                        (void)notification;
+                                                                        restoreRelativeMouseGrab();
+                                                                        [NSApp terminate:nil];
+                                                                      }];
 
     auto inputSender = std::make_shared<NativeInputSender>();
     gNativeInputSender = inputSender;
@@ -1500,8 +1574,13 @@ int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets, bool fullscr
 
     std::cout << "Metal video renderer running on " << nsStringToUtf8([device name]) << "\n";
     std::cout << "Native renderer mode fullscreen=" << boolText(fullscreen)
-              << " hideCursor=" << boolText(hideCursor) << "\n";
+              << " hideCursor=" << boolText(hideCursor)
+              << " relativeMouse=" << boolText(relativeMouse) << "\n";
     [NSApp run];
+    [[NSNotificationCenter defaultCenter] removeObserver:resignObserver];
+    [[NSNotificationCenter defaultCenter] removeObserver:activeObserver];
+    [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
+    restoreRelativeMouseGrab();
     if (hideCursor) {
       [NSCursor unhide];
     }
@@ -1574,6 +1653,7 @@ struct Options {
   bool logInput = false;
   bool fullscreen = false;
   bool hideCursor = false;
+  bool relativeMouse = false;
   bool help = false;
   std::uint64_t maxPackets = 0;
   std::uint16_t listenPort = 0;
@@ -1621,6 +1701,8 @@ Options parseOptions(int argc, char** argv) {
       options.fullscreen = true;
     } else if (arg == "--hide-cursor") {
       options.hideCursor = true;
+    } else if (arg == "--relative-mouse") {
+      options.relativeMouse = true;
     } else if (arg == "--clipboard-read") {
       options.clipboardRead = true;
     } else if (arg == "--clipboard-write") {
@@ -1652,7 +1734,13 @@ int main(int argc, char** argv) {
     if (options.probe) return runProbe();
     if (options.decodeSnv) return decodeSnvFile(options.snvFile, options.maxPackets);
     if (options.listenSnv) return listenSnvTcp(options.listenPort, options.maxPackets);
-    if (options.listenRenderSnv) return runVideoRenderTcp(options.listenRenderPort, options.maxPackets, options.fullscreen, options.hideCursor);
+    if (options.listenRenderSnv) {
+      return runVideoRenderTcp(options.listenRenderPort,
+                               options.maxPackets,
+                               options.fullscreen,
+                               options.hideCursor,
+                               options.relativeMouse);
+    }
     if (options.clipboardRead) return clipboardRead();
     if (options.clipboardWrite) return clipboardWrite(options.clipboardText);
     if (options.metalTest) return runMetalTest(options.seconds);

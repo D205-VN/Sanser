@@ -282,6 +282,14 @@ int jsonIntValue(const std::string& json, const char* key, int fallback = 0) {
   }
 }
 
+bool jsonBoolValue(const std::string& json, const char* key, bool fallback = false) {
+  const std::size_t offset = findJsonValue(json, key);
+  if (offset == std::string::npos) return fallback;
+  if (json.compare(offset, 4, "true") == 0) return true;
+  if (json.compare(offset, 5, "false") == 0) return false;
+  return fallback;
+}
+
 std::wstring utf8ToWide(const std::string& value) {
   if (value.empty()) return {};
   const int required = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
@@ -342,6 +350,26 @@ bool movePointerNormalized(double normalizedX, double normalizedY) {
               0,
               0);
   return cursorNearTarget(target);
+}
+
+bool movePointerRelative(double deltaX, double deltaY) {
+  const LONG relativeX = static_cast<LONG>(std::lround(deltaX));
+  const LONG relativeY = static_cast<LONG>(std::lround(deltaY));
+  if (relativeX == 0 && relativeY == 0) return true;
+
+  INPUT input{};
+  input.type = INPUT_MOUSE;
+  input.mi.dx = relativeX;
+  input.mi.dy = relativeY;
+  input.mi.dwFlags = MOUSEEVENTF_MOVE;
+  if (SendInput(1, &input, sizeof(input)) == 1) return true;
+
+  mouse_event(MOUSEEVENTF_MOVE,
+              static_cast<DWORD>(relativeX),
+              static_cast<DWORD>(relativeY),
+              0,
+              0);
+  return GetLastError() == ERROR_SUCCESS;
 }
 
 DWORD mouseButtonFlag(int button, bool down) {
@@ -527,7 +555,10 @@ void handleControlPayload(const std::string& json) {
   if (type == "pointer-move") {
     const double x = jsonDoubleValue(json, "x");
     const double y = jsonDoubleValue(json, "y");
-    const bool moved = movePointerNormalized(x, y);
+    const double dx = jsonDoubleValue(json, "dx");
+    const double dy = jsonDoubleValue(json, "dy");
+    const bool relative = jsonBoolValue(json, "relative");
+    const bool moved = relative ? movePointerRelative(dx, dy) : movePointerNormalized(x, y);
     static auto lastMoveLog = std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
     if (now - lastMoveLog > std::chrono::milliseconds(250)) {
@@ -536,8 +567,11 @@ void handleControlPayload(const std::string& json) {
       POINT cursor{};
       GetCursorPos(&cursor);
       std::cerr << "SNINPUT_APPLIED pointer-move"
+                << " mode=" << (relative ? "relative" : "absolute")
                 << " x=" << x
                 << " y=" << y
+                << " dx=" << dx
+                << " dy=" << dy
                 << " moved=" << (moved ? "yes" : "no")
                 << " target=" << target.x << "," << target.y
                 << " cursor=" << cursor.x << "," << cursor.y
@@ -546,12 +580,14 @@ void handleControlPayload(const std::string& json) {
   } else if (type == "pointer-down" || type == "pointer-up") {
     const double x = jsonDoubleValue(json, "x");
     const double y = jsonDoubleValue(json, "y");
-    const bool moved = movePointerNormalized(x, y);
+    const bool relative = jsonBoolValue(json, "relative");
+    const bool moved = relative ? true : movePointerNormalized(x, y);
     const bool clicked = sendMouseButton(jsonIntValue(json, "button"), type == "pointer-down");
     const POINT target = normalizedToScreenPoint(x, y);
     POINT cursor{};
     GetCursorPos(&cursor);
     std::cerr << "SNINPUT_APPLIED " << type
+              << " mode=" << (relative ? "relative" : "absolute")
               << " button=" << jsonIntValue(json, "button")
               << " x=" << x
               << " y=" << y
@@ -561,9 +597,12 @@ void handleControlPayload(const std::string& json) {
               << " cursor=" << cursor.x << "," << cursor.y
               << "\n";
   } else if (type == "wheel") {
-    const bool moved = movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
+    const bool relative = jsonBoolValue(json, "relative");
+    const bool moved = relative ? true : movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
     const bool wheeled = sendWheel(jsonDoubleValue(json, "dy"));
-    std::cerr << "SNINPUT_APPLIED wheel dy=" << jsonDoubleValue(json, "dy")
+    std::cerr << "SNINPUT_APPLIED wheel"
+              << " mode=" << (relative ? "relative" : "absolute")
+              << " dy=" << jsonDoubleValue(json, "dy")
               << " moved=" << (moved ? "yes" : "no")
               << " sent=" << (wheeled ? "yes" : "no")
               << "\n";

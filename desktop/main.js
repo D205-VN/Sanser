@@ -299,6 +299,7 @@ function startNativeClient(options = {}) {
   if (options.logInput !== false) args.push("--log-input");
   if (options.fullscreen !== false) args.push("--fullscreen");
   if (options.hideCursor !== false) args.push("--hide-cursor");
+  if (options.relativeMouse !== false) args.push("--relative-mouse");
 
   nativeProcesses.client = spawnNativeProcess("client", executable, args);
   return nativeStatus();
