@@ -319,9 +319,11 @@ async function handleApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/config") {
     const iceServers = getIceServers();
+    const hasTurn = iceServers.some((server) => parseCsv(server.urls).some((item) => item.toLowerCase().startsWith("turn")));
     sendJson(res, 200, {
       iceServers,
-      hasTurn: iceServers.some((server) => parseCsv(server.urls).some((item) => item.toLowerCase().startsWith("turn")))
+      hasTurn,
+      iceTransportPolicy: process.env.ICE_TRANSPORT_POLICY || (hasTurn ? "relay" : "all")
     });
     return;
   }

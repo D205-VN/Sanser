@@ -18,6 +18,7 @@ const appState = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" }
   ],
+  iceTransportPolicy: "all",
   hasTurn: false,
   stats: {
     clientBytes: 0,
@@ -273,6 +274,7 @@ async function loadNetworkConfig() {
     appState.iceServers = config.iceServers;
   }
   appState.hasTurn = Boolean(config.hasTurn);
+  appState.iceTransportPolicy = config.iceTransportPolicy === "relay" ? "relay" : "all";
 }
 
 async function logout() {
@@ -637,6 +639,7 @@ function createPeerConnection(room, role) {
   const pc = new RTCPeerConnection({
     bundlePolicy: "max-bundle",
     rtcpMuxPolicy: "require",
+    iceTransportPolicy: appState.iceTransportPolicy,
     iceCandidatePoolSize: 4,
     iceServers: appState.iceServers
   });
