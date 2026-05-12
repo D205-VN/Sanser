@@ -11,7 +11,7 @@ if (!gotLock) {
   app.quit();
 }
 
-app.setName("GameRemote");
+app.setName("Sanser");
 app.commandLine.appendSwitch("enable-features", "WebRTCPipeWireCapturer");
 
 app.on("second-instance", () => {
@@ -60,7 +60,7 @@ function createWindow(url) {
     minWidth: 1040,
     minHeight: 700,
     backgroundColor: "#101110",
-    title: "GameRemote",
+    title: "Sanser",
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,

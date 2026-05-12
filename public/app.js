@@ -497,9 +497,20 @@ async function connectToDevice(deviceId) {
   if (!device || !device.online || device.sessionId === appState.sessionId) return;
 
   try {
+    showConnecting(device.name || 'máy chủ');
     $(".stream-dock").classList.add("is-visible");
-    streamStatus.textContent = "Connecting";
-    $("#selectedDeviceLabel").textContent = `${device.name} selected`;
+    streamStatus.textContent = "Đang kết nối...";
+    $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
+
+    // Connection timeout
+    appState._connectTimeout = setTimeout(() => {
+      if (!appState.clientPeer || appState.clientPeer.connectionState !== 'connected') {
+        hideConnecting();
+        showToast(`Không thể kết nối tới ${device.name}. Hết thời gian chờ!`, 'error');
+        cleanupClientPeer();
+      }
+    }, 15000);
+
     const data = await api("/api/connect/request", {
       method: "POST",
       body: {
@@ -509,17 +520,12 @@ async function connectToDevice(deviceId) {
       }
     });
     appState.clientRoom = data.room;
-    
-    const emptyStrong = document.querySelector("#emptyStream strong");
-    const emptySpan = document.querySelector("#emptyStream span");
-    if (emptyStrong) emptyStrong.textContent = "Đang kết nối...";
-    if (emptySpan) emptySpan.textContent = `Đang chờ tín hiệu từ ${device.name}...`;
-
-    
-    // Fullscreen is moved to ontrack per user request
   } catch (error) {
+    hideConnecting();
+    showToast(error.message || 'Kết nối thất bại!', 'error');
     connectError.textContent = error.message;
-    streamStatus.textContent = "Idle";
+    streamStatus.textContent = "Chờ kết nối";
+    if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
   }
 }
 
@@ -563,33 +569,31 @@ async function startClientPeer(room) {
   appState.clientRoom = room;
   appState.clientPeer = createPeerConnection(room, "client");
   appState.clientPeer.ontrack = async (event) => {
+    hideConnecting();
+    if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
     remoteVideo.srcObject = event.streams[0];
     emptyStream.classList.add("is-hidden");
-    streamStatus.textContent = "Streaming";
+    streamStatus.textContent = "Đang stream";
     $("#clientRoleBadge").classList.remove("is-hidden");
-    
-    // Request fullscreen ONLY when stream arrives
+    showToast('Kết nối thành công! Đang stream...', 'success');
+
+    // Fullscreen on stream arrival
     try {
       const vs = document.getElementById("videoShell");
-      if (vs.requestFullscreen) {
-        await vs.requestFullscreen();
-      } else if (vs.webkitRequestFullscreen) {
-        await vs.webkitRequestFullscreen();
-      }
-    } catch (e) {
-      console.warn("Fullscreen error:", e);
-    }
-    
+      if (vs.requestFullscreen) await vs.requestFullscreen();
+      else if (vs.webkitRequestFullscreen) await vs.webkitRequestFullscreen();
+    } catch (e) { console.warn("Fullscreen error:", e); }
+
     monitorClientStats(appState.clientPeer);
   };
   appState.clientPeer.ondatachannel = (event) => {
     appState.inputChannel = event.channel;
     appState.inputChannel.onopen = () => {
-      streamStatus.textContent = "Streaming | input active";
+      streamStatus.textContent = "Đang stream | input hoạt động";
       videoShell.focus();
     };
     appState.inputChannel.onclose = () => {
-      streamStatus.textContent = "Streaming | input closed";
+      streamStatus.textContent = "Đang stream | input đóng";
     };
   };
 }
@@ -612,8 +616,10 @@ function createPeerConnection(room, role) {
   };
   pc.oniceconnectionstatechange = () => {
     if (role === "client" && ["failed", "disconnected"].includes(pc.iceConnectionState)) {
-      streamStatus.textContent = `Connection ${pc.iceConnectionState}`;
-      connectError.textContent = "Không thể kết nối tới máy chủ! Vui lòng thử lại.";
+      hideConnecting();
+      if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
+      streamStatus.textContent = `Kết nối ${pc.iceConnectionState}`;
+      showToast('Không thể kết nối tới máy chủ! Vui lòng thử lại.', 'error');
       cleanupClientPeer();
     }
   };
@@ -783,6 +789,8 @@ async function disconnectClient() {
 }
 
 async function cleanupClientPeer() {
+  hideConnecting();
+  if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
   if (appState.clientPeer) appState.clientPeer.close();
   appState.clientPeer = null;
   appState.clientRoom = null;
@@ -790,21 +798,17 @@ async function cleanupClientPeer() {
   remoteVideo.srcObject = null;
   emptyStream.classList.remove("is-hidden");
   $("#clientRoleBadge").classList.add("is-hidden");
-  
+
   const emptyStrong = document.querySelector("#emptyStream strong");
   const emptySpan = document.querySelector("#emptyStream span");
-  if (emptyStrong) emptyStrong.textContent = "No active stream";
-  if (emptySpan) emptySpan.textContent = "Choose an online computer.";
-  
-  streamStatus.textContent = "Idle";
-  
-  // Exit fullscreen
+  if (emptyStrong) emptyStrong.textContent = "Chưa có stream";
+  if (emptySpan) emptySpan.textContent = "Chọn một máy tính online để kết nối.";
+
+  streamStatus.textContent = "Chờ kết nối";
+
   try {
-    if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    } else if (document.webkitFullscreenElement) {
-      await document.webkitExitFullscreen();
-    }
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else if (document.webkitFullscreenElement) await document.webkitExitFullscreen();
   } catch (e) {}
 }
 
