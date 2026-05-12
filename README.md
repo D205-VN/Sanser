@@ -11,7 +11,9 @@ A single-app Parsec-like prototype for low-latency remote game streaming.
 - WebRTC peer-to-peer screen streaming
 - 720p, 1080p, 1440p, FPS, bitrate, and codec preference
 - Remote input data channel
-- Live FPS, bitrate, packet loss, and RTT stats
+- Reliable input channel plus realtime mouse/transport feedback channel
+- Live FPS, bitrate, jitter, packet loss, and RTT stats
+- WebRTC adaptive bitrate prototype
 
 ## Run
 
@@ -91,7 +93,7 @@ Restart Sanser on both machines. Tailscale must stay connected while streaming. 
 
 ## Smoothness notes
 
-This version uses Electron/WebRTC screen capture. Default quality is tuned for a sharper low-latency Tailscale session at `1080p`, `60 FPS`, and about `28 Mbps` with VP8. If it stutters, lower bitrate to `16-20 Mbps` or FPS to `30`; if text is still blurry and the network is stable, raise bitrate to `35-45 Mbps`.
+This version uses Electron/WebRTC screen capture. Default quality is tuned for a sharper low-latency Tailscale session at `1080p`, `60 FPS`, and about `28 Mbps` with VP8. The WebRTC Adaptive transport mode uses client feedback to reduce bitrate when RTT, jitter, packet loss, or FPS pressure rises, then slowly recovers toward the requested bitrate. If it still stutters, lower bitrate to `16-20 Mbps` or FPS to `30`; if text is still blurry and the network is stable, raise bitrate to `35-45 Mbps`.
 
 Parsec is smoother because it uses native low-level capture, dedicated GPU encoder control, a custom low-latency transport, adaptive congestion control, and a native input driver. Sanser is a WebRTC/Electron prototype, so true Parsec-grade game feel still needs native capture, GPU encode control, deeper input injection, and more mature network adaptation.
 
@@ -107,4 +109,4 @@ npm run native:host-win:build
 .\native\host-win\build\Release\sanser-native-host.exe --frames 5 --interval-ms 100 --output-dir native-captures
 ```
 
-The prototype writes BMP frames for validation and also supports `--pipe --fps 60` to stream BGRA frames to stdout. Once capture is stable, the next step is feeding this pipe into a hardware encoder instead of the current browser/WebRTC capture path.
+The prototype writes BMP frames for validation, supports `--pipe --fps 60` to stream BGRA frames to stdout, and has a Media Foundation H.264 file-encode prototype. The app transport currently remains WebRTC with adaptive bitrate and split data channels. The later transport step is moving native encoded packets onto RTP first, then a custom UDP/QUIC transport with a jitter buffer.

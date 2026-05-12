@@ -13,6 +13,7 @@ const appState = {
   clientPeer: null,
   clientRoom: null,
   inputChannel: null,
+  realtimeChannel: null,
   pendingRequests: new Map(),
   heartbeatTimer: null,
   mouseTimer: 0,
@@ -20,14 +21,11 @@ const appState = {
     { urls: "stun:stun.l.google.com:19302" }
   ],
   iceTransportPolicy: "all",
-  hasTurn: false,
-  stats: {
-    clientBytes: 0,
-    clientAt: 0,
-    hostBytes: 0,
-    hostAt: 0
-  }
+  hasTurn: false
 };
+
+const TRANSPORT_FEEDBACK_TYPE = "__sanser_transport_feedback";
+const TRANSPORT_ADJUST_INTERVAL_MS = 1800;
 
 localStorage.setItem("gr_session_id", appState.sessionId);
 localStorage.setItem("gr_device_id", appState.deviceId);
@@ -107,6 +105,7 @@ function applyPerformanceDefaults() {
   localStorage.setItem("gr_setting_hostFps", "60");
   localStorage.setItem("gr_setting_hostBitrate", "28");
   localStorage.setItem("gr_setting_codecPreference", "VP8");
+  localStorage.setItem("gr_setting_transportMode", "webrtc-adaptive");
   localStorage.setItem("gr_perf_defaults_v5", "1");
 }
 
@@ -237,7 +236,18 @@ function hydrateSettings() {
     const saved = localStorage.getItem(`gr_setting_${node.id}`);
     if (saved !== null) node.value = saved;
   });
+  normalizeTransportSetting();
   applyLiveSetting("statsMode");
+}
+
+function normalizeTransportSetting() {
+  const select = $("#transportMode");
+  if (!select) return;
+  const saved = localStorage.getItem("gr_setting_transportMode");
+  if (!saved || saved === "p2p") {
+    select.value = "webrtc-adaptive";
+    localStorage.setItem("gr_setting_transportMode", "webrtc-adaptive");
+  }
 }
 
 function setAuthMode(mode) {
@@ -616,16 +626,24 @@ async function startHostPeer(room) {
   const pc = createPeerConnection(room, "host");
   appState.hostPeers.set(room.id, pc);
   const inputChannel = pc.createDataChannel("input", {
+    ordered: true,
+    maxRetransmits: 3
+  });
+  inputChannel.onmessage = (event) => handleHostDataMessage(event.data, pc);
+  const realtimeChannel = pc.createDataChannel("realtime", {
     ordered: false,
     maxRetransmits: 0
   });
-  inputChannel.onmessage = (event) => handleRemoteInput(event.data);
+  realtimeChannel.onmessage = (event) => handleHostDataMessage(event.data, pc);
+  pc._inputChannel = inputChannel;
+  pc._realtimeChannel = realtimeChannel;
 
   const videoTrack = appState.localStream.getVideoTracks()[0];
   if (videoTrack) {
     const transceiver = pc.addTransceiver(videoTrack, { direction: "sendonly", streams: [appState.localStream] });
     setCodecPreference(transceiver, room.quality.preferCodec || $("#codecPreference").value);
     await tuneSender(transceiver.sender, room.quality);
+    attachHostTransport(pc, transceiver.sender, room.quality);
   }
   for (const audioTrack of appState.localStream.getAudioTracks()) {
     pc.addTrack(audioTrack, appState.localStream);
@@ -663,14 +681,29 @@ async function startClientPeer(room) {
     monitorClientStats(appState.clientPeer);
   };
   appState.clientPeer.ondatachannel = (event) => {
-    appState.inputChannel = event.channel;
-    appState.inputChannel.onopen = () => {
+    bindClientDataChannel(event.channel);
+  };
+}
+
+function bindClientDataChannel(channel) {
+  if (channel.label === "realtime") {
+    appState.realtimeChannel = channel;
+  } else {
+    appState.inputChannel = channel;
+  }
+
+  channel.onopen = () => {
+    if (channel.label === "input") {
       streamStatus.textContent = "Đang stream | input hoạt động";
       videoShell.focus();
-    };
-    appState.inputChannel.onclose = () => {
+    }
+  };
+  channel.onclose = () => {
+    if (channel.label === "input") {
       streamStatus.textContent = "Đang stream | input đóng";
-    };
+    }
+    if (channel === appState.inputChannel) appState.inputChannel = null;
+    if (channel === appState.realtimeChannel) appState.realtimeChannel = null;
   };
 }
 
@@ -761,11 +794,12 @@ async function sendSignal(roomId, message) {
   });
 }
 
-async function tuneSender(sender, quality) {
+async function tuneSender(sender, quality, overrideBitrateMbps) {
+  const bitrateMbps = Number(overrideBitrateMbps || quality.bitrateMbps || 12);
   const params = sender.getParameters();
-  params.degradationPreference = "balanced";
+  params.degradationPreference = $("#lowLatencyMode")?.value === "off" ? "balanced" : "maintain-framerate";
   params.encodings = [{
-    maxBitrate: quality.bitrateMbps * 1000 * 1000,
+    maxBitrate: Math.round(bitrateMbps * 1000 * 1000),
     maxFramerate: quality.fps,
     scaleResolutionDownBy: 1,
     priority: "high",
@@ -775,6 +809,75 @@ async function tuneSender(sender, quality) {
     await sender.setParameters(params);
   } catch {
     // Browser support for sender knobs varies.
+  }
+}
+
+function readTransportMode() {
+  const raw = $("#transportMode")?.value || "webrtc-adaptive";
+  const mode = raw === "p2p" ? "webrtc-adaptive" : raw;
+  return {
+    mode,
+    adaptive: mode !== "webrtc-fixed",
+    label: mode === "webrtc-fixed" ? "WebRTC fixed" : "WebRTC adaptive"
+  };
+}
+
+function attachHostTransport(pc, sender, quality) {
+  const mode = readTransportMode();
+  const maxBitrateMbps = Number(quality.bitrateMbps || 28);
+  pc._transport = {
+    sender,
+    mode: mode.mode,
+    adaptive: mode.adaptive,
+    quality,
+    maxBitrateMbps,
+    minBitrateMbps: Math.max(3, Math.round(maxBitrateMbps * 0.25)),
+    currentBitrateMbps: maxBitrateMbps,
+    stableTicks: 0,
+    lastAdjustAt: 0,
+    lastReason: mode.adaptive ? "adaptive ready" : "fixed"
+  };
+}
+
+async function setHostTransportBitrate(pc, nextBitrateMbps, reason) {
+  const state = pc._transport;
+  if (!state?.sender) return;
+  const now = performance.now();
+  if (now - state.lastAdjustAt < TRANSPORT_ADJUST_INTERVAL_MS) return;
+
+  const next = clamp(nextBitrateMbps, state.minBitrateMbps, state.maxBitrateMbps);
+  if (Math.abs(next - state.currentBitrateMbps) < 0.25) return;
+
+  state.lastAdjustAt = now;
+  state.currentBitrateMbps = next;
+  state.lastReason = reason;
+  await tuneSender(state.sender, state.quality, next).catch(() => {});
+}
+
+function updateHostTransportFromFeedback(pc, feedback) {
+  const state = pc._transport;
+  if (!state?.adaptive) return;
+
+  const rttMs = Number(feedback.rttMs || 0);
+  const jitterMs = Number(feedback.jitterMs || 0);
+  const lostDelta = Number(feedback.packetsLostDelta || 0);
+  const fps = Number(feedback.fps || 0);
+  const targetFps = Number(state.quality.fps || 60);
+
+  const severe = rttMs > 220 || jitterMs > 90 || lostDelta > 30 || (fps > 0 && fps < targetFps * 0.55);
+  const congested = severe || rttMs > 140 || jitterMs > 45 || lostDelta > 5 || (fps > 0 && fps < targetFps * 0.78);
+
+  if (congested) {
+    state.stableTicks = 0;
+    const factor = severe ? 0.72 : 0.85;
+    setHostTransportBitrate(pc, state.currentBitrateMbps * factor, severe ? "network pressure" : "network adjust");
+    return;
+  }
+
+  state.stableTicks += 1;
+  if (state.stableTicks >= 4 && state.currentBitrateMbps < state.maxBitrateMbps) {
+    state.stableTicks = 0;
+    setHostTransportBitrate(pc, state.currentBitrateMbps * 1.08, "recovering");
   }
 }
 
@@ -847,53 +950,91 @@ function videoContentRect() {
 }
 
 function sendInputEvent(payload) {
-  if (!appState.inputChannel || appState.inputChannel.readyState !== "open") return;
-  appState.inputChannel.send(JSON.stringify({ ...payload, at: performance.now() }));
+  const prefersRealtime = payload.type === "pointer-move" || payload.type === "wheel";
+  sendDataPayload({ ...payload, at: performance.now() }, prefersRealtime);
 }
 
-function handleRemoteInput(raw) {
+function sendDataPayload(payload, prefersRealtime = false) {
+  const first = prefersRealtime ? appState.realtimeChannel : appState.inputChannel;
+  const second = prefersRealtime ? appState.inputChannel : appState.realtimeChannel;
+  const channel = [first, second].find((item) => item && item.readyState === "open");
+  if (!channel) return;
+  channel.send(JSON.stringify(payload));
+}
+
+function sendTransportFeedback(stats) {
+  sendDataPayload({ type: TRANSPORT_FEEDBACK_TYPE, stats, at: performance.now() }, true);
+}
+
+function handleHostDataMessage(raw, pc) {
   try {
     const payload = JSON.parse(raw);
-    $("#captureStatus").textContent = `Input ${payload.type}`;
-    if (window.sanserHost?.input) {
-      window.sanserHost.input(payload);
+    if (payload.type === TRANSPORT_FEEDBACK_TYPE) {
+      updateHostTransportFromFeedback(pc, payload.stats || {});
+      return;
     }
+    handleRemoteInputPayload(payload);
   } catch {
     $("#captureStatus").textContent = "Input event";
   }
 }
 
+function handleRemoteInputPayload(payload) {
+  $("#captureStatus").textContent = `Input ${payload.type}`;
+  if (window.sanserHost?.input) {
+    window.sanserHost.input(payload);
+  }
+}
+
 function monitorClientStats(pc) {
+  pc._stats = pc._stats || {};
   const tick = async () => {
     if (pc !== appState.clientPeer || pc.connectionState === "closed") return;
     const stats = await pc.getStats();
     let fps = "--";
     let bitrate = "--";
     let rtt = "--";
+    let jitter = "--";
     let lost = 0;
+    let lostDelta = 0;
+    let framesDropped = 0;
     stats.forEach((report) => {
       if (report.type === "inbound-rtp" && report.kind === "video") {
         fps = Math.round(report.framesPerSecond || 0);
         lost = report.packetsLost || 0;
-        if (appState.stats.clientBytes && appState.stats.clientAt) {
-          const bytes = Number(report.bytesReceived || 0) - appState.stats.clientBytes;
-          const seconds = (report.timestamp - appState.stats.clientAt) / 1000;
+        lostDelta = pc._stats.clientLost === undefined ? 0 : Math.max(0, lost - pc._stats.clientLost);
+        jitter = report.jitter !== undefined ? Math.round(Number(report.jitter || 0) * 1000) : "--";
+        framesDropped = Number(report.framesDropped || 0);
+        if (pc._stats.clientBytes && pc._stats.clientAt) {
+          const bytes = Number(report.bytesReceived || 0) - pc._stats.clientBytes;
+          const seconds = (report.timestamp - pc._stats.clientAt) / 1000;
           bitrate = seconds > 0 ? ((bytes * 8) / seconds / 1000000).toFixed(1) : "--";
         }
-        appState.stats.clientBytes = Number(report.bytesReceived || 0);
-        appState.stats.clientAt = report.timestamp;
+        pc._stats.clientBytes = Number(report.bytesReceived || 0);
+        pc._stats.clientAt = report.timestamp;
+        pc._stats.clientLost = lost;
       }
       if (report.type === "candidate-pair" && report.state === "succeeded" && report.currentRoundTripTime) {
         rtt = Math.round(report.currentRoundTripTime * 1000);
       }
     });
-    clientStats.textContent = `FPS ${fps} | ${bitrate} Mbps | RTT ${rtt} ms | Lost ${lost}`;
+    sendTransportFeedback({
+      fps: fps === "--" ? 0 : Number(fps),
+      bitrateMbps: bitrate === "--" ? 0 : Number(bitrate),
+      rttMs: rtt === "--" ? 0 : Number(rtt),
+      jitterMs: jitter === "--" ? 0 : Number(jitter),
+      packetsLost: lost,
+      packetsLostDelta: lostDelta,
+      framesDropped
+    });
+    clientStats.textContent = `FPS ${fps} | ${bitrate} Mbps | RTT ${rtt} ms | Jitter ${jitter} ms | Lost +${lostDelta}`;
     setTimeout(tick, 1000);
   };
   tick();
 }
 
 function monitorHostStats(pc) {
+  pc._stats = pc._stats || {};
   const tick = async () => {
     if (pc.connectionState === "closed") return;
     const stats = await pc.getStats();
@@ -902,16 +1043,20 @@ function monitorHostStats(pc) {
     stats.forEach((report) => {
       if (report.type === "outbound-rtp" && report.kind === "video") {
         fps = Math.round(report.framesPerSecond || report.framesEncoded || 0);
-        if (appState.stats.hostBytes && appState.stats.hostAt) {
-          const bytes = Number(report.bytesSent || 0) - appState.stats.hostBytes;
-          const seconds = (report.timestamp - appState.stats.hostAt) / 1000;
+        if (pc._stats.hostBytes && pc._stats.hostAt) {
+          const bytes = Number(report.bytesSent || 0) - pc._stats.hostBytes;
+          const seconds = (report.timestamp - pc._stats.hostAt) / 1000;
           bitrate = seconds > 0 ? ((bytes * 8) / seconds / 1000000).toFixed(1) : "--";
         }
-        appState.stats.hostBytes = Number(report.bytesSent || 0);
-        appState.stats.hostAt = report.timestamp;
+        pc._stats.hostBytes = Number(report.bytesSent || 0);
+        pc._stats.hostAt = report.timestamp;
       }
     });
-    hostStats.textContent = `Outbound FPS ${fps} | ${bitrate} Mbps`;
+    const transport = pc._transport;
+    const target = transport
+      ? `Target ${transport.currentBitrateMbps.toFixed(1)}/${transport.maxBitrateMbps} Mbps | ${transport.lastReason}`
+      : "Target --";
+    hostStats.textContent = `Outbound FPS ${fps} | ${bitrate} Mbps | ${target}`;
     setTimeout(tick, 1000);
   };
   tick();
@@ -931,6 +1076,7 @@ async function cleanupClientPeer() {
   appState.clientPeer = null;
   appState.clientRoom = null;
   appState.inputChannel = null;
+  appState.realtimeChannel = null;
   remoteVideo.srcObject = null;
   emptyStream.classList.remove("is-hidden");
   $("#clientRoleBadge").classList.add("is-hidden");
@@ -988,6 +1134,19 @@ function applyLiveSetting(id) {
       startHost({ capture: false }).catch(() => {});
     } else {
       stopHost();
+    }
+  }
+  if (id === "transportMode") {
+    const mode = readTransportMode();
+    for (const pc of appState.hostPeers.values()) {
+      if (!pc._transport) continue;
+      pc._transport.mode = mode.mode;
+      pc._transport.adaptive = mode.adaptive;
+      pc._transport.lastReason = mode.adaptive ? "adaptive ready" : "fixed";
+      if (!mode.adaptive) {
+        pc._transport.lastAdjustAt = 0;
+        setHostTransportBitrate(pc, pc._transport.maxBitrateMbps, "fixed");
+      }
     }
   }
 }
@@ -1108,4 +1267,8 @@ function escapeHtml(value) {
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }

@@ -307,9 +307,10 @@
                 <input id="serverUrlInput" placeholder="Local server">
               </label>
               <label class="setting-row">
-                <span><strong>Transport</strong><small>UDP trực tiếp khi NAT cho phép.</small></span>
+                <span><strong>Transport</strong><small>WebRTC P2P với điều chỉnh bitrate.</small></span>
                 <select id="transportMode">
-                  <option value="p2p" selected>WebRTC P2P</option>
+                  <option value="webrtc-adaptive" selected>WebRTC Adaptive</option>
+                  <option value="webrtc-fixed">WebRTC Fixed</option>
                 </select>
               </label>
               <label class="setting-row">
