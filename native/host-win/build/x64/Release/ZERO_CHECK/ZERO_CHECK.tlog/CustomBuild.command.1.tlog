@@ -1,0 +1,10 @@
+^C:\USERS\ASUS\ONEDRIVE\DOCUMENTS\SANSER\NATIVE\HOST-WIN\BUILD\CMAKEFILES\0F61E8F5F067F6F3D04CDA8AABF91FDB\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/ASUS/OneDrive/Documents/Sanser/native/host-win -BC:/Users/ASUS/OneDrive/Documents/Sanser/native/host-win/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/ASUS/OneDrive/Documents/Sanser/native/host-win/build/sanser_native_host_win.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

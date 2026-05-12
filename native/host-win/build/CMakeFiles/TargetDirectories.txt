@@ -1,0 +1,3 @@
+C:/Users/ASUS/OneDrive/Documents/Sanser/native/host-win/build/CMakeFiles/sanser-native-host.dir
+C:/Users/ASUS/OneDrive/Documents/Sanser/native/host-win/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/ASUS/OneDrive/Documents/Sanser/native/host-win/build/CMakeFiles/ZERO_CHECK.dir

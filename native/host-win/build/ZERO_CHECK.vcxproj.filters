@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\ASUS\OneDrive\Documents\Sanser\native\host-win\build\CMakeFiles\0f61e8f5f067f6f3d04cda8aabf91fdb\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{2C003530-473A-35D3-BBFA-B43F6226CD78}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
