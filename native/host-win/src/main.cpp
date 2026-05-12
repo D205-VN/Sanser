@@ -3,7 +3,10 @@
 #include "mf_video_encoder.h"
 #include "mf_video_packet_encoder.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -11,7 +14,9 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -20,6 +25,7 @@
 #include <io.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #endif
 
 struct Options {
@@ -68,6 +74,16 @@ struct EncodedPacketHeader {
   std::uint32_t payloadSize = 0;
 };
 #pragma pack(pop)
+
+#ifdef _WIN32
+#pragma pack(push, 1)
+struct ControlMessageHeader {
+  char magic[4] = {'S', 'N', 'I', '1'};
+  std::uint32_t headerSize = sizeof(ControlMessageHeader);
+  std::uint32_t payloadSize = 0;
+};
+#pragma pack(pop)
+#endif
 
 std::uint32_t readUintArg(int argc, char** argv, int& i, const char* name) {
   if (i + 1 >= argc) {
@@ -136,7 +152,7 @@ Options parseOptions(int argc, char** argv) {
         << "  --bitrate N      Target encode bitrate, default 28000000\n"
         << "  --output-file P  Encoded output file path\n"
         << "  --packet-file P  SNV1 packet output file; stdout is used when omitted\n"
-        << "  --tcp-connect H:P Connect to a TCP SNV1 receiver and stream packets\n"
+        << "  --tcp-connect H:P Connect to a TCP SNV1 receiver, stream video, receive native input\n"
         << "  --list-encoders  List Media Foundation hardware encoders\n"
         << "  --software-encoder Disable hardware transform request\n";
       std::exit(0);
@@ -170,6 +186,301 @@ public:
   WinsockRuntime(const WinsockRuntime&) = delete;
   WinsockRuntime& operator=(const WinsockRuntime&) = delete;
 };
+
+std::size_t skipJsonWhitespace(const std::string& json, std::size_t offset) {
+  while (offset < json.size()) {
+    const char ch = json[offset];
+    if (ch != ' ' && ch != '\n' && ch != '\r' && ch != '\t') break;
+    ++offset;
+  }
+  return offset;
+}
+
+std::size_t findJsonValue(const std::string& json, const char* key) {
+  const std::string needle = std::string("\"") + key + "\"";
+  const std::size_t keyOffset = json.find(needle);
+  if (keyOffset == std::string::npos) return std::string::npos;
+  const std::size_t colon = json.find(':', keyOffset + needle.size());
+  if (colon == std::string::npos) return std::string::npos;
+  return skipJsonWhitespace(json, colon + 1);
+}
+
+std::string jsonUnescape(std::string_view value) {
+  std::string out;
+  out.reserve(value.size());
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    const char ch = value[i];
+    if (ch != '\\' || i + 1 >= value.size()) {
+      out.push_back(ch);
+      continue;
+    }
+    const char escaped = value[++i];
+    switch (escaped) {
+      case 'n': out.push_back('\n'); break;
+      case 'r': out.push_back('\r'); break;
+      case 't': out.push_back('\t'); break;
+      case '\\': out.push_back('\\'); break;
+      case '"': out.push_back('"'); break;
+      default: out.push_back(escaped); break;
+    }
+  }
+  return out;
+}
+
+std::string jsonStringValue(const std::string& json, const char* key, const std::string& fallback = {}) {
+  std::size_t offset = findJsonValue(json, key);
+  if (offset == std::string::npos || offset >= json.size() || json[offset] != '"') return fallback;
+  ++offset;
+
+  std::string raw;
+  while (offset < json.size()) {
+    const char ch = json[offset++];
+    if (ch == '"') return jsonUnescape(raw);
+    if (ch == '\\' && offset < json.size()) {
+      raw.push_back(ch);
+      raw.push_back(json[offset++]);
+    } else {
+      raw.push_back(ch);
+    }
+  }
+  return fallback;
+}
+
+double jsonDoubleValue(const std::string& json, const char* key, double fallback = 0.0) {
+  const std::size_t offset = findJsonValue(json, key);
+  if (offset == std::string::npos) return fallback;
+  try {
+    return std::stod(json.substr(offset));
+  } catch (...) {
+    return fallback;
+  }
+}
+
+int jsonIntValue(const std::string& json, const char* key, int fallback = 0) {
+  const std::size_t offset = findJsonValue(json, key);
+  if (offset == std::string::npos) return fallback;
+  try {
+    return std::stoi(json.substr(offset));
+  } catch (...) {
+    return fallback;
+  }
+}
+
+std::wstring utf8ToWide(const std::string& value) {
+  if (value.empty()) return {};
+  const int required = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+  if (required <= 0) return {};
+  std::wstring wide(static_cast<std::size_t>(required), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), required);
+  return wide;
+}
+
+void movePointerNormalized(double normalizedX, double normalizedY) {
+  const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+  const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+  const int width = std::max(GetSystemMetrics(SM_CXVIRTUALSCREEN), 1);
+  const int height = std::max(GetSystemMetrics(SM_CYVIRTUALSCREEN), 1);
+
+  const double x = std::clamp(normalizedX, 0.0, 1.0);
+  const double y = std::clamp(normalizedY, 0.0, 1.0);
+  const int screenX = left + static_cast<int>(std::lround(x * static_cast<double>(width - 1)));
+  const int screenY = top + static_cast<int>(std::lround(y * static_cast<double>(height - 1)));
+  SetCursorPos(screenX, screenY);
+}
+
+DWORD mouseButtonFlag(int button, bool down) {
+  if (button == 1) return down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+  if (button == 2) return down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+  return down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+}
+
+void sendMouseButton(int button, bool down) {
+  INPUT input{};
+  input.type = INPUT_MOUSE;
+  input.mi.dwFlags = mouseButtonFlag(button, down);
+  SendInput(1, &input, sizeof(input));
+}
+
+void sendWheel(double deltaY) {
+  if (std::abs(deltaY) < 0.01) return;
+  const double clamped = std::clamp(-deltaY * static_cast<double>(WHEEL_DELTA), -1200.0, 1200.0);
+  INPUT input{};
+  input.type = INPUT_MOUSE;
+  input.mi.dwFlags = MOUSEEVENTF_WHEEL;
+  input.mi.mouseData = static_cast<DWORD>(static_cast<LONG>(std::lround(clamped)));
+  SendInput(1, &input, sizeof(input));
+}
+
+WORD macKeyCodeToVirtualKey(int keyCode, const std::string& keyText) {
+  switch (keyCode) {
+    case 0: return 'A';
+    case 1: return 'S';
+    case 2: return 'D';
+    case 3: return 'F';
+    case 4: return 'H';
+    case 5: return 'G';
+    case 6: return 'Z';
+    case 7: return 'X';
+    case 8: return 'C';
+    case 9: return 'V';
+    case 11: return 'B';
+    case 12: return 'Q';
+    case 13: return 'W';
+    case 14: return 'E';
+    case 15: return 'R';
+    case 16: return 'Y';
+    case 17: return 'T';
+    case 18: return '1';
+    case 19: return '2';
+    case 20: return '3';
+    case 21: return '4';
+    case 22: return '6';
+    case 23: return '5';
+    case 24: return VK_OEM_PLUS;
+    case 25: return '9';
+    case 26: return '7';
+    case 27: return VK_OEM_MINUS;
+    case 28: return '8';
+    case 29: return '0';
+    case 30: return VK_OEM_6;
+    case 31: return 'O';
+    case 32: return 'U';
+    case 33: return VK_OEM_4;
+    case 34: return 'I';
+    case 35: return 'P';
+    case 36: return VK_RETURN;
+    case 37: return 'L';
+    case 38: return 'J';
+    case 39: return VK_OEM_7;
+    case 40: return 'K';
+    case 41: return VK_OEM_1;
+    case 42: return VK_OEM_5;
+    case 43: return VK_OEM_COMMA;
+    case 44: return VK_OEM_2;
+    case 45: return 'N';
+    case 46: return 'M';
+    case 47: return VK_OEM_PERIOD;
+    case 48: return VK_TAB;
+    case 49: return VK_SPACE;
+    case 50: return VK_OEM_3;
+    case 51: return VK_BACK;
+    case 53: return VK_ESCAPE;
+    case 54:
+    case 55: return VK_CONTROL;
+    case 56:
+    case 60: return VK_SHIFT;
+    case 58:
+    case 61: return VK_MENU;
+    case 59:
+    case 62: return VK_CONTROL;
+    case 63: return 0;
+    case 115: return VK_HOME;
+    case 116: return VK_PRIOR;
+    case 117: return VK_DELETE;
+    case 119: return VK_END;
+    case 121: return VK_NEXT;
+    case 123: return VK_LEFT;
+    case 124: return VK_RIGHT;
+    case 125: return VK_DOWN;
+    case 126: return VK_UP;
+    default:
+      break;
+  }
+
+  if (!keyText.empty()) {
+    const std::wstring wide = utf8ToWide(keyText);
+    if (!wide.empty()) {
+      const SHORT mapped = VkKeyScanW(wide[0]);
+      if (mapped != -1) return static_cast<WORD>(mapped & 0xff);
+    }
+  }
+  return 0;
+}
+
+void sendVirtualKey(WORD virtualKey, bool down) {
+  if (virtualKey == 0) return;
+  INPUT input{};
+  input.type = INPUT_KEYBOARD;
+  input.ki.wVk = virtualKey;
+  input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+  SendInput(1, &input, sizeof(input));
+}
+
+void sendShortcut(WORD virtualKey) {
+  sendVirtualKey(VK_CONTROL, true);
+  sendVirtualKey(virtualKey, true);
+  sendVirtualKey(virtualKey, false);
+  sendVirtualKey(VK_CONTROL, false);
+}
+
+void setClipboardText(const std::string& text) {
+  const std::wstring wide = utf8ToWide(text);
+  const SIZE_T bytes = (wide.size() + 1) * sizeof(wchar_t);
+  HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+  if (!memory) return;
+
+  void* target = GlobalLock(memory);
+  if (!target) {
+    GlobalFree(memory);
+    return;
+  }
+  std::memcpy(target, wide.c_str(), bytes);
+  GlobalUnlock(memory);
+
+  if (!OpenClipboard(nullptr)) {
+    GlobalFree(memory);
+    return;
+  }
+  EmptyClipboard();
+  if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+    GlobalFree(memory);
+  }
+  CloseClipboard();
+}
+
+void handleModifierState(int keyCode, int modifiers) {
+  constexpr int shiftMask = 1 << 17;
+  constexpr int controlMask = 1 << 18;
+  constexpr int optionMask = 1 << 19;
+  constexpr int commandMask = 1 << 20;
+
+  WORD virtualKey = macKeyCodeToVirtualKey(keyCode, {});
+  bool down = false;
+  if (keyCode == 56 || keyCode == 60) down = (modifiers & shiftMask) != 0;
+  if (keyCode == 58 || keyCode == 61) down = (modifiers & optionMask) != 0;
+  if (keyCode == 59 || keyCode == 62) down = (modifiers & controlMask) != 0;
+  if (keyCode == 54 || keyCode == 55) down = (modifiers & commandMask) != 0;
+  sendVirtualKey(virtualKey, down);
+}
+
+void handleControlPayload(const std::string& json) {
+  const std::string type = jsonStringValue(json, "type");
+  if (type == "pointer-move") {
+    movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
+  } else if (type == "pointer-down" || type == "pointer-up") {
+    movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
+    sendMouseButton(jsonIntValue(json, "button"), type == "pointer-down");
+  } else if (type == "wheel") {
+    movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
+    sendWheel(jsonDoubleValue(json, "dy"));
+  } else if (type == "key-down" || type == "key-up") {
+    const WORD virtualKey = macKeyCodeToVirtualKey(jsonIntValue(json, "keyCode", -1),
+                                                   jsonStringValue(json, "key"));
+    sendVirtualKey(virtualKey, type == "key-down");
+  } else if (type == "modifiers") {
+    handleModifierState(jsonIntValue(json, "keyCode", -1), jsonIntValue(json, "modifiers", 0));
+  } else if (type == "clipboard") {
+    setClipboardText(jsonStringValue(json, "text"));
+  } else if (type == "copy") {
+    sendShortcut('C');
+  } else if (type == "cut") {
+    sendShortcut('X');
+  } else if (type == "paste") {
+    sendShortcut('V');
+  } else if (type == "select-all") {
+    sendShortcut('A');
+  }
+}
 
 class TcpClient {
 public:
@@ -215,7 +526,13 @@ public:
 
   ~TcpClient() {
     if (socket_ != INVALID_SOCKET) {
-      shutdown(socket_, SD_SEND);
+      running_ = false;
+      shutdown(socket_, SD_BOTH);
+    }
+    if (controlThread_.joinable()) {
+      controlThread_.join();
+    }
+    if (socket_ != INVALID_SOCKET) {
       closesocket(socket_);
     }
   }
@@ -239,8 +556,65 @@ public:
     }
   }
 
+  void startControlReceiver() {
+    if (controlThread_.joinable()) return;
+    running_ = true;
+    controlThread_ = std::thread([this]() { controlLoop(); });
+  }
+
 private:
+  bool recvAll(void* data, std::size_t size) {
+    char* cursor = static_cast<char*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0 && running_) {
+      const int chunk = remaining > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        ? std::numeric_limits<int>::max()
+        : static_cast<int>(remaining);
+      const int received = recv(socket_, cursor, chunk, 0);
+      if (received == 0) return false;
+      if (received == SOCKET_ERROR) {
+        if (!running_) return false;
+        std::cerr << "SNINPUT receive failed, WSA error " << WSAGetLastError() << "\n";
+        return false;
+      }
+      cursor += received;
+      remaining -= static_cast<std::size_t>(received);
+    }
+    return remaining == 0;
+  }
+
+  void controlLoop() {
+    std::cerr << "SNINPUT control backchannel enabled.\n";
+    while (running_) {
+      ControlMessageHeader header{};
+      if (!recvAll(&header, sizeof(header))) break;
+      if (std::memcmp(header.magic, "SNI1", 4) != 0 || header.headerSize < sizeof(ControlMessageHeader)) {
+        std::cerr << "SNINPUT invalid control header.\n";
+        break;
+      }
+      if (header.payloadSize > 4 * 1024 * 1024) {
+        std::cerr << "SNINPUT payload too large: " << header.payloadSize << "\n";
+        break;
+      }
+      if (header.headerSize > sizeof(ControlMessageHeader)) {
+        std::vector<char> extra(header.headerSize - sizeof(ControlMessageHeader));
+        if (!recvAll(extra.data(), extra.size())) break;
+      }
+
+      std::string payload(header.payloadSize, '\0');
+      if (!payload.empty() && !recvAll(payload.data(), payload.size())) break;
+      try {
+        handleControlPayload(payload);
+      } catch (const std::exception& error) {
+        std::cerr << "SNINPUT control error: " << error.what() << "\n";
+      }
+    }
+    std::cerr << "SNINPUT control backchannel closed.\n";
+  }
+
   SOCKET socket_ = INVALID_SOCKET;
+  std::atomic<bool> running_{false};
+  std::thread controlThread_;
 };
 #endif
 
@@ -372,6 +746,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 #ifdef _WIN32
     winsock = std::make_unique<WinsockRuntime>();
     tcpClient = std::make_unique<TcpClient>(options.tcpConnect);
+    tcpClient->startControlReceiver();
 #else
     throw std::runtime_error("--tcp-connect is currently implemented for Windows host builds.");
 #endif

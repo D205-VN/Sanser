@@ -16,6 +16,8 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -91,7 +93,7 @@ void printHelp() {
     << "  --probe           Print VideoToolbox hardware decode and Metal availability\n"
     << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
     << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
-    << "  --listen-render-snv P Listen over TCP, decode with VideoToolbox, render with Metal\n"
+    << "  --listen-render-snv P Listen over TCP, render with Metal, send native input back\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --metal-test      Open a Metal window and log native input events to stdout\n"
     << "  --seconds N       Auto-close Metal test after N seconds; 0 keeps it open\n"
@@ -145,29 +147,138 @@ double secondsSince(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double>(now - start).count();
 }
 
-void logPointerEvent(const char* type, NSEvent* event, NSView* view) {
+void writeLe32Raw(std::uint8_t* target, std::uint32_t value) {
+  target[0] = static_cast<std::uint8_t>(value & 0xff);
+  target[1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
+  target[2] = static_cast<std::uint8_t>((value >> 16) & 0xff);
+  target[3] = static_cast<std::uint8_t>((value >> 24) & 0xff);
+}
+
+class NativeInputSender {
+public:
+  void setFd(int fd) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fd_ = fd;
+  }
+
+  void clearFd(int fd) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fd_ == fd) fd_ = -1;
+  }
+
+  bool sendJson(const std::string& json) {
+    std::array<std::uint8_t, 12> header{};
+    std::memcpy(header.data(), "SNI1", 4);
+    writeLe32Raw(header.data() + 4, static_cast<std::uint32_t>(header.size()));
+    writeLe32Raw(header.data() + 8, static_cast<std::uint32_t>(json.size()));
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fd_ < 0) return false;
+    if (!sendAllLocked(header.data(), header.size())) {
+      fd_ = -1;
+      return false;
+    }
+    if (!json.empty() && !sendAllLocked(json.data(), json.size())) {
+      fd_ = -1;
+      return false;
+    }
+    return true;
+  }
+
+private:
+  bool sendAllLocked(const void* data, std::size_t size) {
+    const auto* cursor = static_cast<const std::uint8_t*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0) {
+      const ssize_t sent = send(fd_, cursor, remaining, 0);
+      if (sent < 0) {
+        if (errno == EINTR) continue;
+        return false;
+      }
+      if (sent == 0) return false;
+      cursor += sent;
+      remaining -= static_cast<std::size_t>(sent);
+    }
+    return true;
+  }
+
+  std::mutex mutex_;
+  int fd_ = -1;
+};
+
+std::shared_ptr<NativeInputSender> gNativeInputSender;
+
+bool sendNativeInputJson(const std::string& json) {
+  const bool sent = gNativeInputSender && gNativeInputSender->sendJson(json);
+  std::cout << (sent ? "SNINPUT_TX " : "SNINPUT_LOCAL ") << json << "\n";
+  return sent;
+}
+
+std::string pointerEventJson(const char* type, NSEvent* event, NSView* view) {
   const NSPoint point = [view convertPoint:[event locationInWindow] fromView:nil];
   const NSRect bounds = [view bounds];
   const double width = std::max<double>(bounds.size.width, 1.0);
   const double height = std::max<double>(bounds.size.height, 1.0);
   const double x = std::clamp(point.x / width, 0.0, 1.0);
   const double y = std::clamp(1.0 - (point.y / height), 0.0, 1.0);
-  std::cout << "SNINPUT {\"type\":\"" << type
-            << "\",\"x\":" << x
-            << ",\"y\":" << y
-            << ",\"button\":" << [event buttonNumber]
-            << ",\"dx\":" << [event scrollingDeltaX]
-            << ",\"dy\":" << [event scrollingDeltaY]
-            << "}\n";
+  std::ostringstream out;
+  out << "{\"type\":\"" << type
+      << "\",\"x\":" << x
+      << ",\"y\":" << y
+      << ",\"button\":" << [event buttonNumber]
+      << ",\"dx\":" << [event scrollingDeltaX]
+      << ",\"dy\":" << [event scrollingDeltaY]
+      << "}";
+  return out.str();
+}
+
+std::string keyEventJson(const char* type, NSEvent* event) {
+  const std::string text = jsonEscape([[event charactersIgnoringModifiers] UTF8String]);
+  std::ostringstream out;
+  out << "{\"type\":\"" << type
+      << "\",\"key\":\"" << text
+      << "\",\"keyCode\":" << [event keyCode]
+      << ",\"modifiers\":" << static_cast<unsigned long long>([event modifierFlags])
+      << "}";
+  return out.str();
+}
+
+std::string pasteboardText() {
+  NSString* value = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
+  return value ? std::string([value UTF8String] ?: "") : "";
+}
+
+bool sendCommandShortcut(NSEvent* event) {
+  if (([event modifierFlags] & NSEventModifierFlagCommand) == 0) return false;
+  NSString* key = [[[event charactersIgnoringModifiers] lowercaseString] copy];
+  if (!key || [key length] == 0) return false;
+
+  if ([key isEqualToString:@"v"]) {
+    sendNativeInputJson("{\"type\":\"clipboard\",\"text\":\"" + jsonEscape(pasteboardText().c_str()) + "\"}");
+    sendNativeInputJson("{\"type\":\"paste\"}");
+    return true;
+  }
+  if ([key isEqualToString:@"c"]) {
+    sendNativeInputJson("{\"type\":\"copy\"}");
+    return true;
+  }
+  if ([key isEqualToString:@"x"]) {
+    sendNativeInputJson("{\"type\":\"cut\"}");
+    return true;
+  }
+  if ([key isEqualToString:@"a"]) {
+    sendNativeInputJson("{\"type\":\"select-all\"}");
+    return true;
+  }
+  return false;
+}
+
+void logPointerEvent(const char* type, NSEvent* event, NSView* view) {
+  sendNativeInputJson(pointerEventJson(type, event, view));
 }
 
 void logKeyEvent(const char* type, NSEvent* event) {
-  const std::string text = jsonEscape([[event charactersIgnoringModifiers] UTF8String]);
-  std::cout << "SNINPUT {\"type\":\"" << type
-            << "\",\"key\":\"" << text
-            << "\",\"keyCode\":" << [event keyCode]
-            << ",\"modifiers\":" << static_cast<unsigned long long>([event modifierFlags])
-            << "}\n";
+  sendNativeInputJson(keyEventJson(type, event));
 }
 
 std::string osStatusString(OSStatus status) {
@@ -818,6 +929,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)keyDown:(NSEvent*)event {
+  if (sendCommandShortcut(event)) return;
   logKeyEvent("key-down", event);
 }
 
@@ -827,6 +939,11 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 - (void)flagsChanged:(NSEvent*)event {
   logKeyEvent("modifiers", event);
+}
+
+- (BOOL)performKeyEquivalent:(NSEvent*)event {
+  if ([event type] == NSEventTypeKeyDown && sendCommandShortcut(event)) return YES;
+  return [super performKeyEquivalent:event];
 }
 
 - (void)mouseMoved:(NSEvent*)event {
@@ -1134,7 +1251,8 @@ void submitFrameToVideoRenderer(void* context, CVImageBufferRef imageBuffer) {
 
 void decodeTcpStreamToRenderer(std::uint16_t port,
                                std::uint64_t maxPackets,
-                               void* retainedRendererContext) {
+                               void* retainedRendererContext,
+                               std::shared_ptr<NativeInputSender> inputSender) {
   @autoreleasepool {
     try {
       ScopedFd server(socket(AF_INET, SOCK_STREAM, 0));
@@ -1165,10 +1283,18 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
       if (client.get() < 0) {
         throw std::runtime_error("TCP accept failed.");
       }
+#ifdef SO_NOSIGPIPE
+      int noSigPipe = 1;
+      setsockopt(client.get(), SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
+#endif
 
       char peerIp[INET_ADDRSTRLEN]{};
       inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
       std::cout << "SNV1 render client connected from " << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
+      if (inputSender) {
+        inputSender->setFd(client.get());
+        std::cout << "SNINPUT native control enabled on render TCP socket.\n";
+      }
 
       VtH264Decoder decoder(submitFrameToVideoRenderer, retainedRendererContext);
       DecodeSummary summary;
@@ -1188,6 +1314,9 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
 
       decoder.flush();
       printDecodeSummary("tcp-render:" + std::to_string(port), summary, decoder);
+      if (inputSender) {
+        inputSender->clearFd(client.get());
+      }
     } catch (const std::exception& error) {
       std::cerr << "SNV1 render listener error: " << error.what() << "\n";
     }
@@ -1238,9 +1367,12 @@ int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets) {
     [window makeFirstResponder:view];
     [NSApp activateIgnoringOtherApps:YES];
 
+    auto inputSender = std::make_shared<NativeInputSender>();
+    gNativeInputSender = inputSender;
+
     void* rendererContext = (__bridge_retained void*)renderer;
-    std::thread worker([port, maxPackets, rendererContext]() {
-      decodeTcpStreamToRenderer(port, maxPackets, rendererContext);
+    std::thread worker([port, maxPackets, rendererContext, inputSender]() {
+      decodeTcpStreamToRenderer(port, maxPackets, rendererContext, inputSender);
     });
     worker.detach();
 
