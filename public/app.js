@@ -30,6 +30,7 @@ const TRANSPORT_FEEDBACK_TYPE = "__sanser_transport_feedback";
 const TRANSPORT_ADJUST_INTERVAL_MS = 1800;
 const NATIVE_TRANSPORT = "native-snv";
 const NATIVE_DEFAULT_PORT = 7777;
+const NATIVE_DEFAULT_CLIENT_IP = "100.100.83.44";
 
 localStorage.setItem("gr_session_id", appState.sessionId);
 localStorage.setItem("gr_device_id", appState.deviceId);
@@ -112,6 +113,7 @@ function applyPerformanceDefaults() {
   localStorage.setItem("gr_setting_codecPreference", "H264");
   localStorage.setItem("gr_setting_transportMode", NATIVE_TRANSPORT);
   localStorage.setItem("gr_setting_nativeListenPort", String(NATIVE_DEFAULT_PORT));
+  localStorage.setItem("gr_setting_nativeClientIp", NATIVE_DEFAULT_CLIENT_IP);
   localStorage.setItem("gr_perf_defaults_v6", "1");
 }
 
@@ -153,6 +155,7 @@ function bindUi() {
     "codecPreference",
     "transportMode",
     "nativeListenPort",
+    "nativeClientIp",
     "mouseRate",
     "disconnectHotkey",
     "overlayHotkey",
@@ -292,6 +295,10 @@ function hydrateSettings() {
     const saved = localStorage.getItem(`gr_setting_${node.id}`);
     if (saved !== null) node.value = saved;
   });
+  if ($("#nativeClientIp") && !localStorage.getItem("gr_setting_nativeClientIp")) {
+    $("#nativeClientIp").value = NATIVE_DEFAULT_CLIENT_IP;
+    localStorage.setItem("gr_setting_nativeClientIp", NATIVE_DEFAULT_CLIENT_IP);
+  }
   normalizeTransportSetting();
   applyLiveSetting("statsMode");
 }
@@ -748,6 +755,9 @@ async function connectNativeToDevice(device) {
 }
 
 function chooseNativeClientIp(device, addresses) {
+  const override = String($("#nativeClientIp")?.value || "").trim();
+  if (override) return override;
+
   const usable = (addresses || []).filter((entry) => entry?.address && !entry.address.startsWith("127."));
   if (!usable.length) return "";
 
