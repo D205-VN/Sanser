@@ -606,6 +606,7 @@ function createPeerConnection(room, role) {
       { urls: "stun:stun.l.google.com:19302" }
     ]
   });
+  pc.pendingRemoteIce = [];
   pc.onicecandidate = (event) => {
     if (event.candidate) sendSignal(room.id, { type: "ice", candidate: event.candidate }).catch(() => {});
   };
@@ -633,19 +634,36 @@ async function handleSignal(data) {
   const message = data.message || {};
   if (message.type === "offer") {
     await pc.setRemoteDescription(message.description);
+    await flushRemoteIce(pc);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await sendSignal(data.roomId, { type: "answer", description: pc.localDescription });
   }
   if (message.type === "answer") {
     await pc.setRemoteDescription(message.description);
+    await flushRemoteIce(pc);
   }
   if (message.type === "ice" && message.candidate) {
-    try {
-      await pc.addIceCandidate(message.candidate);
-    } catch {
-      // ICE candidates can arrive while descriptions are still settling.
-    }
+    await addRemoteIce(pc, message.candidate);
+  }
+}
+
+async function addRemoteIce(pc, candidate) {
+  if (!pc.remoteDescription) {
+    pc.pendingRemoteIce.push(candidate);
+    return;
+  }
+  try {
+    await pc.addIceCandidate(candidate);
+  } catch {
+    // Some browsers may emit stale candidates after an ICE restart or close.
+  }
+}
+
+async function flushRemoteIce(pc) {
+  const pending = pc.pendingRemoteIce.splice(0);
+  for (const candidate of pending) {
+    await addRemoteIce(pc, candidate);
   }
 }
 

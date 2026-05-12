@@ -91,12 +91,13 @@ function installScreenCaptureHandler() {
       });
       const source = sources.find((item) => item.id.startsWith("screen:")) || sources[0];
       if (!source) {
-        callback({});
+        callback({ useSystemPicker: true });
         return;
       }
       callback({ video: source });
     } catch {
-      callback({});
+      // Fallback to system picker if getSources fails (common on macOS 14+)
+      callback({ useSystemPicker: true });
     }
-  }, { useSystemPicker: false });
+  }, { useSystemPicker: true });
 }
