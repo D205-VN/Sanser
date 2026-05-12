@@ -94,6 +94,12 @@ Inspect a written packet file:
 npm run native:host-win:inspect-snv -- native-captures\capture_h264.snv
 ```
 
+If the hardware encoder fails on your GPU/driver stack, retry with the software encoder:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 12000000 --software-encoder --packet-file native-captures\capture_h264_software.snv
+```
+
 Each packet is:
 
 ```text

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -156,6 +157,15 @@ void setVideoTypeCommon(IMFMediaType* type, std::uint32_t width, std::uint32_t h
   checkHr(MFSetAttributeRatio(type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1), "Set pixel aspect ratio");
 }
 
+void notifyTransform(IMFTransform* transform, MFT_MESSAGE_TYPE message, const char* label) {
+  const HRESULT hr = transform->ProcessMessage(message, 0);
+  if (FAILED(hr) && hr != E_NOTIMPL) {
+    // Hardware encoder MFTs vary here. Some fail startup flush before any input
+    // frame even though ProcessInput/ProcessOutput works normally afterward.
+    std::cerr << label << " ignored: " << hresultMessage(hr) << "\n";
+  }
+}
+
 void releaseActivates(IMFActivate** activates, UINT32 count) {
   if (!activates) return;
   for (UINT32 i = 0; i < count; ++i) {
@@ -262,9 +272,9 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   checkHr(impl_->transform->GetOutputStreamInfo(0, &impl_->outputInfo), "GetOutputStreamInfo");
   impl_->providesOutputSamples = (impl_->outputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
 
-  checkHr(impl_->transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0), "Encoder flush");
-  checkHr(impl_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0), "Encoder begin streaming");
-  checkHr(impl_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0), "Encoder start stream");
+  notifyTransform(impl_->transform.Get(), MFT_MESSAGE_COMMAND_FLUSH, "Encoder flush");
+  notifyTransform(impl_->transform.Get(), MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, "Encoder begin streaming");
+  notifyTransform(impl_->transform.Get(), MFT_MESSAGE_NOTIFY_START_OF_STREAM, "Encoder start stream");
 }
 
 MfVideoPacketEncoder::~MfVideoPacketEncoder() = default;
