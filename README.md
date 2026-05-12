@@ -116,11 +116,11 @@ The prototype writes BMP frames for validation, supports `--pipe --fps 60` to st
 npm run native:host-win:inspect-snv -- native-captures\capture_h264.snv
 ```
 
-The app transport currently remains WebRTC with adaptive bitrate and split data channels. The next native integration step is reading `SNV1` packets on macOS, decoding them with VideoToolbox, then rendering decoded frames through Metal before moving the packets onto RTP or UDP/QUIC.
+The app transport currently remains WebRTC with adaptive bitrate and split data channels. The next native integration step is rendering decoded frames through Metal, then moving the packets onto RTP or UDP/QUIC.
 
 ## Native macOS Client Prototype
 
-The first Phase 5 native client prototype lives in `native/client-mac`. It probes VideoToolbox hardware decode support, opens a Metal render test window, logs native input events, and validates native clipboard read/write.
+The native macOS client prototype lives in `native/client-mac`. It probes VideoToolbox hardware decode support, can decode-test Windows `SNV1` H.264 packet files, opens a Metal render test window, logs native input events, and validates native clipboard read/write.
 
 On macOS:
 
@@ -128,7 +128,8 @@ On macOS:
 npm run native:client-mac:configure
 npm run native:client-mac:build
 npm run native:client-mac:probe
+npm run native:client-mac:decode-snv -- /path/to/capture_h264.snv
 ./native/client-mac/build/sanser-native-client --metal-test --seconds 5
 ```
 
-This does not replace the Electron/WebRTC client view yet. The next native-client step is receiving realtime encoded frames from the Windows native host, decoding them with VideoToolbox, then rendering decoded `CVPixelBuffer` frames as Metal textures.
+This does not replace the Electron/WebRTC client view yet. The next native-client step is rendering decoded `CVPixelBuffer` frames as Metal textures and then wiring the packet source to a realtime transport.

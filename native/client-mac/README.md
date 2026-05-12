@@ -5,13 +5,15 @@ This is the first Phase 5 prototype for the long-term Sunshine/Parsec-style clie
 Current scope:
 
 - VideoToolbox hardware decode capability probe
+- SNV1 H.264 packet file parser
+- VideoToolbox decode test from Windows native host `.snv` captures
 - Metal render test window
 - Native mouse, keyboard, scroll event logging from the Metal view
 - Native clipboard read/write probe
 
 Not included yet:
 
-- Realtime H.264/H.265/AV1 packet decode
+- Realtime H.264/H.265/AV1 network packet decode
 - CVPixelBuffer-to-Metal texture render path
 - Jitter buffer
 - Audio decode/playback
@@ -33,6 +35,22 @@ npm run native:client-mac:probe
 ```
 
 Expected output includes the Metal device and whether VideoToolbox reports hardware decode support for H.264, H.265/HEVC, and AV1.
+
+## Decode SNV1 H.264 Packet File
+
+After generating an `.snv` file on Windows:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --packet-file native-captures\capture_h264.snv
+```
+
+Copy `capture_h264.snv` to the Mac, then decode-test it:
+
+```bash
+npm run native:client-mac:decode-snv -- /path/to/capture_h264.snv
+```
+
+The output reports parsed packets, keyframes, NAL units, submitted frames, decoded frames, and decode errors. `decodedFrames` greater than zero means VideoToolbox accepted the Windows native packet stream.
 
 ## Metal Render Test
 

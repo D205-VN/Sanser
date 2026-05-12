@@ -16,6 +16,7 @@
     "native:client-mac:configure": "node scripts/run-cmake.js -S native/client-mac -B native/client-mac/build -DCMAKE_BUILD_TYPE=Release",
     "native:client-mac:build": "node scripts/run-cmake.js --build native/client-mac/build --config Release",
     "native:client-mac:probe": "./native/client-mac/build/sanser-native-client --probe",
+    "native:client-mac:decode-snv": "./native/client-mac/build/sanser-native-client --decode-snv",
     "dist:win": "electron-builder --win portable --x64",
     "dist:win:installer": "electron-builder --win nsis --x64",
     "dist:mac": "electron-builder --mac zip --arm64",

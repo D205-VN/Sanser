@@ -1,17 +1,23 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <VideoToolbox/VideoToolbox.h>
 
 #include <chrono>
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -66,12 +72,15 @@ void printMetalDevices() {
 void printHelp() {
   std::cout
     << "sanser-native-client --probe\n"
+    << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
     << "\n"
     << "Phase 5 prototype:\n"
     << "  --probe           Print VideoToolbox hardware decode and Metal availability\n"
+    << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
+    << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --metal-test      Open a Metal window and log native input events to stdout\n"
     << "  --seconds N       Auto-close Metal test after N seconds; 0 keeps it open\n"
     << "  --clipboard-read  Print macOS pasteboard text\n"
@@ -147,6 +156,442 @@ void logKeyEvent(const char* type, NSEvent* event) {
             << "\",\"keyCode\":" << [event keyCode]
             << ",\"modifiers\":" << static_cast<unsigned long long>([event modifierFlags])
             << "}\n";
+}
+
+std::string osStatusString(OSStatus status) {
+  std::ostringstream out;
+  out << "OSStatus " << status;
+  return out.str();
+}
+
+void checkStatus(OSStatus status, const char* label) {
+  if (status != noErr) {
+    throw std::runtime_error(std::string(label) + ": " + osStatusString(status));
+  }
+}
+
+std::uint32_t readLe32(const std::vector<std::uint8_t>& data, std::size_t offset) {
+  if (offset + 4 > data.size()) throw std::runtime_error("Unexpected EOF reading uint32.");
+  return static_cast<std::uint32_t>(data[offset])
+       | (static_cast<std::uint32_t>(data[offset + 1]) << 8)
+       | (static_cast<std::uint32_t>(data[offset + 2]) << 16)
+       | (static_cast<std::uint32_t>(data[offset + 3]) << 24);
+}
+
+std::uint64_t readLe64(const std::vector<std::uint8_t>& data, std::size_t offset) {
+  if (offset + 8 > data.size()) throw std::runtime_error("Unexpected EOF reading uint64.");
+  std::uint64_t value = 0;
+  for (int i = 0; i < 8; ++i) {
+    value |= static_cast<std::uint64_t>(data[offset + i]) << (8 * i);
+  }
+  return value;
+}
+
+std::uint32_t readBe32(const std::vector<std::uint8_t>& data, std::size_t offset) {
+  if (offset + 4 > data.size()) return 0;
+  return (static_cast<std::uint32_t>(data[offset]) << 24)
+       | (static_cast<std::uint32_t>(data[offset + 1]) << 16)
+       | (static_cast<std::uint32_t>(data[offset + 2]) << 8)
+       | static_cast<std::uint32_t>(data[offset + 3]);
+}
+
+void appendBe32(std::vector<std::uint8_t>& data, std::uint32_t value) {
+  data.push_back(static_cast<std::uint8_t>((value >> 24) & 0xff));
+  data.push_back(static_cast<std::uint8_t>((value >> 16) & 0xff));
+  data.push_back(static_cast<std::uint8_t>((value >> 8) & 0xff));
+  data.push_back(static_cast<std::uint8_t>(value & 0xff));
+}
+
+struct SnvPacket {
+  std::uint32_t codec = 0;
+  std::uint32_t packetFormat = 0;
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+  std::uint64_t sequence = 0;
+  std::uint64_t timestampMicros = 0;
+  std::uint32_t durationMicros = 0;
+  std::uint32_t flags = 0;
+  std::vector<std::uint8_t> payload;
+};
+
+struct NalUnit {
+  std::vector<std::uint8_t> bytes;
+  std::uint8_t type = 0;
+};
+
+std::vector<SnvPacket> readSnvPackets(const std::string& file, std::uint64_t maxPackets) {
+  std::ifstream input(file, std::ios::binary);
+  if (!input.is_open()) {
+    throw std::runtime_error("Could not open SNV file: " + file);
+  }
+
+  input.seekg(0, std::ios::end);
+  const auto fileSize = input.tellg();
+  input.seekg(0, std::ios::beg);
+  if (fileSize <= 0) {
+    throw std::runtime_error("SNV file is empty: " + file);
+  }
+
+  std::vector<std::uint8_t> data(static_cast<std::size_t>(fileSize));
+  input.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+
+  std::vector<SnvPacket> packets;
+  std::size_t offset = 0;
+  while (offset < data.size() && (maxPackets == 0 || packets.size() < maxPackets)) {
+    if (offset + 52 > data.size()) {
+      throw std::runtime_error("Truncated SNV header at byte " + std::to_string(offset));
+    }
+    if (std::memcmp(data.data() + offset, "SNV1", 4) != 0) {
+      throw std::runtime_error("Invalid SNV1 magic at byte " + std::to_string(offset));
+    }
+
+    const std::uint32_t headerSize = readLe32(data, offset + 4);
+    if (headerSize < 52 || offset + headerSize > data.size()) {
+      throw std::runtime_error("Invalid SNV1 header size at byte " + std::to_string(offset));
+    }
+
+    SnvPacket packet;
+    packet.codec = readLe32(data, offset + 8);
+    packet.packetFormat = readLe32(data, offset + 12);
+    packet.width = readLe32(data, offset + 16);
+    packet.height = readLe32(data, offset + 20);
+    packet.sequence = readLe64(data, offset + 24);
+    packet.timestampMicros = readLe64(data, offset + 32);
+    packet.durationMicros = readLe32(data, offset + 40);
+    packet.flags = readLe32(data, offset + 44);
+    const std::uint32_t payloadSize = readLe32(data, offset + 48);
+    const std::size_t payloadOffset = offset + headerSize;
+    const std::size_t nextOffset = payloadOffset + payloadSize;
+    if (nextOffset > data.size()) {
+      throw std::runtime_error("SNV1 packet payload exceeds file length.");
+    }
+
+    packet.payload.assign(data.begin() + static_cast<std::ptrdiff_t>(payloadOffset),
+                          data.begin() + static_cast<std::ptrdiff_t>(nextOffset));
+    packets.push_back(std::move(packet));
+    offset = nextOffset;
+  }
+
+  return packets;
+}
+
+std::size_t annexBStartCodeSize(const std::vector<std::uint8_t>& data, std::size_t offset) {
+  if (offset + 3 <= data.size() && data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 1) {
+    return 3;
+  }
+  if (offset + 4 <= data.size() && data[offset] == 0 && data[offset + 1] == 0 && data[offset + 2] == 0 && data[offset + 3] == 1) {
+    return 4;
+  }
+  return 0;
+}
+
+std::vector<NalUnit> parseAnnexBNalUnits(const std::vector<std::uint8_t>& payload) {
+  std::vector<NalUnit> nals;
+  std::size_t offset = 0;
+  while (offset < payload.size()) {
+    while (offset < payload.size() && annexBStartCodeSize(payload, offset) == 0) {
+      ++offset;
+    }
+    if (offset >= payload.size()) break;
+
+    const std::size_t startCode = annexBStartCodeSize(payload, offset);
+    std::size_t nalStart = offset + startCode;
+    std::size_t next = nalStart;
+    while (next < payload.size() && annexBStartCodeSize(payload, next) == 0) {
+      ++next;
+    }
+
+    if (next > nalStart) {
+      NalUnit nal;
+      nal.bytes.assign(payload.begin() + static_cast<std::ptrdiff_t>(nalStart),
+                       payload.begin() + static_cast<std::ptrdiff_t>(next));
+      nal.type = nal.bytes.empty() ? 0 : (nal.bytes[0] & 0x1f);
+      nals.push_back(std::move(nal));
+    }
+    offset = next;
+  }
+  return nals;
+}
+
+std::vector<NalUnit> parseAvccNalUnits(const std::vector<std::uint8_t>& payload) {
+  std::vector<NalUnit> nals;
+  std::size_t offset = 0;
+  while (offset + 4 <= payload.size()) {
+    const std::uint32_t size = readBe32(payload, offset);
+    offset += 4;
+    if (size == 0 || offset + size > payload.size()) {
+      nals.clear();
+      return nals;
+    }
+    NalUnit nal;
+    nal.bytes.assign(payload.begin() + static_cast<std::ptrdiff_t>(offset),
+                     payload.begin() + static_cast<std::ptrdiff_t>(offset + size));
+    nal.type = nal.bytes.empty() ? 0 : (nal.bytes[0] & 0x1f);
+    nals.push_back(std::move(nal));
+    offset += size;
+  }
+  if (offset != payload.size()) nals.clear();
+  return nals;
+}
+
+std::vector<NalUnit> parseNalUnits(const std::vector<std::uint8_t>& payload) {
+  auto nals = parseAnnexBNalUnits(payload);
+  if (!nals.empty()) return nals;
+  return parseAvccNalUnits(payload);
+}
+
+std::vector<std::uint8_t> buildAvccSample(const std::vector<NalUnit>& nals) {
+  std::vector<std::uint8_t> sample;
+  for (const auto& nal : nals) {
+    if (nal.bytes.empty()) continue;
+    if (nal.type == 7 || nal.type == 8 || nal.type == 9) continue;
+    appendBe32(sample, static_cast<std::uint32_t>(nal.bytes.size()));
+    sample.insert(sample.end(), nal.bytes.begin(), nal.bytes.end());
+  }
+  return sample;
+}
+
+class VtH264Decoder {
+public:
+  ~VtH264Decoder() {
+    if (session_) {
+      VTDecompressionSessionWaitForAsynchronousFrames(session_);
+      VTDecompressionSessionInvalidate(session_);
+      CFRelease(session_);
+    }
+    if (format_) {
+      CFRelease(format_);
+    }
+  }
+
+  void observeParameterSets(const std::vector<NalUnit>& nals) {
+    bool changed = false;
+    for (const auto& nal : nals) {
+      if (nal.type == 7 && nal.bytes != sps_) {
+        sps_ = nal.bytes;
+        changed = true;
+      } else if (nal.type == 8 && nal.bytes != pps_) {
+        pps_ = nal.bytes;
+        changed = true;
+      }
+    }
+    if (changed) {
+      resetSession();
+    }
+  }
+
+  bool ready() const {
+    return !sps_.empty() && !pps_.empty();
+  }
+
+  bool decode(const SnvPacket& packet, const std::vector<std::uint8_t>& avccSample) {
+    if (!ready() || avccSample.empty()) return false;
+    ensureSession(packet.width, packet.height);
+
+    CMBlockBufferRef blockBuffer = nullptr;
+    OSStatus status = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,
+                                                         nullptr,
+                                                         avccSample.size(),
+                                                         kCFAllocatorDefault,
+                                                         nullptr,
+                                                         0,
+                                                         avccSample.size(),
+                                                         0,
+                                                         &blockBuffer);
+    if (status != noErr) {
+      ++decodeErrors_;
+      std::cerr << "CMBlockBufferCreate failed: " << osStatusString(status) << "\n";
+      return false;
+    }
+
+    status = CMBlockBufferReplaceDataBytes(avccSample.data(), blockBuffer, 0, avccSample.size());
+    if (status != noErr) {
+      CFRelease(blockBuffer);
+      ++decodeErrors_;
+      std::cerr << "CMBlockBufferReplaceDataBytes failed: " << osStatusString(status) << "\n";
+      return false;
+    }
+
+    CMSampleTimingInfo timing{};
+    timing.presentationTimeStamp = CMTimeMake(static_cast<int64_t>(packet.timestampMicros), 1000000);
+    timing.duration = CMTimeMake(static_cast<int64_t>(packet.durationMicros ? packet.durationMicros : 16667), 1000000);
+    timing.decodeTimeStamp = kCMTimeInvalid;
+
+    CMSampleBufferRef sampleBuffer = nullptr;
+    status = CMSampleBufferCreateReady(kCFAllocatorDefault,
+                                       blockBuffer,
+                                       format_,
+                                       1,
+                                       1,
+                                       &timing,
+                                       0,
+                                       nullptr,
+                                       &sampleBuffer);
+    CFRelease(blockBuffer);
+    if (status != noErr) {
+      ++decodeErrors_;
+      std::cerr << "CMSampleBufferCreateReady failed: " << osStatusString(status) << "\n";
+      return false;
+    }
+
+    VTDecodeInfoFlags infoFlags = 0;
+    status = VTDecompressionSessionDecodeFrame(session_, sampleBuffer, 0, nullptr, &infoFlags);
+    CFRelease(sampleBuffer);
+    if (status != noErr) {
+      ++decodeErrors_;
+      std::cerr << "VTDecompressionSessionDecodeFrame failed at packet "
+                << packet.sequence << ": " << osStatusString(status) << "\n";
+      return false;
+    }
+    submittedFrames_ += 1;
+    return true;
+  }
+
+  void flush() {
+    if (session_) {
+      VTDecompressionSessionWaitForAsynchronousFrames(session_);
+    }
+  }
+
+  std::uint64_t decodedFrames() const { return decodedFrames_; }
+  std::uint64_t submittedFrames() const { return submittedFrames_; }
+  std::uint64_t decodeErrors() const { return decodeErrors_; }
+
+private:
+  void resetSession() {
+    if (session_) {
+      VTDecompressionSessionWaitForAsynchronousFrames(session_);
+      VTDecompressionSessionInvalidate(session_);
+      CFRelease(session_);
+      session_ = nullptr;
+    }
+    if (format_) {
+      CFRelease(format_);
+      format_ = nullptr;
+    }
+  }
+
+  void ensureSession(std::uint32_t width, std::uint32_t height) {
+    if (session_) return;
+
+    const uint8_t* parameterSets[] = { sps_.data(), pps_.data() };
+    const size_t parameterSetSizes[] = { sps_.size(), pps_.size() };
+    checkStatus(CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,
+                                                                    2,
+                                                                    parameterSets,
+                                                                    parameterSetSizes,
+                                                                    4,
+                                                                    &format_),
+                "CMVideoFormatDescriptionCreateFromH264ParameterSets");
+
+    VTDecompressionOutputCallbackRecord callback{};
+    callback.decompressionOutputCallback = &VtH264Decoder::outputCallback;
+    callback.decompressionOutputRefCon = this;
+
+    NSDictionary* attributes = @{
+      (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+      (id)kCVPixelBufferWidthKey: @(width),
+      (id)kCVPixelBufferHeightKey: @(height)
+    };
+
+    checkStatus(VTDecompressionSessionCreate(kCFAllocatorDefault,
+                                             format_,
+                                             nullptr,
+                                             (__bridge CFDictionaryRef)attributes,
+                                             &callback,
+                                             &session_),
+                "VTDecompressionSessionCreate");
+  }
+
+  static void outputCallback(void* decompressionOutputRefCon,
+                             void* sourceFrameRefCon,
+                             OSStatus status,
+                             VTDecodeInfoFlags infoFlags,
+                             CVImageBufferRef imageBuffer,
+                             CMTime presentationTimeStamp,
+                             CMTime presentationDuration) {
+    (void)sourceFrameRefCon;
+    (void)infoFlags;
+    (void)presentationTimeStamp;
+    (void)presentationDuration;
+    auto* self = static_cast<VtH264Decoder*>(decompressionOutputRefCon);
+    if (status == noErr && imageBuffer) {
+      self->decodedFrames_ += 1;
+      if (self->decodedFrames_ == 1) {
+        self->decodedWidth_ = static_cast<std::uint32_t>(CVPixelBufferGetWidth(imageBuffer));
+        self->decodedHeight_ = static_cast<std::uint32_t>(CVPixelBufferGetHeight(imageBuffer));
+      }
+    } else {
+      self->decodeErrors_ += 1;
+    }
+  }
+
+  std::vector<std::uint8_t> sps_;
+  std::vector<std::uint8_t> pps_;
+  CMVideoFormatDescriptionRef format_ = nullptr;
+  VTDecompressionSessionRef session_ = nullptr;
+  std::uint64_t submittedFrames_ = 0;
+  std::uint64_t decodedFrames_ = 0;
+  std::uint64_t decodeErrors_ = 0;
+  std::uint32_t decodedWidth_ = 0;
+  std::uint32_t decodedHeight_ = 0;
+};
+
+int decodeSnvFile(const std::string& file, std::uint64_t maxPackets) {
+  @autoreleasepool {
+    const auto packets = readSnvPackets(file, maxPackets);
+    VtH264Decoder decoder;
+    std::uint64_t keyframes = 0;
+    std::uint64_t skippedNoParameters = 0;
+    std::uint64_t skippedEmptySamples = 0;
+    std::uint64_t nalUnits = 0;
+
+    for (const auto& packet : packets) {
+      if (packet.codec != 1) {
+        throw std::runtime_error("Only H.264 SNV1 codec packets are supported in Phase 6B.");
+      }
+      if (packet.flags & 1) ++keyframes;
+
+      const auto nals = parseNalUnits(packet.payload);
+      nalUnits += nals.size();
+      decoder.observeParameterSets(nals);
+      if (!decoder.ready()) {
+        ++skippedNoParameters;
+        continue;
+      }
+
+      const auto sample = buildAvccSample(nals);
+      if (sample.empty()) {
+        ++skippedEmptySamples;
+        continue;
+      }
+      decoder.decode(packet, sample);
+    }
+
+    decoder.flush();
+
+    const SnvPacket* first = packets.empty() ? nullptr : &packets.front();
+    const SnvPacket* last = packets.empty() ? nullptr : &packets.back();
+    std::cout << "{\n"
+              << "  \"file\": \"" << jsonEscape(file.c_str()) << "\",\n"
+              << "  \"packets\": " << packets.size() << ",\n"
+              << "  \"keyframes\": " << keyframes << ",\n"
+              << "  \"nalUnits\": " << nalUnits << ",\n"
+              << "  \"submittedFrames\": " << decoder.submittedFrames() << ",\n"
+              << "  \"decodedFrames\": " << decoder.decodedFrames() << ",\n"
+              << "  \"decodeErrors\": " << decoder.decodeErrors() << ",\n"
+              << "  \"skippedNoParameters\": " << skippedNoParameters << ",\n"
+              << "  \"skippedEmptySamples\": " << skippedEmptySamples << ",\n"
+              << "  \"firstSequence\": " << (first ? first->sequence : 0) << ",\n"
+              << "  \"lastSequence\": " << (last ? last->sequence : 0) << "\n"
+              << "}\n";
+
+    if (decoder.decodedFrames() == 0) {
+      std::cerr << "No frames decoded. The SNV file may not contain SPS/PPS in H.264 Annex B or AVCC form yet.\n";
+      return 2;
+    }
+  }
+  return 0;
 }
 
 } // namespace
@@ -364,11 +809,14 @@ int runMetalTest(double seconds) {
 
 struct Options {
   bool probe = false;
+  bool decodeSnv = false;
   bool metalTest = false;
   bool clipboardRead = false;
   bool clipboardWrite = false;
   bool help = false;
+  std::uint64_t maxPackets = 0;
   double seconds = 5;
+  std::string snvFile;
   std::string clipboardText;
 };
 
@@ -383,6 +831,13 @@ Options parseOptions(int argc, char** argv) {
     const std::string arg = argv[i];
     if (arg == "--probe") {
       options.probe = true;
+    } else if (arg == "--decode-snv") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --decode-snv");
+      options.decodeSnv = true;
+      options.snvFile = argv[++i];
+    } else if (arg == "--max-packets") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --max-packets");
+      options.maxPackets = static_cast<std::uint64_t>(std::stoull(argv[++i]));
     } else if (arg == "--metal-test") {
       options.metalTest = true;
     } else if (arg == "--clipboard-read") {
@@ -413,6 +868,7 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (options.probe) return runProbe();
+    if (options.decodeSnv) return decodeSnvFile(options.snvFile, options.maxPackets);
     if (options.clipboardRead) return clipboardRead();
     if (options.clipboardWrite) return clipboardWrite(options.clipboardText);
     if (options.metalTest) return runMetalTest(options.seconds);
