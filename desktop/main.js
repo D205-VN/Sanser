@@ -98,5 +98,5 @@ function installScreenCaptureHandler() {
     } catch {
       callback({});
     }
-  }, { useSystemPicker: true });
+  }, { useSystemPicker: false });
 }

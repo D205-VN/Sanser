@@ -483,15 +483,15 @@ async function connectToDevice(deviceId) {
       }
     });
     appState.clientRoom = data.room;
-    streamStatus.textContent = "Connecting";
     $("#clientRoleBadge").classList.remove("is-hidden");
     
     // Request fullscreen
     try {
-      if (document.documentElement.requestFullscreen) {
-        await document.documentElement.requestFullscreen();
-      } else if (document.documentElement.webkitRequestFullscreen) {
-        await document.documentElement.webkitRequestFullscreen();
+      const vs = document.getElementById("videoShell");
+      if (vs.requestFullscreen) {
+        await vs.requestFullscreen();
+      } else if (vs.webkitRequestFullscreen) {
+        await vs.webkitRequestFullscreen();
       }
     } catch (e) {
       console.warn("Fullscreen error:", e);
