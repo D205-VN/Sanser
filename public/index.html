@@ -3,44 +3,59 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GameRemote</title>
+    <title>Sanser — Remote Desktop</title>
+    <meta name="description" content="Low-latency remote desktop streaming powered by WebRTC">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Connecting Overlay -->
+    <div class="connecting-overlay is-hidden" id="connectingOverlay">
+      <div class="connecting-content">
+        <div class="connecting-spinner"></div>
+        <h3 id="connectingTitle">Đang kết nối...</h3>
+        <p id="connectingDesc">Vui lòng chờ tín hiệu từ máy chủ</p>
+      </div>
+    </div>
+
+    <!-- AUTH VIEW -->
     <main class="auth-view" id="authView">
       <section class="auth-panel">
         <div class="auth-brand">
           <span class="gem-logo"></span>
           <div>
-            <h1>GameRemote</h1>
-            <p>Low latency desktop mode</p>
+            <h1>Sanser</h1>
+            <p>Remote Desktop Streaming</p>
           </div>
         </div>
 
         <div class="auth-tabs" role="tablist" aria-label="Auth mode">
-          <button class="auth-tab is-active" id="loginTab" type="button">Login</button>
-          <button class="auth-tab" id="registerTab" type="button">Register</button>
+          <button class="auth-tab is-active" id="loginTab" type="button">Đăng nhập</button>
+          <button class="auth-tab" id="registerTab" type="button">Đăng ký</button>
         </div>
 
         <form class="auth-form" id="authForm">
           <label class="field register-only is-hidden">
-            <span>Name</span>
-            <input id="nameInput" autocomplete="name" placeholder="TanDung">
+            <span>Tên</span>
+            <input id="nameInput" autocomplete="name" placeholder="Nhập tên của bạn">
           </label>
           <label class="field">
             <span>Email</span>
             <input id="emailInput" type="email" autocomplete="email" placeholder="you@example.com">
           </label>
           <label class="field">
-            <span>Password</span>
-            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="6+ characters">
+            <span>Mật khẩu</span>
+            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="6+ ký tự">
           </label>
-          <button class="primary-action" id="authSubmit" type="submit">Login</button>
+          <button class="primary-action" id="authSubmit" type="submit">Đăng nhập</button>
           <p class="form-error" id="authError"></p>
         </form>
       </section>
     </main>
 
+    <!-- APP SHELL -->
     <main class="app-shell is-hidden" id="appShell">
       <aside class="rail">
         <button class="rail-item is-active" data-view="computersView" type="button" title="Computers" aria-label="Computers">
@@ -52,10 +67,7 @@
         <button class="rail-item" data-view="hostView" type="button" title="Host" aria-label="Host">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10v4h2v14H5V7h2V3Zm2 2v2h6V5H9Zm-2 4v10h10V9H7Zm2 2h6v2H9v-2Zm0 4h6v2H9v-2Z"/></svg>
         </button>
-        <button class="rail-item muted" type="button" title="Help" aria-label="Help">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 17h2v2h-2v-2Zm1-14a8 8 0 1 1 0 16 8 8 0 0 1 0-16Zm0 2a6 6 0 1 0 0 12 6 6 0 0 0 0-12Zm0 2.5c1.7 0 3 1 3 2.5 0 1-.5 1.7-1.5 2.3-.7.4-.9.7-.9 1.4v.3h-2v-.4c0-1.2.4-1.9 1.5-2.6.7-.4.9-.7.9-1.1 0-.6-.4-.9-1.1-.9-.8 0-1.3.5-1.4 1.3l-1.9-.3c.3-1.6 1.5-2.5 3.4-2.5Z"/></svg>
-        </button>
-        <button class="rail-item logout" id="logoutButton" type="button" title="Logout" aria-label="Logout">
+        <button class="rail-item logout" id="logoutButton" type="button" title="Đăng xuất" aria-label="Logout">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9v2H7v14h7v2H5V3Zm11.6 5.4L21.2 13l-4.6 4.6-1.4-1.4 2.2-2.2H10v-2h7.4l-2.2-2.2 1.4-1.4Z"/></svg>
         </button>
       </aside>
@@ -64,7 +76,7 @@
         <header class="account-bar">
           <div class="server-state">
             <span class="state-dot" id="serverDot"></span>
-            <span id="serverState">Connecting</span>
+            <span id="serverState">Đang kết nối</span>
           </div>
           <div class="account-pill">
             <span class="gem-logo small"></span>
@@ -72,18 +84,21 @@
           </div>
         </header>
 
+        <!-- COMPUTERS VIEW -->
         <section class="view is-active" id="computersView">
           <div class="page-head">
-            <h1>Computers</h1>
-            <p>Connect to your computers in low latency desktop mode.</p>
+            <div>
+              <h1>Máy tính</h1>
+              <p>Kết nối đến máy tính của bạn với độ trễ thấp</p>
+            </div>
           </div>
           <div class="rule"></div>
           <div class="computer-tools">
             <label class="search-box">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 4a6.5 6.5 0 0 1 5.1 10.5l4 4-1.4 1.4-4-4A6.5 6.5 0 1 1 10.5 4Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z"/></svg>
-              <input id="computerSearch" placeholder="Search Hosts and Computers">
+              <input id="computerSearch" placeholder="Tìm kiếm máy tính...">
             </label>
-            <button class="link-action" id="refreshDevices" type="button">Reload</button>
+            <button class="link-action" id="refreshDevices" type="button">Tải lại</button>
           </div>
 
           <section class="computer-vault">
@@ -94,35 +109,38 @@
             <div class="dock-head">
               <div>
                 <h2>Stream</h2>
-                <p id="streamStatus">Idle</p>
+                <p id="streamStatus">Chờ kết nối</p>
               </div>
               <div class="dock-actions">
                 <button class="secondary-action" id="focusInputButton" type="button">Focus Input</button>
-                <button class="danger-action" id="disconnectButton" type="button">Disconnect</button>
+                <button class="danger-action" id="disconnectButton" type="button">Ngắt kết nối</button>
               </div>
             </div>
             <div class="video-shell" id="videoShell" tabindex="0">
               <video id="remoteVideo" playsinline autoplay></video>
               <div class="empty-stream" id="emptyStream">
-                <strong>No active stream</strong>
-                <span id="selectedDeviceLabel">Choose an online computer.</span>
+                <strong>Chưa có stream</strong>
+                <span id="selectedDeviceLabel">Chọn một máy tính online để kết nối.</span>
               </div>
-              <div class="role-badge is-hidden" id="clientRoleBadge">Vai trò: CLIENT (Người điều khiển)</div>
+              <div class="role-badge is-hidden" id="clientRoleBadge">CLIENT</div>
               <div class="stats-overlay" id="clientStats">FPS -- | -- Mbps | RTT -- ms</div>
             </div>
             <p class="form-error" id="connectError"></p>
           </section>
 
           <footer class="join-bar">
-            <input disabled placeholder="Join with a share link or Peer ID.">
+            <input disabled placeholder="Nhập link hoặc Peer ID để tham gia">
             <button disabled type="button">Join</button>
           </footer>
         </section>
 
+        <!-- HOST VIEW -->
         <section class="view" id="hostView">
           <div class="page-head">
-            <h1>Host</h1>
-            <p>Manage this computer and its streaming state.</p>
+            <div>
+              <h1>Máy chủ</h1>
+              <p>Quản lý máy tính này và trạng thái streaming.</p>
+            </div>
           </div>
           <div class="rule"></div>
 
@@ -130,37 +148,37 @@
             <section class="dark-panel">
               <div class="panel-head">
                 <div>
-                  <h2>This Computer</h2>
+                  <h2>Máy này</h2>
                   <p id="hostStatus">Offline</p>
                 </div>
                 <div class="button-row">
-                  <button class="primary-action" id="startHostButton" type="button">Go Online</button>
-                  <button class="danger-action" id="stopHostButton" type="button">Stop</button>
+                  <button class="primary-action" id="startHostButton" type="button">Bật Online</button>
+                  <button class="danger-action" id="stopHostButton" type="button">Tắt</button>
                 </div>
               </div>
               <div class="settings-stack compact">
                 <label class="setting-row">
                   <span>
-                    <strong>Computer Name</strong>
-                    <small>Displayed on other devices using this account.</small>
+                    <strong>Tên máy tính</strong>
+                    <small>Hiển thị trên các thiết bị khác.</small>
                   </span>
                   <input id="hostName" placeholder="LAPTOP-MO1H2EFV">
                 </label>
                 <label class="setting-row">
                   <span>
                     <strong>GPU</strong>
-                    <small>Shown on the computer card.</small>
+                    <small>Hiện trên thẻ máy tính.</small>
                   </span>
                   <input id="hostGpu" placeholder="RTX 3060">
                 </label>
                 <label class="setting-row">
                   <span>
-                    <strong>Auto Accept Same Account</strong>
-                    <small>Connections from your account start immediately.</small>
+                    <strong>Tự động chấp nhận</strong>
+                    <small>Kết nối cùng tài khoản tự động bắt đầu.</small>
                   </span>
                   <select id="autoAccept">
-                    <option value="on" selected>On</option>
-                    <option value="off">Off</option>
+                    <option value="on" selected>Bật</option>
+                    <option value="off">Tắt</option>
                   </select>
                 </label>
               </div>
@@ -170,13 +188,13 @@
               <div class="panel-head">
                 <div>
                   <h2>Preview</h2>
-                  <p id="captureStatus">Screen capture inactive</p>
+                  <p id="captureStatus">Chưa bắt đầu chụp màn hình</p>
                 </div>
-                <button class="secondary-action" id="captureButton" type="button">Capture Screen</button>
+                <button class="secondary-action" id="captureButton" type="button">Chụp màn hình</button>
               </div>
               <div style="position:relative;">
                 <video class="preview-video" id="hostPreview" autoplay muted playsinline></video>
-                <div class="role-badge is-hidden" id="hostRoleBadge">Vai trò: HOST (Máy chủ)</div>
+                <div class="role-badge is-hidden" id="hostRoleBadge">HOST</div>
               </div>
               <div class="stats-strip" id="hostStats">Outbound FPS -- | -- Mbps</div>
             </section>
@@ -185,21 +203,22 @@
           <section class="dark-panel">
             <div class="panel-head">
               <div>
-                <h2>Connections</h2>
-                <p>Same-account sessions are accepted automatically.</p>
+                <h2>Kết nối</h2>
+                <p>Các phiên cùng tài khoản được chấp nhận tự động.</p>
               </div>
             </div>
             <div class="request-list" id="requestList"></div>
           </section>
         </section>
 
+        <!-- SETTINGS VIEW -->
         <section class="view" id="settingsView">
           <div class="page-head settings-head">
             <div>
-              <h1>Settings</h1>
-              <p>Customize your GameRemote experience.</p>
+              <h1>Cài đặt</h1>
+              <p>Tùy chỉnh trải nghiệm Sanser của bạn.</p>
             </div>
-            <span>Version 0.1.0</span>
+            <span>v0.1.0</span>
           </div>
           <div class="rule"></div>
 
@@ -209,18 +228,15 @@
             <button class="settings-tab" data-settings-tab="networkSettings" type="button">Network</button>
             <button class="settings-tab" data-settings-tab="hotkeySettings" type="button">Hotkeys</button>
             <button class="settings-tab" data-settings-tab="gamepadSettings" type="button">Gamepad</button>
-            <button class="settings-tab" data-settings-tab="experimentalSettings" type="button">Experimental</button>
-            <button class="settings-tab" data-settings-tab="accountSettings" type="button">Account</button>
+            <button class="settings-tab" data-settings-tab="experimentalSettings" type="button">Nâng cao</button>
+            <button class="settings-tab" data-settings-tab="accountSettings" type="button">Tài khoản</button>
           </nav>
 
           <section class="settings-pane is-active" id="clientSettings">
             <h2>Client Settings</h2>
             <div class="settings-stack">
               <label class="setting-row">
-                <span>
-                  <strong>Resolution</strong>
-                  <small>Client stream size.</small>
-                </span>
+                <span><strong>Độ phân giải</strong><small>Kích thước stream phía client.</small></span>
                 <select id="clientResolution">
                   <option value="720p">720p</option>
                   <option value="1080p" selected>1080p</option>
@@ -229,27 +245,18 @@
                 </select>
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>FPS</strong>
-                  <small>Higher values need a stronger network.</small>
-                </span>
+                <span><strong>FPS</strong><small>Giá trị cao hơn cần mạng mạnh hơn.</small></span>
                 <input id="clientFps" type="number" min="30" max="120" step="10" value="60">
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>Bitrate</strong>
-                  <small>Mbps sent from the host.</small>
-                </span>
+                <span><strong>Bitrate</strong><small>Mbps gửi từ host.</small></span>
                 <input id="clientBitrate" type="number" min="4" max="120" step="1" value="35">
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>Overlay</strong>
-                  <small>Performance stats while connected.</small>
-                </span>
+                <span><strong>Overlay</strong><small>Hiển thị stats khi kết nối.</small></span>
                 <select id="overlayMode">
-                  <option value="on" selected>On</option>
-                  <option value="off">Off</option>
+                  <option value="on" selected>Bật</option>
+                  <option value="off">Tắt</option>
                 </select>
               </label>
             </div>
@@ -259,34 +266,22 @@
             <h2>Host Settings</h2>
             <div class="settings-stack">
               <label class="setting-row">
-                <span>
-                  <strong>Hosting</strong>
-                  <small>This computer appears after login.</small>
-                </span>
+                <span><strong>Hosting</strong><small>Máy tính này xuất hiện sau khi đăng nhập.</small></span>
                 <select id="hostEnabled">
-                  <option value="on" selected>On</option>
-                  <option value="off">Off</option>
+                  <option value="on" selected>Bật</option>
+                  <option value="off">Tắt</option>
                 </select>
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>Host FPS</strong>
-                  <small>Capture target frame rate.</small>
-                </span>
+                <span><strong>Host FPS</strong><small>Tốc độ khung hình chụp.</small></span>
                 <input id="hostFps" type="number" min="30" max="120" step="10" value="60">
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>Host Bitrate</strong>
-                  <small>Default Mbps for new sessions.</small>
-                </span>
+                <span><strong>Host Bitrate</strong><small>Mbps mặc định cho phiên mới.</small></span>
                 <input id="hostBitrate" type="number" min="4" max="120" step="1" value="35">
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>Video Codec</strong>
-                  <small>Preferred WebRTC encoder.</small>
-                </span>
+                <span><strong>Video Codec</strong><small>Bộ mã hóa WebRTC ưu tiên.</small></span>
                 <select id="codecPreference">
                   <option value="H264" selected>H.264</option>
                   <option value="VP9">VP9</option>
@@ -300,26 +295,17 @@
             <h2>Network Settings</h2>
             <div class="settings-stack">
               <label class="setting-row">
-                <span>
-                  <strong>Server URL</strong>
-                  <small>Use the same URL on macOS and Windows.</small>
-                </span>
+                <span><strong>Server URL</strong><small>Dùng cùng URL trên macOS và Windows.</small></span>
                 <input id="serverUrlInput" placeholder="Local server">
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>Transport</strong>
-                  <small>Direct UDP when NAT allows it.</small>
-                </span>
+                <span><strong>Transport</strong><small>UDP trực tiếp khi NAT cho phép.</small></span>
                 <select id="transportMode">
                   <option value="p2p" selected>WebRTC P2P</option>
                 </select>
               </label>
               <label class="setting-row">
-                <span>
-                  <strong>Mouse Sample Rate</strong>
-                  <small>Remote input update rate.</small>
-                </span>
+                <span><strong>Mouse Sample Rate</strong><small>Tốc độ cập nhật input từ xa.</small></span>
                 <select id="mouseRate">
                   <option value="30">30 Hz</option>
                   <option value="60" selected>60 Hz</option>
@@ -327,11 +313,8 @@
                 </select>
               </label>
               <div class="setting-row action-row">
-                <span>
-                  <strong>Apply Network</strong>
-                  <small id="serverUrlLabel">Using local embedded server.</small>
-                </span>
-                <button class="secondary-action" id="applyServerButton" type="button">Apply</button>
+                <span><strong>Áp dụng Network</strong><small id="serverUrlLabel">Đang dùng server local.</small></span>
+                <button class="secondary-action" id="applyServerButton" type="button">Áp dụng</button>
               </div>
             </div>
           </section>
@@ -340,11 +323,11 @@
             <h2>Hotkey Settings</h2>
             <div class="settings-stack">
               <label class="setting-row">
-                <span><strong>Disconnect Hotkey</strong><small>Ends the active session.</small></span>
+                <span><strong>Ngắt kết nối</strong><small>Kết thúc phiên đang hoạt động.</small></span>
                 <input id="disconnectHotkey" value="Ctrl+Shift+D">
               </label>
               <label class="setting-row">
-                <span><strong>Overlay Hotkey</strong><small>Toggles performance stats.</small></span>
+                <span><strong>Overlay</strong><small>Bật/tắt hiển thị performance.</small></span>
                 <input id="overlayHotkey" value="Ctrl+Shift+O">
               </label>
             </div>
@@ -354,48 +337,48 @@
             <h2>Gamepad Settings</h2>
             <div class="settings-stack">
               <label class="setting-row">
-                <span><strong>Gamepad Passthrough</strong><small>Forward browser gamepad events.</small></span>
+                <span><strong>Gamepad Passthrough</strong><small>Chuyển tiếp sự kiện gamepad.</small></span>
                 <select id="gamepadMode">
-                  <option value="on" selected>On</option>
-                  <option value="off">Off</option>
+                  <option value="on" selected>Bật</option>
+                  <option value="off">Tắt</option>
                 </select>
               </label>
               <label class="setting-row">
-                <span><strong>Vibration</strong><small>Client haptics.</small></span>
+                <span><strong>Rung</strong><small>Haptics phía client.</small></span>
                 <select id="vibrationMode">
-                  <option value="off" selected>Off</option>
-                  <option value="on">On</option>
+                  <option value="off" selected>Tắt</option>
+                  <option value="on">Bật</option>
                 </select>
               </label>
             </div>
           </section>
 
           <section class="settings-pane" id="experimentalSettings">
-            <h2>Experimental Settings</h2>
+            <h2>Nâng cao</h2>
             <div class="settings-stack">
               <label class="setting-row">
-                <span><strong>Prefer Low Latency</strong><small>Maintains framerate under pressure.</small></span>
+                <span><strong>Ưu tiên độ trễ thấp</strong><small>Duy trì framerate dưới áp lực.</small></span>
                 <select id="lowLatencyMode">
-                  <option value="on" selected>On</option>
-                  <option value="off">Off</option>
+                  <option value="on" selected>Bật</option>
+                  <option value="off">Tắt</option>
                 </select>
               </label>
               <label class="setting-row">
-                <span><strong>Stats Overlay</strong><small>Shows RTT, bitrate, FPS, packet loss.</small></span>
+                <span><strong>Stats Overlay</strong><small>Hiển thị RTT, bitrate, FPS, packet loss.</small></span>
                 <select id="statsMode">
-                  <option value="on" selected>On</option>
-                  <option value="off">Off</option>
+                  <option value="on" selected>Bật</option>
+                  <option value="off">Tắt</option>
                 </select>
               </label>
             </div>
           </section>
 
           <section class="settings-pane" id="accountSettings">
-            <h2>Account Settings</h2>
+            <h2>Tài khoản</h2>
             <div class="settings-stack">
               <div class="setting-row">
-                <span><strong>Signed In</strong><small id="accountEmail">Offline</small></span>
-                <button class="danger-action" id="accountLogoutButton" type="button">Logout</button>
+                <span><strong>Đã đăng nhập</strong><small id="accountEmail">Offline</small></span>
+                <button class="danger-action" id="accountLogoutButton" type="button">Đăng xuất</button>
               </div>
             </div>
           </section>

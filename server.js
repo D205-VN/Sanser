@@ -42,6 +42,7 @@ async function initDb() {
         name VARCHAR(255),
         gpu VARCHAR(255),
         platform VARCHAR(255),
+        ip VARCHAR(255),
         quality JSONB,
         auto_accept BOOLEAN DEFAULT FALSE,
         online BOOLEAN DEFAULT FALSE,
@@ -50,6 +51,10 @@ async function initDb() {
         created_at BIGINT NOT NULL
       );
     `);
+    // Add ip column if missing (migration for existing databases)
+    await client.query(`
+      ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip VARCHAR(255);
+    `).catch(() => {});
   } finally {
     client.release();
   }
@@ -154,6 +159,7 @@ function publicDevice(device) {
     name: device.name,
     gpu: device.gpu,
     platform: device.platform,
+    ip: device.ip || "",
     online: Boolean(device.online),
     status: device.status || "ready",
     quality: device.quality,
@@ -322,6 +328,10 @@ async function handleApi(req, res, url) {
     const deviceId = String(body.deviceId || id("dev"));
     const now = Date.now();
     
+    // Capture the host's IP address
+    const rawIp = req.socket.remoteAddress || "";
+    const hostIp = rawIp.replace(/^::ffff:/, "");
+    
     const existing = await pool.query('SELECT * FROM devices WHERE id = $1 AND user_id = $2', [deviceId, user.id]);
     const name = String(body.name || "Gaming PC").trim().slice(0, 80);
     const gpu = String(body.gpu || "Unknown GPU").trim().slice(0, 80);
@@ -331,15 +341,15 @@ async function handleApi(req, res, url) {
     
     if (existing.rows.length === 0) {
       await pool.query(`
-        INSERT INTO devices (id, user_id, session_id, name, gpu, platform, quality, auto_accept, online, status, last_seen_at, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, 'ready', $9, $9)
-      `, [deviceId, user.id, sessionId, name, gpu, platform, quality, autoAccept, now]);
+        INSERT INTO devices (id, user_id, session_id, name, gpu, platform, ip, quality, auto_accept, online, status, last_seen_at, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, 'ready', $10, $10)
+      `, [deviceId, user.id, sessionId, name, gpu, platform, hostIp, quality, autoAccept, now]);
     } else {
       await pool.query(`
         UPDATE devices 
-        SET session_id = $1, name = $2, gpu = $3, platform = $4, quality = $5, auto_accept = $6, online = true, status = 'ready', last_seen_at = $7
-        WHERE id = $8 AND user_id = $9
-      `, [sessionId, name, gpu, platform, quality, autoAccept, now, deviceId, user.id]);
+        SET session_id = $1, name = $2, gpu = $3, platform = $4, quality = $5, auto_accept = $6, ip = $7, online = true, status = 'ready', last_seen_at = $8
+        WHERE id = $9 AND user_id = $10
+      `, [sessionId, name, gpu, platform, quality, autoAccept, hostIp, now, deviceId, user.id]);
     }
     
     const updated = await pool.query('SELECT * FROM devices WHERE id = $1', [deviceId]);

@@ -29,6 +29,32 @@ localStorage.setItem("gr_device_id", appState.deviceId);
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
+// ─── TOAST SYSTEM ───
+function showToast(message, type = 'error', duration = 5000) {
+  const container = $('#toastContainer');
+  if (!container) return;
+  const icons = { success: '✓', error: '✕', warning: '⚠' };
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type] || ''}</span><span>${escapeHtml(message)}</span><button class="toast-close" type="button">×</button>`;
+  toast.querySelector('.toast-close').addEventListener('click', () => removeToast(toast));
+  container.appendChild(toast);
+  setTimeout(() => removeToast(toast), duration);
+}
+function removeToast(toast) {
+  if (!toast.parentNode) return;
+  toast.classList.add('removing');
+  setTimeout(() => toast.remove(), 300);
+}
+function showConnecting(name) {
+  const o = $('#connectingOverlay');
+  if (o) { o.classList.remove('is-hidden'); $('#connectingTitle').textContent = 'Đang kết nối...'; $('#connectingDesc').textContent = `Đang chờ tín hiệu từ ${name}`; }
+}
+function hideConnecting() {
+  const o = $('#connectingOverlay');
+  if (o) o.classList.add('is-hidden');
+}
+
 const authView = $("#authView");
 const appShell = $("#appShell");
 const authForm = $("#authForm");
@@ -177,7 +203,7 @@ function setAuthMode(mode) {
   loginTab.classList.toggle("is-active", mode === "login");
   registerTab.classList.toggle("is-active", mode === "register");
   $$(".register-only").forEach((node) => node.classList.toggle("is-hidden", mode !== "register"));
-  authSubmit.textContent = mode === "login" ? "Login" : "Create Account";
+  authSubmit.textContent = mode === "login" ? "Đăng nhập" : "Tạo tài khoản";
   authError.textContent = "";
 }
 
@@ -306,7 +332,7 @@ async function refreshDevices() {
 function renderDevices() {
   const query = ($("#computerSearch").value || "").trim().toLowerCase();
   const devices = appState.devices.filter((device) => {
-    const haystack = `${device.name || ""} ${device.gpu || ""} ${device.platform || ""}`.toLowerCase();
+    const haystack = `${device.name || ""} ${device.gpu || ""} ${device.ip || ""} ${device.platform || ""}`.toLowerCase();
     return !query || haystack.includes(query);
   });
 
@@ -314,10 +340,10 @@ function renderDevices() {
     deviceList.innerHTML = `
       <article class="computer-card is-offline">
         <div class="computer-illustration">${computerArt()}</div>
-        <h2 class="computer-name">No Computers</h2>
-        <p class="computer-meta">Same Account</p>
-        <div class="computer-spec">No online host found.</div>
-        <button class="connect-card-button" disabled type="button">Connect</button>
+        <h2 class="computer-name">Chưa có máy tính</h2>
+        <p class="computer-meta">Cùng tài khoản</p>
+        <div class="computer-spec">Không tìm thấy host online.</div>
+        <button class="connect-card-button" disabled type="button">Kết nối</button>
       </article>
     `;
     return;
@@ -326,15 +352,19 @@ function renderDevices() {
   deviceList.innerHTML = "";
   for (const device of devices) {
     const isSelf = device.sessionId === appState.sessionId;
-    const buttonText = isSelf ? "This Computer" : "Connect";
+    const buttonText = isSelf ? "Máy này" : "Kết nối";
     const disabled = !device.online || isSelf;
+    const statusClass = device.online ? "is-online" : "is-offline";
+    const statusText = device.online ? "Online" : "Offline";
+    const ipDisplay = device.ip ? `<span class="computer-ip">${escapeHtml(device.ip)}</span>` : '';
     const card = document.createElement("article");
     card.className = `computer-card ${device.online ? "" : "is-offline"} ${isSelf ? "is-self" : ""}`;
     card.innerHTML = `
       <div class="computer-illustration">${computerArt()}</div>
       <h2 class="computer-name">${escapeHtml(device.name || "Gaming PC")}</h2>
-      <p class="computer-meta">${isSelf ? "Your Computer" : "Your Computer"}</p>
-      <div class="computer-spec">${escapeHtml(device.gpu || "Hardware encoder")} | ${device.online ? "Online" : "Offline"} | ${escapeHtml(device.quality?.label || "1080p")}</div>
+      <span class="online-badge ${statusClass}"><span class="dot"></span>${statusText}</span>
+      ${ipDisplay}
+      <div class="computer-spec">${escapeHtml(device.gpu || "Hardware encoder")} · ${escapeHtml(device.quality?.label || "1080p")}</div>
       <button class="connect-card-button" ${disabled ? "disabled" : ""} type="button">${buttonText}</button>
     `;
     card.querySelector("button").addEventListener("click", () => connectToDevice(device.id));
@@ -343,12 +373,7 @@ function renderDevices() {
 }
 
 function computerArt() {
-  return `
-    <span class="pixel-computer">
-      <span class="pixel-antenna"></span>
-      <span class="gem-logo pixel-screen-logo"></span>
-    </span>
-  `;
+  return `<span class="pc-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v10H4V5Zm2 2v6h12V7H6Zm2 11h8v2H8v-2Zm-3 2h14v2H5v-2Z"/></svg></span>`;
 }
 
 async function maybeAutoHost() {
