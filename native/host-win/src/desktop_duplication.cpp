@@ -73,6 +73,8 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
 
   DXGI_OUTPUT_DESC outputDesc{};
   checkHr(output->GetDesc(&outputDesc), "IDXGIOutput::GetDesc");
+  left_ = outputDesc.DesktopCoordinates.left;
+  top_ = outputDesc.DesktopCoordinates.top;
   width_ = static_cast<std::uint32_t>(outputDesc.DesktopCoordinates.right - outputDesc.DesktopCoordinates.left);
   height_ = static_cast<std::uint32_t>(outputDesc.DesktopCoordinates.bottom - outputDesc.DesktopCoordinates.top);
 

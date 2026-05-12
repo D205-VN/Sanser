@@ -25,12 +25,16 @@ public:
 
   std::uint32_t width() const { return width_; }
   std::uint32_t height() const { return height_; }
+  long left() const { return left_; }
+  long top() const { return top_; }
 
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::uint32_t width_ = 0;
   std::uint32_t height_ = 0;
+  long left_ = 0;
+  long top_ = 0;
 };
 
 std::string hresultMessage(long hr);

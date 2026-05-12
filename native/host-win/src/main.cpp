@@ -28,6 +28,22 @@
 #include <windows.h>
 #endif
 
+struct InputBounds {
+  int left = 0;
+  int top = 0;
+  int width = 1;
+  int height = 1;
+};
+
+InputBounds gInputBounds;
+std::mutex gInputBoundsMutex;
+
+void makeProcessDpiAware() {
+#ifdef _WIN32
+  SetProcessDPIAware();
+#endif
+}
+
 struct Options {
   std::filesystem::path outputDir = "captures";
   std::filesystem::path outputFile = "captures/capture_h264.mp4";
@@ -276,10 +292,15 @@ std::wstring utf8ToWide(const std::string& value) {
 }
 
 bool movePointerNormalized(double normalizedX, double normalizedY) {
-  const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
-  const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
-  const int width = std::max(GetSystemMetrics(SM_CXVIRTUALSCREEN), 1);
-  const int height = std::max(GetSystemMetrics(SM_CYVIRTUALSCREEN), 1);
+  InputBounds bounds;
+  {
+    std::lock_guard<std::mutex> lock(gInputBoundsMutex);
+    bounds = gInputBounds;
+  }
+  const int left = bounds.left;
+  const int top = bounds.top;
+  const int width = std::max(bounds.width, 1);
+  const int height = std::max(bounds.height, 1);
 
   const double x = std::clamp(normalizedX, 0.0, 1.0);
   const double y = std::clamp(normalizedY, 0.0, 1.0);
@@ -311,7 +332,8 @@ bool sendMouseButton(int button, bool down) {
 
 bool sendWheel(double deltaY) {
   if (std::abs(deltaY) < 0.01) return true;
-  const double clamped = std::clamp(-deltaY * static_cast<double>(WHEEL_DELTA), -1200.0, 1200.0);
+  const double wheelSteps = std::clamp(-deltaY / 8.0, -3.0, 3.0);
+  const double clamped = std::clamp(wheelSteps * static_cast<double>(WHEEL_DELTA), -360.0, 360.0);
   INPUT input{};
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = MOUSEEVENTF_WHEEL;
@@ -887,6 +909,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
 int main(int argc, char** argv) {
   try {
+    makeProcessDpiAware();
     const Options options = parseOptions(argc, argv);
 
     if (options.listEncoders) {
@@ -896,6 +919,20 @@ int main(int argc, char** argv) {
 
     DesktopDuplicator duplicator;
     duplicator.initialize(options.adapterIndex, options.outputIndex);
+    {
+      std::lock_guard<std::mutex> lock(gInputBoundsMutex);
+      gInputBounds = {
+        static_cast<int>(duplicator.left()),
+        static_cast<int>(duplicator.top()),
+        static_cast<int>(duplicator.width()),
+        static_cast<int>(duplicator.height())
+      };
+    }
+    std::cerr << "SNINPUT target bounds left=" << gInputBounds.left
+              << " top=" << gInputBounds.top
+              << " width=" << gInputBounds.width
+              << " height=" << gInputBounds.height
+              << "\n";
 
     if (options.pipe) {
       return runPipeMode(duplicator, options);
