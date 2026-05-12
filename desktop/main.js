@@ -293,8 +293,10 @@ function startNativeClient(options = {}) {
   }
 
   const port = clampInt(options.port, 1, 65535, 7777);
+  const controlPort = clampInt(options.controlPort, 0, 65535, port < 65535 ? port + 1 : 0);
   const maxPackets = clampInt(options.maxPackets, 0, Number.MAX_SAFE_INTEGER, 0);
   const args = ["--listen-render-snv", String(port)];
+  if (controlPort > 0) args.push("--control-port", String(controlPort));
   if (maxPackets > 0) args.push("--max-packets", String(maxPackets));
   if (options.logInput !== false) args.push("--log-input");
   if (options.fullscreen !== false) args.push("--fullscreen");
@@ -314,6 +316,10 @@ function startNativeHost(options = {}) {
   if (!/^\[?[A-Za-z0-9:._-]+\]?:\d+$/.test(endpoint)) {
     throw new Error("Native host cần endpoint dạng HOST:PORT.");
   }
+  const controlEndpoint = String(options.controlEndpoint || "").trim();
+  if (controlEndpoint && !/^\[?[A-Za-z0-9:._-]+\]?:\d+$/.test(controlEndpoint)) {
+    throw new Error("Native host cần controlEndpoint dạng HOST:PORT.");
+  }
 
   stopNativeProcess("host");
   const executable = resolveNativeHostPath();
@@ -323,6 +329,7 @@ function startNativeHost(options = {}) {
 
   const fps = clampInt(options.fps, 30, 120, 60);
   const bitrateMbps = clampInt(options.bitrateMbps, 4, 120, 28);
+  const keyframeInterval = clampInt(options.keyframeInterval, 1, 10, 1);
   const args = [
     "--encode-pipe",
     "h264",
@@ -332,9 +339,14 @@ function startNativeHost(options = {}) {
     "0",
     "--bitrate",
     String(bitrateMbps * 1000000),
+    "--keyframe-interval",
+    String(keyframeInterval),
     "--tcp-connect",
     endpoint
   ];
+  if (controlEndpoint) args.push("--control-connect", controlEndpoint);
+  if (options.lowLatencyEncoder !== false) args.push("--low-latency-encoder");
+  else args.push("--no-low-latency-encoder");
   if (options.softwareEncoder) args.push("--software-encoder");
 
   nativeProcesses.host = spawnNativeProcess("host", executable, args);

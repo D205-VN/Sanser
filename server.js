@@ -670,12 +670,15 @@ function normalizeNativeRequest(input = {}, req) {
   if (!input || input.transport !== "snv-tcp") return null;
   const rawIp = String(input.clientIp || req.socket.remoteAddress || "").replace(/^::ffff:/, "");
   const clientIp = rawIp === "::1" ? "127.0.0.1" : rawIp;
-  const clientPort = clamp(Number(input.port || input.clientPort || 7777), 1, 65535);
+  const clientPort = clamp(Number(input.port || input.clientPort || 7777), 1, 65534);
+  const controlPort = clamp(Number(input.controlPort || clientPort + 1), 1, 65535);
   return {
     transport: "snv-tcp",
     clientIp,
     clientPort,
-    clientEndpoint: `${formatEndpointHost(clientIp)}:${clientPort}`
+    controlPort,
+    clientEndpoint: `${formatEndpointHost(clientIp)}:${clientPort}`,
+    controlEndpoint: `${formatEndpointHost(clientIp)}:${controlPort}`
   };
 }
 

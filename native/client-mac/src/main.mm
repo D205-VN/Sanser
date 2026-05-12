@@ -11,9 +11,11 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -23,10 +25,13 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -85,7 +90,7 @@ void printHelp() {
     << "sanser-native-client --probe\n"
     << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
     << "sanser-native-client --listen-snv PORT [--max-packets N]\n"
-    << "sanser-native-client --listen-render-snv PORT [--max-packets N] [--log-input] [--fullscreen] [--hide-cursor] [--relative-mouse]\n"
+    << "sanser-native-client --listen-render-snv PORT [--control-port PORT] [--max-packets N] [--log-input] [--fullscreen] [--hide-cursor] [--relative-mouse]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
@@ -95,6 +100,7 @@ void printHelp() {
     << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
     << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
     << "  --listen-render-snv P Listen over TCP, render with Metal, send native input back\n"
+    << "  --control-port P  Dedicated native input/stats TCP port; defaults to render port + 1, 0 disables\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --log-input       Print each native input event for debugging\n"
     << "  --fullscreen      Open the Metal renderer fullscreen\n"
@@ -152,6 +158,16 @@ double secondsSince(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double>(now - start).count();
 }
 
+std::uint64_t steadyMicros() {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+}
+
+std::uint64_t unixMicros() {
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+}
+
 void writeLe32Raw(std::uint8_t* target, std::uint32_t value) {
   target[0] = static_cast<std::uint8_t>(value & 0xff);
   target[1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
@@ -161,41 +177,132 @@ void writeLe32Raw(std::uint8_t* target, std::uint32_t value) {
 
 class NativeInputSender {
 public:
+  NativeInputSender() : worker_(&NativeInputSender::workerLoop, this) {}
+
+  ~NativeInputSender() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopped_ = true;
+      queue_.clear();
+    }
+    condition_.notify_all();
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
   void setFd(int fd) {
     std::lock_guard<std::mutex> lock(mutex_);
     fd_ = fd;
+    fdGeneration_ += 1;
+    queue_.clear();
+    condition_.notify_all();
   }
 
   void clearFd(int fd) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (fd_ == fd) fd_ = -1;
+    if (fd_ == fd) {
+      fd_ = -1;
+      fdGeneration_ += 1;
+      queue_.clear();
+    }
+    condition_.notify_all();
   }
 
   bool sendJson(const std::string& json) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fd_ < 0 || stopped_) return false;
+    const bool isMove = isPointerMove(json);
+    if (isMove && !queue_.empty() && isPointerMove(queue_.back())) {
+      queue_.back() = json;
+    } else {
+      while (queue_.size() >= maxQueueSize_) {
+        if (!dropOldestPointerMoveLocked()) {
+          queue_.pop_front();
+        }
+      }
+      queue_.push_back(json);
+    }
+    condition_.notify_one();
+    return true;
+  }
+
+private:
+  static bool isPointerMove(const std::string& json) {
+    return json.find("\"type\":\"pointer-move\"") != std::string::npos;
+  }
+
+  bool dropOldestPointerMoveLocked() {
+    for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+      if (isPointerMove(*it)) {
+        queue_.erase(it);
+        droppedPointerMoves_ += 1;
+        if (droppedPointerMoves_ == 1 || droppedPointerMoves_ % 120 == 0) {
+          std::cout << "SNINPUT_QUEUE droppedPointerMoves=" << droppedPointerMoves_
+                    << " pending=" << queue_.size()
+                    << "\n";
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void workerLoop() {
+    while (true) {
+      std::string json;
+      std::uint64_t generation = 0;
+      int sendFd = -1;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [&] {
+          return stopped_ || (fd_ >= 0 && !queue_.empty());
+        });
+        if (stopped_) return;
+        if (fd_ < 0 || queue_.empty()) continue;
+        generation = fdGeneration_;
+        sendFd = dup(fd_);
+        if (sendFd < 0) {
+          fd_ = -1;
+          fdGeneration_ += 1;
+          queue_.clear();
+          std::cerr << "SNINPUT async dup failed; waiting for reconnect.\n";
+          continue;
+        }
+        json = std::move(queue_.front());
+        queue_.pop_front();
+      }
+
+      const bool sent = sendJsonToFd(sendFd, json);
+      close(sendFd);
+      if (!sent) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation == fdGeneration_) {
+          fd_ = -1;
+          fdGeneration_ += 1;
+          queue_.clear();
+        }
+        std::cerr << "SNINPUT async send failed; waiting for reconnect.\n";
+      }
+    }
+  }
+
+  bool sendJsonToFd(int fd, const std::string& json) {
     std::array<std::uint8_t, 12> header{};
     std::memcpy(header.data(), "SNI1", 4);
     writeLe32Raw(header.data() + 4, static_cast<std::uint32_t>(header.size()));
     writeLe32Raw(header.data() + 8, static_cast<std::uint32_t>(json.size()));
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (fd_ < 0) return false;
-    if (!sendAllLocked(header.data(), header.size())) {
-      fd_ = -1;
-      return false;
-    }
-    if (!json.empty() && !sendAllLocked(json.data(), json.size())) {
-      fd_ = -1;
-      return false;
-    }
+    if (!sendAllToFd(fd, header.data(), header.size())) return false;
+    if (!json.empty() && !sendAllToFd(fd, json.data(), json.size())) return false;
     return true;
   }
 
-private:
-  bool sendAllLocked(const void* data, std::size_t size) {
+  bool sendAllToFd(int fd, const void* data, std::size_t size) {
     const auto* cursor = static_cast<const std::uint8_t*>(data);
     std::size_t remaining = size;
     while (remaining > 0) {
-      const ssize_t sent = send(fd_, cursor, remaining, 0);
+      const ssize_t sent = send(fd, cursor, remaining, 0);
       if (sent < 0) {
         if (errno == EINTR) continue;
         return false;
@@ -208,7 +315,14 @@ private:
   }
 
   std::mutex mutex_;
+  std::condition_variable condition_;
+  std::deque<std::string> queue_;
+  std::thread worker_;
+  std::uint64_t droppedPointerMoves_ = 0;
+  std::uint64_t fdGeneration_ = 0;
   int fd_ = -1;
+  bool stopped_ = false;
+  static constexpr std::size_t maxQueueSize_ = 512;
 };
 
 std::shared_ptr<NativeInputSender> gNativeInputSender;
@@ -218,6 +332,29 @@ bool gMouseGrabbed = false;
 
 const char* jsonBool(bool value) {
   return value ? "true" : "false";
+}
+
+std::size_t skipJsonWhitespace(const std::string& json, std::size_t offset) {
+  while (offset < json.size()) {
+    const char ch = json[offset];
+    if (ch != ' ' && ch != '\n' && ch != '\r' && ch != '\t') break;
+    ++offset;
+  }
+  return offset;
+}
+
+std::uint64_t jsonUint64Value(const std::string& json, const char* key, std::uint64_t fallback = 0) {
+  const std::string needle = std::string("\"") + key + "\"";
+  const std::size_t keyOffset = json.find(needle);
+  if (keyOffset == std::string::npos) return fallback;
+  const std::size_t colon = json.find(':', keyOffset + needle.size());
+  if (colon == std::string::npos) return fallback;
+  const std::size_t valueOffset = skipJsonWhitespace(json, colon + 1);
+  try {
+    return static_cast<std::uint64_t>(std::stoull(json.substr(valueOffset)));
+  } catch (...) {
+    return fallback;
+  }
 }
 
 double backingScaleForView(NSView* view) {
@@ -249,14 +386,32 @@ bool sendNativeInputJson(const std::string& json) {
   const bool sent = gNativeInputSender && gNativeInputSender->sendJson(json);
   if (gLogInputEvents) {
     const bool isMove = json.find("\"type\":\"pointer-move\"") != std::string::npos;
+    const bool isControlPing = json.find("\"type\":\"control-ping\"") != std::string::npos;
     static auto lastMoveLog = std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
-    if (!isMove || now - lastMoveLog > std::chrono::milliseconds(250)) {
+    if (!isControlPing && (!isMove || now - lastMoveLog > std::chrono::milliseconds(250))) {
       if (isMove) lastMoveLog = now;
       std::cout << (sent ? "SNINPUT_TX " : "SNINPUT_LOCAL ") << json << "\n";
     }
   }
   return sent;
+}
+
+void sendControlPing(std::uint64_t sequence) {
+  std::ostringstream out;
+  out << "{\"type\":\"control-ping\""
+      << ",\"sequence\":" << sequence
+      << ",\"sentSteadyMicros\":" << steadyMicros()
+      << "}";
+  sendNativeInputJson(out.str());
+}
+
+void handleHostControlPayload(const std::string& payload) {
+  if (payload.find("\"type\":\"control-pong\"") == std::string::npos) return;
+  const std::uint64_t sentSteadyMicros = jsonUint64Value(payload, "sentSteadyMicros");
+  if (sentSteadyMicros == 0) return;
+  const double rttMs = static_cast<double>(steadyMicros() - sentSteadyMicros) / 1000.0;
+  std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
 }
 
 std::string pointerJsonFromPoint(const char* type,
@@ -415,6 +570,7 @@ struct SnvPacket {
   std::uint64_t timestampMicros = 0;
   std::uint32_t durationMicros = 0;
   std::uint32_t flags = 0;
+  std::uint64_t hostUnixMicros = 0;
   std::vector<std::uint8_t> payload;
 };
 
@@ -483,6 +639,9 @@ std::vector<SnvPacket> readSnvPackets(const std::string& file, std::uint64_t max
     packet.timestampMicros = readLe64(data, offset + 32);
     packet.durationMicros = readLe32(data, offset + 40);
     packet.flags = readLe32(data, offset + 44);
+    if (headerSize >= 60) {
+      packet.hostUnixMicros = readLe64(data, offset + 52);
+    }
     const std::uint32_t payloadSize = readLe32(data, offset + 48);
     const std::size_t payloadOffset = offset + headerSize;
     const std::size_t nextOffset = payloadOffset + payloadSize;
@@ -664,7 +823,9 @@ public:
     }
 
     VTDecodeInfoFlags infoFlags = 0;
-    status = VTDecompressionSessionDecodeFrame(session_, sampleBuffer, 0, nullptr, &infoFlags);
+    const VTDecodeFrameFlags decodeFlags = kVTDecodeFrame_EnableAsynchronousDecompression
+                                         | kVTDecodeFrame_1xRealTimePlayback;
+    status = VTDecompressionSessionDecodeFrame(session_, sampleBuffer, decodeFlags, nullptr, &infoFlags);
     CFRelease(sampleBuffer);
     if (status != noErr) {
       ++decodeErrors_;
@@ -723,13 +884,18 @@ private:
       (id)kCVPixelBufferHeightKey: @(height)
     };
 
+    NSDictionary* decoderSpecification = @{
+      (id)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: @YES
+    };
+
     checkStatus(VTDecompressionSessionCreate(kCFAllocatorDefault,
                                              format_,
-                                             nullptr,
+                                             (__bridge CFDictionaryRef)decoderSpecification,
                                              (__bridge CFDictionaryRef)attributes,
                                              &callback,
                                              &session_),
                 "VTDecompressionSessionCreate");
+    VTSessionSetProperty(session_, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
   }
 
   static void outputCallback(void* decompressionOutputRefCon,
@@ -780,6 +946,56 @@ struct DecodeSummary {
   std::uint64_t firstSequence = 0;
   std::uint64_t lastSequence = 0;
   bool hasFirstSequence = false;
+};
+
+struct ClientStreamStats {
+  std::uint64_t windowPackets = 0;
+  std::uint64_t windowDropped = 0;
+  std::uint64_t totalDropped = 0;
+  std::uint64_t lastSequence = 0;
+  std::uint64_t lastArrivalMicros = 0;
+  bool hasLastSequence = false;
+  double jitterMs = 0.0;
+  double ageSumMs = 0.0;
+  double ageMaxMs = 0.0;
+  std::uint64_t ageSamples = 0;
+
+  void observe(const SnvPacket& packet) {
+    ++windowPackets;
+    if (hasLastSequence && packet.sequence > lastSequence + 1) {
+      const std::uint64_t missed = packet.sequence - lastSequence - 1;
+      windowDropped += missed;
+      totalDropped += missed;
+    }
+    lastSequence = packet.sequence;
+    hasLastSequence = true;
+
+    const std::uint64_t arrival = steadyMicros();
+    if (lastArrivalMicros > 0 && packet.durationMicros > 0) {
+      const double actualMs = static_cast<double>(arrival - lastArrivalMicros) / 1000.0;
+      const double expectedMs = static_cast<double>(packet.durationMicros) / 1000.0;
+      const double sampleJitter = std::abs(actualMs - expectedMs);
+      jitterMs = jitterMs == 0.0 ? sampleJitter : (jitterMs * 0.85 + sampleJitter * 0.15);
+    }
+    lastArrivalMicros = arrival;
+
+    if (packet.hostUnixMicros > 0) {
+      const double ageMs = static_cast<double>(unixMicros() - packet.hostUnixMicros) / 1000.0;
+      if (ageMs > -5000.0 && ageMs < 600000.0) {
+        ageSumMs += ageMs;
+        ageMaxMs = std::max(ageMaxMs, ageMs);
+        ageSamples += 1;
+      }
+    }
+  }
+
+  void resetWindow() {
+    windowPackets = 0;
+    windowDropped = 0;
+    ageSumMs = 0.0;
+    ageMaxMs = 0.0;
+    ageSamples = 0;
+  }
 };
 
 void processSnvPacket(VtH264Decoder& decoder, DecodeSummary& summary, const SnvPacket& packet) {
@@ -865,6 +1081,31 @@ bool readExactFd(int fd, void* target, std::size_t size) {
   return true;
 }
 
+bool readControlPayloadFromFd(int fd, std::string& payload) {
+  std::array<std::uint8_t, 12> header{};
+  if (!readExactFd(fd, header.data(), header.size())) return false;
+  if (std::memcmp(header.data(), "SNI1", 4) != 0) {
+    throw std::runtime_error("Invalid SNI1 control magic from host.");
+  }
+
+  const std::uint32_t headerSize = readLe32Raw(header.data() + 4);
+  const std::uint32_t payloadSize = readLe32Raw(header.data() + 8);
+  if (headerSize < header.size()) {
+    throw std::runtime_error("Invalid SNI1 control header size from host.");
+  }
+  if (payloadSize > 4 * 1024 * 1024) {
+    throw std::runtime_error("SNI1 control payload too large from host.");
+  }
+  if (headerSize > header.size()) {
+    std::vector<std::uint8_t> extra(headerSize - header.size());
+    if (!readExactFd(fd, extra.data(), extra.size())) return false;
+  }
+
+  payload.assign(payloadSize, '\0');
+  if (!payload.empty() && !readExactFd(fd, payload.data(), payload.size())) return false;
+  return true;
+}
+
 bool readSnvPacketFromFd(int fd, SnvPacket& packet) {
   std::array<std::uint8_t, 52> header{};
   if (!readExactFd(fd, header.data(), header.size())) {
@@ -885,6 +1126,9 @@ bool readSnvPacketFromFd(int fd, SnvPacket& packet) {
     if (!readExactFd(fd, extraHeader.data(), extraHeader.size())) {
       throw std::runtime_error("TCP stream ended inside SNV1 extended header.");
     }
+    if (extraHeader.size() >= 8) {
+      packet.hostUnixMicros = readLe64Raw(extraHeader.data());
+    }
   }
 
   const std::uint32_t payloadSize = readLe32Raw(header.data() + 48);
@@ -904,6 +1148,14 @@ public:
 
   ScopedFd(const ScopedFd&) = delete;
   ScopedFd& operator=(const ScopedFd&) = delete;
+  ScopedFd(ScopedFd&& other) noexcept : fd_(other.release()) {}
+  ScopedFd& operator=(ScopedFd&& other) noexcept {
+    if (this != &other) {
+      if (fd_ >= 0) close(fd_);
+      fd_ = other.release();
+    }
+    return *this;
+  }
 
   int get() const { return fd_; }
   int release() {
@@ -916,26 +1168,71 @@ private:
   int fd_ = -1;
 };
 
+ScopedFd createTcpListener(std::uint16_t port, const char* label) {
+  ScopedFd server(socket(AF_INET, SOCK_STREAM, 0));
+  if (server.get() < 0) {
+    throw std::runtime_error(std::string("Could not create ") + label + " TCP listener socket.");
+  }
+
+  int reuse = 1;
+  setsockopt(server.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_ANY);
+  address.sin_port = htons(port);
+  if (bind(server.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    throw std::runtime_error(std::string("Could not bind ") + label + " TCP listener on port " + std::to_string(port));
+  }
+  if (listen(server.get(), 2) != 0) {
+    throw std::runtime_error(std::string("Could not listen on ") + label + " TCP port " + std::to_string(port));
+  }
+  return server;
+}
+
+void configureAcceptedTcpSocket(int fd) {
+  if (fd < 0) return;
+
+  int noDelay = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+#ifdef SO_NOSIGPIPE
+  int noSigPipe = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
+#endif
+}
+
+void serviceControlSocket(int fd) {
+  std::uint64_t pingSequence = 0;
+  auto lastPingAt = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastPingAt >= std::chrono::seconds(1)) {
+      lastPingAt = now;
+      sendControlPing(++pingSequence);
+    }
+
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(fd, &readSet);
+    timeval timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 200000;
+    const int ready = select(fd + 1, &readSet, nullptr, nullptr, &timeout);
+    if (ready == 0) continue;
+    if (ready < 0) {
+      if (errno == EINTR) continue;
+      return;
+    }
+
+    std::string payload;
+    if (!readControlPayloadFromFd(fd, payload)) return;
+    handleHostControlPayload(payload);
+  }
+}
+
 int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   @autoreleasepool {
-    ScopedFd server(socket(AF_INET, SOCK_STREAM, 0));
-    if (server.get() < 0) {
-      throw std::runtime_error("Could not create TCP listener socket.");
-    }
-
-    int reuse = 1;
-    setsockopt(server.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
-    address.sin_port = htons(port);
-    if (bind(server.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-      throw std::runtime_error("Could not bind TCP listener on port " + std::to_string(port));
-    }
-    if (listen(server.get(), 1) != 0) {
-      throw std::runtime_error("Could not listen on TCP port " + std::to_string(port));
-    }
+    ScopedFd server = createTcpListener(port, "SNV1");
 
     std::cout << "SNV1 TCP listener ready on 0.0.0.0:" << port << "\n";
     std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port << "\n";
@@ -946,6 +1243,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
     if (client.get() < 0) {
       throw std::runtime_error("TCP accept failed.");
     }
+    configureAcceptedTcpSocket(client.get());
 
     char peerIp[INET_ADDRSTRLEN]{};
     inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
@@ -1231,6 +1529,12 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 @end
 
+struct QueuedVideoFrame {
+  CVPixelBufferRef pixelBuffer = nullptr;
+  std::uint64_t queuedAtMicros = 0;
+  std::uint64_t sequence = 0;
+};
+
 @interface SanserVideoRenderer : NSObject <MTKViewDelegate>
 - (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view;
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer;
@@ -1241,9 +1545,19 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   id<MTLCommandQueue> _commandQueue;
   id<MTLRenderPipelineState> _pipeline;
   CVMetalTextureCacheRef _textureCache;
-  CVPixelBufferRef _latestPixelBuffer;
+  CVPixelBufferRef _currentPixelBuffer;
+  std::uint64_t _currentQueuedAtMicros;
+  std::deque<QueuedVideoFrame> _frameQueue;
   NSLock* _lock;
   std::uint64_t _submittedBuffers;
+  std::uint64_t _renderedBuffers;
+  std::uint64_t _drawCalls;
+  std::uint64_t _droppedQueueFrames;
+  std::uint64_t _droppedLateFrames;
+  double _renderAgeSumMs;
+  double _renderAgeMaxMs;
+  std::uint64_t _renderAgeSamples;
+  std::chrono::steady_clock::time_point _statsStartedAt;
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view {
@@ -1253,6 +1567,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   _device = device;
   _commandQueue = [device newCommandQueue];
   _lock = [[NSLock alloc] init];
+  _statsStartedAt = std::chrono::steady_clock::now();
 
   CVReturn cacheResult = CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device, nullptr, &_textureCache);
   if (cacheResult != kCVReturnSuccess || !_textureCache) {
@@ -1307,10 +1622,14 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 - (void)dealloc {
   [_lock lock];
-  if (_latestPixelBuffer) {
-    CVPixelBufferRelease(_latestPixelBuffer);
-    _latestPixelBuffer = nullptr;
+  if (_currentPixelBuffer) {
+    CVPixelBufferRelease(_currentPixelBuffer);
+    _currentPixelBuffer = nullptr;
   }
+  for (const auto& frame : _frameQueue) {
+    if (frame.pixelBuffer) CVPixelBufferRelease(frame.pixelBuffer);
+  }
+  _frameQueue.clear();
   [_lock unlock];
   if (_textureCache) {
     CFRelease(_textureCache);
@@ -1321,12 +1640,18 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer {
   if (!pixelBuffer) return;
   CVPixelBufferRetain(pixelBuffer);
+  QueuedVideoFrame frame;
+  frame.pixelBuffer = pixelBuffer;
+  frame.queuedAtMicros = steadyMicros();
   [_lock lock];
-  if (_latestPixelBuffer) {
-    CVPixelBufferRelease(_latestPixelBuffer);
+  frame.sequence = ++_submittedBuffers;
+  _frameQueue.push_back(frame);
+  constexpr std::size_t maxQueueDepth = 3;
+  while (_frameQueue.size() > maxQueueDepth) {
+    if (_frameQueue.front().pixelBuffer) CVPixelBufferRelease(_frameQueue.front().pixelBuffer);
+    _frameQueue.pop_front();
+    _droppedQueueFrames += 1;
   }
-  _latestPixelBuffer = pixelBuffer;
-  _submittedBuffers += 1;
   [_lock unlock];
 }
 
@@ -1342,8 +1667,41 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
   CVPixelBufferRef pixelBuffer = nullptr;
   [_lock lock];
-  if (_latestPixelBuffer) {
-    pixelBuffer = CVPixelBufferRetain(_latestPixelBuffer);
+  _drawCalls += 1;
+  const std::uint64_t nowMicrosValue = steadyMicros();
+  constexpr std::uint64_t targetDelayMicros = 6000;
+  constexpr std::uint64_t maxRenderAgeMicros = 85000;
+  while (_frameQueue.size() > 1 &&
+         nowMicrosValue > _frameQueue.front().queuedAtMicros &&
+         nowMicrosValue - _frameQueue.front().queuedAtMicros > maxRenderAgeMicros) {
+    if (_frameQueue.front().pixelBuffer) CVPixelBufferRelease(_frameQueue.front().pixelBuffer);
+    _frameQueue.pop_front();
+    _droppedLateFrames += 1;
+  }
+
+  if (!_frameQueue.empty()) {
+    const bool ready = !_currentPixelBuffer
+                    || _frameQueue.size() >= 2
+                    || (nowMicrosValue > _frameQueue.front().queuedAtMicros &&
+                        nowMicrosValue - _frameQueue.front().queuedAtMicros >= targetDelayMicros);
+    if (ready) {
+      QueuedVideoFrame frame = _frameQueue.front();
+      _frameQueue.pop_front();
+      if (_currentPixelBuffer) CVPixelBufferRelease(_currentPixelBuffer);
+      _currentPixelBuffer = frame.pixelBuffer;
+      _currentQueuedAtMicros = frame.queuedAtMicros;
+      _renderedBuffers += 1;
+      if (nowMicrosValue > _currentQueuedAtMicros) {
+        const double frameAgeMs = static_cast<double>(nowMicrosValue - _currentQueuedAtMicros) / 1000.0;
+        _renderAgeSumMs += frameAgeMs;
+        _renderAgeMaxMs = std::max(_renderAgeMaxMs, frameAgeMs);
+        _renderAgeSamples += 1;
+      }
+    }
+  }
+
+  if (_currentPixelBuffer) {
+    pixelBuffer = CVPixelBufferRetain(_currentPixelBuffer);
   }
   [_lock unlock];
 
@@ -1395,6 +1753,33 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   if (pixelBuffer) {
     CVPixelBufferRelease(pixelBuffer);
   }
+
+  const auto statsNow = std::chrono::steady_clock::now();
+  const double statsSeconds = std::chrono::duration<double>(statsNow - _statsStartedAt).count();
+  if (statsSeconds >= 1.0) {
+    [_lock lock];
+    const double avgRenderAgeMs = _renderAgeSamples > 0
+      ? _renderAgeSumMs / static_cast<double>(_renderAgeSamples)
+      : -1.0;
+    std::cout << "SNV1_RENDER_STATS draws=" << _drawCalls
+              << " rendered=" << _renderedBuffers
+              << " queueDepth=" << _frameQueue.size()
+              << " droppedQueue=" << _droppedQueueFrames
+              << " droppedLate=" << _droppedLateFrames
+              << std::fixed << std::setprecision(1)
+              << " avgRenderAgeMs=" << avgRenderAgeMs
+              << " maxRenderAgeMs=" << _renderAgeMaxMs
+              << "\n";
+    _drawCalls = 0;
+    _renderedBuffers = 0;
+    _droppedQueueFrames = 0;
+    _droppedLateFrames = 0;
+    _renderAgeSumMs = 0.0;
+    _renderAgeMaxMs = 0.0;
+    _renderAgeSamples = 0;
+    _statsStartedAt = statsNow;
+    [_lock unlock];
+  }
 }
 
 @end
@@ -1407,72 +1792,126 @@ void submitFrameToVideoRenderer(void* context, CVImageBufferRef imageBuffer) {
 }
 
 void decodeTcpStreamToRenderer(std::uint16_t port,
+                               std::uint16_t controlPort,
                                std::uint64_t maxPackets,
                                void* retainedRendererContext,
                                std::shared_ptr<NativeInputSender> inputSender) {
   @autoreleasepool {
     try {
-      ScopedFd server(socket(AF_INET, SOCK_STREAM, 0));
-      if (server.get() < 0) {
-        throw std::runtime_error("Could not create TCP listener socket.");
-      }
-
-      int reuse = 1;
-      setsockopt(server.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-      sockaddr_in address{};
-      address.sin_family = AF_INET;
-      address.sin_addr.s_addr = htonl(INADDR_ANY);
-      address.sin_port = htons(port);
-      if (bind(server.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-        throw std::runtime_error("Could not bind TCP render listener on port " + std::to_string(port));
-      }
-      if (listen(server.get(), 1) != 0) {
-        throw std::runtime_error("Could not listen on TCP render port " + std::to_string(port));
-      }
+      ScopedFd server = createTcpListener(port, "SNV1 render");
 
       std::cout << "SNV1 Metal render listener ready on 0.0.0.0:" << port << "\n";
-      std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port << "\n";
+      std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port;
+      if (controlPort > 0) {
+        auto controlServer = std::make_shared<ScopedFd>(createTcpListener(controlPort, "SNINPUT control"));
+        std::cout << " --control-connect 100.100.83.44:" << controlPort;
+        std::cout << "\nSNINPUT dedicated control listener ready on 0.0.0.0:" << controlPort << "\n";
+        std::thread controlWorker([controlServer, inputSender, controlPort]() {
+          while (true) {
+            sockaddr_in peerAddress{};
+            socklen_t peerLength = sizeof(peerAddress);
+            ScopedFd control(accept(controlServer->get(), reinterpret_cast<sockaddr*>(&peerAddress), &peerLength));
+            if (control.get() < 0) {
+              std::cerr << "SNINPUT control accept failed on port " << controlPort << ".\n";
+              return;
+            }
+            configureAcceptedTcpSocket(control.get());
 
-      sockaddr_in peerAddress{};
-      socklen_t peerLength = sizeof(peerAddress);
-      ScopedFd client(accept(server.get(), reinterpret_cast<sockaddr*>(&peerAddress), &peerLength));
-      if (client.get() < 0) {
-        throw std::runtime_error("TCP accept failed.");
+            char peerIp[INET_ADDRSTRLEN]{};
+            inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
+            std::cout << "SNINPUT dedicated control connected from "
+                      << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
+            if (inputSender) {
+              inputSender->setFd(control.get());
+            }
+            serviceControlSocket(control.get());
+            if (inputSender) {
+              inputSender->clearFd(control.get());
+            }
+            std::cout << "SNINPUT dedicated control disconnected; waiting for reconnect.\n";
+          }
+        });
+        controlWorker.detach();
       }
-#ifdef SO_NOSIGPIPE
-      int noSigPipe = 1;
-      setsockopt(client.get(), SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));
-#endif
+      std::cout << "\n";
 
-      char peerIp[INET_ADDRSTRLEN]{};
-      inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
-      std::cout << "SNV1 render client connected from " << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
-      if (inputSender) {
-        inputSender->setFd(client.get());
-        std::cout << "SNINPUT native control enabled on render TCP socket.\n";
-      }
-
-      VtH264Decoder decoder(submitFrameToVideoRenderer, retainedRendererContext);
-      DecodeSummary summary;
-      while (maxPackets == 0 || summary.packets < maxPackets) {
-        SnvPacket packet;
-        if (!readSnvPacketFromFd(client.get(), packet)) {
-          break;
+      std::uint64_t totalPackets = 0;
+      while (maxPackets == 0 || totalPackets < maxPackets) {
+        sockaddr_in peerAddress{};
+        socklen_t peerLength = sizeof(peerAddress);
+        ScopedFd client(accept(server.get(), reinterpret_cast<sockaddr*>(&peerAddress), &peerLength));
+        if (client.get() < 0) {
+          throw std::runtime_error("TCP accept failed.");
         }
-        processSnvPacket(decoder, summary, packet);
-        if (summary.packets % 60 == 0) {
-          std::cout << "SNV1 render packets=" << summary.packets
-                    << " decoded=" << decoder.decodedFrames()
-                    << " errors=" << decoder.decodeErrors()
-                    << "\n";
-        }
-      }
+        configureAcceptedTcpSocket(client.get());
 
-      decoder.flush();
-      printDecodeSummary("tcp-render:" + std::to_string(port), summary, decoder);
-      if (inputSender) {
-        inputSender->clearFd(client.get());
+        char peerIp[INET_ADDRSTRLEN]{};
+        inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
+        std::cout << "SNV1 render client connected from " << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
+        if (inputSender && controlPort == 0) {
+          inputSender->setFd(client.get());
+          std::cout << "SNINPUT fallback control enabled on render TCP socket.\n";
+        } else if (inputSender) {
+          std::cout << "SNINPUT waiting for dedicated control socket.\n";
+        }
+
+        VtH264Decoder decoder(submitFrameToVideoRenderer, retainedRendererContext);
+        DecodeSummary summary;
+        ClientStreamStats stats;
+        while (maxPackets == 0 || totalPackets < maxPackets) {
+          SnvPacket packet;
+          if (!readSnvPacketFromFd(client.get(), packet)) {
+            break;
+          }
+          stats.observe(packet);
+          processSnvPacket(decoder, summary, packet);
+          totalPackets += 1;
+          if (summary.packets % 60 == 0) {
+            std::cout << "SNV1 render packets=" << summary.packets
+                      << " total=" << totalPackets
+                      << " decoded=" << decoder.decodedFrames()
+                      << " errors=" << decoder.decodeErrors()
+                      << "\n";
+            const double avgAgeMs = stats.ageSamples > 0
+              ? stats.ageSumMs / static_cast<double>(stats.ageSamples)
+              : -1.0;
+            std::ostringstream statLine;
+            statLine << std::fixed << std::setprecision(1)
+                     << "SNV1_CLIENT_STATS packets=" << stats.windowPackets
+                     << " decoded=" << decoder.decodedFrames()
+                     << " dropped=" << stats.windowDropped
+                     << " totalDropped=" << stats.totalDropped
+                     << " jitterMs=" << stats.jitterMs;
+            if (avgAgeMs >= 0.0) {
+              statLine << " avgAgeMs=" << avgAgeMs
+                       << " maxAgeMs=" << stats.ageMaxMs;
+            } else {
+              statLine << " avgAgeMs=-- maxAgeMs=--";
+            }
+            std::cout << statLine.str() << "\n";
+
+            std::ostringstream feedback;
+            feedback << std::fixed << std::setprecision(1)
+                     << "{\"type\":\"stream-stats\""
+                     << ",\"packets\":" << stats.windowPackets
+                     << ",\"decoded\":" << decoder.decodedFrames()
+                     << ",\"dropped\":" << stats.windowDropped
+                     << ",\"totalDropped\":" << stats.totalDropped
+                     << ",\"jitterMs\":" << stats.jitterMs
+                     << ",\"avgAgeMs\":" << avgAgeMs
+                     << ",\"maxAgeMs\":" << (avgAgeMs >= 0.0 ? stats.ageMaxMs : -1.0)
+                     << "}";
+            sendNativeInputJson(feedback.str());
+            stats.resetWindow();
+          }
+        }
+
+        decoder.flush();
+        printDecodeSummary("tcp-render:" + std::to_string(port), summary, decoder);
+        if (inputSender && controlPort == 0) {
+          inputSender->clearFd(client.get());
+        }
+        std::cout << "SNV1 render client disconnected; listener stays open for reconnect.\n";
       }
     } catch (const std::exception& error) {
       std::cerr << "SNV1 render listener error: " << error.what() << "\n";
@@ -1486,6 +1925,7 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
 }
 
 int runVideoRenderTcp(std::uint16_t port,
+                      std::uint16_t controlPort,
                       std::uint64_t maxPackets,
                       bool fullscreen,
                       bool hideCursor,
@@ -1515,7 +1955,7 @@ int runVideoRenderTcp(std::uint16_t port,
 
     SanserMetalView* view = [[SanserMetalView alloc] initWithFrame:frame device:device];
     [view setColorPixelFormat:MTLPixelFormatBGRA8Unorm];
-    [view setPreferredFramesPerSecond:60];
+    [view setPreferredFramesPerSecond:120];
     [view setPaused:NO];
     [view setEnableSetNeedsDisplay:NO];
 
@@ -1567,15 +2007,16 @@ int runVideoRenderTcp(std::uint16_t port,
     gNativeInputSender = inputSender;
 
     void* rendererContext = (__bridge_retained void*)renderer;
-    std::thread worker([port, maxPackets, rendererContext, inputSender]() {
-      decodeTcpStreamToRenderer(port, maxPackets, rendererContext, inputSender);
+    std::thread worker([port, controlPort, maxPackets, rendererContext, inputSender]() {
+      decodeTcpStreamToRenderer(port, controlPort, maxPackets, rendererContext, inputSender);
     });
     worker.detach();
 
     std::cout << "Metal video renderer running on " << nsStringToUtf8([device name]) << "\n";
     std::cout << "Native renderer mode fullscreen=" << boolText(fullscreen)
               << " hideCursor=" << boolText(hideCursor)
-              << " relativeMouse=" << boolText(relativeMouse) << "\n";
+              << " relativeMouse=" << boolText(relativeMouse)
+              << " controlPort=" << controlPort << "\n";
     [NSApp run];
     [[NSNotificationCenter defaultCenter] removeObserver:resignObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:activeObserver];
@@ -1658,6 +2099,8 @@ struct Options {
   std::uint64_t maxPackets = 0;
   std::uint16_t listenPort = 0;
   std::uint16_t listenRenderPort = 0;
+  std::uint16_t controlPort = 0;
+  bool controlPortProvided = false;
   double seconds = 5;
   std::string snvFile;
   std::string clipboardText;
@@ -1693,6 +2136,12 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--max-packets") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --max-packets");
       options.maxPackets = static_cast<std::uint64_t>(std::stoull(argv[++i]));
+    } else if (arg == "--control-port") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --control-port");
+      const auto port = std::stoul(argv[++i]);
+      if (port > 65535) throw std::runtime_error("--control-port must be 0-65535");
+      options.controlPort = static_cast<std::uint16_t>(port);
+      options.controlPortProvided = true;
     } else if (arg == "--metal-test") {
       options.metalTest = true;
     } else if (arg == "--log-input") {
@@ -1721,6 +2170,10 @@ Options parseOptions(int argc, char** argv) {
   return options;
 }
 
+std::uint16_t defaultControlPort(std::uint16_t videoPort) {
+  return videoPort < 65535 ? static_cast<std::uint16_t>(videoPort + 1) : 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1735,7 +2188,14 @@ int main(int argc, char** argv) {
     if (options.decodeSnv) return decodeSnvFile(options.snvFile, options.maxPackets);
     if (options.listenSnv) return listenSnvTcp(options.listenPort, options.maxPackets);
     if (options.listenRenderSnv) {
+      const std::uint16_t controlPort = options.controlPortProvided
+        ? options.controlPort
+        : defaultControlPort(options.listenRenderPort);
+      if (controlPort > 0 && controlPort == options.listenRenderPort) {
+        throw std::runtime_error("--control-port must differ from --listen-render-snv port, or use 0 to disable.");
+      }
       return runVideoRenderTcp(options.listenRenderPort,
+                               controlPort,
                                options.maxPackets,
                                options.fullscreen,
                                options.hideCursor,

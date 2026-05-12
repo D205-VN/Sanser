@@ -11,6 +11,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -38,6 +40,32 @@ struct InputBounds {
 InputBounds gInputBounds;
 std::mutex gInputBoundsMutex;
 
+struct StreamFeedbackSnapshot {
+  std::uint64_t sequence = 0;
+  std::uint64_t packets = 0;
+  std::uint64_t dropped = 0;
+  std::uint64_t totalDropped = 0;
+  double jitterMs = 0.0;
+  double avgAgeMs = -1.0;
+  double maxAgeMs = -1.0;
+  int pressure = 0;
+};
+
+StreamFeedbackSnapshot gStreamFeedback;
+std::mutex gStreamFeedbackMutex;
+
+const char* pressureLabel(int pressure) {
+  if (pressure >= 2) return "severe";
+  if (pressure == 1) return "congested";
+  if (pressure < 0) return "clear";
+  return "stable";
+}
+
+StreamFeedbackSnapshot latestStreamFeedback() {
+  std::lock_guard<std::mutex> lock(gStreamFeedbackMutex);
+  return gStreamFeedback;
+}
+
 void makeProcessDpiAware() {
 #ifdef _WIN32
   SetProcessDPIAware();
@@ -49,18 +77,21 @@ struct Options {
   std::filesystem::path outputFile = "captures/capture_h264.mp4";
   std::filesystem::path packetFile;
   std::string tcpConnect;
+  std::string controlConnect;
   std::uint32_t frames = 1;
   std::uint32_t intervalMs = 250;
   std::uint32_t adapterIndex = 0;
   std::uint32_t outputIndex = 0;
   std::uint32_t fps = 30;
   std::uint32_t bitrate = 28000000;
+  std::uint32_t keyframeIntervalSeconds = 1;
   VideoCodec codec = VideoCodec::H264;
   bool pipe = false;
   bool encode = false;
   bool encodePipe = false;
   bool framesProvided = false;
   bool hardwareEncoder = true;
+  bool lowLatencyEncoder = true;
   bool listEncoders = false;
 };
 
@@ -88,6 +119,7 @@ struct EncodedPacketHeader {
   std::uint32_t durationMicros = 0;
   std::uint32_t flags = 0; // bit 0 = keyframe, bit 1 = hardware encoder
   std::uint32_t payloadSize = 0;
+  std::uint64_t hostUnixMicros = 0;
 };
 #pragma pack(pop)
 
@@ -124,6 +156,9 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--tcp-connect") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --tcp-connect");
       options.tcpConnect = argv[++i];
+    } else if (arg == "--control-connect") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --control-connect");
+      options.controlConnect = argv[++i];
     } else if (arg == "--frames") {
       options.frames = readUintArg(argc, argv, i, "--frames");
       options.framesProvided = true;
@@ -137,6 +172,12 @@ Options parseOptions(int argc, char** argv) {
       options.fps = readUintArg(argc, argv, i, "--fps");
     } else if (arg == "--bitrate") {
       options.bitrate = readUintArg(argc, argv, i, "--bitrate");
+    } else if (arg == "--keyframe-interval") {
+      options.keyframeIntervalSeconds = std::max<std::uint32_t>(1, readUintArg(argc, argv, i, "--keyframe-interval"));
+    } else if (arg == "--low-latency-encoder") {
+      options.lowLatencyEncoder = true;
+    } else if (arg == "--no-low-latency-encoder") {
+      options.lowLatencyEncoder = false;
     } else if (arg == "--pipe") {
       options.pipe = true;
     } else if (arg == "--encode") {
@@ -166,9 +207,13 @@ Options parseOptions(int argc, char** argv) {
         << "  --encode CODEC   Encode captured frames with Media Foundation: h264, hevc, av1\n"
         << "  --encode-pipe CODEC Encode H.264 packets to stdout or --packet-file with SNV1 headers\n"
         << "  --bitrate N      Target encode bitrate, default 28000000\n"
+        << "  --keyframe-interval N Seconds between keyframes in SNV1 mode, default 1\n"
+        << "  --low-latency-encoder Enable low-latency encoder hints, default on\n"
+        << "  --no-low-latency-encoder Disable low-latency encoder hints\n"
         << "  --output-file P  Encoded output file path\n"
         << "  --packet-file P  SNV1 packet output file; stdout is used when omitted\n"
         << "  --tcp-connect H:P Connect to a TCP SNV1 receiver, stream video, receive native input\n"
+        << "  --control-connect H:P Connect a dedicated TCP native input/stats backchannel\n"
         << "  --list-encoders  List Media Foundation hardware encoders\n"
         << "  --software-encoder Disable hardware transform request\n";
       std::exit(0);
@@ -181,6 +226,11 @@ Options parseOptions(int argc, char** argv) {
 
 std::uint64_t nowMicros() {
   const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+}
+
+std::uint64_t unixMicros() {
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
 
@@ -277,6 +327,16 @@ int jsonIntValue(const std::string& json, const char* key, int fallback = 0) {
   if (offset == std::string::npos) return fallback;
   try {
     return std::stoi(json.substr(offset));
+  } catch (...) {
+    return fallback;
+  }
+}
+
+std::uint64_t jsonUint64Value(const std::string& json, const char* key, std::uint64_t fallback = 0) {
+  const std::size_t offset = findJsonValue(json, key);
+  if (offset == std::string::npos) return fallback;
+  try {
+    return static_cast<std::uint64_t>(std::stoull(json.substr(offset)));
   } catch (...) {
     return fallback;
   }
@@ -550,6 +610,43 @@ void handleModifierState(int keyCode, int modifiers) {
   sendVirtualKey(virtualKey, down);
 }
 
+void handleStreamStatsPayload(const std::string& json) {
+  StreamFeedbackSnapshot feedback;
+  feedback.packets = static_cast<std::uint64_t>(std::max(0, jsonIntValue(json, "packets")));
+  feedback.dropped = static_cast<std::uint64_t>(std::max(0, jsonIntValue(json, "dropped")));
+  feedback.totalDropped = static_cast<std::uint64_t>(std::max(0, jsonIntValue(json, "totalDropped")));
+  feedback.jitterMs = jsonDoubleValue(json, "jitterMs");
+  feedback.avgAgeMs = jsonDoubleValue(json, "avgAgeMs", -1.0);
+  feedback.maxAgeMs = jsonDoubleValue(json, "maxAgeMs", -1.0);
+
+  if (feedback.dropped > 0 || feedback.jitterMs > 35.0 ||
+      feedback.avgAgeMs > 180.0 || feedback.maxAgeMs > 260.0) {
+    feedback.pressure = 2;
+  } else if (feedback.jitterMs > 16.0 ||
+             feedback.avgAgeMs > 90.0 || feedback.maxAgeMs > 150.0) {
+    feedback.pressure = 1;
+  } else if (feedback.dropped == 0 && feedback.jitterMs < 8.0 &&
+             (feedback.avgAgeMs < 0.0 || feedback.avgAgeMs < 70.0) &&
+             (feedback.maxAgeMs < 0.0 || feedback.maxAgeMs < 120.0)) {
+    feedback.pressure = -1;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(gStreamFeedbackMutex);
+    feedback.sequence = gStreamFeedback.sequence + 1;
+    gStreamFeedback = feedback;
+  }
+
+  std::cerr << "SNFEEDBACK pressure=" << pressureLabel(feedback.pressure)
+            << " packets=" << feedback.packets
+            << " dropped=" << feedback.dropped
+            << " totalDropped=" << feedback.totalDropped
+            << " jitterMs=" << feedback.jitterMs
+            << " avgAgeMs=" << feedback.avgAgeMs
+            << " maxAgeMs=" << feedback.maxAgeMs
+            << "\n";
+}
+
 void handleControlPayload(const std::string& json) {
   const std::string type = jsonStringValue(json, "type");
   if (type == "pointer-move") {
@@ -626,58 +723,36 @@ void handleControlPayload(const std::string& json) {
     sendShortcut('V');
   } else if (type == "select-all") {
     sendShortcut('A');
+  } else if (type == "stream-stats") {
+    handleStreamStatsPayload(json);
   }
 }
 
 class TcpClient {
 public:
-  explicit TcpClient(const std::string& endpoint) {
-    const auto separator = endpoint.rfind(':');
-    if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
-      throw std::runtime_error("--tcp-connect must be HOST:PORT");
+  explicit TcpClient(const std::string& endpoint, const std::string& controlEndpoint = {}) {
+    socket_ = connectEndpoint(endpoint, "--tcp-connect");
+    configureSocket(socket_);
+    if (!controlEndpoint.empty()) {
+      controlSocket_ = connectEndpoint(controlEndpoint, "--control-connect");
+      configureSocket(controlSocket_);
+      std::cerr << "SNINPUT dedicated control connecting " << controlEndpoint << "\n";
     }
-    const std::string host = endpoint.substr(0, separator);
-    const std::string port = endpoint.substr(separator + 1);
-
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    addrinfo* results = nullptr;
-    const int lookup = getaddrinfo(host.c_str(), port.c_str(), &hints, &results);
-    if (lookup != 0) {
-      throw std::runtime_error("getaddrinfo failed for " + endpoint + ": " + std::to_string(lookup));
-    }
-
-    for (addrinfo* item = results; item; item = item->ai_next) {
-      SOCKET candidate = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
-      if (candidate == INVALID_SOCKET) continue;
-
-      if (connect(candidate, item->ai_addr, static_cast<int>(item->ai_addrlen)) == 0) {
-        socket_ = candidate;
-        break;
-      }
-
-      closesocket(candidate);
-    }
-    freeaddrinfo(results);
-
-    if (socket_ == INVALID_SOCKET) {
-      throw std::runtime_error("Could not connect to " + endpoint + ", WSA error " + std::to_string(WSAGetLastError()));
-    }
-
-    int noDelay = 1;
-    setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
   }
 
   ~TcpClient() {
+    running_ = false;
     if (socket_ != INVALID_SOCKET) {
-      running_ = false;
       shutdown(socket_, SD_BOTH);
+    }
+    if (controlSocket_ != INVALID_SOCKET) {
+      shutdown(controlSocket_, SD_BOTH);
     }
     if (controlThread_.joinable()) {
       controlThread_.join();
+    }
+    if (controlSocket_ != INVALID_SOCKET) {
+      closesocket(controlSocket_);
     }
     if (socket_ != INVALID_SOCKET) {
       closesocket(socket_);
@@ -710,14 +785,64 @@ public:
   }
 
 private:
+  static SOCKET connectEndpoint(const std::string& endpoint, const char* optionName) {
+    const auto separator = endpoint.rfind(':');
+    if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
+      throw std::runtime_error(std::string(optionName) + " must be HOST:PORT");
+    }
+    const std::string host = endpoint.substr(0, separator);
+    const std::string port = endpoint.substr(separator + 1);
+
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* results = nullptr;
+    const int lookup = getaddrinfo(host.c_str(), port.c_str(), &hints, &results);
+    if (lookup != 0) {
+      throw std::runtime_error("getaddrinfo failed for " + endpoint + ": " + std::to_string(lookup));
+    }
+
+    SOCKET connected = INVALID_SOCKET;
+    for (addrinfo* item = results; item; item = item->ai_next) {
+      SOCKET candidate = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+      if (candidate == INVALID_SOCKET) continue;
+
+      if (connect(candidate, item->ai_addr, static_cast<int>(item->ai_addrlen)) == 0) {
+        connected = candidate;
+        break;
+      }
+
+      closesocket(candidate);
+    }
+    freeaddrinfo(results);
+
+    if (connected == INVALID_SOCKET) {
+      throw std::runtime_error(std::string("Could not connect ") + optionName + " to " + endpoint +
+                               ", WSA error " + std::to_string(WSAGetLastError()));
+    }
+    return connected;
+  }
+
+  static void configureSocket(SOCKET socket) {
+    int noDelay = 1;
+    setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+  }
+
+  SOCKET controlReceiveSocket() const {
+    return controlSocket_ != INVALID_SOCKET ? controlSocket_ : socket_;
+  }
+
   bool recvAll(void* data, std::size_t size) {
+    const SOCKET receiveSocket = controlReceiveSocket();
     char* cursor = static_cast<char*>(data);
     std::size_t remaining = size;
     while (remaining > 0 && running_) {
       const int chunk = remaining > static_cast<std::size_t>(std::numeric_limits<int>::max())
         ? std::numeric_limits<int>::max()
         : static_cast<int>(remaining);
-      const int received = recv(socket_, cursor, chunk, 0);
+      const int received = recv(receiveSocket, cursor, chunk, 0);
       if (received == 0) return false;
       if (received == SOCKET_ERROR) {
         if (!running_) return false;
@@ -730,8 +855,38 @@ private:
     return remaining == 0;
   }
 
+  void sendControlJson(const std::string& json) {
+    const SOCKET sendSocket = controlReceiveSocket();
+    if (sendSocket == INVALID_SOCKET) return;
+
+    ControlMessageHeader header{};
+    header.payloadSize = static_cast<std::uint32_t>(json.size());
+    sendAllOnSocket(sendSocket, &header, sizeof(header));
+    if (!json.empty()) {
+      sendAllOnSocket(sendSocket, json.data(), json.size());
+    }
+  }
+
+  static void sendAllOnSocket(SOCKET socket, const void* data, std::size_t size) {
+    const char* cursor = static_cast<const char*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0) {
+      const int chunk = remaining > static_cast<std::size_t>(std::numeric_limits<int>::max())
+        ? std::numeric_limits<int>::max()
+        : static_cast<int>(remaining);
+      const int sent = send(socket, cursor, chunk, 0);
+      if (sent == SOCKET_ERROR || sent == 0) {
+        throw std::runtime_error("control send failed, WSA error " + std::to_string(WSAGetLastError()));
+      }
+      cursor += sent;
+      remaining -= static_cast<std::size_t>(sent);
+    }
+  }
+
   void controlLoop() {
-    std::cerr << "SNINPUT control backchannel enabled.\n";
+    std::cerr << "SNINPUT control backchannel enabled"
+              << (controlSocket_ != INVALID_SOCKET ? " dedicated=yes" : " dedicated=no")
+              << ".\n";
     while (running_) {
       ControlMessageHeader header{};
       if (!recvAll(&header, sizeof(header))) break;
@@ -751,6 +906,15 @@ private:
       std::string payload(header.payloadSize, '\0');
       if (!payload.empty() && !recvAll(payload.data(), payload.size())) break;
       try {
+        if (jsonStringValue(payload, "type") == "control-ping") {
+          std::ostringstream pong;
+          pong << "{\"type\":\"control-pong\""
+               << ",\"sentSteadyMicros\":" << jsonUint64Value(payload, "sentSteadyMicros")
+               << ",\"hostUnixMicros\":" << unixMicros()
+               << "}";
+          sendControlJson(pong.str());
+          continue;
+        }
         handleControlPayload(payload);
       } catch (const std::exception& error) {
         std::cerr << "SNINPUT control error: " << error.what() << "\n";
@@ -760,6 +924,7 @@ private:
   }
 
   SOCKET socket_ = INVALID_SOCKET;
+  SOCKET controlSocket_ = INVALID_SOCKET;
   std::atomic<bool> running_{false};
   std::thread controlThread_;
 };
@@ -791,6 +956,7 @@ std::vector<std::uint8_t> makeEncodedPacketBytes(const EncodedVideoPacket& packe
   header.durationMicros = packet.durationMicros;
   header.flags = (packet.keyframe ? 1u : 0u) | (hardware ? 2u : 0u);
   header.payloadSize = static_cast<std::uint32_t>(packet.payload.size());
+  header.hostUnixMicros = unixMicros();
 
   std::vector<std::uint8_t> bytes(sizeof(header) + packet.payload.size());
   std::memcpy(bytes.data(), &header, sizeof(header));
@@ -939,7 +1105,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   if (!options.tcpConnect.empty()) {
 #ifdef _WIN32
     winsock = std::make_unique<WinsockRuntime>();
-    tcpClient = std::make_unique<TcpClient>(options.tcpConnect);
+    tcpClient = std::make_unique<TcpClient>(options.tcpConnect, options.controlConnect);
     tcpClient->startControlReceiver();
 #else
     throw std::runtime_error("--tcp-connect is currently implemented for Windows host builds.");
@@ -964,12 +1130,37 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   encodeOptions.fps = options.fps;
   encodeOptions.bitrate = options.bitrate;
   encodeOptions.hardware = options.hardwareEncoder;
+  encodeOptions.lowLatency = options.lowLatencyEncoder;
+  encodeOptions.keyframeIntervalSeconds = options.keyframeIntervalSeconds;
 
-  MfVideoPacketEncoder encoder(duplicator.width(), duplicator.height(), encodeOptions);
+  auto encoder = std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), encodeOptions);
+  auto restartEncoder = [&](std::uint32_t bitrate, const char* reason) -> bool {
+    auto nextOptions = encodeOptions;
+    nextOptions.bitrate = bitrate;
+    try {
+      auto replacement = std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), nextOptions);
+      encoder = std::move(replacement);
+      encodeOptions = nextOptions;
+      std::cerr << "SNV1_ENCODER_RESTART reason=" << reason
+                << " bitrate=" << bitrate
+                << " hardware=" << (encoder->usingHardware() ? "yes" : "no")
+                << "\n";
+      return true;
+    } catch (const std::exception& error) {
+      std::cerr << "SNV1_ENCODER_RESTART failed reason=" << reason
+                << " bitrate=" << bitrate
+                << " error=" << error.what()
+                << "\n";
+      return false;
+    }
+  };
+
   std::cerr << "SNV1 H.264 packet stream: "
             << duplicator.width() << "x" << duplicator.height()
             << " @ " << options.fps << " FPS, " << options.bitrate << " bps, "
-            << (encoder.usingHardware() ? "hardware encoder" : "software encoder")
+            << (encoder->usingHardware() ? "hardware encoder" : "software encoder")
+            << ", lowLatency=" << (options.lowLatencyEncoder ? "yes" : "no")
+            << ", keyframeInterval=" << options.keyframeIntervalSeconds << "s"
             << (!options.tcpConnect.empty()
                   ? " -> tcp " + options.tcpConnect
                   : (options.packetFile.empty() ? " -> stdout" : " -> " + options.packetFile.string()))
@@ -978,30 +1169,111 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   const auto frameDelay = options.fps > 0
     ? std::chrono::microseconds(1000000 / options.fps)
     : std::chrono::microseconds(0);
+  const std::uint32_t captureTimeoutMs = options.fps > 0
+    ? std::max<std::uint32_t>(1, 1000 / options.fps)
+    : 16;
   const std::uint64_t targetFrames = (!options.framesProvided || options.frames == 0)
     ? std::numeric_limits<std::uint64_t>::max()
     : options.frames;
 
   std::uint64_t capturedFrames = 0;
   std::uint64_t sequence = 0;
+  std::uint64_t timestampOffsetMicros = 0;
+  std::uint64_t lastStreamTimestampMicros = 0;
+  bool hasLastStreamTimestamp = false;
+  auto normalizePacketTimestamp = [&](EncodedVideoPacket packet) {
+    std::uint64_t adjustedTimestamp = packet.timestampMicros + timestampOffsetMicros;
+    if (hasLastStreamTimestamp && adjustedTimestamp <= lastStreamTimestampMicros) {
+      const std::uint64_t increment = packet.durationMicros > 0
+        ? packet.durationMicros
+        : (options.fps > 0 ? 1000000 / options.fps : 16667);
+      timestampOffsetMicros += lastStreamTimestampMicros + std::max<std::uint64_t>(increment, 1) - adjustedTimestamp;
+      adjustedTimestamp = packet.timestampMicros + timestampOffsetMicros;
+    }
+    packet.timestampMicros = adjustedTimestamp;
+    lastStreamTimestampMicros = adjustedTimestamp;
+    hasLastStreamTimestamp = true;
+    return packet;
+  };
+  auto statsStartedAt = std::chrono::steady_clock::now();
+  auto lastTimeoutLogAt = statsStartedAt;
+  std::uint64_t statsFrames = 0;
+  std::uint64_t statsPackets = 0;
+  std::uint64_t statsBytes = 0;
+  std::uint64_t statsKeyframes = 0;
+  const std::uint32_t maxAdaptiveBitrate = std::max<std::uint32_t>(options.bitrate, 1);
+  const std::uint32_t minAdaptiveBitrate = std::min<std::uint32_t>(
+    maxAdaptiveBitrate,
+    std::max<std::uint32_t>(1000000, maxAdaptiveBitrate / 4));
+  std::uint32_t currentAdaptiveBitrate = options.bitrate;
+  std::uint64_t seenFeedbackSequence = 0;
+  std::uint32_t clearFeedbackWindows = 0;
+  auto lastEncoderRestartAt = std::chrono::steady_clock::time_point{};
+#ifdef _WIN32
+  FrameBgra lastCleanFrame;
+  bool hasLastCleanFrame = false;
+  POINT lastCursor{};
+  bool hasLastCursor = false;
+  std::uint64_t statsCursorFrames = 0;
+#endif
+
   while (capturedFrames < targetFrames) {
     const auto frameStartedAt = std::chrono::steady_clock::now();
     FrameBgra frame;
-    if (!duplicator.captureFrame(frame, 1000)) {
-      std::cerr << "Timed out waiting for a changed frame.\n";
+    bool cursorOnlyFrame = false;
+    if (!duplicator.captureFrame(frame, captureTimeoutMs)) {
+#ifdef _WIN32
+      POINT cursor{};
+      const bool cursorOk = GetCursorPos(&cursor) != 0;
+      const bool cursorChanged = cursorOk
+        && (!hasLastCursor || cursor.x != lastCursor.x || cursor.y != lastCursor.y);
+      if (hasLastCleanFrame && cursorChanged) {
+        frame = lastCleanFrame;
+        cursorOnlyFrame = true;
+      } else
+#endif
+      {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastTimeoutLogAt > std::chrono::seconds(2)) {
+          lastTimeoutLogAt = now;
+          std::cerr << "SNV1 waiting for changed frame.\n";
+        }
+        continue;
+      }
+    } else {
+#ifdef _WIN32
+      lastCleanFrame = frame;
+      hasLastCleanFrame = true;
+#endif
+    }
+
+#ifdef _WIN32
+    if (cursorOnlyFrame) {
+      ++statsCursorFrames;
+    }
+    drawSoftwareCursor(frame, duplicator);
+    POINT currentCursor{};
+    if (GetCursorPos(&currentCursor)) {
+      lastCursor = currentCursor;
+      hasLastCursor = true;
+    }
+#else
+    if (cursorOnlyFrame) {
       continue;
     }
-#ifdef _WIN32
-    drawSoftwareCursor(frame, duplicator);
 #endif
 
-    auto packets = encoder.encodeFrame(frame);
+    auto packets = encoder->encodeFrame(frame);
     for (const auto& packet : packets) {
-      const auto bytes = makeEncodedPacketBytes(packet,
+      const auto streamPacket = normalizePacketTimestamp(packet);
+      const auto bytes = makeEncodedPacketBytes(streamPacket,
                                                 duplicator.width(),
                                                 duplicator.height(),
                                                 sequence++,
-                                                encoder.usingHardware());
+                                                encoder->usingHardware());
+      ++statsPackets;
+      statsBytes += bytes.size();
+      if (packet.keyframe) ++statsKeyframes;
 #ifdef _WIN32
       if (tcpClient) {
         tcpClient->sendAll(bytes.data(), bytes.size());
@@ -1018,6 +1290,82 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       output->flush();
     }
     ++capturedFrames;
+    ++statsFrames;
+
+    const auto statsNow = std::chrono::steady_clock::now();
+    const double statsSeconds = std::chrono::duration<double>(statsNow - statsStartedAt).count();
+    if (statsSeconds >= 1.0) {
+      const double fps = static_cast<double>(statsFrames) / statsSeconds;
+      const double mbps = (static_cast<double>(statsBytes) * 8.0) / statsSeconds / 1000000.0;
+      std::cerr << "SNV1_STATS fps=" << std::fixed << std::setprecision(1) << fps
+                << " mbps=" << mbps
+                << " packets=" << statsPackets
+                << " keyframes=" << statsKeyframes
+#ifdef _WIN32
+                << " cursorFrames=" << statsCursorFrames
+#endif
+                << "\n";
+
+      const auto feedback = latestStreamFeedback();
+      if (feedback.sequence != 0 && feedback.sequence != seenFeedbackSequence) {
+        seenFeedbackSequence = feedback.sequence;
+        std::uint32_t nextBitrate = currentAdaptiveBitrate;
+        if (feedback.pressure >= 2) {
+          clearFeedbackWindows = 0;
+          nextBitrate = static_cast<std::uint32_t>(static_cast<double>(currentAdaptiveBitrate) * 0.72);
+        } else if (feedback.pressure == 1) {
+          clearFeedbackWindows = 0;
+          nextBitrate = static_cast<std::uint32_t>(static_cast<double>(currentAdaptiveBitrate) * 0.88);
+        } else if (feedback.pressure < 0) {
+          clearFeedbackWindows += 1;
+          if (clearFeedbackWindows >= 4) {
+            nextBitrate = static_cast<std::uint32_t>(static_cast<double>(currentAdaptiveBitrate) * 1.08);
+            clearFeedbackWindows = 0;
+          }
+        } else {
+          clearFeedbackWindows = 0;
+        }
+
+        nextBitrate = std::clamp(nextBitrate, minAdaptiveBitrate, maxAdaptiveBitrate);
+        const std::uint32_t delta = nextBitrate > currentAdaptiveBitrate
+          ? nextBitrate - currentAdaptiveBitrate
+          : currentAdaptiveBitrate - nextBitrate;
+        if (delta >= 250000) {
+          bool applied = encoder->setBitrate(nextBitrate);
+          bool restarted = false;
+          if (applied) {
+            currentAdaptiveBitrate = encoder->bitrate();
+          } else {
+            const bool enoughCooldown = lastEncoderRestartAt.time_since_epoch().count() == 0
+              || statsNow - lastEncoderRestartAt > std::chrono::seconds(3);
+            if (enoughCooldown && restartEncoder(nextBitrate, "bitrate-adapt")) {
+              currentAdaptiveBitrate = nextBitrate;
+              lastEncoderRestartAt = statsNow;
+              restarted = true;
+              applied = true;
+            }
+          }
+          std::cerr << "SNV1_ADAPT pressure=" << pressureLabel(feedback.pressure)
+                    << " requestedMbps=" << (static_cast<double>(nextBitrate) / 1000000.0)
+                    << " currentMbps=" << (static_cast<double>(currentAdaptiveBitrate) / 1000000.0)
+                    << " applied=" << (applied ? "yes" : "no")
+                    << " restarted=" << (restarted ? "yes" : "no")
+                    << " jitterMs=" << feedback.jitterMs
+                    << " avgAgeMs=" << feedback.avgAgeMs
+                    << " dropped=" << feedback.dropped
+                    << "\n";
+        }
+      }
+
+      statsStartedAt = statsNow;
+      statsFrames = 0;
+      statsPackets = 0;
+      statsBytes = 0;
+      statsKeyframes = 0;
+#ifdef _WIN32
+      statsCursorFrames = 0;
+#endif
+    }
 
     if (options.intervalMs > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(options.intervalMs));
@@ -1026,13 +1374,14 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     }
   }
 
-  auto packets = encoder.finish();
+  auto packets = encoder->finish();
   for (const auto& packet : packets) {
-    const auto bytes = makeEncodedPacketBytes(packet,
+    const auto streamPacket = normalizePacketTimestamp(packet);
+    const auto bytes = makeEncodedPacketBytes(streamPacket,
                                               duplicator.width(),
                                               duplicator.height(),
                                               sequence++,
-                                              encoder.usingHardware());
+                                              encoder->usingHardware());
 #ifdef _WIN32
     if (tcpClient) {
       tcpClient->sendAll(bytes.data(), bytes.size());

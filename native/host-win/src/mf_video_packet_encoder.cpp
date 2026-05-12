@@ -1,5 +1,6 @@
 #include "mf_video_packet_encoder.h"
 
+#include <codecapi.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 
@@ -166,6 +168,55 @@ void notifyTransform(IMFTransform* transform, MFT_MESSAGE_TYPE message, const ch
   }
 }
 
+void logCodecApiResult(const char* label, HRESULT hr) {
+  if (SUCCEEDED(hr)) {
+    std::cerr << "SNV1 encoder option " << label << "=ok\n";
+  } else {
+    std::cerr << "SNV1 encoder option " << label << " ignored: " << hresultMessage(hr) << "\n";
+  }
+}
+
+void setCodecApiBool(ICodecAPI* codecApi, const GUID& key, bool enabled, const char* label) {
+  VARIANT value{};
+  value.vt = VT_BOOL;
+  value.boolVal = enabled ? VARIANT_TRUE : VARIANT_FALSE;
+  logCodecApiResult(label, codecApi->SetValue(&key, &value));
+}
+
+void setCodecApiUInt32(ICodecAPI* codecApi, const GUID& key, std::uint32_t number, const char* label) {
+  VARIANT value{};
+  value.vt = VT_UI4;
+  value.ulVal = number;
+  logCodecApiResult(label, codecApi->SetValue(&key, &value));
+}
+
+void configureLowLatencyEncoder(IMFTransform* transform, const VideoPacketEncodeOptions& options) {
+  if (!options.lowLatency) return;
+
+  ComPtr<ICodecAPI> codecApi;
+  const HRESULT queryHr = transform->QueryInterface(IID_PPV_ARGS(codecApi.GetAddressOf()));
+  if (FAILED(queryHr) || !codecApi) {
+    std::cerr << "SNV1 encoder low-latency CodecAPI unavailable: " << hresultMessage(queryHr) << "\n";
+    return;
+  }
+
+  constexpr std::uint32_t cbrRateControlMode = 0;
+  const std::uint32_t gopFrames = std::max<std::uint32_t>(
+    1,
+    std::max<std::uint32_t>(options.fps, 1) * std::max<std::uint32_t>(options.keyframeIntervalSeconds, 1));
+
+  setCodecApiBool(codecApi.Get(), CODECAPI_AVLowLatencyMode, true, "low-latency");
+  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncCommonRateControlMode, cbrRateControlMode, "rate-control-cbr");
+  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncCommonMeanBitRate, options.bitrate, "mean-bitrate");
+  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncCommonMaxBitRate, options.bitrate, "max-bitrate");
+  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncMPVGOPSize, gopFrames, "gop");
+  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0, "b-frames");
+  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncCommonQualityVsSpeed, 100, "speed");
+
+  std::cerr << "SNV1 encoder low-latency requested: cbr=yes gopFrames="
+            << gopFrames << " bFrames=0 speed=100\n";
+}
+
 void releaseActivates(IMFActivate** activates, UINT32 count) {
   if (!activates) return;
   for (UINT32 i = 0; i < count; ++i) {
@@ -231,6 +282,7 @@ struct MfVideoPacketEncoder::Impl {
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   std::uint32_t fps = 60;
+  std::uint32_t currentBitrate = 0;
   std::uint64_t frameIndex = 0;
   bool usingHardware = false;
   bool providesOutputSamples = false;
@@ -245,6 +297,7 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   impl_->fps = std::max<std::uint32_t>(options.fps, 1);
   impl_->options = options;
   impl_->options.codec = VideoCodec::H264;
+  impl_->currentBitrate = impl_->options.bitrate;
 
   impl_->transform = createEncoderTransform(impl_->options.codec, options.hardware, impl_->usingHardware);
 
@@ -269,6 +322,8 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   setVideoTypeCommon(inputType.Get(), width, height, impl_->fps);
   checkHr(impl_->transform->SetInputType(0, inputType.Get(), 0), "Set encoder input type");
 
+  configureLowLatencyEncoder(impl_->transform.Get(), impl_->options);
+
   checkHr(impl_->transform->GetOutputStreamInfo(0, &impl_->outputInfo), "GetOutputStreamInfo");
   impl_->providesOutputSamples = (impl_->outputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
 
@@ -281,6 +336,35 @@ MfVideoPacketEncoder::~MfVideoPacketEncoder() = default;
 
 bool MfVideoPacketEncoder::usingHardware() const {
   return impl_->usingHardware;
+}
+
+std::uint32_t MfVideoPacketEncoder::bitrate() const {
+  return impl_->currentBitrate;
+}
+
+bool MfVideoPacketEncoder::setBitrate(std::uint32_t bitrate) {
+  bitrate = std::max<std::uint32_t>(bitrate, 1);
+  ComPtr<ICodecAPI> codecApi;
+  const HRESULT queryHr = impl_->transform->QueryInterface(IID_PPV_ARGS(codecApi.GetAddressOf()));
+  if (FAILED(queryHr) || !codecApi) {
+    std::cerr << "SNV1_ADAPT bitrate change unavailable: " << hresultMessage(queryHr) << "\n";
+    return false;
+  }
+
+  VARIANT value{};
+  value.vt = VT_UI4;
+  value.ulVal = bitrate;
+  const HRESULT meanHr = codecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value);
+  const HRESULT maxHr = codecApi->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &value);
+  if (FAILED(meanHr) && FAILED(maxHr)) {
+    std::cerr << "SNV1_ADAPT bitrate change ignored: mean=" << hresultMessage(meanHr)
+              << " max=" << hresultMessage(maxHr) << "\n";
+    return false;
+  }
+
+  impl_->currentBitrate = bitrate;
+  std::cerr << "SNV1_ADAPT bitrate target=" << bitrate << "\n";
+  return true;
 }
 
 std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(const FrameBgra& frame) {

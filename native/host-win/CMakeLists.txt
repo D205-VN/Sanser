@@ -28,7 +28,9 @@ target_link_libraries(sanser-native-host PRIVATE
   mfreadwrite
   mfuuid
   ole32
+  strmiids
   user32
+  wmcodecdspuuid
   ws2_32
 )
 
