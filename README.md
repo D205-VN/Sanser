@@ -78,7 +78,7 @@ For free cross-network testing without router port forwarding, install Tailscale
 npm run tailscale:install
 ```
 
-The desktop app also checks this automatically at startup when `NETWORK_MODE=tailscale`; if Tailscale is missing, it offers to install it using Homebrew on macOS or winget on Windows.
+The desktop app also checks this automatically at startup when `NETWORK_MODE=tailscale`; if Tailscale is missing, it offers to install it using Homebrew on macOS or winget on Windows. After install, Sanser starts Tailscale and opens the login flow if the machine is not signed in yet.
 
 Then set this in `.env` on both computers:
 

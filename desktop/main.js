@@ -41,16 +41,17 @@ app.on("before-quit", () => {
 
 async function boot() {
   process.env.GAME_REMOTE_DATA_DIR = path.join(app.getPath("userData"), "data");
-  await ensureTailscaleInstalled();
+  await ensureTailscaleReady();
   installScreenCaptureHandler();
   serverHandle = await startEmbeddedServer();
   createWindow(`http://127.0.0.1:${serverHandle.port}`);
 }
 
-async function ensureTailscaleInstalled() {
+async function ensureTailscaleReady() {
   if (process.env.NETWORK_MODE !== "tailscale") return;
   if (isTailscaleInstalled()) {
-    openTailscale();
+    await startTailscale();
+    await ensureTailscaleLoggedIn();
     return;
   }
 
@@ -67,20 +68,15 @@ async function ensureTailscaleInstalled() {
 
   try {
     await installTailscale();
-    openTailscale();
-    dialog.showMessageBox({
-      type: "info",
-      title: "Tailscale đã sẵn sàng",
-      message: "Mở Tailscale và đăng nhập cùng tài khoản trên cả Mac và Windows.",
-      buttons: ["OK"]
-    });
+    await startTailscale();
+    await ensureTailscaleLoggedIn();
   } catch (error) {
     dialog.showErrorBox("Không cài được Tailscale", error.message);
   }
 }
 
 function isTailscaleInstalled() {
-  if (commandExists("tailscale")) return true;
+  if (getTailscaleCommand()) return true;
   if (process.platform === "darwin") {
     return fs.existsSync("/Applications/Tailscale.app");
   }
@@ -92,6 +88,28 @@ function isTailscaleInstalled() {
     ].some((candidate) => candidate && fs.existsSync(candidate));
   }
   return false;
+}
+
+function getTailscaleCommand() {
+  const candidates = process.platform === "win32"
+    ? [
+        "tailscale.exe",
+        path.join(process.env.ProgramFiles || "C:\\Program Files", "Tailscale", "tailscale.exe"),
+        path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Tailscale", "tailscale.exe"),
+        path.join(process.env.LOCALAPPDATA || "", "Tailscale", "tailscale.exe")
+      ]
+    : [
+        "tailscale",
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale"
+      ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (candidate.includes(path.sep) && fs.existsSync(candidate)) return candidate;
+    if (!candidate.includes(path.sep) && commandExists(candidate)) return candidate;
+  }
+  return "";
 }
 
 function commandExists(command) {
@@ -149,6 +167,44 @@ function openTailscale() {
   if (process.platform === "win32") {
     spawn("cmd", ["/c", "start", "", "tailscale:"], { stdio: "ignore", detached: true }).unref();
   }
+}
+
+async function startTailscale() {
+  openTailscale();
+  await delay(2000);
+}
+
+async function ensureTailscaleLoggedIn() {
+  const tailscale = getTailscaleCommand();
+  if (!tailscale) return;
+  const status = spawnSync(tailscale, ["status"], {
+    encoding: "utf8",
+    timeout: 5000,
+    windowsHide: true
+  });
+  const output = `${status.stdout || ""}\n${status.stderr || ""}`;
+  if (status.status === 0 && !/Logged out|NeedsLogin|stopped|failed/i.test(output)) return;
+
+  const choice = await dialog.showMessageBox({
+    type: "question",
+    buttons: ["Đăng nhập Tailscale", "Để sau"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "Đăng nhập Tailscale",
+    message: "Sanser cần Tailscale đã đăng nhập để kết nối khác mạng.",
+    detail: "Sanser sẽ mở luồng đăng nhập Tailscale. Hãy dùng cùng một tài khoản Tailscale trên cả Mac và Windows."
+  });
+  if (choice.response !== 0) return;
+
+  spawn(tailscale, ["up"], {
+    stdio: "ignore",
+    detached: true,
+    windowsHide: false
+  }).unref();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function startEmbeddedServer() {
