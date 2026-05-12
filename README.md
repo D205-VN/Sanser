@@ -94,3 +94,17 @@ Restart Sanser on both machines. Tailscale must stay connected while streaming. 
 This version uses Electron/WebRTC screen capture. Default quality is tuned for a sharper low-latency Tailscale session at `1080p`, `60 FPS`, and about `28 Mbps` with VP8. If it stutters, lower bitrate to `16-20 Mbps` or FPS to `30`; if text is still blurry and the network is stable, raise bitrate to `35-45 Mbps`.
 
 Parsec is smoother because it uses native low-level capture, dedicated GPU encoder control, a custom low-latency transport, adaptive congestion control, and a native input driver. Sanser is a WebRTC/Electron prototype, so true Parsec-grade game feel still needs native capture, GPU encode control, deeper input injection, and more mature network adaptation.
+
+## Native Engine Roadmap
+
+The first native Windows host prototype lives in `native/host-win`. It uses Windows Desktop Duplication API to capture frames without `getDisplayMedia`.
+
+On Windows with Visual Studio Build Tools and CMake:
+
+```powershell
+npm run native:host-win:configure
+npm run native:host-win:build
+.\native\host-win\build\Release\sanser-native-host.exe --frames 5 --interval-ms 100 --output-dir native-captures
+```
+
+The prototype writes BMP frames for validation and also supports `--pipe --fps 60` to stream BGRA frames to stdout. Once capture is stable, the next step is feeding this pipe into a hardware encoder instead of the current browser/WebRTC capture path.

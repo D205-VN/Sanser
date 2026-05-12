@@ -126,6 +126,8 @@ function bindUi() {
   $("#stopHostButton").addEventListener("click", stopHost);
   $("#captureButton").addEventListener("click", () => captureScreen().catch(() => {}));
   $("#applyServerButton").addEventListener("click", applyServerUrl);
+  document.addEventListener("keydown", handleDocumentKey, true);
+  document.addEventListener("keyup", handleDocumentKey, true);
 
   $$(".rail-item[data-view]").forEach((button) => {
     button.addEventListener("click", () => selectView(button.dataset.view));
@@ -185,29 +187,40 @@ function bindUi() {
     event.preventDefault();
   }, { passive: false });
   videoShell.addEventListener("keydown", (event) => {
-    sendInputEvent({
-      type: "key-down",
-      key: event.key,
-      code: event.code,
-      alt: event.altKey,
-      ctrl: event.ctrlKey,
-      shift: event.shiftKey,
-      meta: event.metaKey
-    });
+    sendInputEvent(keyPayload(event));
     event.preventDefault();
   });
   videoShell.addEventListener("keyup", (event) => {
-    sendInputEvent({
-      type: "key-up",
-      key: event.key,
-      code: event.code,
-      alt: event.altKey,
-      ctrl: event.ctrlKey,
-      shift: event.shiftKey,
-      meta: event.metaKey
-    });
+    sendInputEvent(keyPayload(event));
     event.preventDefault();
   });
+}
+
+function handleDocumentKey(event) {
+  if (!appState.inputChannel || appState.inputChannel.readyState !== "open") return;
+  if (isEditableTarget(event.target)) return;
+  sendInputEvent(keyPayload(event));
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function keyPayload(event) {
+  const macCommandAsControl = /Mac/i.test(navigator.platform) && event.metaKey;
+  return {
+    type: event.type === "keydown" ? "key-down" : "key-up",
+    key: event.key,
+    code: event.code,
+    alt: event.altKey,
+    ctrl: event.ctrlKey || macCommandAsControl,
+    shift: event.shiftKey,
+    meta: false
+  };
+}
+
+function isEditableTarget(target) {
+  if (!target) return false;
+  const tag = target.tagName;
+  return target.isContentEditable || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
 function hydrateDefaults() {

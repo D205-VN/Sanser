@@ -3,37 +3,6 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class NativeInput {
-  [StructLayout(LayoutKind.Sequential)]
-  public struct INPUT {
-    public uint type;
-    public InputUnion U;
-  }
-
-  [StructLayout(LayoutKind.Explicit)]
-  public struct InputUnion {
-    [FieldOffset(0)] public MOUSEINPUT mi;
-    [FieldOffset(0)] public KEYBDINPUT ki;
-  }
-
-  [StructLayout(LayoutKind.Sequential)]
-  public struct MOUSEINPUT {
-    public int dx;
-    public int dy;
-    public uint mouseData;
-    public uint dwFlags;
-    public uint time;
-    public UIntPtr dwExtraInfo;
-  }
-
-  [StructLayout(LayoutKind.Sequential)]
-  public struct KEYBDINPUT {
-    public ushort wVk;
-    public ushort wScan;
-    public uint dwFlags;
-    public uint time;
-    public UIntPtr dwExtraInfo;
-  }
-
   [DllImport("user32.dll")]
   public static extern bool SetCursorPos(int X, int Y);
 
@@ -41,7 +10,7 @@ public static class NativeInput {
   public static extern void mouse_event(uint dwFlags, uint dx, uint dy, int dwData, UIntPtr dwExtraInfo);
 
   [DllImport("user32.dll")]
-  public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 }
 "@
 
@@ -53,7 +22,6 @@ $MOUSEEVENTF_MIDDLEDOWN = 0x0020
 $MOUSEEVENTF_MIDDLEUP = 0x0040
 $MOUSEEVENTF_WHEEL = 0x0800
 $KEYEVENTF_KEYUP = 0x0002
-$INPUT_KEYBOARD = 1
 $VK_SHIFT = 0x10
 $VK_CONTROL = 0x11
 $VK_MENU = 0x12
@@ -105,14 +73,9 @@ function Is-ModifierKey($vk) {
 }
 
 function Send-Key($vk, $up) {
-  $input = New-Object NativeInput+INPUT
-  $input.type = $INPUT_KEYBOARD
-  $input.U.ki.wVk = [uint16]$vk
-  $input.U.ki.wScan = 0
-  $input.U.ki.dwFlags = $(if ($up) { $KEYEVENTF_KEYUP } else { 0 })
-  $input.U.ki.time = 0
-  $input.U.ki.dwExtraInfo = [UIntPtr]::Zero
-  [NativeInput]::SendInput(1, [NativeInput+INPUT[]]@($input), [Runtime.InteropServices.Marshal]::SizeOf([type][NativeInput+INPUT])) | Out-Null
+  $flags = 0
+  if ($up) { $flags = $KEYEVENTF_KEYUP }
+  [NativeInput]::keybd_event([byte]$vk, 0, [uint32]$flags, [UIntPtr]::Zero)
 }
 
 function Send-Modifiers($payload, $up) {
