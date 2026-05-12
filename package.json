@@ -65,6 +65,11 @@
   },
   "devDependencies": {
     "electron": "^42.0.1",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "prisma": "^7.8.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "pg": "^8.20.0"
   }
 }

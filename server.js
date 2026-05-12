@@ -1,29 +1,58 @@
+require('dotenv').config();
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const { URL } = require("url");
+const { Pool } = require("pg");
 
 const PORT = Number(process.env.PORT || 5174);
 const HOST = process.env.HOST || "127.0.0.1";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const OFFLINE_AFTER_MS = 25000;
 
-let db = null;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+});
 
-function getDataDir() {
-  return process.env.GAME_REMOTE_DATA_DIR || path.join(__dirname, "data");
-}
-
-function getDataFile() {
-  return path.join(getDataDir(), "store.json");
-}
-
-function ensureDbLoaded() {
-  if (db === null) {
-    db = loadStore();
+async function initDb() {
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(255) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        created_at BIGINT NOT NULL
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS tokens (
+        token VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255) REFERENCES users(id) ON DELETE CASCADE,
+        created_at BIGINT NOT NULL
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS devices (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255) REFERENCES users(id) ON DELETE CASCADE,
+        session_id VARCHAR(255),
+        name VARCHAR(255),
+        gpu VARCHAR(255),
+        platform VARCHAR(255),
+        quality JSONB,
+        auto_accept BOOLEAN DEFAULT FALSE,
+        online BOOLEAN DEFAULT FALSE,
+        status VARCHAR(255) DEFAULT 'ready',
+        last_seen_at BIGINT,
+        created_at BIGINT NOT NULL
+      );
+    `);
+  } finally {
+    client.release();
   }
-  return db;
 }
 
 const mimeTypes = {
@@ -40,30 +69,6 @@ const state = {
   rooms: new Map(),
   clientsByUser: new Map()
 };
-
-function loadStore() {
-  try {
-    const filename = getDataFile();
-    if (!fs.existsSync(filename)) {
-      return { users: [], devices: [], tokens: [] };
-    }
-    const parsed = JSON.parse(fs.readFileSync(filename, "utf8"));
-    return {
-      users: Array.isArray(parsed.users) ? parsed.users : [],
-      devices: Array.isArray(parsed.devices) ? parsed.devices : [],
-      tokens: Array.isArray(parsed.tokens) ? parsed.tokens : []
-    };
-  } catch (error) {
-    console.error("Could not load data/store.json:", error.message);
-    return { users: [], devices: [], tokens: [] };
-  }
-}
-
-function saveStore() {
-  const filename = getDataFile();
-  fs.mkdirSync(path.dirname(filename), { recursive: true });
-  fs.writeFileSync(filename, JSON.stringify(db, null, 2));
-}
 
 function id(prefix) {
   return `${prefix}_${crypto.randomBytes(10).toString("hex")}`;
@@ -123,10 +128,10 @@ function getBearer(req) {
   return "";
 }
 
-function getUserFromToken(token) {
-  const row = db.tokens.find((item) => item.token === token);
-  if (!row) return null;
-  return db.users.find((user) => user.id === row.userId) || null;
+async function getUserFromToken(token) {
+  const res = await pool.query('SELECT u.* FROM tokens t JOIN users u ON t.user_id = u.id WHERE t.token = $1', [token]);
+  if (res.rows.length === 0) return null;
+  return res.rows[0];
 }
 
 function publicUser(user) {
@@ -137,30 +142,23 @@ function publicUser(user) {
   };
 }
 
-function cleanOfflineDevices() {
-  const now = Date.now();
-  let changed = false;
-  for (const device of db.devices) {
-    if (device.online && now - Number(device.lastSeenAt || 0) > OFFLINE_AFTER_MS) {
-      device.online = false;
-      changed = true;
-    }
-  }
-  if (changed) saveStore();
+async function cleanOfflineDevices() {
+  const cutoff = Date.now() - OFFLINE_AFTER_MS;
+  await pool.query('UPDATE devices SET online = false WHERE online = true AND last_seen_at <= $1', [cutoff]);
 }
 
 function publicDevice(device) {
   return {
     id: device.id,
-    sessionId: device.sessionId,
+    sessionId: device.session_id,
     name: device.name,
     gpu: device.gpu,
     platform: device.platform,
     online: Boolean(device.online),
     status: device.status || "ready",
     quality: device.quality,
-    autoAccept: Boolean(device.autoAccept),
-    lastSeenAt: device.lastSeenAt
+    autoAccept: Boolean(device.auto_accept),
+    lastSeenAt: Number(device.last_seen_at)
   };
 }
 
@@ -174,22 +172,22 @@ function sendEvent(userId, event, payload) {
   }
 }
 
-function broadcastDevices(userId) {
-  cleanOfflineDevices();
-  const devices = db.devices.filter((device) => device.userId === userId).map(publicDevice);
+async function broadcastDevices(userId) {
+  await cleanOfflineDevices();
+  const res = await pool.query('SELECT * FROM devices WHERE user_id = $1', [userId]);
+  const devices = res.rows.map(publicDevice);
   sendEvent(userId, "devices", { devices });
 }
 
-function issueToken(userId) {
+async function issueToken(userId) {
   const token = crypto.randomBytes(32).toString("hex");
-  db.tokens.push({ token, userId, createdAt: Date.now() });
-  saveStore();
+  await pool.query('INSERT INTO tokens (token, user_id, created_at) VALUES ($1, $2, $3)', [token, userId, Date.now()]);
   return token;
 }
 
-function requireAuth(req, res, url) {
+async function requireAuth(req, res, url) {
   const token = getBearer(req) || url.searchParams.get("token");
-  const user = getUserFromToken(token);
+  const user = await getUserFromToken(token);
   if (!user) {
     sendJson(res, 401, { error: "Not authenticated." });
     return null;
@@ -223,13 +221,16 @@ async function handleApi(req, res, url) {
       sendJson(res, 400, { error: "Name, email, and a 6+ character password are required." });
       return;
     }
-    if (db.users.some((user) => user.email === email)) {
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
       sendJson(res, 409, { error: "Email already exists." });
       return;
     }
-    const user = { id: id("usr"), name, email, passwordHash: hashPassword(password), createdAt: Date.now() };
-    db.users.push(user);
-    const token = issueToken(user.id);
+    const userId = id("usr");
+    const user = { id: userId, name, email, passwordHash: hashPassword(password), createdAt: Date.now() };
+    await pool.query('INSERT INTO users (id, name, email, password_hash, created_at) VALUES ($1, $2, $3, $4, $5)', 
+      [user.id, user.name, user.email, user.passwordHash, user.createdAt]);
+    const token = await issueToken(user.id);
     sendJson(res, 201, { token, user: publicUser(user) });
     return;
   }
@@ -238,19 +239,24 @@ async function handleApi(req, res, url) {
     const body = await readBody(req);
     const email = String(body.email || "").trim().toLowerCase();
     const password = String(body.password || "");
-    const user = db.users.find((item) => item.email === email);
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    const existing = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (existing.rows.length === 0) {
       sendJson(res, 401, { error: "Invalid email or password." });
       return;
     }
-    const token = issueToken(user.id);
+    const user = existing.rows[0];
+    if (!verifyPassword(password, user.password_hash)) {
+      sendJson(res, 401, { error: "Invalid email or password." });
+      return;
+    }
+    const token = await issueToken(user.id);
     sendJson(res, 200, { token, user: publicUser(user) });
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/api/events") {
     const token = url.searchParams.get("token") || "";
-    const user = getUserFromToken(token);
+    const user = await getUserFromToken(token);
     if (!user) {
       res.writeHead(401);
       res.end("Not authenticated.");
@@ -272,7 +278,7 @@ async function handleApi(req, res, url) {
     }
     clients.add(res);
     res.write(`event: ready\ndata: ${JSON.stringify({ user: publicUser(user), now: Date.now() })}\n\n`);
-    broadcastDevices(user.id);
+    await broadcastDevices(user.id);
 
     const keepAlive = setInterval(() => {
       res.write(`event: ping\ndata: ${JSON.stringify({ now: Date.now() })}\n\n`);
@@ -286,7 +292,7 @@ async function handleApi(req, res, url) {
     return;
   }
 
-  const auth = requireAuth(req, res, url);
+  const auth = await requireAuth(req, res, url);
   if (!auth) return;
   const { user, token } = auth;
 
@@ -296,16 +302,16 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/logout") {
-    db.tokens = db.tokens.filter((item) => item.token !== token);
-    saveStore();
+    await pool.query('DELETE FROM tokens WHERE token = $1', [token]);
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/api/devices") {
-    cleanOfflineDevices();
+    await cleanOfflineDevices();
+    const resDevices = await pool.query('SELECT * FROM devices WHERE user_id = $1', [user.id]);
     sendJson(res, 200, {
-      devices: db.devices.filter((device) => device.userId === user.id).map(publicDevice)
+      devices: resDevices.rows.map(publicDevice)
     });
     return;
   }
@@ -315,51 +321,57 @@ async function handleApi(req, res, url) {
     const sessionId = String(body.sessionId || "");
     const deviceId = String(body.deviceId || id("dev"));
     const now = Date.now();
-    let device = db.devices.find((item) => item.id === deviceId && item.userId === user.id);
-    if (!device) {
-      device = { id: deviceId, userId: user.id, createdAt: now };
-      db.devices.push(device);
+    
+    const existing = await pool.query('SELECT * FROM devices WHERE id = $1 AND user_id = $2', [deviceId, user.id]);
+    const name = String(body.name || "Gaming PC").trim().slice(0, 80);
+    const gpu = String(body.gpu || "Unknown GPU").trim().slice(0, 80);
+    const platform = String(body.platform || req.headers["user-agent"] || "Unknown").slice(0, 160);
+    const quality = normalizeQuality(body.quality);
+    const autoAccept = Boolean(body.autoAccept);
+    
+    if (existing.rows.length === 0) {
+      await pool.query(`
+        INSERT INTO devices (id, user_id, session_id, name, gpu, platform, quality, auto_accept, online, status, last_seen_at, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, 'ready', $9, $9)
+      `, [deviceId, user.id, sessionId, name, gpu, platform, quality, autoAccept, now]);
+    } else {
+      await pool.query(`
+        UPDATE devices 
+        SET session_id = $1, name = $2, gpu = $3, platform = $4, quality = $5, auto_accept = $6, online = true, status = 'ready', last_seen_at = $7
+        WHERE id = $8 AND user_id = $9
+      `, [sessionId, name, gpu, platform, quality, autoAccept, now, deviceId, user.id]);
     }
-    device.sessionId = sessionId;
-    device.name = String(body.name || "Gaming PC").trim().slice(0, 80);
-    device.gpu = String(body.gpu || "Unknown GPU").trim().slice(0, 80);
-    device.platform = String(body.platform || req.headers["user-agent"] || "Unknown").slice(0, 160);
-    device.quality = normalizeQuality(body.quality);
-    device.autoAccept = Boolean(body.autoAccept);
-    device.online = true;
-    device.status = "ready";
-    device.lastSeenAt = now;
-    saveStore();
-    sendJson(res, 200, { device: publicDevice(device) });
-    broadcastDevices(user.id);
+    
+    const updated = await pool.query('SELECT * FROM devices WHERE id = $1', [deviceId]);
+    sendJson(res, 200, { device: publicDevice(updated.rows[0]) });
+    await broadcastDevices(user.id);
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/host/heartbeat") {
     const body = await readBody(req);
-    const device = db.devices.find((item) => item.id === body.deviceId && item.userId === user.id);
-    if (!device) {
+    const existing = await pool.query('SELECT * FROM devices WHERE id = $1 AND user_id = $2', [body.deviceId, user.id]);
+    if (existing.rows.length === 0) {
       sendJson(res, 404, { error: "Device not found." });
       return;
     }
-    device.online = true;
-    device.lastSeenAt = Date.now();
-    if (body.status) device.status = String(body.status).slice(0, 30);
-    saveStore();
-    sendJson(res, 200, { device: publicDevice(device) });
-    broadcastDevices(user.id);
+    const status = body.status ? String(body.status).slice(0, 30) : existing.rows[0].status;
+    await pool.query('UPDATE devices SET online = true, last_seen_at = $1, status = $2 WHERE id = $3 AND user_id = $4', 
+      [Date.now(), status, body.deviceId, user.id]);
+      
+    const updated = await pool.query('SELECT * FROM devices WHERE id = $1', [body.deviceId]);
+    sendJson(res, 200, { device: publicDevice(updated.rows[0]) });
+    await broadcastDevices(user.id);
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/host/offline") {
     const body = await readBody(req);
-    const device = db.devices.find((item) => item.id === body.deviceId && item.userId === user.id);
-    if (device) {
-      device.online = false;
-      device.status = "offline";
-      device.lastSeenAt = Date.now();
-      saveStore();
-      broadcastDevices(user.id);
+    const existing = await pool.query('SELECT * FROM devices WHERE id = $1 AND user_id = $2', [body.deviceId, user.id]);
+    if (existing.rows.length > 0) {
+      await pool.query('UPDATE devices SET online = false, status = $1, last_seen_at = $2 WHERE id = $3 AND user_id = $4', 
+        ['offline', Date.now(), body.deviceId, user.id]);
+      await broadcastDevices(user.id);
     }
     sendJson(res, 200, { ok: true });
     return;
@@ -367,16 +379,17 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/connect/request") {
     const body = await readBody(req);
-    const device = db.devices.find((item) => item.id === body.deviceId && item.userId === user.id);
-    if (!device || !device.online) {
+    const existing = await pool.query('SELECT * FROM devices WHERE id = $1 AND user_id = $2', [body.deviceId, user.id]);
+    if (existing.rows.length === 0 || !existing.rows[0].online) {
       sendJson(res, 404, { error: "Host is not online." });
       return;
     }
+    const device = existing.rows[0];
     const room = {
       id: id("room"),
       userId: user.id,
       hostDeviceId: device.id,
-      hostSessionId: device.sessionId,
+      hostSessionId: device.session_id,
       clientSessionId: String(body.sessionId || ""),
       clientName: user.name,
       quality: normalizeQuality(body.quality),
@@ -515,10 +528,12 @@ function createAppServer() {
   });
 }
 
-function startServer(options = {}) {
+async function startServer(options = {}) {
   const host = options.host || HOST;
   const port = Number.isFinite(Number(options.port)) ? Number(options.port) : PORT;
-  ensureDbLoaded();
+  
+  await initDb();
+  
   const server = createAppServer();
 
   return new Promise((resolve, reject) => {
