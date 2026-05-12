@@ -315,7 +315,7 @@ function sendNativeHostInput(payload) {
 
 function getNativeInputWorker() {
   if (nativeInputWorker && !nativeInputWorker.killed) return nativeInputWorker;
-  const script = path.join(__dirname, "input-worker-win.ps1");
+  const script = resolveInputWorkerPath();
   nativeInputWorker = spawn("powershell.exe", [
     "-NoProfile",
     "-ExecutionPolicy",
@@ -333,6 +333,11 @@ function getNativeInputWorker() {
     nativeInputWorker = null;
   });
   return nativeInputWorker;
+}
+
+function resolveInputWorkerPath() {
+  if (!app.isPackaged) return path.join(__dirname, "input-worker-win.ps1");
+  return path.join(process.resourcesPath, "app.asar.unpacked", "desktop", "input-worker-win.ps1");
 }
 
 function screenPoint(payload) {

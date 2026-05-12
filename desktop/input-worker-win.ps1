@@ -3,6 +3,37 @@ using System;
 using System.Runtime.InteropServices;
 
 public static class NativeInput {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct INPUT {
+    public uint type;
+    public InputUnion U;
+  }
+
+  [StructLayout(LayoutKind.Explicit)]
+  public struct InputUnion {
+    [FieldOffset(0)] public MOUSEINPUT mi;
+    [FieldOffset(0)] public KEYBDINPUT ki;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct MOUSEINPUT {
+    public int dx;
+    public int dy;
+    public uint mouseData;
+    public uint dwFlags;
+    public uint time;
+    public UIntPtr dwExtraInfo;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct KEYBDINPUT {
+    public ushort wVk;
+    public ushort wScan;
+    public uint dwFlags;
+    public uint time;
+    public UIntPtr dwExtraInfo;
+  }
+
   [DllImport("user32.dll")]
   public static extern bool SetCursorPos(int X, int Y);
 
@@ -10,7 +41,7 @@ public static class NativeInput {
   public static extern void mouse_event(uint dwFlags, uint dx, uint dy, int dwData, UIntPtr dwExtraInfo);
 
   [DllImport("user32.dll")]
-  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 }
 "@
 
@@ -22,6 +53,11 @@ $MOUSEEVENTF_MIDDLEDOWN = 0x0020
 $MOUSEEVENTF_MIDDLEUP = 0x0040
 $MOUSEEVENTF_WHEEL = 0x0800
 $KEYEVENTF_KEYUP = 0x0002
+$INPUT_KEYBOARD = 1
+$VK_SHIFT = 0x10
+$VK_CONTROL = 0x11
+$VK_MENU = 0x12
+$VK_LWIN = 0x5B
 
 function Get-ButtonFlags($button, $down) {
   if ($button -eq "right") {
@@ -64,6 +100,36 @@ function Get-VirtualKey($key, $code) {
   return 0
 }
 
+function Send-Key($vk, $up) {
+  $input = New-Object NativeInput+INPUT
+  $input.type = $INPUT_KEYBOARD
+  $input.U.ki.wVk = [uint16]$vk
+  $input.U.ki.wScan = 0
+  $input.U.ki.dwFlags = $(if ($up) { $KEYEVENTF_KEYUP } else { 0 })
+  $input.U.ki.time = 0
+  $input.U.ki.dwExtraInfo = [UIntPtr]::Zero
+  [NativeInput]::SendInput(1, [NativeInput+INPUT[]]@($input), [Runtime.InteropServices.Marshal]::SizeOf([type][NativeInput+INPUT])) | Out-Null
+}
+
+function Send-Modifiers($payload, $up) {
+  if ($payload.ctrl) { Send-Key $VK_CONTROL $up }
+  if ($payload.alt) { Send-Key $VK_MENU $up }
+  if ($payload.shift) { Send-Key $VK_SHIFT $up }
+  if ($payload.meta) { Send-Key $VK_LWIN $up }
+}
+
+function Send-KeyStroke($payload, $down) {
+  $vk = Get-VirtualKey $payload.key $payload.code
+  if ($vk -eq 0) { return }
+  if ($down) {
+    Send-Modifiers $payload $false
+    Send-Key $vk $false
+  } else {
+    Send-Key $vk $true
+    Send-Modifiers $payload $true
+  }
+}
+
 while ($line = [Console]::In.ReadLine()) {
   try {
     $payload = $line | ConvertFrom-Json
@@ -85,12 +151,7 @@ while ($line = [Console]::In.ReadLine()) {
     }
 
     if ($type -eq "key-down" -or $type -eq "key-up") {
-      $vk = Get-VirtualKey $payload.key $payload.code
-      if ($vk -ne 0) {
-        $flags = 0
-        if ($type -eq "key-up") { $flags = $KEYEVENTF_KEYUP }
-        [NativeInput]::keybd_event([byte]$vk, 0, [uint32]$flags, [UIntPtr]::Zero)
-      }
+      Send-KeyStroke $payload ($type -eq "key-down")
     }
   } catch {
     # Keep the worker alive even if one event is malformed.

@@ -29,6 +29,9 @@
     "directories": {
       "output": "dist"
     },
+    "asarUnpack": [
+      "desktop/input-worker-win.ps1"
+    ],
     "files": [
       "desktop/**/*",
       "public/**/*",
