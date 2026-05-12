@@ -223,6 +223,12 @@ function handleNativeLog(entry = {}) {
     if (/SNINPUT_TX/i.test(line)) {
       streamStatus.textContent = "Native SNV đang stream | input hoạt động";
     }
+    if (/SNINPUT_LOCAL/i.test(line)) {
+      streamStatus.textContent = "Native input đang local | chờ Windows backchannel";
+      if (/pointer-down/i.test(line)) {
+        showToast("Click đã vào cửa sổ native, nhưng Windows host chưa nối input backchannel.", "warning", 3500);
+      }
+    }
   }
   if (entry.role === "host") {
     if (/SNV1 H\.264 packet stream/i.test(line)) {
