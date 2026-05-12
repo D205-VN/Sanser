@@ -7,6 +7,18 @@ const { startServer } = require("../server");
 let mainWindow = null;
 let serverHandle = null;
 let nativeInputWorker = null;
+const nativeProcesses = {
+  client: null,
+  host: null
+};
+const nativeLogBuffers = {
+  client: "",
+  host: ""
+};
+const nativeLogs = {
+  client: [],
+  host: []
+};
 
 const gotLock = app.requestSingleInstanceLock();
 
@@ -41,6 +53,8 @@ app.on("before-quit", () => {
   if (nativeInputWorker) {
     nativeInputWorker.kill();
   }
+  stopNativeProcess("client");
+  stopNativeProcess("host");
 });
 
 async function boot() {
@@ -48,6 +62,7 @@ async function boot() {
   await ensureTailscaleReady();
   installScreenCaptureHandler();
   installInputHandler();
+  installNativeHandlers();
   serverHandle = await startEmbeddedServer();
   createWindow(`http://127.0.0.1:${serverHandle.port}`);
 }
@@ -254,6 +269,167 @@ function installInputHandler() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     sendHostInput(payload);
   });
+}
+
+function installNativeHandlers() {
+  ipcMain.handle("sanser:native-status", () => nativeStatus());
+  ipcMain.handle("sanser:native-start-client", (_event, options = {}) => startNativeClient(options));
+  ipcMain.handle("sanser:native-stop-client", () => stopNativeProcess("client"));
+  ipcMain.handle("sanser:native-start-host", (_event, options = {}) => startNativeHost(options));
+  ipcMain.handle("sanser:native-stop-host", () => stopNativeProcess("host"));
+}
+
+function startNativeClient(options = {}) {
+  if (process.platform !== "darwin") {
+    throw new Error("Native SNV client hiện chỉ hỗ trợ macOS.");
+  }
+
+  stopNativeProcess("client");
+  const executable = resolveNativeClientPath();
+  if (!fs.existsSync(executable)) {
+    throw new Error(`Không tìm thấy sanser-native-client tại ${executable}. Hãy build bằng npm run native:client-mac:build.`);
+  }
+
+  const port = clampInt(options.port, 1, 65535, 7777);
+  const maxPackets = clampInt(options.maxPackets, 0, Number.MAX_SAFE_INTEGER, 0);
+  const args = ["--listen-render-snv", String(port)];
+  if (maxPackets > 0) args.push("--max-packets", String(maxPackets));
+  if (options.logInput !== false) args.push("--log-input");
+
+  nativeProcesses.client = spawnNativeProcess("client", executable, args);
+  return nativeStatus();
+}
+
+function startNativeHost(options = {}) {
+  if (process.platform !== "win32") {
+    throw new Error("Native SNV host hiện chỉ hỗ trợ Windows.");
+  }
+
+  const endpoint = String(options.endpoint || "").trim();
+  if (!/^\[?[A-Za-z0-9:._-]+\]?:\d+$/.test(endpoint)) {
+    throw new Error("Native host cần endpoint dạng HOST:PORT.");
+  }
+
+  stopNativeProcess("host");
+  const executable = resolveNativeHostPath();
+  if (!fs.existsSync(executable)) {
+    throw new Error(`Không tìm thấy sanser-native-host.exe tại ${executable}. Hãy build bằng npm run native:host-win:build.`);
+  }
+
+  const fps = clampInt(options.fps, 30, 120, 60);
+  const bitrateMbps = clampInt(options.bitrateMbps, 4, 120, 28);
+  const args = [
+    "--encode-pipe",
+    "h264",
+    "--fps",
+    String(fps),
+    "--interval-ms",
+    "0",
+    "--bitrate",
+    String(bitrateMbps * 1000000),
+    "--tcp-connect",
+    endpoint
+  ];
+  if (options.softwareEncoder) args.push("--software-encoder");
+
+  nativeProcesses.host = spawnNativeProcess("host", executable, args);
+  return nativeStatus();
+}
+
+function spawnNativeProcess(role, executable, args) {
+  nativeLogs[role] = [];
+  nativeLogBuffers[role] = "";
+  appendNativeLog(role, `$ ${path.basename(executable)} ${args.join(" ")}`);
+
+  const child = spawn(executable, args, {
+    cwd: path.dirname(executable),
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: false
+  });
+
+  child.stdout.on("data", (chunk) => consumeNativeLog(role, chunk));
+  child.stderr.on("data", (chunk) => consumeNativeLog(role, chunk));
+  child.on("error", (error) => {
+    appendNativeLog(role, error.message || String(error));
+  });
+  child.on("close", (code, signal) => {
+    if (nativeProcesses[role] === child) nativeProcesses[role] = null;
+    const exitReason = signal || (code ?? "unknown");
+    appendNativeLog(role, `native ${role} exited (${exitReason})`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("sanser:native-exit", { role, code, signal, status: nativeStatus() });
+    }
+  });
+
+  return child;
+}
+
+function consumeNativeLog(role, chunk) {
+  nativeLogBuffers[role] += chunk.toString("utf8");
+  const lines = nativeLogBuffers[role].split(/\r?\n/);
+  nativeLogBuffers[role] = lines.pop() || "";
+  for (const line of lines) {
+    if (line.trim()) appendNativeLog(role, line);
+  }
+}
+
+function appendNativeLog(role, line) {
+  const entry = {
+    role,
+    line,
+    at: Date.now()
+  };
+  nativeLogs[role].push(entry);
+  if (nativeLogs[role].length > 80) nativeLogs[role].shift();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("sanser:native-log", entry);
+  }
+}
+
+function stopNativeProcess(role) {
+  const child = nativeProcesses[role];
+  if (!child) return nativeStatus();
+  nativeProcesses[role] = null;
+  if (!child.killed) child.kill();
+  return nativeStatus();
+}
+
+function nativeStatus() {
+  return {
+    platform: process.platform,
+    client: processStatus("client"),
+    host: processStatus("host"),
+    logs: nativeLogs
+  };
+}
+
+function processStatus(role) {
+  const child = nativeProcesses[role];
+  return {
+    running: Boolean(child && !child.killed),
+    pid: child && !child.killed ? child.pid : null
+  };
+}
+
+function resolveNativeClientPath() {
+  return resolveNativeBinary("native/client-mac/build/sanser-native-client");
+}
+
+function resolveNativeHostPath() {
+  return resolveNativeBinary("native/host-win/build/Release/sanser-native-host.exe");
+}
+
+function resolveNativeBinary(relativePath) {
+  if (!app.isPackaged) {
+    return path.join(__dirname, "..", relativePath);
+  }
+  return path.join(process.resourcesPath, "app.asar.unpacked", relativePath);
+}
+
+function clampInt(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
 }
 
 function sendHostInput(payload) {

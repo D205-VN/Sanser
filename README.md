@@ -126,7 +126,7 @@ npm run native:client-mac:listen-snv -- 7777 --max-packets 180
 .\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
 ```
 
-The app transport currently remains WebRTC with adaptive bitrate and split data channels. The next native integration step is rendering decoded frames through Metal, then moving the packets onto RTP or UDP/QUIC.
+WebRTC remains available as a fallback transport, but the app can now launch the native TCP SNV1 path for Mac client + Windows host sessions.
 
 ## Native macOS Client Prototype
 
@@ -144,4 +144,14 @@ npm run native:client-mac:listen-render-snv -- 7777 --max-packets 180
 ./native/client-mac/build/sanser-native-client --metal-test --seconds 5
 ```
 
-This does not replace the Electron/WebRTC client view yet. The native client can now render decoded `CVPixelBuffer` frames as Metal NV12 textures; the next step is wiring this native window/helper into the Electron app flow and then moving from TCP to RTP or UDP/QUIC.
+The desktop app can now launch this native path when Settings -> Network -> Transport is set to `Native SNV`. The Mac client opens the Metal render listener, sends its listener endpoint through the app server, and the Windows host spawns `sanser-native-host --tcp-connect` automatically. Electron remains the account/device/control shell; native code owns capture, H.264 encode, Metal render, and the SNINPUT backchannel.
+
+For manual testing, keep using:
+
+```bash
+npm run native:client-mac:listen-render-snv -- 7777 --log-input
+```
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect <MAC_IP>:7777
+```

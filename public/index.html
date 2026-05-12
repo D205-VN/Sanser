@@ -307,11 +307,16 @@
                 <input id="serverUrlInput" placeholder="Local server">
               </label>
               <label class="setting-row">
-                <span><strong>Transport</strong><small>WebRTC P2P với điều chỉnh bitrate.</small></span>
+                <span><strong>Transport</strong><small>Native SNV dùng TCP, Metal và input backchannel.</small></span>
                 <select id="transportMode">
-                  <option value="webrtc-adaptive" selected>WebRTC Adaptive</option>
+                  <option value="native-snv" selected>Native SNV</option>
+                  <option value="webrtc-adaptive">WebRTC Adaptive</option>
                   <option value="webrtc-fixed">WebRTC Fixed</option>
                 </select>
+              </label>
+              <label class="setting-row">
+                <span><strong>Native Listen Port</strong><small>Mac client mở renderer native trên cổng này.</small></span>
+                <input id="nativeListenPort" type="number" min="1024" max="65535" step="1" value="7777">
               </label>
               <label class="setting-row">
                 <span><strong>Mouse Sample Rate</strong><small>Tốc độ cập nhật input từ xa.</small></span>

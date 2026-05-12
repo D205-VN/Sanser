@@ -533,6 +533,7 @@ async function handleApi(req, res, url) {
       clientSessionId: String(body.sessionId || ""),
       clientName: user.name,
       quality: normalizeQuality(body.quality),
+      native: normalizeNativeRequest(body.native, req),
       status: "accepted",
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -663,6 +664,24 @@ function normalizeQuality(input = {}) {
     bitrateMbps: clamp(Number(input.bitrateMbps || base.bitrateMbps), 4, 120),
     preferCodec: String(input.preferCodec || "H264").toUpperCase()
   };
+}
+
+function normalizeNativeRequest(input = {}, req) {
+  if (!input || input.transport !== "snv-tcp") return null;
+  const rawIp = String(input.clientIp || req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  const clientIp = rawIp === "::1" ? "127.0.0.1" : rawIp;
+  const clientPort = clamp(Number(input.port || input.clientPort || 7777), 1, 65535);
+  return {
+    transport: "snv-tcp",
+    clientIp,
+    clientPort,
+    clientEndpoint: `${formatEndpointHost(clientIp)}:${clientPort}`
+  };
+}
+
+function formatEndpointHost(host) {
+  if (host.includes(":") && !host.startsWith("[")) return `[${host}]`;
+  return host;
 }
 
 function clamp(value, min, max) {

@@ -39,7 +39,9 @@
       "output": "dist"
     },
     "asarUnpack": [
-      "desktop/input-worker-win.ps1"
+      "desktop/input-worker-win.ps1",
+      "native/host-win/build/Release/sanser-native-host.exe",
+      "native/client-mac/build/sanser-native-client"
     ],
     "files": [
       "desktop/**/*",

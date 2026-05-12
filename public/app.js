@@ -14,6 +14,8 @@ const appState = {
   clientRoom: null,
   inputChannel: null,
   realtimeChannel: null,
+  nativeClientConnected: false,
+  nativeHostRooms: new Set(),
   pendingRequests: new Map(),
   heartbeatTimer: null,
   mouseTimer: 0,
@@ -26,6 +28,8 @@ const appState = {
 
 const TRANSPORT_FEEDBACK_TYPE = "__sanser_transport_feedback";
 const TRANSPORT_ADJUST_INTERVAL_MS = 1800;
+const NATIVE_TRANSPORT = "native-snv";
+const NATIVE_DEFAULT_PORT = 7777;
 
 localStorage.setItem("gr_session_id", appState.sessionId);
 localStorage.setItem("gr_device_id", appState.deviceId);
@@ -87,6 +91,7 @@ init();
 
 function init() {
   bindUi();
+  bindNativeEvents();
   hydrateDefaults();
   applyPerformanceDefaults();
   hydrateSettings();
@@ -98,15 +103,16 @@ function init() {
 }
 
 function applyPerformanceDefaults() {
-  if (localStorage.getItem("gr_perf_defaults_v5") === "1") return;
+  if (localStorage.getItem("gr_perf_defaults_v6") === "1") return;
   localStorage.setItem("gr_setting_clientResolution", "1080p");
   localStorage.setItem("gr_setting_clientFps", "60");
   localStorage.setItem("gr_setting_clientBitrate", "28");
   localStorage.setItem("gr_setting_hostFps", "60");
   localStorage.setItem("gr_setting_hostBitrate", "28");
-  localStorage.setItem("gr_setting_codecPreference", "VP8");
-  localStorage.setItem("gr_setting_transportMode", "webrtc-adaptive");
-  localStorage.setItem("gr_perf_defaults_v5", "1");
+  localStorage.setItem("gr_setting_codecPreference", "H264");
+  localStorage.setItem("gr_setting_transportMode", NATIVE_TRANSPORT);
+  localStorage.setItem("gr_setting_nativeListenPort", String(NATIVE_DEFAULT_PORT));
+  localStorage.setItem("gr_perf_defaults_v6", "1");
 }
 
 function bindUi() {
@@ -146,6 +152,7 @@ function bindUi() {
     "hostBitrate",
     "codecPreference",
     "transportMode",
+    "nativeListenPort",
     "mouseRate",
     "disconnectHotkey",
     "overlayHotkey",
@@ -193,6 +200,49 @@ function bindUi() {
     sendInputEvent(keyPayload(event));
     event.preventDefault();
   });
+}
+
+function bindNativeEvents() {
+  if (!window.sanserNative?.onLog) return;
+  window.sanserNative.onLog(handleNativeLog);
+  window.sanserNative.onExit(handleNativeExit);
+}
+
+function handleNativeLog(entry = {}) {
+  const line = String(entry.line || "");
+  if (entry.role === "client") {
+    if (/SNV1 render client connected/i.test(line)) {
+      appState.nativeClientConnected = true;
+      hideConnecting();
+      if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
+      streamStatus.textContent = "Native SNV đang stream";
+      emptyStream.classList.add("is-hidden");
+      $("#clientRoleBadge").classList.remove("is-hidden");
+      showToast("Native stream đã kết nối.", "success", 2500);
+    }
+    if (/SNINPUT_TX/i.test(line)) {
+      streamStatus.textContent = "Native SNV đang stream | input hoạt động";
+    }
+  }
+  if (entry.role === "host") {
+    if (/SNV1 H\.264 packet stream/i.test(line)) {
+      $("#captureStatus").textContent = "Native host đang encode H.264";
+    }
+    if (/SNINPUT control backchannel enabled/i.test(line)) {
+      hostStats.textContent = "Native SNV | input backchannel hoạt động";
+    }
+  }
+}
+
+function handleNativeExit(payload = {}) {
+  if (payload.role === "client" && appState.clientRoom && isNativeRoom(appState.clientRoom)) {
+    streamStatus.textContent = "Native renderer đã dừng";
+  }
+  if (payload.role === "host") {
+    appState.nativeHostRooms.clear();
+    $("#captureStatus").textContent = "Native host đã dừng";
+    hostStats.textContent = "Native SNV inactive";
+  }
 }
 
 function handleDocumentKey(event) {
@@ -365,6 +415,17 @@ function connectEvents() {
   events.addEventListener("connect-accepted", async (event) => {
     const data = JSON.parse(event.data);
     if (data.targetSessionId !== appState.sessionId) return;
+    if (isNativeRoom(data.room)) {
+      if (data.room.hostSessionId === appState.sessionId) {
+        await startNativeHostForRoom(data.room).catch((error) => {
+          $("#captureStatus").textContent = error.message || "Could not start native host";
+          api("/api/connect/close", { method: "POST", body: { roomId: data.room.id } }).catch(() => {});
+        });
+        return;
+      }
+      handleNativeClientAccepted(data.room);
+      return;
+    }
     if (data.room.hostSessionId === appState.sessionId) {
       await startHostPeer(data.room).catch((error) => {
         $("#captureStatus").textContent = error.message || "Could not start stream";
@@ -383,6 +444,10 @@ function connectEvents() {
   events.addEventListener("connect-closed", (event) => {
     const data = JSON.parse(event.data);
     if (data.targetSessionId !== appState.sessionId) return;
+    if (isNativeRoom(data.room)) {
+      handleNativeClosed(data.room);
+      return;
+    }
     if (appState.hostPeers.has(data.room.id)) {
       appState.hostPeers.get(data.room.id).close();
       appState.hostPeers.delete(data.room.id);
@@ -504,6 +569,10 @@ function startHeartbeat() {
 async function stopHost() {
   if (appState.heartbeatTimer) clearInterval(appState.heartbeatTimer);
   appState.heartbeatTimer = null;
+  if (window.sanserNative?.stopHost) {
+    await window.sanserNative.stopHost().catch(() => {});
+  }
+  appState.nativeHostRooms.clear();
   if (appState.hostDevice) {
     await api("/api/host/offline", { method: "POST", body: { deviceId: appState.hostDevice.id } }).catch(() => {});
   }
@@ -580,6 +649,10 @@ async function connectToDevice(deviceId) {
   connectError.textContent = "";
   const device = appState.devices.find((item) => item.id === deviceId);
   if (!device || !device.online || device.sessionId === appState.sessionId) return;
+  if (isNativeTransport()) {
+    await connectNativeToDevice(device);
+    return;
+  }
 
   try {
     await loadNetworkConfig().catch(() => {});
@@ -612,6 +685,98 @@ async function connectToDevice(deviceId) {
     streamStatus.textContent = "Chờ kết nối";
     if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
   }
+}
+
+async function connectNativeToDevice(device) {
+  try {
+    if (!window.sanserNative?.startClient) {
+      throw new Error("Native launcher chỉ chạy trong app desktop Electron.");
+    }
+
+    const port = readNativePort();
+    showConnecting(device.name || "máy chủ");
+    streamStatus.textContent = `Đang mở native renderer trên cổng ${port}...`;
+    $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
+    appState.nativeClientConnected = false;
+
+    await window.sanserNative.startClient({ port, logInput: true });
+
+    appState._connectTimeout = setTimeout(() => {
+      if (!appState.nativeClientConnected) {
+        hideConnecting();
+        streamStatus.textContent = "Native renderer đang chờ host";
+        showToast("Native listener đã mở, nhưng Windows host chưa connect vào.", "warning", 5000);
+      }
+    }, 15000);
+
+    const data = await api("/api/connect/request", {
+      method: "POST",
+      body: {
+        sessionId: appState.sessionId,
+        deviceId: device.id,
+        quality: readClientQuality(),
+        native: {
+          transport: "snv-tcp",
+          port
+        }
+      }
+    });
+    appState.clientRoom = data.room;
+    streamStatus.textContent = `Native renderer chờ ${device.name || "host"} connect`;
+    emptyStream.classList.add("is-hidden");
+    $(".stream-dock").classList.add("is-visible");
+  } catch (error) {
+    hideConnecting();
+    if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
+    if (window.sanserNative?.stopClient) {
+      await window.sanserNative.stopClient().catch(() => {});
+    }
+    showToast(error.message || "Không mở được native renderer.", "error");
+    connectError.textContent = error.message || "Native connection failed";
+    streamStatus.textContent = "Chờ kết nối";
+  }
+}
+
+async function startNativeHostForRoom(room) {
+  if (!window.sanserNative?.startHost) {
+    throw new Error("Native launcher chỉ chạy trong app desktop Electron.");
+  }
+  if (!appState.hostDevice) {
+    await startHost({ capture: false });
+  }
+
+  const endpoint = room.native?.clientEndpoint;
+  if (!endpoint) throw new Error("Native room thiếu endpoint của Mac client.");
+
+  appState.nativeHostRooms.add(room.id);
+  $("#captureStatus").textContent = `Native host đang connect ${endpoint}`;
+  $("#hostRoleBadge").classList.remove("is-hidden");
+  hostStats.textContent = "Native SNV starting";
+  await window.sanserNative.startHost({
+    endpoint,
+    fps: room.quality?.fps || Number($("#hostFps").value || 60),
+    bitrateMbps: room.quality?.bitrateMbps || Number($("#hostBitrate").value || 28)
+  });
+}
+
+function handleNativeClientAccepted(room) {
+  appState.clientRoom = room;
+  streamStatus.textContent = "Native renderer đang chờ Windows host";
+  $(".stream-dock").classList.add("is-visible");
+  emptyStream.classList.add("is-hidden");
+}
+
+function handleNativeClosed(room) {
+  if (room.hostSessionId === appState.sessionId) {
+    appState.nativeHostRooms.delete(room.id);
+    if (!appState.nativeHostRooms.size) {
+      if (window.sanserNative?.stopHost) window.sanserNative.stopHost().catch(() => {});
+      $("#captureStatus").textContent = "Native client disconnected";
+      hostStats.textContent = "Native SNV inactive";
+    }
+    return;
+  }
+  cleanupClientPeer();
 }
 
 async function startHostPeer(room) {
@@ -817,9 +982,23 @@ function readTransportMode() {
   const mode = raw === "p2p" ? "webrtc-adaptive" : raw;
   return {
     mode,
-    adaptive: mode !== "webrtc-fixed",
-    label: mode === "webrtc-fixed" ? "WebRTC fixed" : "WebRTC adaptive"
+    adaptive: mode === "webrtc-adaptive",
+    label: mode === NATIVE_TRANSPORT
+      ? "Native SNV"
+      : (mode === "webrtc-fixed" ? "WebRTC fixed" : "WebRTC adaptive")
   };
+}
+
+function isNativeTransport() {
+  return readTransportMode().mode === NATIVE_TRANSPORT;
+}
+
+function isNativeRoom(room) {
+  return room?.native?.transport === "snv-tcp";
+}
+
+function readNativePort() {
+  return Math.round(clamp(Number($("#nativeListenPort")?.value || NATIVE_DEFAULT_PORT), 1, 65535));
 }
 
 function attachHostTransport(pc, sender, quality) {
@@ -1072,6 +1251,10 @@ async function disconnectClient() {
 async function cleanupClientPeer() {
   hideConnecting();
   if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
+  if (appState.clientRoom && isNativeRoom(appState.clientRoom) && window.sanserNative?.stopClient) {
+    await window.sanserNative.stopClient().catch(() => {});
+  }
+  appState.nativeClientConnected = false;
   if (appState.clientPeer) appState.clientPeer.close();
   appState.clientPeer = null;
   appState.clientRoom = null;
