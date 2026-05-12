@@ -8,10 +8,12 @@ Current scope:
 - D3D11 capture from a selected adapter/output
 - BMP frame dump for validation
 - BGRA frame pipe mode for Node/Electron integration
+- Media Foundation H.264 file encode prototype with hardware transforms requested
 
 Not included yet:
 
-- NVENC/AMF/QuickSync hardware encoding
+- Direct NVIDIA NVENC SDK backend with low-level GPU encoder controls
+- Intel QuickSync / AMD AMF backend-specific controls
 - Audio capture
 - Network transport
 - Native client decode/render
@@ -42,6 +44,32 @@ Options:
 ```
 
 If the desktop is idle, the duplicator may wait until the screen changes. Move the mouse or open a window to produce frames.
+
+## Hardware Encoder Probe
+
+List Windows Media Foundation hardware encoders:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --list-encoders
+```
+
+This reports hardware MFT encoders exposed by the GPU driver/Windows stack for H.264, H.265/HEVC, and AV1. On NVIDIA systems this may be backed by NVENC, but this prototype does not use the NVIDIA Video Codec SDK directly yet.
+
+## H.264 Encode Test
+
+Write a short H.264 MP4 from native captured frames:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode h264 --frames 300 --fps 60 --interval-ms 0 --bitrate 28000000 --output-file native-captures\capture_h264.mp4
+```
+
+Open `native-captures\capture_h264.mp4` after the command finishes. If the desktop is idle, move the mouse or drag a window so Desktop Duplication produces changed frames.
+
+Use `--software-encoder` to disable the hardware-transform request and compare behavior:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode h264 --frames 300 --fps 60 --interval-ms 0 --software-encoder --output-file native-captures\capture_h264_software.mp4
+```
 
 ## Pipe Mode
 

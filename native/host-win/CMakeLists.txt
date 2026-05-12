@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(sanser-native-host
   src/main.cpp
   src/desktop_duplication.cpp
+  src/mf_video_encoder.cpp
   src/bmp_writer.cpp
 )
 
@@ -22,6 +23,10 @@ target_include_directories(sanser-native-host PRIVATE src)
 target_link_libraries(sanser-native-host PRIVATE
   d3d11
   dxgi
+  mfplat
+  mfreadwrite
+  mfuuid
+  ole32
 )
 
 if (MSVC)
