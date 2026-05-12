@@ -483,19 +483,14 @@ async function connectToDevice(deviceId) {
       }
     });
     appState.clientRoom = data.room;
-    $("#clientRoleBadge").classList.remove("is-hidden");
     
-    // Request fullscreen
-    try {
-      const vs = document.getElementById("videoShell");
-      if (vs.requestFullscreen) {
-        await vs.requestFullscreen();
-      } else if (vs.webkitRequestFullscreen) {
-        await vs.webkitRequestFullscreen();
-      }
-    } catch (e) {
-      console.warn("Fullscreen error:", e);
-    }
+    const emptyStrong = document.querySelector("#emptyStream strong");
+    const emptySpan = document.querySelector("#emptyStream span");
+    if (emptyStrong) emptyStrong.textContent = "Đang kết nối...";
+    if (emptySpan) emptySpan.textContent = `Đang chờ tín hiệu từ ${device.name}...`;
+
+    
+    // Fullscreen is moved to ontrack per user request
   } catch (error) {
     connectError.textContent = error.message;
     streamStatus.textContent = "Idle";
@@ -541,10 +536,24 @@ async function startClientPeer(room) {
   $(".stream-dock").classList.add("is-visible");
   appState.clientRoom = room;
   appState.clientPeer = createPeerConnection(room, "client");
-  appState.clientPeer.ontrack = (event) => {
+  appState.clientPeer.ontrack = async (event) => {
     remoteVideo.srcObject = event.streams[0];
     emptyStream.classList.add("is-hidden");
     streamStatus.textContent = "Streaming";
+    $("#clientRoleBadge").classList.remove("is-hidden");
+    
+    // Request fullscreen ONLY when stream arrives
+    try {
+      const vs = document.getElementById("videoShell");
+      if (vs.requestFullscreen) {
+        await vs.requestFullscreen();
+      } else if (vs.webkitRequestFullscreen) {
+        await vs.webkitRequestFullscreen();
+      }
+    } catch (e) {
+      console.warn("Fullscreen error:", e);
+    }
+    
     monitorClientStats(appState.clientPeer);
   };
   appState.clientPeer.ondatachannel = (event) => {
@@ -578,6 +587,8 @@ function createPeerConnection(room, role) {
   pc.oniceconnectionstatechange = () => {
     if (role === "client" && ["failed", "disconnected"].includes(pc.iceConnectionState)) {
       streamStatus.textContent = `Connection ${pc.iceConnectionState}`;
+      connectError.textContent = "Không thể kết nối tới máy chủ! Vui lòng thử lại.";
+      cleanupClientPeer();
     }
   };
   return pc;
@@ -753,6 +764,12 @@ async function cleanupClientPeer() {
   remoteVideo.srcObject = null;
   emptyStream.classList.remove("is-hidden");
   $("#clientRoleBadge").classList.add("is-hidden");
+  
+  const emptyStrong = document.querySelector("#emptyStream strong");
+  const emptySpan = document.querySelector("#emptyStream span");
+  if (emptyStrong) emptyStrong.textContent = "No active stream";
+  if (emptySpan) emptySpan.textContent = "Choose an online computer.";
+  
   streamStatus.textContent = "Idle";
   
   // Exit fullscreen
