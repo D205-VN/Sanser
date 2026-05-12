@@ -262,6 +262,7 @@ function connectEvents() {
     if (data.room.hostSessionId === appState.sessionId) {
       await startHostPeer(data.room).catch((error) => {
         $("#captureStatus").textContent = error.message || "Could not start stream";
+        api("/api/connect/close", { method: "POST", body: { roomId: data.room.id } }).catch(() => {});
       });
       return;
     }
