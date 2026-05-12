@@ -96,6 +96,8 @@ function bindUi() {
   loginTab.addEventListener("click", () => setAuthMode("login"));
   registerTab.addEventListener("click", () => setAuthMode("register"));
   authForm.addEventListener("submit", submitAuth);
+  $("#authServerUrlInput").addEventListener("change", syncAuthServerUrl);
+  $("#authUseLocalServerButton").addEventListener("click", useLocalServer);
   $("#logoutButton").addEventListener("click", logout);
   $("#accountLogoutButton").addEventListener("click", logout);
   $("#refreshDevices").addEventListener("click", refreshDevices);
@@ -186,6 +188,7 @@ function hydrateDefaults() {
   $("#hostName").value = localStorage.getItem("gr_host_name") || defaultComputerName();
   $("#hostGpu").value = localStorage.getItem("gr_host_gpu") || defaultGpuLabel();
   $("#serverUrlInput").value = appState.apiBase;
+  $("#authServerUrlInput").value = appState.apiBase;
   updateServerUrlLabel();
 }
 
@@ -210,6 +213,9 @@ function setAuthMode(mode) {
 async function submitAuth(event) {
   event.preventDefault();
   authError.textContent = "";
+  syncAuthServerUrl();
+  authSubmit.disabled = true;
+  authSubmit.textContent = authMode === "login" ? "Đang đăng nhập..." : "Đang tạo tài khoản...";
   const body = {
     name: $("#nameInput").value.trim(),
     email: $("#emailInput").value.trim(),
@@ -221,8 +227,23 @@ async function submitAuth(event) {
     localStorage.setItem("gr_token", data.token);
     enterApp(data.user);
   } catch (error) {
-    authError.textContent = error.message;
+    const message = friendlyAuthError(error.message);
+    authError.textContent = message;
+    showToast(message, "error");
+  } finally {
+    authSubmit.disabled = false;
+    authSubmit.textContent = authMode === "login" ? "Đăng nhập" : "Tạo tài khoản";
   }
+}
+
+function friendlyAuthError(message) {
+  if (/Invalid email or password/i.test(message)) return "Email hoặc mật khẩu không đúng.";
+  if (/Email already exists/i.test(message)) return "Email này đã được đăng ký.";
+  if (/Name, email/i.test(message)) return "Vui lòng nhập tên, email và mật khẩu ít nhất 6 ký tự.";
+  if (/Failed to fetch|NetworkError|Load failed|AbortError|Request timed out/i.test(message)) {
+    return `Không kết nối được server (${currentServerLabel()}). Kiểm tra Server URL hoặc mạng.`;
+  }
+  return message || "Đăng nhập thất bại.";
 }
 
 function showAuth() {
@@ -875,8 +896,7 @@ function applyLiveSetting(id) {
 
 function applyServerUrl() {
   const nextBase = normalizeServerUrl($("#serverUrlInput").value);
-  localStorage.setItem("gr_server_url", nextBase);
-  appState.apiBase = nextBase;
+  setServerUrl(nextBase);
   updateServerUrlLabel();
   localStorage.removeItem("gr_token");
   appState.token = "";
@@ -889,20 +909,51 @@ function updateServerUrlLabel() {
   $("#serverUrlLabel").textContent = appState.apiBase
     ? `Using ${appState.apiBase}`
     : "Using local embedded server.";
+  $("#authServerHint").textContent = appState.apiBase
+    ? `Đang gọi ${appState.apiBase}`
+    : `Đang gọi server local (${window.location.origin}).`;
+}
+
+function syncAuthServerUrl() {
+  const nextBase = normalizeServerUrl($("#authServerUrlInput").value);
+  setServerUrl(nextBase);
+  $("#serverUrlInput").value = nextBase;
+  updateServerUrlLabel();
+}
+
+function useLocalServer() {
+  $("#authServerUrlInput").value = "";
+  syncAuthServerUrl();
+  authError.textContent = "";
+}
+
+function setServerUrl(nextBase) {
+  localStorage.setItem("gr_server_url", nextBase);
+  appState.apiBase = nextBase;
+}
+
+function currentServerLabel() {
+  return appState.apiBase || window.location.origin;
 }
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (appState.token) headers.Authorization = `Bearer ${appState.token}`;
-  const init = { ...options, headers };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), 12000);
+  const init = { ...options, headers, signal: options.signal || controller.signal };
   if (options.body && typeof options.body !== "string") {
     init.body = JSON.stringify(options.body);
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(apiUrl(path), init);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "Request failed.");
-  return data;
+  try {
+    const response = await fetch(apiUrl(path), init);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Request failed.");
+    return data;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function apiUrl(path) {

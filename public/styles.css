@@ -197,6 +197,28 @@ input:focus, select:focus {
 
 button:disabled, input:disabled { cursor: not-allowed; opacity: 0.35; }
 .form-error { min-height: 18px; color: var(--red); font-size: 13px; }
+.form-error:not(:empty) {
+  padding: 10px 12px;
+  border: 1px solid rgba(229,49,112,0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(229,49,112,0.1);
+}
+.auth-server-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+.auth-server-actions small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.auth-server-actions .link-action {
+  min-height: auto;
+  padding: 0;
+  white-space: nowrap;
+}
 
 .register-only { transition: all 0.3s ease; }
 

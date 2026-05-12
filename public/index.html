@@ -49,8 +49,16 @@
             <span>Mật khẩu</span>
             <input id="passwordInput" type="password" autocomplete="current-password" placeholder="6+ ký tự">
           </label>
+          <label class="field">
+            <span>Server URL</span>
+            <input id="authServerUrlInput" placeholder="Để trống = server local">
+          </label>
+          <div class="auth-server-actions">
+            <small id="authServerHint">Đang dùng server local.</small>
+            <button class="link-action" id="authUseLocalServerButton" type="button">Dùng local</button>
+          </div>
+          <p class="form-error" id="authError" role="alert" aria-live="polite"></p>
           <button class="primary-action" id="authSubmit" type="submit">Đăng nhập</button>
-          <p class="form-error" id="authError"></p>
         </form>
       </section>
     </main>
