@@ -408,10 +408,12 @@ async function handleApi(req, res, url) {
       updatedAt: Date.now()
     };
     state.rooms.set(room.id, room);
+    console.log(`[CONNECT] Room ${room.id} created. Host=${room.hostSessionId} Client=${room.clientSessionId}`);
     sendJson(res, 200, { room });
     sendEvent(user.id, "connect-request", { room, targetSessionId: room.hostSessionId });
     sendEvent(user.id, "connect-accepted", { room, targetSessionId: room.hostSessionId });
     sendEvent(user.id, "connect-accepted", { room, targetSessionId: room.clientSessionId });
+    console.log(`[CONNECT] Events sent to user ${user.id}. SSE clients: ${state.clientsByUser.get(user.id)?.size || 0}`);
     return;
   }
 
@@ -450,6 +452,7 @@ async function handleApi(req, res, url) {
       sendJson(res, 403, { error: "Session does not belong to this room." });
       return;
     }
+    console.log(`[SIGNAL] ${body.message?.type || '?'} from=${fromSessionId.slice(-6)} to=${targetSessionId.slice(-6)} room=${room.id.slice(-8)}`);
     sendEvent(user.id, "signal", {
       roomId: room.id,
       fromSessionId,
