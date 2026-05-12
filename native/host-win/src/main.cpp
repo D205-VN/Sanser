@@ -275,7 +275,7 @@ std::wstring utf8ToWide(const std::string& value) {
   return wide;
 }
 
-void movePointerNormalized(double normalizedX, double normalizedY) {
+bool movePointerNormalized(double normalizedX, double normalizedY) {
   const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
   const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
   const int width = std::max(GetSystemMetrics(SM_CXVIRTUALSCREEN), 1);
@@ -285,7 +285,7 @@ void movePointerNormalized(double normalizedX, double normalizedY) {
   const double y = std::clamp(normalizedY, 0.0, 1.0);
   const int screenX = left + static_cast<int>(std::lround(x * static_cast<double>(width - 1)));
   const int screenY = top + static_cast<int>(std::lround(y * static_cast<double>(height - 1)));
-  SetCursorPos(screenX, screenY);
+  return SetCursorPos(screenX, screenY) != 0;
 }
 
 DWORD mouseButtonFlag(int button, bool down) {
@@ -294,21 +294,31 @@ DWORD mouseButtonFlag(int button, bool down) {
   return down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
 }
 
-void sendMouseButton(int button, bool down) {
-  INPUT input{};
-  input.type = INPUT_MOUSE;
-  input.mi.dwFlags = mouseButtonFlag(button, down);
-  SendInput(1, &input, sizeof(input));
+DWORD normalizeMacMouseButton(int button, bool down) {
+  if (button == 1) return down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+  if (button == 2) return down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+  return down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
 }
 
-void sendWheel(double deltaY) {
-  if (std::abs(deltaY) < 0.01) return;
+bool sendMouseButton(int button, bool down) {
+  INPUT input{};
+  input.type = INPUT_MOUSE;
+  input.mi.dwFlags = normalizeMacMouseButton(button, down);
+  if (SendInput(1, &input, sizeof(input)) == 1) return true;
+  mouse_event(input.mi.dwFlags, 0, 0, 0, 0);
+  return GetLastError() == ERROR_SUCCESS;
+}
+
+bool sendWheel(double deltaY) {
+  if (std::abs(deltaY) < 0.01) return true;
   const double clamped = std::clamp(-deltaY * static_cast<double>(WHEEL_DELTA), -1200.0, 1200.0);
   INPUT input{};
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = MOUSEEVENTF_WHEEL;
   input.mi.mouseData = static_cast<DWORD>(static_cast<LONG>(std::lround(clamped)));
-  SendInput(1, &input, sizeof(input));
+  if (SendInput(1, &input, sizeof(input)) == 1) return true;
+  mouse_event(MOUSEEVENTF_WHEEL, 0, 0, static_cast<DWORD>(static_cast<LONG>(std::lround(clamped))), 0);
+  return GetLastError() == ERROR_SUCCESS;
 }
 
 WORD macKeyCodeToVirtualKey(int keyCode, const std::string& keyText) {
@@ -397,13 +407,15 @@ WORD macKeyCodeToVirtualKey(int keyCode, const std::string& keyText) {
   return 0;
 }
 
-void sendVirtualKey(WORD virtualKey, bool down) {
-  if (virtualKey == 0) return;
+bool sendVirtualKey(WORD virtualKey, bool down) {
+  if (virtualKey == 0) return false;
   INPUT input{};
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = virtualKey;
   input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
-  SendInput(1, &input, sizeof(input));
+  if (SendInput(1, &input, sizeof(input)) == 1) return true;
+  keybd_event(static_cast<BYTE>(virtualKey), 0, down ? 0 : KEYEVENTF_KEYUP, 0);
+  return GetLastError() == ERROR_SUCCESS;
 }
 
 void sendShortcut(WORD virtualKey) {
@@ -460,22 +472,30 @@ void handleControlPayload(const std::string& json) {
   } else if (type == "pointer-down" || type == "pointer-up") {
     const double x = jsonDoubleValue(json, "x");
     const double y = jsonDoubleValue(json, "y");
-    movePointerNormalized(x, y);
-    sendMouseButton(jsonIntValue(json, "button"), type == "pointer-down");
+    const bool moved = movePointerNormalized(x, y);
+    const bool clicked = sendMouseButton(jsonIntValue(json, "button"), type == "pointer-down");
     std::cerr << "SNINPUT_APPLIED " << type
               << " button=" << jsonIntValue(json, "button")
               << " x=" << x
               << " y=" << y
+              << " moved=" << (moved ? "yes" : "no")
+              << " sent=" << (clicked ? "yes" : "no")
               << "\n";
   } else if (type == "wheel") {
-    movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
-    sendWheel(jsonDoubleValue(json, "dy"));
-    std::cerr << "SNINPUT_APPLIED wheel dy=" << jsonDoubleValue(json, "dy") << "\n";
+    const bool moved = movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
+    const bool wheeled = sendWheel(jsonDoubleValue(json, "dy"));
+    std::cerr << "SNINPUT_APPLIED wheel dy=" << jsonDoubleValue(json, "dy")
+              << " moved=" << (moved ? "yes" : "no")
+              << " sent=" << (wheeled ? "yes" : "no")
+              << "\n";
   } else if (type == "key-down" || type == "key-up") {
     const WORD virtualKey = macKeyCodeToVirtualKey(jsonIntValue(json, "keyCode", -1),
                                                    jsonStringValue(json, "key"));
-    sendVirtualKey(virtualKey, type == "key-down");
-    std::cerr << "SNINPUT_APPLIED " << type << " vk=" << virtualKey << "\n";
+    const bool sent = sendVirtualKey(virtualKey, type == "key-down");
+    std::cerr << "SNINPUT_APPLIED " << type
+              << " vk=" << virtualKey
+              << " sent=" << (sent ? "yes" : "no")
+              << "\n";
   } else if (type == "modifiers") {
     handleModifierState(jsonIntValue(json, "keyCode", -1), jsonIntValue(json, "modifiers", 0));
   } else if (type == "clipboard") {
