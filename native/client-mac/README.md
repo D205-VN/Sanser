@@ -63,7 +63,7 @@ npm run native:client-mac:listen-snv -- 7777 --max-packets 180
 Then start the Windows native host with the Mac Tailscale IP:
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect MAC_TAILSCALE_IP:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
 ```
 
 The Mac command decodes packets as they arrive and prints the same decode summary. This is Phase 6C's first network transport: TCP over Tailscale, before RTP/UDP/QUIC.
@@ -79,7 +79,7 @@ npm run native:client-mac:listen-render-snv -- 7777 --max-packets 180
 Then start the Windows native host:
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect MAC_TAILSCALE_IP:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
 ```
 
 Decoded `CVPixelBuffer` frames are submitted to a Metal renderer and displayed as NV12 textures.

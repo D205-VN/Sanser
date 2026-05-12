@@ -123,7 +123,7 @@ npm run native:client-mac:listen-snv -- 7777 --max-packets 180
 ```
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect MAC_TAILSCALE_IP:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
 ```
 
 The app transport currently remains WebRTC with adaptive bitrate and split data channels. The next native integration step is rendering decoded frames through Metal, then moving the packets onto RTP or UDP/QUIC.

@@ -91,7 +91,7 @@ Do not run the stdout form directly in a normal terminal unless you are redirect
 Stream packets to the macOS native client over TCP:
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect MAC_TAILSCALE_IP:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
 ```
 
 Start the Mac receiver first:

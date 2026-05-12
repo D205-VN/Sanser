@@ -876,7 +876,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
     }
 
     std::cout << "SNV1 TCP listener ready on 0.0.0.0:" << port << "\n";
-    std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect MAC_TAILSCALE_IP:" << port << "\n";
+    std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port << "\n";
 
     sockaddr_in peerAddress{};
     socklen_t peerLength = sizeof(peerAddress);
@@ -1297,7 +1297,7 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
       }
 
       std::cout << "SNV1 Metal render listener ready on 0.0.0.0:" << port << "\n";
-      std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect MAC_TAILSCALE_IP:" << port << "\n";
+      std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port << "\n";
 
       sockaddr_in peerAddress{};
       socklen_t peerLength = sizeof(peerAddress);
