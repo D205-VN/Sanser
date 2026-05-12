@@ -12,6 +12,7 @@
     "tailscale:install": "node scripts/install-tailscale.js",
     "native:host-win:configure": "node scripts/run-cmake.js -S native/host-win -B native/host-win/build -G \"Visual Studio 17 2022\" -A x64",
     "native:host-win:build": "node scripts/run-cmake.js --build native/host-win/build --config Release",
+    "native:host-win:inspect-snv": "node scripts/inspect-snv.js",
     "native:client-mac:configure": "node scripts/run-cmake.js -S native/client-mac -B native/client-mac/build -DCMAKE_BUILD_TYPE=Release",
     "native:client-mac:build": "node scripts/run-cmake.js --build native/client-mac/build --config Release",
     "native:client-mac:probe": "./native/client-mac/build/sanser-native-client --probe",

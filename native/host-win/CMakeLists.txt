@@ -10,6 +10,7 @@ add_executable(sanser-native-host
   src/main.cpp
   src/desktop_duplication.cpp
   src/mf_video_encoder.cpp
+  src/mf_video_packet_encoder.cpp
   src/bmp_writer.cpp
 )
 

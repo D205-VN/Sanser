@@ -9,14 +9,15 @@ Current scope:
 - BMP frame dump for validation
 - BGRA frame pipe mode for Node/Electron integration
 - Media Foundation H.264 file encode prototype with hardware transforms requested
+- SNV1 H.264 packet pipe prototype for native streaming integration
 
 Not included yet:
 
 - Direct NVIDIA NVENC SDK backend with low-level GPU encoder controls
 - Intel QuickSync / AMD AMF backend-specific controls
 - Audio capture
-- Network transport
-- Native client decode/render
+- Network transport for SNV1 packets
+- Native client decode/render integration
 
 ## Build
 
@@ -69,6 +70,53 @@ Use `--software-encoder` to disable the hardware-transform request and compare b
 
 ```powershell
 .\native\host-win\build\Release\sanser-native-host.exe --encode h264 --frames 300 --fps 60 --interval-ms 0 --software-encoder --output-file native-captures\capture_h264_software.mp4
+```
+
+## H.264 Packet Pipe Test
+
+Write realtime-style H.264 packets with `SNV1` headers:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --packet-file native-captures\capture_h264.snv
+```
+
+Omit `--packet-file` only when another process is reading stdout:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --fps 60 --interval-ms 0
+```
+
+Do not run the stdout form directly in a normal terminal unless you are redirecting or piping it; it writes binary data.
+
+Inspect a written packet file:
+
+```powershell
+npm run native:host-win:inspect-snv -- native-captures\capture_h264.snv
+```
+
+Each packet is:
+
+```text
+SNV1 header
+H.264 sample payload emitted by Media Foundation
+```
+
+Header layout, little-endian:
+
+```cpp
+struct EncodedPacketHeader {
+  char magic[4];              // "SNV1"
+  uint32_t headerSize;        // sizeof(EncodedPacketHeader)
+  uint32_t codec;             // 1 = H.264
+  uint32_t packetFormat;      // 1 = Media Foundation compressed sample bytes
+  uint32_t width;
+  uint32_t height;
+  uint64_t sequence;
+  uint64_t timestampMicros;
+  uint32_t durationMicros;
+  uint32_t flags;             // bit 0 = keyframe, bit 1 = hardware encoder
+  uint32_t payloadSize;
+};
 ```
 
 ## Pipe Mode

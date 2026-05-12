@@ -109,7 +109,14 @@ npm run native:host-win:build
 .\native\host-win\build\Release\sanser-native-host.exe --frames 5 --interval-ms 100 --output-dir native-captures
 ```
 
-The prototype writes BMP frames for validation, supports `--pipe --fps 60` to stream BGRA frames to stdout, and has a Media Foundation H.264 file-encode prototype. The app transport currently remains WebRTC with adaptive bitrate and split data channels. The later transport step is moving native encoded packets onto RTP first, then a custom UDP/QUIC transport with a jitter buffer.
+The prototype writes BMP frames for validation, supports `--pipe --fps 60` to stream BGRA frames to stdout, has a Media Foundation H.264 file-encode prototype, and can now write realtime-style H.264 `SNV1` packets:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --packet-file native-captures\capture_h264.snv
+npm run native:host-win:inspect-snv -- native-captures\capture_h264.snv
+```
+
+The app transport currently remains WebRTC with adaptive bitrate and split data channels. The next native integration step is reading `SNV1` packets on macOS, decoding them with VideoToolbox, then rendering decoded frames through Metal before moving the packets onto RTP or UDP/QUIC.
 
 ## Native macOS Client Prototype
 
