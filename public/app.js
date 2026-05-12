@@ -779,6 +779,9 @@ function handleRemoteInput(raw) {
   try {
     const payload = JSON.parse(raw);
     $("#captureStatus").textContent = `Input ${payload.type}`;
+    if (window.sanserHost?.input) {
+      window.sanserHost.input(payload);
+    }
   } catch {
     $("#captureStatus").textContent = "Input event";
   }

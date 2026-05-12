@@ -1,11 +1,12 @@
 const path = require("path");
 const fs = require("fs");
 const { spawn, spawnSync } = require("child_process");
-const { app, BrowserWindow, desktopCapturer, dialog, session, shell } = require("electron");
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session, shell } = require("electron");
 const { startServer } = require("../server");
 
 let mainWindow = null;
 let serverHandle = null;
+let nativeInputWorker = null;
 
 const gotLock = app.requestSingleInstanceLock();
 
@@ -37,12 +38,16 @@ app.on("before-quit", () => {
   if (serverHandle?.server) {
     serverHandle.server.close();
   }
+  if (nativeInputWorker) {
+    nativeInputWorker.kill();
+  }
 });
 
 async function boot() {
   process.env.GAME_REMOTE_DATA_DIR = path.join(app.getPath("userData"), "data");
   await ensureTailscaleReady();
   installScreenCaptureHandler();
+  installInputHandler();
   serverHandle = await startEmbeddedServer();
   createWindow(`http://127.0.0.1:${serverHandle.port}`);
 }
@@ -228,7 +233,8 @@ function createWindow(url) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: false,
+      preload: path.join(__dirname, "preload.js")
     }
   });
 
@@ -241,6 +247,120 @@ function createWindow(url) {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+}
+
+function installInputHandler() {
+  ipcMain.on("sanser:host-input", (_event, payload = {}) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    sendHostInput(payload);
+  });
+}
+
+function sendHostInput(payload) {
+  if (sendNativeHostInput(payload)) return;
+
+  const type = String(payload.type || "");
+  if (type.startsWith("pointer")) {
+    const point = screenPoint(payload);
+    mainWindow.webContents.sendInputEvent({
+      type: "mouseMove",
+      x: point.x,
+      y: point.y,
+      button: mouseButton(payload.button)
+    });
+    if (type === "pointer-down" || type === "pointer-up") {
+      mainWindow.webContents.sendInputEvent({
+        type: type === "pointer-down" ? "mouseDown" : "mouseUp",
+        x: point.x,
+        y: point.y,
+        button: mouseButton(payload.button),
+        clickCount: 1
+      });
+    }
+    return;
+  }
+
+  if (type === "wheel") {
+    mainWindow.webContents.sendInputEvent({
+      type: "mouseWheel",
+      deltaX: Number(payload.dx || 0),
+      deltaY: Number(payload.dy || 0)
+    });
+    return;
+  }
+
+  if (type === "key-down" || type === "key-up") {
+    mainWindow.webContents.sendInputEvent({
+      type: type === "key-down" ? "keyDown" : "keyUp",
+      keyCode: String(payload.key || payload.code || ""),
+      modifiers: keyModifiers(payload)
+    });
+  }
+}
+
+function sendNativeHostInput(payload) {
+  if (process.platform !== "win32") return false;
+  const worker = getNativeInputWorker();
+  if (!worker?.stdin?.writable) return false;
+  const point = screenPoint(payload);
+  const nativePayload = {
+    ...payload,
+    screenX: point.x,
+    screenY: point.y,
+    buttonName: mouseButton(payload.button)
+  };
+  worker.stdin.write(`${JSON.stringify(nativePayload)}\n`);
+  return true;
+}
+
+function getNativeInputWorker() {
+  if (nativeInputWorker && !nativeInputWorker.killed) return nativeInputWorker;
+  const script = path.join(__dirname, "input-worker-win.ps1");
+  nativeInputWorker = spawn("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    script
+  ], {
+    stdio: ["pipe", "ignore", "ignore"],
+    windowsHide: true
+  });
+  nativeInputWorker.on("exit", () => {
+    nativeInputWorker = null;
+  });
+  nativeInputWorker.on("error", () => {
+    nativeInputWorker = null;
+  });
+  return nativeInputWorker;
+}
+
+function screenPoint(payload) {
+  const bounds = screen.getPrimaryDisplay().workArea;
+  return {
+    x: Math.round(bounds.x + clamp01(Number(payload.x || 0)) * bounds.width),
+    y: Math.round(bounds.y + clamp01(Number(payload.y || 0)) * bounds.height)
+  };
+}
+
+function mouseButton(button) {
+  if (button === 1) return "middle";
+  if (button === 2) return "right";
+  return "left";
+}
+
+function keyModifiers(payload) {
+  const modifiers = [];
+  if (payload.alt) modifiers.push("alt");
+  if (payload.ctrl) modifiers.push("control");
+  if (payload.shift) modifiers.push("shift");
+  if (payload.meta) modifiers.push("meta");
+  return modifiers;
+}
+
+function clamp01(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(1, value));
 }
 
 function installScreenCaptureHandler() {
