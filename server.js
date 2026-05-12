@@ -55,6 +55,32 @@ async function initDb() {
     await client.query(`
       ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip VARCHAR(255);
     `).catch(() => {});
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS connection_rooms (
+        id VARCHAR(255) PRIMARY KEY,
+        user_id VARCHAR(255) REFERENCES users(id) ON DELETE CASCADE,
+        host_device_id VARCHAR(255),
+        host_session_id VARCHAR(255),
+        client_session_id VARCHAR(255),
+        client_name VARCHAR(255),
+        quality JSONB,
+        status VARCHAR(255) DEFAULT 'accepted',
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS app_events (
+        id BIGSERIAL PRIMARY KEY,
+        user_id VARCHAR(255) REFERENCES users(id) ON DELETE CASCADE,
+        event VARCHAR(255) NOT NULL,
+        payload JSONB NOT NULL,
+        created_at BIGINT NOT NULL
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS app_events_user_id_id_idx ON app_events (user_id, id);
+    `);
   } finally {
     client.release();
   }
@@ -168,21 +194,72 @@ function publicDevice(device) {
   };
 }
 
-function sendEvent(userId, event, payload) {
+function publicRoom(room) {
+  return {
+    id: room.id,
+    userId: room.user_id || room.userId,
+    hostDeviceId: room.host_device_id || room.hostDeviceId,
+    hostSessionId: room.host_session_id || room.hostSessionId,
+    clientSessionId: room.client_session_id || room.clientSessionId,
+    clientName: room.client_name || room.clientName,
+    quality: normalizeQuality(room.quality),
+    status: room.status || "accepted",
+    createdAt: Number(room.created_at || room.createdAt),
+    updatedAt: Number(room.updated_at || room.updatedAt)
+  };
+}
+
+async function getCurrentEventId(userId) {
+  const result = await pool.query('SELECT COALESCE(MAX(id), 0) AS id FROM app_events WHERE user_id = $1', [userId]);
+  return Number(result.rows[0]?.id || 0);
+}
+
+function writeSse(client, eventId, event, payload) {
+  client.res.write(`id: ${eventId}\n`);
+  client.res.write(`event: ${event}\n`);
+  client.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  client.lastEventId = Math.max(client.lastEventId, Number(eventId || 0));
+}
+
+async function sendEvent(userId, event, payload) {
+  const inserted = await pool.query(
+    'INSERT INTO app_events (user_id, event, payload, created_at) VALUES ($1, $2, $3, $4) RETURNING id',
+    [userId, event, payload, Date.now()]
+  );
+  const eventId = Number(inserted.rows[0].id);
   const clients = state.clientsByUser.get(userId);
   if (!clients) return;
-  const data = JSON.stringify(payload);
-  for (const res of clients) {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${data}\n\n`);
+  for (const client of clients) {
+    writeSse(client, eventId, event, payload);
   }
+}
+
+async function pollEvents(userId, client) {
+  const result = await pool.query(
+    'SELECT id, event, payload FROM app_events WHERE user_id = $1 AND id > $2 ORDER BY id ASC LIMIT 100',
+    [userId, client.lastEventId]
+  );
+  for (const row of result.rows) {
+    writeSse(client, Number(row.id), row.event, row.payload);
+  }
+}
+
+async function getRoom(roomId) {
+  if (!roomId) return null;
+  const cached = state.rooms.get(roomId);
+  if (cached) return cached;
+  const result = await pool.query('SELECT * FROM connection_rooms WHERE id = $1', [roomId]);
+  if (result.rows.length === 0) return null;
+  const room = publicRoom(result.rows[0]);
+  state.rooms.set(room.id, room);
+  return room;
 }
 
 async function broadcastDevices(userId) {
   await cleanOfflineDevices();
   const res = await pool.query('SELECT * FROM devices WHERE user_id = $1', [userId]);
   const devices = res.rows.map(publicDevice);
-  sendEvent(userId, "devices", { devices });
+  await sendEvent(userId, "devices", { devices });
 }
 
 async function issueToken(userId) {
@@ -282,17 +359,24 @@ async function handleApi(req, res, url) {
       clients = new Set();
       state.clientsByUser.set(user.id, clients);
     }
-    clients.add(res);
-    res.write(`event: ready\ndata: ${JSON.stringify({ user: publicUser(user), now: Date.now() })}\n\n`);
+    const client = { res, lastEventId: await getCurrentEventId(user.id) };
+    clients.add(client);
+    writeSse(client, 0, "ready", { user: publicUser(user), now: Date.now() });
     await broadcastDevices(user.id);
 
     const keepAlive = setInterval(() => {
       res.write(`event: ping\ndata: ${JSON.stringify({ now: Date.now() })}\n\n`);
     }, 15000);
+    const eventPoller = setInterval(() => {
+      pollEvents(user.id, client).catch((error) => {
+        console.error("Event poll failed:", error.message);
+      });
+    }, 1000);
 
     req.on("close", () => {
       clearInterval(keepAlive);
-      clients.delete(res);
+      clearInterval(eventPoller);
+      clients.delete(client);
       if (clients.size === 0) state.clientsByUser.delete(user.id);
     });
     return;
@@ -408,18 +492,42 @@ async function handleApi(req, res, url) {
       updatedAt: Date.now()
     };
     state.rooms.set(room.id, room);
+    await pool.query(`
+      INSERT INTO connection_rooms (
+        id, user_id, host_device_id, host_session_id, client_session_id, client_name, quality, status, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (id) DO UPDATE SET
+        host_device_id = EXCLUDED.host_device_id,
+        host_session_id = EXCLUDED.host_session_id,
+        client_session_id = EXCLUDED.client_session_id,
+        client_name = EXCLUDED.client_name,
+        quality = EXCLUDED.quality,
+        status = EXCLUDED.status,
+        updated_at = EXCLUDED.updated_at
+    `, [
+      room.id,
+      room.userId,
+      room.hostDeviceId,
+      room.hostSessionId,
+      room.clientSessionId,
+      room.clientName,
+      room.quality,
+      room.status,
+      room.createdAt,
+      room.updatedAt
+    ]);
     console.log(`[CONNECT] Room ${room.id} created. Host=${room.hostSessionId} Client=${room.clientSessionId}`);
     sendJson(res, 200, { room });
-    sendEvent(user.id, "connect-request", { room, targetSessionId: room.hostSessionId });
-    sendEvent(user.id, "connect-accepted", { room, targetSessionId: room.hostSessionId });
-    sendEvent(user.id, "connect-accepted", { room, targetSessionId: room.clientSessionId });
+    await sendEvent(user.id, "connect-request", { room, targetSessionId: room.hostSessionId });
+    await sendEvent(user.id, "connect-accepted", { room, targetSessionId: room.hostSessionId });
+    await sendEvent(user.id, "connect-accepted", { room, targetSessionId: room.clientSessionId });
     console.log(`[CONNECT] Events sent to user ${user.id}. SSE clients: ${state.clientsByUser.get(user.id)?.size || 0}`);
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/connect/respond") {
     const body = await readBody(req);
-    const room = state.rooms.get(String(body.roomId || ""));
+    const room = await getRoom(String(body.roomId || ""));
     if (!room || room.userId !== user.id) {
       sendJson(res, 404, { error: "Room not found." });
       return;
@@ -430,18 +538,25 @@ async function handleApi(req, res, url) {
     }
     room.status = body.accepted ? "accepted" : "rejected";
     room.updatedAt = Date.now();
+    await pool.query('UPDATE connection_rooms SET status = $1, updated_at = $2 WHERE id = $3 AND user_id = $4', [
+      room.status,
+      room.updatedAt,
+      room.id,
+      user.id
+    ]);
+    state.rooms.set(room.id, room);
     const event = body.accepted ? "connect-accepted" : "connect-rejected";
     sendJson(res, 200, { room });
-    sendEvent(user.id, event, { room, targetSessionId: room.clientSessionId });
+    await sendEvent(user.id, event, { room, targetSessionId: room.clientSessionId });
     if (body.accepted) {
-      sendEvent(user.id, event, { room, targetSessionId: room.hostSessionId });
+      await sendEvent(user.id, event, { room, targetSessionId: room.hostSessionId });
     }
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/signaling") {
     const body = await readBody(req);
-    const room = state.rooms.get(String(body.roomId || ""));
+    const room = await getRoom(String(body.roomId || ""));
     if (!room || room.userId !== user.id || room.status !== "accepted") {
       sendJson(res, 404, { error: "Accepted room not found." });
       return;
@@ -453,7 +568,7 @@ async function handleApi(req, res, url) {
       return;
     }
     console.log(`[SIGNAL] ${body.message?.type || '?'} from=${fromSessionId.slice(-6)} to=${targetSessionId.slice(-6)} room=${room.id.slice(-8)}`);
-    sendEvent(user.id, "signal", {
+    await sendEvent(user.id, "signal", {
       roomId: room.id,
       fromSessionId,
       targetSessionId,
@@ -465,12 +580,19 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/connect/close") {
     const body = await readBody(req);
-    const room = state.rooms.get(String(body.roomId || ""));
+    const room = await getRoom(String(body.roomId || ""));
     if (room && room.userId === user.id) {
       room.status = "closed";
       room.updatedAt = Date.now();
-      sendEvent(user.id, "connect-closed", { room, targetSessionId: room.hostSessionId });
-      sendEvent(user.id, "connect-closed", { room, targetSessionId: room.clientSessionId });
+      await pool.query('UPDATE connection_rooms SET status = $1, updated_at = $2 WHERE id = $3 AND user_id = $4', [
+        room.status,
+        room.updatedAt,
+        room.id,
+        user.id
+      ]);
+      state.rooms.set(room.id, room);
+      await sendEvent(user.id, "connect-closed", { room, targetSessionId: room.hostSessionId });
+      await sendEvent(user.id, "connect-closed", { room, targetSessionId: room.clientSessionId });
     }
     sendJson(res, 200, { ok: true });
     return;
