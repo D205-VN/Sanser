@@ -22,6 +22,7 @@ target_compile_definitions(sanser-native-host PRIVATE
 target_include_directories(sanser-native-host PRIVATE src)
 
 target_link_libraries(sanser-native-host PRIVATE
+  avrt
   d3d11
   dxgi
   mfplat

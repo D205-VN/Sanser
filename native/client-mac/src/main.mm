@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <VideoToolbox/VideoToolbox.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <dispatch/dispatch.h>
 
 #include <chrono>
@@ -19,6 +20,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -90,7 +92,7 @@ void printHelp() {
     << "sanser-native-client --probe\n"
     << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
     << "sanser-native-client --listen-snv PORT [--max-packets N]\n"
-    << "sanser-native-client --listen-render-snv PORT [--control-port PORT] [--max-packets N] [--log-input] [--fullscreen] [--hide-cursor] [--relative-mouse]\n"
+    << "sanser-native-client --listen-render-snv PORT [--control-port PORT] [--audio-port PORT] [--audio-jitter-ms N] [--max-packets N] [--log-input] [--fullscreen] [--hide-cursor] [--relative-mouse]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
@@ -100,7 +102,10 @@ void printHelp() {
     << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
     << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
     << "  --listen-render-snv P Listen over TCP, render with Metal, send native input back\n"
+    << "  --udp-video      Listen for SNU1 UDP video instead of TCP video\n"
     << "  --control-port P  Dedicated native input/stats TCP port; defaults to render port + 1, 0 disables\n"
+    << "  --audio-port P   Listen for SNA1 UDP float PCM audio; defaults to render port + 2, 0 disables\n"
+    << "  --audio-jitter-ms N Target SNA1 audio jitter buffer, default 24 ms\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --log-input       Print each native input event for debugging\n"
     << "  --fullscreen      Open the Metal renderer fullscreen\n"
@@ -196,6 +201,7 @@ public:
     fd_ = fd;
     fdGeneration_ += 1;
     queue_.clear();
+    batchEnabled_ = false;
     condition_.notify_all();
   }
 
@@ -207,6 +213,13 @@ public:
       queue_.clear();
     }
     condition_.notify_all();
+  }
+
+  void setBatchEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (batchEnabled_ == enabled) return;
+    batchEnabled_ = enabled;
+    std::cout << "SNCONTROL inputBatch=" << (enabled ? "enabled" : "disabled") << "\n";
   }
 
   bool sendJson(const std::string& json) {
@@ -232,6 +245,22 @@ private:
     return json.find("\"type\":\"pointer-move\"") != std::string::npos;
   }
 
+  static bool isControlPing(const std::string& json) {
+    return json.find("\"type\":\"control-ping\"") != std::string::npos;
+  }
+
+  static bool isStreamStats(const std::string& json) {
+    return json.find("\"type\":\"stream-stats\"") != std::string::npos;
+  }
+
+  static bool isControlHello(const std::string& json) {
+    return json.find("\"type\":\"control-hello\"") != std::string::npos;
+  }
+
+  static bool isBatchable(const std::string& json) {
+    return !isControlPing(json) && !isStreamStats(json) && !isControlHello(json);
+  }
+
   bool dropOldestPointerMoveLocked() {
     for (auto it = queue_.begin(); it != queue_.end(); ++it) {
       if (isPointerMove(*it)) {
@@ -250,7 +279,7 @@ private:
 
   void workerLoop() {
     while (true) {
-      std::string json;
+      std::vector<std::string> batch;
       std::uint64_t generation = 0;
       int sendFd = -1;
       {
@@ -269,10 +298,20 @@ private:
           std::cerr << "SNINPUT async dup failed; waiting for reconnect.\n";
           continue;
         }
-        json = std::move(queue_.front());
+        const bool batchEnabled = batchEnabled_;
+        batch.push_back(std::move(queue_.front()));
         queue_.pop_front();
+        if (batchEnabled && isBatchable(batch.front())) {
+          while (batch.size() < maxBatchEvents_ && !queue_.empty() && isBatchable(queue_.front())) {
+            batch.push_back(std::move(queue_.front()));
+            queue_.pop_front();
+          }
+        }
       }
 
+      const std::string json = batch.size() == 1
+        ? batch.front()
+        : makeInputBatch(batch);
       const bool sent = sendJsonToFd(sendFd, json);
       close(sendFd);
       if (!sent) {
@@ -285,6 +324,26 @@ private:
         std::cerr << "SNINPUT async send failed; waiting for reconnect.\n";
       }
     }
+  }
+
+  std::string makeInputBatch(const std::vector<std::string>& events) {
+    std::ostringstream out;
+    const std::uint64_t sequence = ++batchSequence_;
+    out << "{\"type\":\"input-batch\""
+        << ",\"sequence\":" << sequence
+        << ",\"sentSteadyMicros\":" << steadyMicros()
+        << ",\"events\":[";
+    for (std::size_t i = 0; i < events.size(); ++i) {
+      if (i > 0) out << ",";
+      out << events[i];
+    }
+    out << "]}";
+    if (events.size() > 1 && (sequence == 1 || sequence % 120 == 0)) {
+      std::cout << "SNINPUT_BATCH_TX sequence=" << sequence
+                << " events=" << events.size()
+                << "\n";
+    }
+    return out.str();
   }
 
   bool sendJsonToFd(int fd, const std::string& json) {
@@ -319,10 +378,13 @@ private:
   std::deque<std::string> queue_;
   std::thread worker_;
   std::uint64_t droppedPointerMoves_ = 0;
+  std::uint64_t batchSequence_ = 0;
   std::uint64_t fdGeneration_ = 0;
   int fd_ = -1;
+  bool batchEnabled_ = false;
   bool stopped_ = false;
   static constexpr std::size_t maxQueueSize_ = 512;
+  static constexpr std::size_t maxBatchEvents_ = 24;
 };
 
 std::shared_ptr<NativeInputSender> gNativeInputSender;
@@ -355,6 +417,18 @@ std::uint64_t jsonUint64Value(const std::string& json, const char* key, std::uin
   } catch (...) {
     return fallback;
   }
+}
+
+bool jsonBoolValue(const std::string& json, const char* key, bool fallback = false) {
+  const std::string needle = std::string("\"") + key + "\"";
+  const std::size_t keyOffset = json.find(needle);
+  if (keyOffset == std::string::npos) return fallback;
+  const std::size_t colon = json.find(':', keyOffset + needle.size());
+  if (colon == std::string::npos) return fallback;
+  const std::size_t valueOffset = skipJsonWhitespace(json, colon + 1);
+  if (json.compare(valueOffset, 4, "true") == 0) return true;
+  if (json.compare(valueOffset, 5, "false") == 0) return false;
+  return fallback;
 }
 
 double backingScaleForView(NSView* view) {
@@ -406,12 +480,52 @@ void sendControlPing(std::uint64_t sequence) {
   sendNativeInputJson(out.str());
 }
 
+void sendControlHello() {
+  std::ostringstream out;
+  out << "{\"type\":\"control-hello\""
+      << ",\"protocolVersion\":2"
+      << ",\"sentSteadyMicros\":" << steadyMicros()
+      << ",\"inputBatch\":true"
+      << ",\"inputAck\":true"
+      << ",\"audioUdp\":true"
+      << ",\"videoUdp\":true"
+      << "}";
+  sendNativeInputJson(out.str());
+  std::cout << "SNCONTROL_HELLO protocol=2 inputBatch=requested fallback=single-event-until-ack\n";
+}
+
 void handleHostControlPayload(const std::string& payload) {
-  if (payload.find("\"type\":\"control-pong\"") == std::string::npos) return;
+  if (payload.find("\"type\":\"control-hello-ack\"") != std::string::npos) {
+    const bool inputBatch = jsonBoolValue(payload, "inputBatch");
+    const bool inputAck = jsonBoolValue(payload, "inputAck");
+    if (gNativeInputSender) {
+      gNativeInputSender->setBatchEnabled(inputBatch && inputAck);
+    }
+    std::cout << "SNCONTROL_HELLO_ACK protocol=" << jsonUint64Value(payload, "protocolVersion")
+              << " inputBatch=" << boolText(inputBatch)
+              << " inputAck=" << boolText(inputAck)
+              << "\n";
+    return;
+  }
+
   const std::uint64_t sentSteadyMicros = jsonUint64Value(payload, "sentSteadyMicros");
   if (sentSteadyMicros == 0) return;
   const double rttMs = static_cast<double>(steadyMicros() - sentSteadyMicros) / 1000.0;
-  std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
+  if (payload.find("\"type\":\"control-pong\"") != std::string::npos) {
+    std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
+    return;
+  }
+  if (payload.find("\"type\":\"input-ack\"") != std::string::npos) {
+    static auto lastAckLog = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastAckLog > std::chrono::milliseconds(250)) {
+      lastAckLog = now;
+      std::cout << "SNINPUT_ACK sequence=" << jsonUint64Value(payload, "sequence")
+                << " applied=" << jsonUint64Value(payload, "applied")
+                << " rttMs=" << std::fixed << std::setprecision(1) << rttMs
+                << "\n";
+    }
+  }
 }
 
 std::string pointerJsonFromPoint(const char* type,
@@ -529,6 +643,11 @@ std::uint32_t readLe32Raw(const std::uint8_t* data) {
        | (static_cast<std::uint32_t>(data[3]) << 24);
 }
 
+std::uint16_t readLe16Raw(const std::uint8_t* data) {
+  return static_cast<std::uint16_t>(data[0])
+       | static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[1]) << 8);
+}
+
 std::uint64_t readLe64Raw(const std::uint8_t* data) {
   std::uint64_t value = 0;
   for (int i = 0; i < 8; ++i) {
@@ -574,6 +693,31 @@ struct SnvPacket {
   std::vector<std::uint8_t> payload;
 };
 
+#pragma pack(push, 1)
+struct UdpVideoFragmentHeader {
+  char magic[4] = {'S', 'N', 'U', '1'};
+  std::uint16_t headerSize = sizeof(UdpVideoFragmentHeader);
+  std::uint16_t fragmentCount = 0;
+  std::uint16_t fragmentIndex = 0;
+  std::uint16_t flags = 0;
+  std::uint64_t packetId = 0;
+  std::uint32_t packetSize = 0;
+  std::uint32_t fragmentOffset = 0;
+  std::uint32_t payloadSize = 0;
+};
+
+struct AudioPacketHeader {
+  char magic[4] = {'S', 'N', 'A', '1'};
+  std::uint16_t headerSize = sizeof(AudioPacketHeader);
+  std::uint16_t channels = 2;
+  std::uint32_t sampleRate = 0;
+  std::uint32_t frameCount = 0;
+  std::uint64_t sequence = 0;
+  std::uint64_t hostUnixMicros = 0;
+  std::uint32_t payloadSize = 0;
+};
+#pragma pack(pop)
+
 struct NalUnit {
   std::vector<std::uint8_t> bytes;
   std::uint8_t type = 0;
@@ -596,6 +740,29 @@ SnvPacket parseSnvHeader(const std::uint8_t* header, std::size_t headerSize) {
   packet.timestampMicros = readLe64Raw(header + 32);
   packet.durationMicros = readLe32Raw(header + 40);
   packet.flags = readLe32Raw(header + 44);
+  return packet;
+}
+
+SnvPacket parseSnvPacketBytes(const std::vector<std::uint8_t>& data) {
+  if (data.size() < 52) {
+    throw std::runtime_error("Truncated SNV1 packet bytes.");
+  }
+  const std::uint32_t headerSize = readLe32Raw(data.data() + 4);
+  if (headerSize < 52 || headerSize > data.size()) {
+    throw std::runtime_error("Invalid SNV1 packet header size.");
+  }
+
+  SnvPacket packet = parseSnvHeader(data.data(), headerSize);
+  if (headerSize >= 60) {
+    packet.hostUnixMicros = readLe64Raw(data.data() + 52);
+  }
+  const std::uint32_t payloadSize = readLe32Raw(data.data() + 48);
+  const std::size_t nextOffset = static_cast<std::size_t>(headerSize) + payloadSize;
+  if (nextOffset > data.size()) {
+    throw std::runtime_error("Truncated SNV1 packet payload.");
+  }
+  packet.payload.assign(data.begin() + static_cast<std::ptrdiff_t>(headerSize),
+                        data.begin() + static_cast<std::ptrdiff_t>(nextOffset));
   return packet;
 }
 
@@ -1139,6 +1306,504 @@ bool readSnvPacketFromFd(int fd, SnvPacket& packet) {
   return true;
 }
 
+struct UdpVideoStats {
+  std::uint64_t datagrams = 0;
+  std::uint64_t fragments = 0;
+  std::uint64_t completedPackets = 0;
+  std::uint64_t droppedAssemblies = 0;
+  std::uint64_t malformedDatagrams = 0;
+  std::uint64_t duplicateFragments = 0;
+};
+
+struct UdpPacketAssembly {
+  std::vector<std::uint8_t> data;
+  std::vector<std::uint8_t> received;
+  std::chrono::steady_clock::time_point createdAt;
+  std::uint32_t receivedBytes = 0;
+  std::uint16_t receivedFragments = 0;
+  std::uint16_t fragmentCount = 0;
+};
+
+class UdpVideoReassembler {
+public:
+  bool push(const std::vector<std::uint8_t>& datagram,
+            std::vector<std::uint8_t>& packetBytes,
+            UdpVideoStats& stats) {
+    stats.datagrams += 1;
+    if (datagram.size() < sizeof(UdpVideoFragmentHeader)) {
+      stats.malformedDatagrams += 1;
+      return false;
+    }
+
+    UdpVideoFragmentHeader header{};
+    std::memcpy(&header, datagram.data(), sizeof(header));
+    if (std::memcmp(header.magic, "SNU1", 4) != 0 ||
+        header.headerSize < sizeof(UdpVideoFragmentHeader) ||
+        header.headerSize > datagram.size() ||
+        header.fragmentCount == 0 ||
+        header.fragmentIndex >= header.fragmentCount ||
+        header.packetSize == 0 ||
+        header.payloadSize == 0 ||
+        static_cast<std::size_t>(header.headerSize) + header.payloadSize > datagram.size() ||
+        static_cast<std::uint64_t>(header.fragmentOffset) + header.payloadSize > header.packetSize) {
+      stats.malformedDatagrams += 1;
+      return false;
+    }
+
+    prune(stats);
+    stats.fragments += 1;
+    auto& assembly = assemblies_[header.packetId];
+    if (assembly.data.empty() ||
+        assembly.data.size() != header.packetSize ||
+        assembly.fragmentCount != header.fragmentCount) {
+      if (!assembly.data.empty()) {
+        stats.droppedAssemblies += 1;
+      }
+      assembly.data.assign(header.packetSize, 0);
+      assembly.received.assign(header.fragmentCount, 0);
+      assembly.createdAt = std::chrono::steady_clock::now();
+      assembly.receivedBytes = 0;
+      assembly.receivedFragments = 0;
+      assembly.fragmentCount = header.fragmentCount;
+    }
+
+    if (assembly.received[header.fragmentIndex]) {
+      stats.duplicateFragments += 1;
+      return false;
+    }
+
+    const auto* payload = datagram.data() + header.headerSize;
+    std::memcpy(assembly.data.data() + header.fragmentOffset, payload, header.payloadSize);
+    assembly.received[header.fragmentIndex] = 1;
+    assembly.receivedBytes += header.payloadSize;
+    assembly.receivedFragments += 1;
+
+    if (assembly.receivedFragments == assembly.fragmentCount &&
+        assembly.receivedBytes == assembly.data.size()) {
+      packetBytes = std::move(assembly.data);
+      assemblies_.erase(header.packetId);
+      stats.completedPackets += 1;
+      return true;
+    }
+
+    if (assemblies_.size() > 128) {
+      assemblies_.erase(assemblies_.begin());
+      stats.droppedAssemblies += 1;
+    }
+    return false;
+  }
+
+private:
+  void prune(UdpVideoStats& stats) {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = assemblies_.begin(); it != assemblies_.end();) {
+      if (now - it->second.createdAt > std::chrono::milliseconds(500)) {
+        it = assemblies_.erase(it);
+        stats.droppedAssemblies += 1;
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  std::map<std::uint64_t, UdpPacketAssembly> assemblies_;
+};
+
+struct UdpAudioStats {
+  std::uint64_t datagrams = 0;
+  std::uint64_t malformed = 0;
+};
+
+struct AudioPayloadPacket {
+  std::uint64_t sequence = 0;
+  std::uint64_t hostUnixMicros = 0;
+  std::uint32_t sampleRate = 0;
+  std::uint16_t channels = 0;
+  std::uint32_t frameCount = 0;
+  std::vector<std::uint8_t> payload;
+  std::chrono::steady_clock::time_point receivedAt;
+};
+
+struct AudioJitterStats {
+  std::uint64_t submittedPackets = 0;
+  std::uint64_t submittedFrames = 0;
+  std::uint64_t lostPackets = 0;
+  std::uint64_t duplicatePackets = 0;
+  std::uint64_t reorderedPackets = 0;
+  std::uint64_t staleDrops = 0;
+  std::uint64_t latencyDrops = 0;
+  std::uint64_t underflows = 0;
+  std::uint64_t queueDrops = 0;
+  std::uint64_t resets = 0;
+  std::uint64_t ageSamples = 0;
+  double ageSumMs = 0.0;
+  double ageMaxMs = 0.0;
+  double bufferMs = 0.0;
+  std::size_t queuedPackets = 0;
+};
+
+class AudioQueuePcmPlayer {
+public:
+  AudioQueuePcmPlayer() = default;
+
+  ~AudioQueuePcmPlayer() {
+    AudioQueueRef oldQueue = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      oldQueue = queue_;
+      queue_ = nullptr;
+      freeBuffers_.clear();
+    }
+    disposeQueue(oldQueue);
+  }
+
+  AudioQueuePcmPlayer(const AudioQueuePcmPlayer&) = delete;
+  AudioQueuePcmPlayer& operator=(const AudioQueuePcmPlayer&) = delete;
+
+  bool submit(std::uint32_t sampleRate,
+              std::uint16_t channels,
+              const std::uint8_t* payload,
+              std::uint32_t payloadSize,
+              std::uint32_t frameCount) {
+    if (sampleRate < 8000 || sampleRate > 384000 || channels == 0 || channels > 8 || frameCount == 0) {
+      return false;
+    }
+    const std::uint32_t bytesPerFrame = static_cast<std::uint32_t>(channels) * sizeof(float);
+    if (bytesPerFrame == 0 || payloadSize < frameCount * bytesPerFrame) {
+      return false;
+    }
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!queue_ || sampleRate_ != sampleRate || channels_ != channels || maxBufferBytes_ < payloadSize) {
+      configureLocked(lock, sampleRate, channels, payloadSize);
+    }
+    if (!queue_ || freeBuffers_.empty()) {
+      queueDrops_ += 1;
+      return false;
+    }
+
+    AudioQueueBufferRef buffer = freeBuffers_.front();
+    freeBuffers_.pop_front();
+    std::memcpy(buffer->mAudioData, payload, payloadSize);
+    buffer->mAudioDataByteSize = payloadSize;
+    const OSStatus status = AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
+    if (status != noErr) {
+      freeBuffers_.push_back(buffer);
+      queueDrops_ += 1;
+      return false;
+    }
+    return true;
+  }
+
+  std::uint64_t takeQueueDrops() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::uint64_t value = queueDrops_;
+    queueDrops_ = 0;
+    return value;
+  }
+
+private:
+  static void callback(void* userData, AudioQueueRef, AudioQueueBufferRef buffer) {
+    auto* player = static_cast<AudioQueuePcmPlayer*>(userData);
+    if (player) player->recycle(buffer);
+  }
+
+  static void disposeQueue(AudioQueueRef queue) {
+    if (!queue) return;
+    AudioQueueStop(queue, true);
+    AudioQueueDispose(queue, true);
+  }
+
+  void configureLocked(std::unique_lock<std::mutex>& lock,
+                       std::uint32_t sampleRate,
+                       std::uint16_t channels,
+                       std::uint32_t requiredBytes) {
+    AudioQueueRef oldQueue = queue_;
+    queue_ = nullptr;
+    freeBuffers_.clear();
+    sampleRate_ = 0;
+    channels_ = 0;
+    maxBufferBytes_ = 0;
+
+    lock.unlock();
+    disposeQueue(oldQueue);
+    lock.lock();
+
+    AudioStreamBasicDescription description{};
+    description.mSampleRate = static_cast<Float64>(sampleRate);
+    description.mFormatID = kAudioFormatLinearPCM;
+    description.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    description.mBytesPerPacket = static_cast<UInt32>(channels * sizeof(float));
+    description.mFramesPerPacket = 1;
+    description.mBytesPerFrame = static_cast<UInt32>(channels * sizeof(float));
+    description.mChannelsPerFrame = channels;
+    description.mBitsPerChannel = 32;
+
+    AudioQueueRef createdQueue = nullptr;
+    checkStatus(AudioQueueNewOutput(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
+                "AudioQueueNewOutput");
+    queue_ = createdQueue;
+    sampleRate_ = sampleRate;
+    channels_ = channels;
+    maxBufferBytes_ = std::max<std::uint32_t>(requiredBytes, 4096);
+
+    constexpr int bufferCount = 48;
+    for (int i = 0; i < bufferCount; ++i) {
+      AudioQueueBufferRef buffer = nullptr;
+      checkStatus(AudioQueueAllocateBuffer(queue_, maxBufferBytes_, &buffer), "AudioQueueAllocateBuffer");
+      freeBuffers_.push_back(buffer);
+    }
+    checkStatus(AudioQueueStart(queue_, nullptr), "AudioQueueStart");
+    std::cout << "SNA1_AUDIO_PLAYBACK sampleRate=" << sampleRate_
+              << " channels=" << channels_
+              << " buffers=" << bufferCount
+              << " bufferBytes=" << maxBufferBytes_
+              << "\n";
+  }
+
+  void recycle(AudioQueueBufferRef buffer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!queue_) return;
+    freeBuffers_.push_back(buffer);
+  }
+
+  std::mutex mutex_;
+  std::deque<AudioQueueBufferRef> freeBuffers_;
+  AudioQueueRef queue_ = nullptr;
+  std::uint32_t sampleRate_ = 0;
+  std::uint16_t channels_ = 0;
+  std::uint32_t maxBufferBytes_ = 0;
+  std::uint64_t queueDrops_ = 0;
+};
+
+class AudioJitterBuffer {
+public:
+  AudioJitterBuffer(std::shared_ptr<AudioQueuePcmPlayer> player, double targetJitterMs)
+    : player_(std::move(player)),
+      targetJitterMs_(std::clamp(targetJitterMs, 0.0, 120.0)),
+      maxDelayMs_(std::max(80.0, targetJitterMs_ * 3.0)),
+      worker_(&AudioJitterBuffer::pumpLoop, this) {}
+
+  ~AudioJitterBuffer() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopped_ = true;
+    }
+    condition_.notify_all();
+    if (worker_.joinable()) worker_.join();
+  }
+
+  AudioJitterBuffer(const AudioJitterBuffer&) = delete;
+  AudioJitterBuffer& operator=(const AudioJitterBuffer&) = delete;
+
+  void push(AudioPayloadPacket packet) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stopped_) return;
+
+    if ((sampleRate_ != 0 && sampleRate_ != packet.sampleRate) ||
+        (channels_ != 0 && channels_ != packet.channels)) {
+      buffer_.clear();
+      started_ = false;
+      hasExpectedSequence_ = false;
+      hasHighestSequence_ = false;
+      missingStartedAt_ = {};
+      stats_.resets += 1;
+      std::cout << "SNA1_JITTER_RESET sampleRate=" << packet.sampleRate
+                << " channels=" << packet.channels
+                << "\n";
+    }
+    sampleRate_ = packet.sampleRate;
+    channels_ = packet.channels;
+
+    if (hasExpectedSequence_ && packet.sequence < expectedSequence_) {
+      stats_.staleDrops += 1;
+      return;
+    }
+    if (hasHighestSequence_ && packet.sequence < highestSequence_) {
+      stats_.reorderedPackets += 1;
+    }
+    if (!hasHighestSequence_ || packet.sequence > highestSequence_) {
+      highestSequence_ = packet.sequence;
+      hasHighestSequence_ = true;
+    }
+
+    const auto inserted = buffer_.emplace(packet.sequence, std::move(packet));
+    if (!inserted.second) {
+      stats_.duplicatePackets += 1;
+      return;
+    }
+
+    pruneLatencyLocked();
+    condition_.notify_one();
+  }
+
+  AudioJitterStats takeStats() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AudioJitterStats snapshot = stats_;
+    snapshot.bufferMs = bufferedDurationMsLocked();
+    snapshot.queuedPackets = buffer_.size();
+    stats_ = {};
+    return snapshot;
+  }
+
+  double targetJitterMs() const {
+    return targetJitterMs_;
+  }
+
+private:
+  double packetDurationMs(const AudioPayloadPacket& packet) const {
+    if (packet.sampleRate == 0) return 0.0;
+    return (static_cast<double>(packet.frameCount) * 1000.0) / static_cast<double>(packet.sampleRate);
+  }
+
+  double bufferedDurationMsLocked() const {
+    double durationMs = 0.0;
+    for (const auto& entry : buffer_) {
+      durationMs += packetDurationMs(entry.second);
+    }
+    return durationMs;
+  }
+
+  void pruneLatencyLocked() {
+    while (buffer_.size() > 1 && bufferedDurationMsLocked() > maxDelayMs_) {
+      const auto droppedSequence = buffer_.begin()->first;
+      buffer_.erase(buffer_.begin());
+      stats_.latencyDrops += 1;
+      if (!hasExpectedSequence_ || expectedSequence_ <= droppedSequence) {
+        expectedSequence_ = droppedSequence + 1;
+        hasExpectedSequence_ = true;
+      }
+      started_ = true;
+      missingStartedAt_ = {};
+    }
+  }
+
+  bool shouldStartLocked() const {
+    if (buffer_.empty()) return false;
+    return targetJitterMs_ <= 0.0 || bufferedDurationMsLocked() >= targetJitterMs_;
+  }
+
+  bool popNextLocked(AudioPayloadPacket& packet) {
+    const auto now = std::chrono::steady_clock::now();
+    pruneLatencyLocked();
+    if (buffer_.empty()) {
+      if (started_) {
+        stats_.underflows += 1;
+      }
+      started_ = false;
+      missingStartedAt_ = {};
+      return false;
+    }
+
+    if (!started_) {
+      if (!shouldStartLocked()) return false;
+      expectedSequence_ = buffer_.begin()->first;
+      hasExpectedSequence_ = true;
+      started_ = true;
+      missingStartedAt_ = {};
+      stats_.resets += 1;
+      std::cout << "SNA1_JITTER_READY targetMs=" << std::fixed << std::setprecision(1)
+                << targetJitterMs_
+                << " bufferedMs=" << bufferedDurationMsLocked()
+                << " packets=" << buffer_.size()
+                << "\n";
+    }
+
+    while (!buffer_.empty() && buffer_.begin()->first < expectedSequence_) {
+      buffer_.erase(buffer_.begin());
+      stats_.staleDrops += 1;
+    }
+    if (buffer_.empty()) return false;
+
+    auto it = buffer_.find(expectedSequence_);
+    if (it == buffer_.end()) {
+      const std::uint64_t firstSequence = buffer_.begin()->first;
+      if (firstSequence > expectedSequence_) {
+        if (missingStartedAt_.time_since_epoch().count() == 0) {
+          missingStartedAt_ = now;
+          return false;
+        }
+        const double waitedMs = std::chrono::duration<double, std::milli>(now - missingStartedAt_).count();
+        if (waitedMs < missingWaitMs_ && bufferedDurationMsLocked() < maxDelayMs_) {
+          return false;
+        }
+        stats_.lostPackets += firstSequence - expectedSequence_;
+        expectedSequence_ = firstSequence;
+        missingStartedAt_ = {};
+        it = buffer_.begin();
+      } else {
+        return false;
+      }
+    } else {
+      missingStartedAt_ = {};
+    }
+
+    packet = std::move(it->second);
+    buffer_.erase(it);
+    expectedSequence_ = packet.sequence + 1;
+    hasExpectedSequence_ = true;
+    return true;
+  }
+
+  void pumpLoop() {
+    while (true) {
+      AudioPayloadPacket packet;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait_for(lock, std::chrono::milliseconds(3), [&] {
+          return stopped_ || !buffer_.empty();
+        });
+        if (stopped_) return;
+        if (!popNextLocked(packet)) continue;
+      }
+
+      bool submitted = false;
+      try {
+        submitted = player_ && player_->submit(packet.sampleRate,
+                                               packet.channels,
+                                               packet.payload.data(),
+                                               static_cast<std::uint32_t>(packet.payload.size()),
+                                               packet.frameCount);
+      } catch (const std::exception& error) {
+        std::cerr << "SNA1_JITTER submit error: " << error.what() << "\n";
+      }
+
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (submitted) {
+        stats_.submittedPackets += 1;
+        stats_.submittedFrames += packet.frameCount;
+        if (packet.hostUnixMicros > 0) {
+          const double ageMs = static_cast<double>(unixMicros() - packet.hostUnixMicros) / 1000.0;
+          stats_.ageSumMs += ageMs;
+          stats_.ageMaxMs = std::max(stats_.ageMaxMs, ageMs);
+          stats_.ageSamples += 1;
+        }
+      } else {
+        stats_.queueDrops += 1;
+      }
+    }
+  }
+
+  std::shared_ptr<AudioQueuePcmPlayer> player_;
+  const double targetJitterMs_;
+  const double maxDelayMs_;
+  static constexpr double missingWaitMs_ = 6.0;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::map<std::uint64_t, AudioPayloadPacket> buffer_;
+  AudioJitterStats stats_;
+  std::thread worker_;
+  std::uint64_t expectedSequence_ = 0;
+  std::uint64_t highestSequence_ = 0;
+  std::uint32_t sampleRate_ = 0;
+  std::uint16_t channels_ = 0;
+  std::chrono::steady_clock::time_point missingStartedAt_{};
+  bool hasExpectedSequence_ = false;
+  bool hasHighestSequence_ = false;
+  bool started_ = false;
+  bool stopped_ = false;
+};
+
 class ScopedFd {
 public:
   explicit ScopedFd(int fd = -1) : fd_(fd) {}
@@ -1190,6 +1855,28 @@ ScopedFd createTcpListener(std::uint16_t port, const char* label) {
   return server;
 }
 
+ScopedFd createUdpListener(std::uint16_t port, const char* label) {
+  ScopedFd server(socket(AF_INET, SOCK_DGRAM, 0));
+  if (server.get() < 0) {
+    throw std::runtime_error(std::string("Could not create ") + label + " UDP listener socket.");
+  }
+
+  int reuse = 1;
+  setsockopt(server.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+  int receiveBufferBytes = 4 * 1024 * 1024;
+  setsockopt(server.get(), SOL_SOCKET, SO_RCVBUF, &receiveBufferBytes, sizeof(receiveBufferBytes));
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_ANY);
+  address.sin_port = htons(port);
+  if (bind(server.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    throw std::runtime_error(std::string("Could not bind ") + label + " UDP listener on port " + std::to_string(port));
+  }
+  return server;
+}
+
 void configureAcceptedTcpSocket(int fd) {
   if (fd < 0) return;
 
@@ -1204,6 +1891,7 @@ void configureAcceptedTcpSocket(int fd) {
 void serviceControlSocket(int fd) {
   std::uint64_t pingSequence = 0;
   auto lastPingAt = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+  sendControlHello();
   while (true) {
     const auto now = std::chrono::steady_clock::now();
     if (now - lastPingAt >= std::chrono::seconds(1)) {
@@ -1791,8 +2479,158 @@ void submitFrameToVideoRenderer(void* context, CVImageBufferRef imageBuffer) {
   [renderer submitPixelBuffer:(CVPixelBufferRef)imageBuffer];
 }
 
+void startDedicatedControlListener(std::uint16_t controlPort,
+                                   std::shared_ptr<NativeInputSender> inputSender) {
+  if (controlPort == 0) return;
+  auto controlServer = std::make_shared<ScopedFd>(createTcpListener(controlPort, "SNINPUT control"));
+  std::cout << "SNINPUT dedicated control listener ready on 0.0.0.0:" << controlPort << "\n";
+  std::thread controlWorker([controlServer, inputSender, controlPort]() {
+    while (true) {
+      sockaddr_in peerAddress{};
+      socklen_t peerLength = sizeof(peerAddress);
+      ScopedFd control(accept(controlServer->get(), reinterpret_cast<sockaddr*>(&peerAddress), &peerLength));
+      if (control.get() < 0) {
+        std::cerr << "SNINPUT control accept failed on port " << controlPort << ".\n";
+        return;
+      }
+      configureAcceptedTcpSocket(control.get());
+
+      char peerIp[INET_ADDRSTRLEN]{};
+      inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
+      std::cout << "SNINPUT dedicated control connected from "
+                << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
+      if (inputSender) {
+        inputSender->setFd(control.get());
+      }
+      serviceControlSocket(control.get());
+      if (inputSender) {
+        inputSender->clearFd(control.get());
+      }
+      std::cout << "SNINPUT dedicated control disconnected; waiting for reconnect.\n";
+    }
+  });
+  controlWorker.detach();
+}
+
+void listenUdpAudio(std::uint16_t audioPort,
+                    double audioJitterMs,
+                    std::shared_ptr<AudioQueuePcmPlayer> player) {
+  if (audioPort == 0 || !player) return;
+  @autoreleasepool {
+    try {
+      ScopedFd server = createUdpListener(audioPort, "SNA1 audio");
+      std::cout << "SNA1 audio listener ready on 0.0.0.0:" << audioPort << "\n";
+
+      AudioJitterBuffer jitter(player, audioJitterMs);
+      std::cout << "SNA1_JITTER_CONFIG targetMs=" << std::fixed << std::setprecision(1)
+                << jitter.targetJitterMs()
+                << "\n";
+
+      std::array<std::uint8_t, 65536> datagramBuffer{};
+      UdpAudioStats stats;
+      auto statsStartedAt = std::chrono::steady_clock::now();
+      while (true) {
+        sockaddr_in peerAddress{};
+        socklen_t peerLength = sizeof(peerAddress);
+        const ssize_t received = recvfrom(server.get(),
+                                          datagramBuffer.data(),
+                                          datagramBuffer.size(),
+                                          0,
+                                          reinterpret_cast<sockaddr*>(&peerAddress),
+                                          &peerLength);
+        if (received < 0) {
+          if (errno == EINTR) continue;
+          throw std::runtime_error("SNA1 UDP receive failed.");
+        }
+        if (received == 0) continue;
+
+        stats.datagrams += 1;
+        const auto* data = datagramBuffer.data();
+        const std::size_t size = static_cast<std::size_t>(received);
+        if (size < sizeof(AudioPacketHeader) || std::memcmp(data, "SNA1", 4) != 0) {
+          stats.malformed += 1;
+          continue;
+        }
+
+        const std::uint16_t headerSize = readLe16Raw(data + 4);
+        const std::uint16_t channels = readLe16Raw(data + 6);
+        const std::uint32_t sampleRate = readLe32Raw(data + 8);
+        const std::uint32_t frameCount = readLe32Raw(data + 12);
+        const std::uint64_t sequence = readLe64Raw(data + 16);
+        const std::uint64_t hostUnixMicros = readLe64Raw(data + 24);
+        const std::uint32_t payloadSize = readLe32Raw(data + 32);
+        const std::size_t expectedPayloadBytes = static_cast<std::size_t>(frameCount)
+          * static_cast<std::size_t>(channels)
+          * sizeof(float);
+
+        if (headerSize < sizeof(AudioPacketHeader) ||
+            headerSize > size ||
+            payloadSize == 0 ||
+            static_cast<std::size_t>(headerSize) + payloadSize > size ||
+            channels == 0 ||
+            channels > 8 ||
+            frameCount == 0 ||
+            expectedPayloadBytes == 0 ||
+            static_cast<std::size_t>(payloadSize) < expectedPayloadBytes) {
+          stats.malformed += 1;
+          continue;
+        }
+
+        const auto* payload = data + headerSize;
+        AudioPayloadPacket packet;
+        packet.sequence = sequence;
+        packet.hostUnixMicros = hostUnixMicros;
+        packet.sampleRate = sampleRate;
+        packet.channels = channels;
+        packet.frameCount = frameCount;
+        packet.payload.assign(payload, payload + expectedPayloadBytes);
+        packet.receivedAt = std::chrono::steady_clock::now();
+        jitter.push(std::move(packet));
+
+        const auto statsNow = std::chrono::steady_clock::now();
+        const double statsSeconds = std::chrono::duration<double>(statsNow - statsStartedAt).count();
+        if (statsSeconds >= 1.0) {
+          const AudioJitterStats jitterStats = jitter.takeStats();
+          const double avgAgeMs = jitterStats.ageSamples > 0
+            ? jitterStats.ageSumMs / static_cast<double>(jitterStats.ageSamples)
+            : -1.0;
+          std::ostringstream line;
+          line << std::fixed << std::setprecision(1)
+               << "SNA1_AUDIO_STATS datagrams=" << stats.datagrams
+               << " played=" << jitterStats.submittedPackets
+               << " frames=" << jitterStats.submittedFrames
+               << " lost=" << jitterStats.lostPackets
+               << " reorder=" << jitterStats.reorderedPackets
+               << " dup=" << jitterStats.duplicatePackets
+               << " stale=" << jitterStats.staleDrops
+               << " lateDrop=" << jitterStats.latencyDrops
+               << " underflow=" << jitterStats.underflows
+               << " queueDrop=" << jitterStats.queueDrops
+               << " resets=" << jitterStats.resets
+               << " malformed=" << stats.malformed
+               << " bufferMs=" << jitterStats.bufferMs
+               << " queued=" << jitterStats.queuedPackets;
+          if (avgAgeMs >= 0.0) {
+            line << " avgAgeMs=" << avgAgeMs
+                 << " maxAgeMs=" << jitterStats.ageMaxMs;
+          } else {
+            line << " avgAgeMs=-- maxAgeMs=--";
+          }
+          std::cout << line.str() << "\n";
+
+          stats = {};
+          statsStartedAt = statsNow;
+        }
+      }
+    } catch (const std::exception& error) {
+      std::cerr << "SNA1 audio listener error: " << error.what() << "\n";
+    }
+  }
+}
+
 void decodeTcpStreamToRenderer(std::uint16_t port,
                                std::uint16_t controlPort,
+                               std::uint16_t audioPort,
                                std::uint64_t maxPackets,
                                void* retainedRendererContext,
                                std::shared_ptr<NativeInputSender> inputSender) {
@@ -1803,35 +2641,11 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
       std::cout << "SNV1 Metal render listener ready on 0.0.0.0:" << port << "\n";
       std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port;
       if (controlPort > 0) {
-        auto controlServer = std::make_shared<ScopedFd>(createTcpListener(controlPort, "SNINPUT control"));
         std::cout << " --control-connect 100.100.83.44:" << controlPort;
-        std::cout << "\nSNINPUT dedicated control listener ready on 0.0.0.0:" << controlPort << "\n";
-        std::thread controlWorker([controlServer, inputSender, controlPort]() {
-          while (true) {
-            sockaddr_in peerAddress{};
-            socklen_t peerLength = sizeof(peerAddress);
-            ScopedFd control(accept(controlServer->get(), reinterpret_cast<sockaddr*>(&peerAddress), &peerLength));
-            if (control.get() < 0) {
-              std::cerr << "SNINPUT control accept failed on port " << controlPort << ".\n";
-              return;
-            }
-            configureAcceptedTcpSocket(control.get());
-
-            char peerIp[INET_ADDRSTRLEN]{};
-            inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
-            std::cout << "SNINPUT dedicated control connected from "
-                      << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
-            if (inputSender) {
-              inputSender->setFd(control.get());
-            }
-            serviceControlSocket(control.get());
-            if (inputSender) {
-              inputSender->clearFd(control.get());
-            }
-            std::cout << "SNINPUT dedicated control disconnected; waiting for reconnect.\n";
-          }
-        });
-        controlWorker.detach();
+        startDedicatedControlListener(controlPort, inputSender);
+      }
+      if (audioPort > 0) {
+        std::cout << " --audio-udp-connect 100.100.83.44:" << audioPort;
       }
       std::cout << "\n";
 
@@ -1924,8 +2738,131 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
   }
 }
 
+void decodeUdpStreamToRenderer(std::uint16_t port,
+                               std::uint16_t controlPort,
+                               std::uint16_t audioPort,
+                               std::uint64_t maxPackets,
+                               void* retainedRendererContext,
+                               std::shared_ptr<NativeInputSender> inputSender) {
+  @autoreleasepool {
+    try {
+      ScopedFd server = createUdpListener(port, "SNU1 render");
+
+      std::cout << "SNU1 UDP render listener ready on 0.0.0.0:" << port << "\n";
+      std::cout << "Start Windows host with: --encode-pipe h264 --udp-connect 100.100.83.44:" << port;
+      if (controlPort > 0) {
+        std::cout << " --control-connect 100.100.83.44:" << controlPort;
+        startDedicatedControlListener(controlPort, inputSender);
+      }
+      if (audioPort > 0) {
+        std::cout << " --audio-udp-connect 100.100.83.44:" << audioPort;
+      }
+      std::cout << "\n";
+
+      VtH264Decoder decoder(submitFrameToVideoRenderer, retainedRendererContext);
+      DecodeSummary summary;
+      ClientStreamStats stats;
+      UdpVideoReassembler reassembler;
+      UdpVideoStats udpStats;
+      auto udpStatsStartedAt = std::chrono::steady_clock::now();
+      std::array<std::uint8_t, 1500> datagramBuffer{};
+      while (maxPackets == 0 || summary.packets < maxPackets) {
+        sockaddr_in peerAddress{};
+        socklen_t peerLength = sizeof(peerAddress);
+        const ssize_t received = recvfrom(server.get(),
+                                          datagramBuffer.data(),
+                                          datagramBuffer.size(),
+                                          0,
+                                          reinterpret_cast<sockaddr*>(&peerAddress),
+                                          &peerLength);
+        if (received < 0) {
+          if (errno == EINTR) continue;
+          throw std::runtime_error("UDP receive failed.");
+        }
+        if (received == 0) continue;
+
+        std::vector<std::uint8_t> datagram(datagramBuffer.begin(),
+                                           datagramBuffer.begin() + static_cast<std::ptrdiff_t>(received));
+        std::vector<std::uint8_t> packetBytes;
+        if (!reassembler.push(datagram, packetBytes, udpStats)) {
+          continue;
+        }
+
+        SnvPacket packet = parseSnvPacketBytes(packetBytes);
+        stats.observe(packet);
+        processSnvPacket(decoder, summary, packet);
+
+        if (summary.packets == 1 || summary.packets % 60 == 0) {
+          std::cout << "SNU1 render packets=" << summary.packets
+                    << " decoded=" << decoder.decodedFrames()
+                    << " errors=" << decoder.decodeErrors()
+                    << "\n";
+          const double avgAgeMs = stats.ageSamples > 0
+            ? stats.ageSumMs / static_cast<double>(stats.ageSamples)
+            : -1.0;
+          std::ostringstream statLine;
+          statLine << std::fixed << std::setprecision(1)
+                   << "SNV1_CLIENT_STATS packets=" << stats.windowPackets
+                   << " decoded=" << decoder.decodedFrames()
+                   << " dropped=" << stats.windowDropped
+                   << " totalDropped=" << stats.totalDropped
+                   << " jitterMs=" << stats.jitterMs;
+          if (avgAgeMs >= 0.0) {
+            statLine << " avgAgeMs=" << avgAgeMs
+                     << " maxAgeMs=" << stats.ageMaxMs;
+          } else {
+            statLine << " avgAgeMs=-- maxAgeMs=--";
+          }
+          std::cout << statLine.str() << "\n";
+
+          std::ostringstream feedback;
+          feedback << std::fixed << std::setprecision(1)
+                   << "{\"type\":\"stream-stats\""
+                   << ",\"packets\":" << stats.windowPackets
+                   << ",\"decoded\":" << decoder.decodedFrames()
+                   << ",\"dropped\":" << stats.windowDropped
+                   << ",\"totalDropped\":" << stats.totalDropped
+                   << ",\"jitterMs\":" << stats.jitterMs
+                   << ",\"avgAgeMs\":" << avgAgeMs
+                   << ",\"maxAgeMs\":" << (avgAgeMs >= 0.0 ? stats.ageMaxMs : -1.0)
+                   << "}";
+          sendNativeInputJson(feedback.str());
+          stats.resetWindow();
+        }
+
+        const auto statsNow = std::chrono::steady_clock::now();
+        const double statsSeconds = std::chrono::duration<double>(statsNow - udpStatsStartedAt).count();
+        if (statsSeconds >= 1.0) {
+          std::cout << "SNU1_STATS datagrams=" << udpStats.datagrams
+                    << " fragments=" << udpStats.fragments
+                    << " completed=" << udpStats.completedPackets
+                    << " droppedAssemblies=" << udpStats.droppedAssemblies
+                    << " malformed=" << udpStats.malformedDatagrams
+                    << " duplicateFragments=" << udpStats.duplicateFragments
+                    << "\n";
+          udpStats = {};
+          udpStatsStartedAt = statsNow;
+        }
+      }
+
+      decoder.flush();
+      printDecodeSummary("udp-render:" + std::to_string(port), summary, decoder);
+    } catch (const std::exception& error) {
+      std::cerr << "SNU1 UDP render listener error: " << error.what() << "\n";
+    }
+
+    CFRelease((CFTypeRef)retainedRendererContext);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [NSApp terminate:nil];
+    });
+  }
+}
+
 int runVideoRenderTcp(std::uint16_t port,
                       std::uint16_t controlPort,
+                      std::uint16_t audioPort,
+                      double audioJitterMs,
+                      bool udpVideo,
                       std::uint64_t maxPackets,
                       bool fullscreen,
                       bool hideCursor,
@@ -2006,9 +2943,21 @@ int runVideoRenderTcp(std::uint16_t port,
     auto inputSender = std::make_shared<NativeInputSender>();
     gNativeInputSender = inputSender;
 
+    if (audioPort > 0) {
+      auto audioPlayer = std::make_shared<AudioQueuePcmPlayer>();
+      std::thread audioWorker([audioPort, audioJitterMs, audioPlayer]() {
+        listenUdpAudio(audioPort, audioJitterMs, audioPlayer);
+      });
+      audioWorker.detach();
+    }
+
     void* rendererContext = (__bridge_retained void*)renderer;
-    std::thread worker([port, controlPort, maxPackets, rendererContext, inputSender]() {
-      decodeTcpStreamToRenderer(port, controlPort, maxPackets, rendererContext, inputSender);
+    std::thread worker([port, controlPort, audioPort, udpVideo, maxPackets, rendererContext, inputSender]() {
+      if (udpVideo) {
+        decodeUdpStreamToRenderer(port, controlPort, audioPort, maxPackets, rendererContext, inputSender);
+      } else {
+        decodeTcpStreamToRenderer(port, controlPort, audioPort, maxPackets, rendererContext, inputSender);
+      }
     });
     worker.detach();
 
@@ -2016,7 +2965,11 @@ int runVideoRenderTcp(std::uint16_t port,
     std::cout << "Native renderer mode fullscreen=" << boolText(fullscreen)
               << " hideCursor=" << boolText(hideCursor)
               << " relativeMouse=" << boolText(relativeMouse)
-              << " controlPort=" << controlPort << "\n";
+              << " videoTransport=" << (udpVideo ? "udp" : "tcp")
+              << " controlPort=" << controlPort
+              << " audioPort=" << audioPort
+              << " audioJitterMs=" << std::fixed << std::setprecision(1) << audioJitterMs
+              << "\n";
     [NSApp run];
     [[NSNotificationCenter defaultCenter] removeObserver:resignObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:activeObserver];
@@ -2095,12 +3048,16 @@ struct Options {
   bool fullscreen = false;
   bool hideCursor = false;
   bool relativeMouse = false;
+  bool udpVideo = false;
   bool help = false;
   std::uint64_t maxPackets = 0;
   std::uint16_t listenPort = 0;
   std::uint16_t listenRenderPort = 0;
   std::uint16_t controlPort = 0;
+  std::uint16_t audioPort = 0;
   bool controlPortProvided = false;
+  bool audioPortProvided = false;
+  double audioJitterMs = 24.0;
   double seconds = 5;
   std::string snvFile;
   std::string clipboardText;
@@ -2142,6 +3099,15 @@ Options parseOptions(int argc, char** argv) {
       if (port > 65535) throw std::runtime_error("--control-port must be 0-65535");
       options.controlPort = static_cast<std::uint16_t>(port);
       options.controlPortProvided = true;
+    } else if (arg == "--audio-port") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --audio-port");
+      const auto port = std::stoul(argv[++i]);
+      if (port > 65535) throw std::runtime_error("--audio-port must be 0-65535");
+      options.audioPort = static_cast<std::uint16_t>(port);
+      options.audioPortProvided = true;
+    } else if (arg == "--audio-jitter-ms") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --audio-jitter-ms");
+      options.audioJitterMs = std::clamp(std::atof(argv[++i]), 0.0, 120.0);
     } else if (arg == "--metal-test") {
       options.metalTest = true;
     } else if (arg == "--log-input") {
@@ -2152,6 +3118,8 @@ Options parseOptions(int argc, char** argv) {
       options.hideCursor = true;
     } else if (arg == "--relative-mouse") {
       options.relativeMouse = true;
+    } else if (arg == "--udp-video") {
+      options.udpVideo = true;
     } else if (arg == "--clipboard-read") {
       options.clipboardRead = true;
     } else if (arg == "--clipboard-write") {
@@ -2174,6 +3142,10 @@ std::uint16_t defaultControlPort(std::uint16_t videoPort) {
   return videoPort < 65535 ? static_cast<std::uint16_t>(videoPort + 1) : 0;
 }
 
+std::uint16_t defaultAudioPort(std::uint16_t videoPort) {
+  return videoPort < 65534 ? static_cast<std::uint16_t>(videoPort + 2) : 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -2191,11 +3163,23 @@ int main(int argc, char** argv) {
       const std::uint16_t controlPort = options.controlPortProvided
         ? options.controlPort
         : defaultControlPort(options.listenRenderPort);
+      const std::uint16_t audioPort = options.audioPortProvided
+        ? options.audioPort
+        : defaultAudioPort(options.listenRenderPort);
       if (controlPort > 0 && controlPort == options.listenRenderPort) {
         throw std::runtime_error("--control-port must differ from --listen-render-snv port, or use 0 to disable.");
       }
+      if (audioPort > 0 && audioPort == options.listenRenderPort) {
+        throw std::runtime_error("--audio-port must differ from --listen-render-snv port, or use 0 to disable.");
+      }
+      if (audioPort > 0 && controlPort > 0 && audioPort == controlPort) {
+        throw std::runtime_error("--audio-port must differ from --control-port, or use 0 to disable.");
+      }
       return runVideoRenderTcp(options.listenRenderPort,
                                controlPort,
+                               audioPort,
+                               options.audioJitterMs,
+                               options.udpVideo,
                                options.maxPackets,
                                options.fullscreen,
                                options.hideCursor,

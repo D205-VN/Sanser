@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -28,6 +30,13 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <audioclient.h>
+#include <avrt.h>
+#include <ks.h>
+#include <ksmedia.h>
+#include <mmdeviceapi.h>
+#include <mmreg.h>
+#include <wrl/client.h>
 #endif
 
 struct InputBounds {
@@ -77,7 +86,9 @@ struct Options {
   std::filesystem::path outputFile = "captures/capture_h264.mp4";
   std::filesystem::path packetFile;
   std::string tcpConnect;
+  std::string udpConnect;
   std::string controlConnect;
+  std::string audioUdpConnect;
   std::uint32_t frames = 1;
   std::uint32_t intervalMs = 250;
   std::uint32_t adapterIndex = 0;
@@ -92,6 +103,7 @@ struct Options {
   bool framesProvided = false;
   bool hardwareEncoder = true;
   bool lowLatencyEncoder = true;
+  bool udpPacing = true;
   bool listEncoders = false;
 };
 
@@ -130,6 +142,29 @@ struct ControlMessageHeader {
   std::uint32_t headerSize = sizeof(ControlMessageHeader);
   std::uint32_t payloadSize = 0;
 };
+
+struct UdpVideoFragmentHeader {
+  char magic[4] = {'S', 'N', 'U', '1'};
+  std::uint16_t headerSize = sizeof(UdpVideoFragmentHeader);
+  std::uint16_t fragmentCount = 0;
+  std::uint16_t fragmentIndex = 0;
+  std::uint16_t flags = 0; // bit 0 = first, bit 1 = last
+  std::uint64_t packetId = 0;
+  std::uint32_t packetSize = 0;
+  std::uint32_t fragmentOffset = 0;
+  std::uint32_t payloadSize = 0;
+};
+
+struct AudioPacketHeader {
+  char magic[4] = {'S', 'N', 'A', '1'};
+  std::uint16_t headerSize = sizeof(AudioPacketHeader);
+  std::uint16_t channels = 2;
+  std::uint32_t sampleRate = 0;
+  std::uint32_t frameCount = 0;
+  std::uint64_t sequence = 0;
+  std::uint64_t hostUnixMicros = 0;
+  std::uint32_t payloadSize = 0;
+};
 #pragma pack(pop)
 #endif
 
@@ -156,9 +191,15 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--tcp-connect") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --tcp-connect");
       options.tcpConnect = argv[++i];
+    } else if (arg == "--udp-connect") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --udp-connect");
+      options.udpConnect = argv[++i];
     } else if (arg == "--control-connect") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --control-connect");
       options.controlConnect = argv[++i];
+    } else if (arg == "--audio-udp-connect") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --audio-udp-connect");
+      options.audioUdpConnect = argv[++i];
     } else if (arg == "--frames") {
       options.frames = readUintArg(argc, argv, i, "--frames");
       options.framesProvided = true;
@@ -178,6 +219,10 @@ Options parseOptions(int argc, char** argv) {
       options.lowLatencyEncoder = true;
     } else if (arg == "--no-low-latency-encoder") {
       options.lowLatencyEncoder = false;
+    } else if (arg == "--udp-pacing") {
+      options.udpPacing = true;
+    } else if (arg == "--no-udp-pacing") {
+      options.udpPacing = false;
     } else if (arg == "--pipe") {
       options.pipe = true;
     } else if (arg == "--encode") {
@@ -213,7 +258,11 @@ Options parseOptions(int argc, char** argv) {
         << "  --output-file P  Encoded output file path\n"
         << "  --packet-file P  SNV1 packet output file; stdout is used when omitted\n"
         << "  --tcp-connect H:P Connect to a TCP SNV1 receiver, stream video, receive native input\n"
+        << "  --udp-connect H:P Send SNV1 video over UDP with SNU1 fragmentation\n"
+        << "  --udp-pacing     Pace UDP video fragments by bitrate, default on\n"
+        << "  --no-udp-pacing  Disable UDP video fragment pacing\n"
         << "  --control-connect H:P Connect a dedicated TCP native input/stats backchannel\n"
+        << "  --audio-udp-connect H:P Send loopback system audio as SNA1 UDP float PCM\n"
         << "  --list-encoders  List Media Foundation hardware encoders\n"
         << "  --software-encoder Disable hardware transform request\n";
       std::exit(0);
@@ -348,6 +397,53 @@ bool jsonBoolValue(const std::string& json, const char* key, bool fallback = fal
   if (json.compare(offset, 4, "true") == 0) return true;
   if (json.compare(offset, 5, "false") == 0) return false;
   return fallback;
+}
+
+std::vector<std::string> jsonObjectArrayValue(const std::string& json, const char* key) {
+  std::vector<std::string> objects;
+  std::size_t offset = findJsonValue(json, key);
+  if (offset == std::string::npos || offset >= json.size() || json[offset] != '[') return objects;
+  ++offset;
+
+  bool inString = false;
+  bool escaped = false;
+  int depth = 0;
+  std::size_t objectStart = std::string::npos;
+  for (std::size_t i = offset; i < json.size(); ++i) {
+    const char ch = json[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if (ch == '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch == '"') {
+      inString = true;
+      continue;
+    }
+    if (ch == '{') {
+      if (depth == 0) objectStart = i;
+      depth += 1;
+      continue;
+    }
+    if (ch == '}') {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth == 0 && objectStart != std::string::npos) {
+          objects.push_back(json.substr(objectStart, i - objectStart + 1));
+          objectStart = std::string::npos;
+        }
+      }
+      continue;
+    }
+    if (ch == ']' && depth == 0) break;
+  }
+  return objects;
 }
 
 std::wstring utf8ToWide(const std::string& value) {
@@ -647,9 +743,16 @@ void handleStreamStatsPayload(const std::string& json) {
             << "\n";
 }
 
-void handleControlPayload(const std::string& json) {
+int handleControlPayload(const std::string& json) {
   const std::string type = jsonStringValue(json, "type");
-  if (type == "pointer-move") {
+  if (type == "input-batch") {
+    const auto events = jsonObjectArrayValue(json, "events");
+    int applied = 0;
+    for (const auto& eventJson : events) {
+      applied += handleControlPayload(eventJson);
+    }
+    return applied;
+  } else if (type == "pointer-move") {
     const double x = jsonDoubleValue(json, "x");
     const double y = jsonDoubleValue(json, "y");
     const double dx = jsonDoubleValue(json, "dx");
@@ -674,6 +777,7 @@ void handleControlPayload(const std::string& json) {
                 << " cursor=" << cursor.x << "," << cursor.y
                 << "\n";
     }
+    return moved ? 1 : 0;
   } else if (type == "pointer-down" || type == "pointer-up") {
     const double x = jsonDoubleValue(json, "x");
     const double y = jsonDoubleValue(json, "y");
@@ -693,6 +797,7 @@ void handleControlPayload(const std::string& json) {
               << " target=" << target.x << "," << target.y
               << " cursor=" << cursor.x << "," << cursor.y
               << "\n";
+    return clicked ? 1 : 0;
   } else if (type == "wheel") {
     const bool relative = jsonBoolValue(json, "relative");
     const bool moved = relative ? true : movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
@@ -703,6 +808,7 @@ void handleControlPayload(const std::string& json) {
               << " moved=" << (moved ? "yes" : "no")
               << " sent=" << (wheeled ? "yes" : "no")
               << "\n";
+    return wheeled ? 1 : 0;
   } else if (type == "key-down" || type == "key-up") {
     const WORD virtualKey = macKeyCodeToVirtualKey(jsonIntValue(json, "keyCode", -1),
                                                    jsonStringValue(json, "key"));
@@ -711,32 +817,46 @@ void handleControlPayload(const std::string& json) {
               << " vk=" << virtualKey
               << " sent=" << (sent ? "yes" : "no")
               << "\n";
+    return sent ? 1 : 0;
   } else if (type == "modifiers") {
     handleModifierState(jsonIntValue(json, "keyCode", -1), jsonIntValue(json, "modifiers", 0));
+    return 1;
   } else if (type == "clipboard") {
     setClipboardText(jsonStringValue(json, "text"));
+    return 1;
   } else if (type == "copy") {
     sendShortcut('C');
+    return 1;
   } else if (type == "cut") {
     sendShortcut('X');
+    return 1;
   } else if (type == "paste") {
     sendShortcut('V');
+    return 1;
   } else if (type == "select-all") {
     sendShortcut('A');
+    return 1;
   } else if (type == "stream-stats") {
     handleStreamStatsPayload(json);
+    return 0;
   }
+  return 0;
 }
 
 class TcpClient {
 public:
   explicit TcpClient(const std::string& endpoint, const std::string& controlEndpoint = {}) {
-    socket_ = connectEndpoint(endpoint, "--tcp-connect");
-    configureSocket(socket_);
+    if (!endpoint.empty()) {
+      socket_ = connectEndpoint(endpoint, "--tcp-connect");
+      configureSocket(socket_);
+    }
     if (!controlEndpoint.empty()) {
       controlSocket_ = connectEndpoint(controlEndpoint, "--control-connect");
       configureSocket(controlSocket_);
       std::cerr << "SNINPUT dedicated control connecting " << controlEndpoint << "\n";
+    }
+    if (socket_ == INVALID_SOCKET && controlSocket_ == INVALID_SOCKET) {
+      throw std::runtime_error("TcpClient needs --tcp-connect or --control-connect.");
     }
   }
 
@@ -763,6 +883,9 @@ public:
   TcpClient& operator=(const TcpClient&) = delete;
 
   void sendAll(const void* data, std::size_t size) {
+    if (socket_ == INVALID_SOCKET) {
+      throw std::runtime_error("TCP video socket is not connected.");
+    }
     const char* cursor = static_cast<const char*>(data);
     std::size_t remaining = size;
     while (remaining > 0) {
@@ -780,6 +903,7 @@ public:
 
   void startControlReceiver() {
     if (controlThread_.joinable()) return;
+    if (controlReceiveSocket() == INVALID_SOCKET) return;
     running_ = true;
     controlThread_ = std::thread([this]() { controlLoop(); });
   }
@@ -906,7 +1030,22 @@ private:
       std::string payload(header.payloadSize, '\0');
       if (!payload.empty() && !recvAll(payload.data(), payload.size())) break;
       try {
-        if (jsonStringValue(payload, "type") == "control-ping") {
+        const std::string payloadType = jsonStringValue(payload, "type");
+        if (payloadType == "control-hello") {
+          std::ostringstream hello;
+          hello << "{\"type\":\"control-hello-ack\""
+                << ",\"protocolVersion\":2"
+                << ",\"inputBatch\":true"
+                << ",\"inputAck\":true"
+                << ",\"videoUdpPacing\":true"
+                << ",\"audioUdp\":true"
+                << ",\"hostUnixMicros\":" << unixMicros()
+                << "}";
+          sendControlJson(hello.str());
+          std::cerr << "SNCONTROL_HELLO_ACK protocol=2 inputBatch=yes inputAck=yes\n";
+          continue;
+        }
+        if (payloadType == "control-ping") {
           std::ostringstream pong;
           pong << "{\"type\":\"control-pong\""
                << ",\"sentSteadyMicros\":" << jsonUint64Value(payload, "sentSteadyMicros")
@@ -915,7 +1054,27 @@ private:
           sendControlJson(pong.str());
           continue;
         }
-        handleControlPayload(payload);
+        const int applied = handleControlPayload(payload);
+        if (payloadType == "input-batch") {
+          const std::uint64_t sequence = jsonUint64Value(payload, "sequence");
+          const std::uint64_t sentSteadyMicros = jsonUint64Value(payload, "sentSteadyMicros");
+          std::ostringstream ack;
+          ack << "{\"type\":\"input-ack\""
+              << ",\"sequence\":" << sequence
+              << ",\"sentSteadyMicros\":" << sentSteadyMicros
+              << ",\"applied\":" << applied
+              << ",\"hostUnixMicros\":" << unixMicros()
+              << "}";
+          sendControlJson(ack.str());
+          static auto lastBatchLog = std::chrono::steady_clock::time_point{};
+          const auto now = std::chrono::steady_clock::now();
+          if (now - lastBatchLog > std::chrono::milliseconds(250)) {
+            lastBatchLog = now;
+            std::cerr << "SNINPUT_BATCH sequence=" << sequence
+                      << " applied=" << applied
+                      << "\n";
+          }
+        }
       } catch (const std::exception& error) {
         std::cerr << "SNINPUT control error: " << error.what() << "\n";
       }
@@ -927,6 +1086,519 @@ private:
   SOCKET controlSocket_ = INVALID_SOCKET;
   std::atomic<bool> running_{false};
   std::thread controlThread_;
+};
+
+class UdpVideoClient {
+public:
+  explicit UdpVideoClient(const std::string& endpoint,
+                          std::uint32_t bitrate,
+                          bool pacingEnabled)
+    : bitrate_(std::max<std::uint32_t>(bitrate, 1000000)),
+      pacingEnabled_(pacingEnabled),
+      nextSendAt_(std::chrono::steady_clock::now()) {
+    const auto separator = endpoint.rfind(':');
+    if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
+      throw std::runtime_error("--udp-connect must be HOST:PORT");
+    }
+    const std::string host = endpoint.substr(0, separator);
+    const std::string port = endpoint.substr(separator + 1);
+
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+
+    addrinfo* results = nullptr;
+    const int lookup = getaddrinfo(host.c_str(), port.c_str(), &hints, &results);
+    if (lookup != 0) {
+      throw std::runtime_error("getaddrinfo failed for " + endpoint + ": " + std::to_string(lookup));
+    }
+
+    for (addrinfo* item = results; item; item = item->ai_next) {
+      SOCKET candidate = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+      if (candidate == INVALID_SOCKET) continue;
+
+      if (connect(candidate, item->ai_addr, static_cast<int>(item->ai_addrlen)) == 0) {
+        socket_ = candidate;
+        break;
+      }
+
+      closesocket(candidate);
+    }
+    freeaddrinfo(results);
+
+    if (socket_ == INVALID_SOCKET) {
+      throw std::runtime_error("Could not connect --udp-connect to " + endpoint +
+                               ", WSA error " + std::to_string(WSAGetLastError()));
+    }
+
+    int sendBufferBytes = 4 * 1024 * 1024;
+    setsockopt(socket_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBufferBytes), sizeof(sendBufferBytes));
+    std::cerr << "SNU1 UDP video connected " << endpoint
+              << " pacing=" << (pacingEnabled_ ? "on" : "off")
+              << " bitrate=" << bitrate_
+              << "\n";
+  }
+
+  ~UdpVideoClient() {
+    if (socket_ != INVALID_SOCKET) {
+      closesocket(socket_);
+    }
+  }
+
+  UdpVideoClient(const UdpVideoClient&) = delete;
+  UdpVideoClient& operator=(const UdpVideoClient&) = delete;
+
+  void setBitrate(std::uint32_t bitrate) {
+    bitrate_ = std::max<std::uint32_t>(bitrate, 1000000);
+  }
+
+  double takePacedSleepMs() {
+    const double value = pacedSleepMs_;
+    pacedSleepMs_ = 0.0;
+    return value;
+  }
+
+  std::uint32_t sendPacket(const std::vector<std::uint8_t>& packetBytes) {
+    if (packetBytes.empty()) return 0;
+    if (packetBytes.size() > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::runtime_error("UDP packet payload too large.");
+    }
+
+    constexpr std::size_t maxPayloadBytes = 1152;
+    const std::size_t fragmentCountSize = (packetBytes.size() + maxPayloadBytes - 1) / maxPayloadBytes;
+    if (fragmentCountSize > std::numeric_limits<std::uint16_t>::max()) {
+      throw std::runtime_error("UDP video packet requires too many fragments.");
+    }
+    const std::uint16_t fragmentCount = static_cast<std::uint16_t>(fragmentCountSize);
+    if (fragmentCount == 0) return 0;
+
+    const std::uint64_t packetId = nextPacketId_++;
+    std::uint32_t fragmentsSent = 0;
+    for (std::uint16_t fragmentIndex = 0; fragmentIndex < fragmentCount; ++fragmentIndex) {
+      const std::size_t offset = static_cast<std::size_t>(fragmentIndex) * maxPayloadBytes;
+      const std::size_t chunkSize = std::min(maxPayloadBytes, packetBytes.size() - offset);
+
+      UdpVideoFragmentHeader header{};
+      header.fragmentCount = fragmentCount;
+      header.fragmentIndex = fragmentIndex;
+      header.flags = (fragmentIndex == 0 ? 1u : 0u) | (fragmentIndex + 1 == fragmentCount ? 2u : 0u);
+      header.packetId = packetId;
+      header.packetSize = static_cast<std::uint32_t>(packetBytes.size());
+      header.fragmentOffset = static_cast<std::uint32_t>(offset);
+      header.payloadSize = static_cast<std::uint32_t>(chunkSize);
+
+      std::vector<std::uint8_t> datagram(sizeof(header) + chunkSize);
+      std::memcpy(datagram.data(), &header, sizeof(header));
+      std::memcpy(datagram.data() + sizeof(header), packetBytes.data() + offset, chunkSize);
+
+      paceDatagram(datagram.size());
+      const int sent = send(socket_,
+                            reinterpret_cast<const char*>(datagram.data()),
+                            static_cast<int>(datagram.size()),
+                            0);
+      if (sent == SOCKET_ERROR || sent != static_cast<int>(datagram.size())) {
+        throw std::runtime_error("UDP video send failed, WSA error " + std::to_string(WSAGetLastError()));
+      }
+      fragmentsSent += 1;
+    }
+    return fragmentsSent;
+  }
+
+private:
+  void paceDatagram(std::size_t datagramBytes) {
+    if (!pacingEnabled_ || bitrate_ == 0 || datagramBytes == 0) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    constexpr auto maxBurstWindow = std::chrono::milliseconds(6);
+    if (nextSendAt_ + maxBurstWindow < now) {
+      nextSendAt_ = now - maxBurstWindow;
+    }
+    if (nextSendAt_ > now) {
+      const auto sleepFor = nextSendAt_ - now;
+      pacedSleepMs_ += std::chrono::duration<double, std::milli>(sleepFor).count();
+      if (sleepFor > std::chrono::milliseconds(2)) {
+        std::this_thread::sleep_until(nextSendAt_ - std::chrono::microseconds(500));
+      }
+      while (std::chrono::steady_clock::now() < nextSendAt_) {
+        std::this_thread::yield();
+      }
+    }
+
+    const double datagramSeconds = (static_cast<double>(datagramBytes) * 8.0) /
+      static_cast<double>(std::max<std::uint32_t>(bitrate_, 1000000));
+    const auto spacing = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(datagramSeconds));
+    nextSendAt_ = std::max(nextSendAt_, std::chrono::steady_clock::now()) + spacing;
+  }
+
+  SOCKET socket_ = INVALID_SOCKET;
+  std::uint64_t nextPacketId_ = 1;
+  std::uint32_t bitrate_ = 28000000;
+  bool pacingEnabled_ = true;
+  std::chrono::steady_clock::time_point nextSendAt_;
+  double pacedSleepMs_ = 0.0;
+};
+
+using Microsoft::WRL::ComPtr;
+
+enum class WasapiSampleFormat {
+  Float32,
+  Pcm16
+};
+
+struct WasapiFormatInfo {
+  WasapiSampleFormat sampleFormat = WasapiSampleFormat::Float32;
+  std::uint16_t channels = 0;
+  std::uint32_t sampleRate = 0;
+  std::uint16_t bitsPerSample = 0;
+};
+
+class UdpAudioClient {
+public:
+  explicit UdpAudioClient(const std::string& endpoint) {
+    const auto separator = endpoint.rfind(':');
+    if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
+      throw std::runtime_error("--audio-udp-connect must be HOST:PORT");
+    }
+    const std::string host = endpoint.substr(0, separator);
+    const std::string port = endpoint.substr(separator + 1);
+
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+
+    addrinfo* results = nullptr;
+    const int lookup = getaddrinfo(host.c_str(), port.c_str(), &hints, &results);
+    if (lookup != 0) {
+      throw std::runtime_error("getaddrinfo failed for " + endpoint + ": " + std::to_string(lookup));
+    }
+
+    for (addrinfo* item = results; item; item = item->ai_next) {
+      SOCKET candidate = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
+      if (candidate == INVALID_SOCKET) continue;
+
+      if (connect(candidate, item->ai_addr, static_cast<int>(item->ai_addrlen)) == 0) {
+        socket_ = candidate;
+        break;
+      }
+
+      closesocket(candidate);
+    }
+    freeaddrinfo(results);
+
+    if (socket_ == INVALID_SOCKET) {
+      throw std::runtime_error("Could not connect --audio-udp-connect to " + endpoint +
+                               ", WSA error " + std::to_string(WSAGetLastError()));
+    }
+
+    int sendBufferBytes = 1024 * 1024;
+    setsockopt(socket_, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBufferBytes), sizeof(sendBufferBytes));
+    std::cerr << "SNA1 audio UDP connected " << endpoint << "\n";
+  }
+
+  ~UdpAudioClient() {
+    if (socket_ != INVALID_SOCKET) {
+      closesocket(socket_);
+    }
+  }
+
+  UdpAudioClient(const UdpAudioClient&) = delete;
+  UdpAudioClient& operator=(const UdpAudioClient&) = delete;
+
+  std::uint32_t sendStereoFloat(std::uint32_t sampleRate,
+                                const float* samples,
+                                std::uint32_t frameCount) {
+    if (socket_ == INVALID_SOCKET || !samples || frameCount == 0) return 0;
+
+    constexpr std::uint16_t channels = 2;
+    constexpr std::size_t maxPayloadBytes = 1152;
+    constexpr std::size_t bytesPerFrame = channels * sizeof(float);
+    constexpr std::uint32_t maxFramesPerPacket = static_cast<std::uint32_t>(maxPayloadBytes / bytesPerFrame);
+    std::uint32_t sentPackets = 0;
+    std::uint32_t offsetFrames = 0;
+    while (offsetFrames < frameCount) {
+      const std::uint32_t chunkFrames = std::min<std::uint32_t>(frameCount - offsetFrames, maxFramesPerPacket);
+      const std::uint32_t payloadSize = chunkFrames * static_cast<std::uint32_t>(bytesPerFrame);
+
+      AudioPacketHeader header{};
+      header.channels = channels;
+      header.sampleRate = sampleRate;
+      header.frameCount = chunkFrames;
+      header.sequence = nextSequence_++;
+      header.hostUnixMicros = unixMicros();
+      header.payloadSize = payloadSize;
+
+      std::array<std::uint8_t, sizeof(AudioPacketHeader) + maxPayloadBytes> datagram{};
+      std::memcpy(datagram.data(), &header, sizeof(header));
+      std::memcpy(datagram.data() + sizeof(header),
+                  samples + static_cast<std::size_t>(offsetFrames) * channels,
+                  payloadSize);
+      const int datagramSize = static_cast<int>(sizeof(header) + payloadSize);
+      const int sent = send(socket_,
+                            reinterpret_cast<const char*>(datagram.data()),
+                            datagramSize,
+                            0);
+      if (sent == SOCKET_ERROR || sent != datagramSize) {
+        throw std::runtime_error("SNA1 audio UDP send failed, WSA error " + std::to_string(WSAGetLastError()));
+      }
+      sentPackets += 1;
+      offsetFrames += chunkFrames;
+    }
+    return sentPackets;
+  }
+
+private:
+  SOCKET socket_ = INVALID_SOCKET;
+  std::uint64_t nextSequence_ = 1;
+};
+
+class WasapiLoopbackAudioSender {
+public:
+  explicit WasapiLoopbackAudioSender(std::string endpoint)
+    : endpoint_(std::move(endpoint)),
+      worker_(&WasapiLoopbackAudioSender::run, this) {}
+
+  ~WasapiLoopbackAudioSender() {
+    running_ = false;
+    HANDLE event = wakeEvent_.load();
+    if (event) SetEvent(event);
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+  WasapiLoopbackAudioSender(const WasapiLoopbackAudioSender&) = delete;
+  WasapiLoopbackAudioSender& operator=(const WasapiLoopbackAudioSender&) = delete;
+
+private:
+  static void requireHr(HRESULT hr, const char* label) {
+    if (FAILED(hr)) {
+      std::ostringstream out;
+      out << label << " failed hr=0x" << std::hex << static_cast<unsigned long>(hr);
+      throw std::runtime_error(out.str());
+    }
+  }
+
+  static WasapiFormatInfo inspectFormat(const WAVEFORMATEX* format) {
+    if (!format) throw std::runtime_error("WASAPI mix format is null.");
+
+    WasapiFormatInfo info;
+    info.channels = format->nChannels;
+    info.sampleRate = format->nSamplesPerSec;
+    info.bitsPerSample = format->wBitsPerSample;
+
+    if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT && format->wBitsPerSample == 32) {
+      info.sampleFormat = WasapiSampleFormat::Float32;
+      return info;
+    }
+    if (format->wFormatTag == WAVE_FORMAT_PCM && format->wBitsPerSample == 16) {
+      info.sampleFormat = WasapiSampleFormat::Pcm16;
+      return info;
+    }
+    if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+        format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
+      const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
+      if (IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) &&
+          format->wBitsPerSample == 32) {
+        info.sampleFormat = WasapiSampleFormat::Float32;
+        return info;
+      }
+      if (IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_PCM) &&
+          format->wBitsPerSample == 16) {
+        info.sampleFormat = WasapiSampleFormat::Pcm16;
+        return info;
+      }
+    }
+
+    throw std::runtime_error("Unsupported WASAPI mix format tag=" + std::to_string(format->wFormatTag) +
+                             " bits=" + std::to_string(format->wBitsPerSample));
+  }
+
+  static const char* formatLabel(WasapiSampleFormat format) {
+    switch (format) {
+      case WasapiSampleFormat::Float32: return "float32";
+      case WasapiSampleFormat::Pcm16: return "pcm16";
+    }
+    return "unknown";
+  }
+
+  static float sampleAt(const BYTE* data,
+                        WasapiSampleFormat format,
+                        std::uint16_t channels,
+                        std::uint32_t frame,
+                        std::uint16_t channel) {
+    const std::size_t index = static_cast<std::size_t>(frame) * channels + channel;
+    if (format == WasapiSampleFormat::Float32) {
+      return reinterpret_cast<const float*>(data)[index];
+    }
+    return static_cast<float>(reinterpret_cast<const std::int16_t*>(data)[index]) / 32768.0f;
+  }
+
+  static void convertToStereoFloat(const BYTE* data,
+                                   std::uint32_t frameCount,
+                                   const WasapiFormatInfo& format,
+                                   bool silent,
+                                   std::vector<float>& output) {
+    output.assign(static_cast<std::size_t>(frameCount) * 2, 0.0f);
+    if (silent || !data) return;
+
+    for (std::uint32_t frame = 0; frame < frameCount; ++frame) {
+      const float left = sampleAt(data, format.sampleFormat, format.channels, frame, 0);
+      const float right = format.channels > 1
+        ? sampleAt(data, format.sampleFormat, format.channels, frame, 1)
+        : left;
+      output[static_cast<std::size_t>(frame) * 2] = std::clamp(left, -1.0f, 1.0f);
+      output[static_cast<std::size_t>(frame) * 2 + 1] = std::clamp(right, -1.0f, 1.0f);
+    }
+  }
+
+  void run() {
+    HRESULT coinit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool comInitialized = SUCCEEDED(coinit);
+    if (coinit == RPC_E_CHANGED_MODE) {
+      coinit = S_OK;
+    }
+
+    HANDLE event = nullptr;
+    HANDLE avrtHandle = nullptr;
+    DWORD avrtTaskIndex = 0;
+    WAVEFORMATEX* mixFormat = nullptr;
+    try {
+      requireHr(coinit, "CoInitializeEx");
+
+      UdpAudioClient audioClient(endpoint_);
+      ComPtr<IMMDeviceEnumerator> enumerator;
+      requireHr(CoCreateInstance(__uuidof(MMDeviceEnumerator),
+                                 nullptr,
+                                 CLSCTX_ALL,
+                                 __uuidof(IMMDeviceEnumerator),
+                                 reinterpret_cast<void**>(enumerator.GetAddressOf())),
+                "CoCreateInstance(MMDeviceEnumerator)");
+
+      ComPtr<IMMDevice> device;
+      requireHr(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf()),
+                "GetDefaultAudioEndpoint");
+
+      ComPtr<IAudioClient> wasapiClient;
+      requireHr(device->Activate(__uuidof(IAudioClient),
+                                 CLSCTX_ALL,
+                                 nullptr,
+                                 reinterpret_cast<void**>(wasapiClient.GetAddressOf())),
+                "IMMDevice::Activate(IAudioClient)");
+
+      requireHr(wasapiClient->GetMixFormat(&mixFormat), "IAudioClient::GetMixFormat");
+      const WasapiFormatInfo format = inspectFormat(mixFormat);
+      if (format.channels == 0 || format.channels > 8 || format.sampleRate == 0) {
+        throw std::runtime_error("Unsupported WASAPI channel/rate combination.");
+      }
+
+      REFERENCE_TIME defaultPeriod = 0;
+      REFERENCE_TIME minimumPeriod = 0;
+      requireHr(wasapiClient->GetDevicePeriod(&defaultPeriod, &minimumPeriod), "IAudioClient::GetDevicePeriod");
+      const REFERENCE_TIME bufferDuration = defaultPeriod > 0 ? defaultPeriod : 100000;
+      requireHr(wasapiClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                         AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                                         bufferDuration,
+                                         0,
+                                         mixFormat,
+                                         nullptr),
+                "IAudioClient::Initialize(loopback)");
+
+      event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+      if (!event) {
+        throw std::runtime_error("CreateEventW for WASAPI audio failed.");
+      }
+      wakeEvent_ = event;
+      requireHr(wasapiClient->SetEventHandle(event), "IAudioClient::SetEventHandle");
+
+      ComPtr<IAudioCaptureClient> captureClient;
+      requireHr(wasapiClient->GetService(__uuidof(IAudioCaptureClient),
+                                         reinterpret_cast<void**>(captureClient.GetAddressOf())),
+                "IAudioClient::GetService(IAudioCaptureClient)");
+
+      avrtHandle = AvSetMmThreadCharacteristicsW(L"Audio", &avrtTaskIndex);
+      requireHr(wasapiClient->Start(), "IAudioClient::Start");
+      std::cerr << "SNA1_AUDIO_CAPTURE sampleRate=" << format.sampleRate
+                << " sourceChannels=" << format.channels
+                << " sendChannels=2"
+                << " format=" << formatLabel(format.sampleFormat)
+                << "\n";
+
+      std::vector<float> stereoSamples;
+      auto statsStartedAt = std::chrono::steady_clock::now();
+      std::uint64_t statsPackets = 0;
+      std::uint64_t statsFrames = 0;
+      std::uint64_t statsBytes = 0;
+      std::uint64_t statsSilentFrames = 0;
+
+      while (running_) {
+        const DWORD wait = WaitForSingleObject(event, 200);
+        if (!running_) break;
+        if (wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT) {
+          throw std::runtime_error("WASAPI audio wait failed.");
+        }
+
+        UINT32 packetFrames = 0;
+        requireHr(captureClient->GetNextPacketSize(&packetFrames), "IAudioCaptureClient::GetNextPacketSize");
+        while (packetFrames > 0 && running_) {
+          BYTE* data = nullptr;
+          UINT32 frameCount = 0;
+          DWORD flags = 0;
+          requireHr(captureClient->GetBuffer(&data, &frameCount, &flags, nullptr, nullptr),
+                    "IAudioCaptureClient::GetBuffer");
+          const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+          convertToStereoFloat(data, frameCount, format, silent, stereoSamples);
+          requireHr(captureClient->ReleaseBuffer(frameCount), "IAudioCaptureClient::ReleaseBuffer");
+          statsPackets += audioClient.sendStereoFloat(format.sampleRate, stereoSamples.data(), frameCount);
+          statsFrames += frameCount;
+          statsBytes += static_cast<std::uint64_t>(frameCount) * 2 * sizeof(float);
+          if (silent) statsSilentFrames += frameCount;
+          requireHr(captureClient->GetNextPacketSize(&packetFrames), "IAudioCaptureClient::GetNextPacketSize");
+        }
+
+        const auto statsNow = std::chrono::steady_clock::now();
+        const double statsSeconds = std::chrono::duration<double>(statsNow - statsStartedAt).count();
+        if (statsSeconds >= 1.0) {
+          const double kbps = static_cast<double>(statsBytes) * 8.0 / statsSeconds / 1000.0;
+          std::cerr << "SNA1_AUDIO_STATS packets=" << statsPackets
+                    << " frames=" << statsFrames
+                    << " kbps=" << std::fixed << std::setprecision(1) << kbps
+                    << " silentFrames=" << statsSilentFrames
+                    << "\n";
+          statsStartedAt = statsNow;
+          statsPackets = 0;
+          statsFrames = 0;
+          statsBytes = 0;
+          statsSilentFrames = 0;
+        }
+      }
+
+      wasapiClient->Stop();
+    } catch (const std::exception& error) {
+      std::cerr << "SNA1_AUDIO_CAPTURE error: " << error.what() << "\n";
+    }
+
+    wakeEvent_ = nullptr;
+    if (avrtHandle) {
+      AvRevertMmThreadCharacteristics(avrtHandle);
+    }
+    if (event) {
+      CloseHandle(event);
+    }
+    if (mixFormat) {
+      CoTaskMemFree(mixFormat);
+    }
+    if (comInitialized) {
+      CoUninitialize();
+    }
+  }
+
+  std::string endpoint_;
+  std::atomic<bool> running_{true};
+  std::atomic<HANDLE> wakeEvent_{nullptr};
+  std::thread worker_;
 };
 #endif
 
@@ -1091,8 +1763,15 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   if (options.codec != VideoCodec::H264) {
     throw std::runtime_error("--encode-pipe currently supports h264 only.");
   }
-  if (!options.tcpConnect.empty() && !options.packetFile.empty()) {
-    throw std::runtime_error("Use either --tcp-connect or --packet-file, not both.");
+  const bool hasNetworkVideo = !options.tcpConnect.empty() || !options.udpConnect.empty();
+  if (hasNetworkVideo && !options.packetFile.empty()) {
+    throw std::runtime_error("Use network video or --packet-file, not both.");
+  }
+  if (!options.tcpConnect.empty() && !options.udpConnect.empty()) {
+    throw std::runtime_error("Use either --tcp-connect or --udp-connect, not both.");
+  }
+  if (!options.audioUdpConnect.empty() && !hasNetworkVideo) {
+    throw std::runtime_error("--audio-udp-connect requires --tcp-connect or --udp-connect video.");
   }
 
   std::unique_ptr<std::ofstream> packetFile;
@@ -1100,6 +1779,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 #ifdef _WIN32
   std::unique_ptr<WinsockRuntime> winsock;
   std::unique_ptr<TcpClient> tcpClient;
+  std::unique_ptr<TcpClient> controlClient;
+  std::unique_ptr<UdpVideoClient> udpClient;
+  std::unique_ptr<WasapiLoopbackAudioSender> audioSender;
 #endif
 
   if (!options.tcpConnect.empty()) {
@@ -1109,6 +1791,19 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     tcpClient->startControlReceiver();
 #else
     throw std::runtime_error("--tcp-connect is currently implemented for Windows host builds.");
+#endif
+  } else if (!options.udpConnect.empty()) {
+#ifdef _WIN32
+    winsock = std::make_unique<WinsockRuntime>();
+    udpClient = std::make_unique<UdpVideoClient>(options.udpConnect, options.bitrate, options.udpPacing);
+    if (!options.controlConnect.empty()) {
+      controlClient = std::make_unique<TcpClient>("", options.controlConnect);
+      controlClient->startControlReceiver();
+    } else {
+      std::cerr << "SNU1 UDP video has no --control-connect; native input/stats feedback disabled.\n";
+    }
+#else
+    throw std::runtime_error("--udp-connect is currently implemented for Windows host builds.");
 #endif
   } else if (!options.packetFile.empty()) {
     if (options.packetFile.has_parent_path()) {
@@ -1124,6 +1819,19 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
   }
+
+#ifdef _WIN32
+  if (!options.audioUdpConnect.empty()) {
+    if (!winsock) {
+      winsock = std::make_unique<WinsockRuntime>();
+    }
+    audioSender = std::make_unique<WasapiLoopbackAudioSender>(options.audioUdpConnect);
+  }
+#else
+  if (!options.audioUdpConnect.empty()) {
+    throw std::runtime_error("--audio-udp-connect is currently implemented for Windows host builds.");
+  }
+#endif
 
   VideoPacketEncodeOptions encodeOptions;
   encodeOptions.codec = VideoCodec::H264;
@@ -1161,9 +1869,15 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
             << (encoder->usingHardware() ? "hardware encoder" : "software encoder")
             << ", lowLatency=" << (options.lowLatencyEncoder ? "yes" : "no")
             << ", keyframeInterval=" << options.keyframeIntervalSeconds << "s"
-            << (!options.tcpConnect.empty()
+            << (!options.udpConnect.empty()
+                  ? " -> udp " + options.udpConnect
+                  : (!options.tcpConnect.empty()
                   ? " -> tcp " + options.tcpConnect
-                  : (options.packetFile.empty() ? " -> stdout" : " -> " + options.packetFile.string()))
+                  : (options.packetFile.empty() ? " -> stdout" : " -> " + options.packetFile.string())))
+            << (options.audioUdpConnect.empty() ? "" : " + audio " + options.audioUdpConnect)
+            << (!options.udpConnect.empty()
+                  ? std::string(" udpPacing=") + (options.udpPacing ? "on" : "off")
+                  : "")
             << "\n";
 
   const auto frameDelay = options.fps > 0
@@ -1200,6 +1914,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint64_t statsFrames = 0;
   std::uint64_t statsPackets = 0;
   std::uint64_t statsBytes = 0;
+  std::uint64_t statsUdpFragments = 0;
+  double statsUdpPacedMs = 0.0;
   std::uint64_t statsKeyframes = 0;
   const std::uint32_t maxAdaptiveBitrate = std::max<std::uint32_t>(options.bitrate, 1);
   const std::uint32_t minAdaptiveBitrate = std::min<std::uint32_t>(
@@ -1277,6 +1993,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 #ifdef _WIN32
       if (tcpClient) {
         tcpClient->sendAll(bytes.data(), bytes.size());
+      } else if (udpClient) {
+        statsUdpFragments += udpClient->sendPacket(bytes);
       } else
 #endif
       {
@@ -1284,7 +2002,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       }
     }
 #ifdef _WIN32
-    if (!tcpClient)
+    if (!tcpClient && !udpClient)
 #endif
     {
       output->flush();
@@ -1297,11 +2015,18 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     if (statsSeconds >= 1.0) {
       const double fps = static_cast<double>(statsFrames) / statsSeconds;
       const double mbps = (static_cast<double>(statsBytes) * 8.0) / statsSeconds / 1000000.0;
+#ifdef _WIN32
+      if (udpClient) {
+        statsUdpPacedMs += udpClient->takePacedSleepMs();
+      }
+#endif
       std::cerr << "SNV1_STATS fps=" << std::fixed << std::setprecision(1) << fps
                 << " mbps=" << mbps
                 << " packets=" << statsPackets
                 << " keyframes=" << statsKeyframes
 #ifdef _WIN32
+                << " udpFragments=" << statsUdpFragments
+                << " udpPacedMs=" << statsUdpPacedMs
                 << " cursorFrames=" << statsCursorFrames
 #endif
                 << "\n";
@@ -1345,6 +2070,11 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
               applied = true;
             }
           }
+#ifdef _WIN32
+          if (applied && udpClient) {
+            udpClient->setBitrate(currentAdaptiveBitrate);
+          }
+#endif
           std::cerr << "SNV1_ADAPT pressure=" << pressureLabel(feedback.pressure)
                     << " requestedMbps=" << (static_cast<double>(nextBitrate) / 1000000.0)
                     << " currentMbps=" << (static_cast<double>(currentAdaptiveBitrate) / 1000000.0)
@@ -1361,6 +2091,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       statsFrames = 0;
       statsPackets = 0;
       statsBytes = 0;
+      statsUdpFragments = 0;
+      statsUdpPacedMs = 0.0;
       statsKeyframes = 0;
 #ifdef _WIN32
       statsCursorFrames = 0;
@@ -1385,6 +2117,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 #ifdef _WIN32
     if (tcpClient) {
       tcpClient->sendAll(bytes.data(), bytes.size());
+    } else if (udpClient) {
+      udpClient->sendPacket(bytes);
     } else
 #endif
     {
@@ -1392,7 +2126,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     }
   }
 #ifdef _WIN32
-  if (!tcpClient)
+  if (!tcpClient && !udpClient)
 #endif
   {
     output->flush();

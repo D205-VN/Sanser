@@ -667,18 +667,22 @@ function normalizeQuality(input = {}) {
 }
 
 function normalizeNativeRequest(input = {}, req) {
-  if (!input || input.transport !== "snv-tcp") return null;
+  const transport = input?.transport === "snv-udp" ? "snv-udp" : (input?.transport === "snv-tcp" ? "snv-tcp" : "");
+  if (!transport) return null;
   const rawIp = String(input.clientIp || req.socket.remoteAddress || "").replace(/^::ffff:/, "");
   const clientIp = rawIp === "::1" ? "127.0.0.1" : rawIp;
-  const clientPort = clamp(Number(input.port || input.clientPort || 7777), 1, 65534);
+  const clientPort = clamp(Number(input.port || input.clientPort || 7777), 1, 65533);
   const controlPort = clamp(Number(input.controlPort || clientPort + 1), 1, 65535);
+  const audioPort = clamp(Number(input.audioPort || clientPort + 2), 1, 65535);
   return {
-    transport: "snv-tcp",
+    transport,
     clientIp,
     clientPort,
     controlPort,
+    audioPort,
     clientEndpoint: `${formatEndpointHost(clientIp)}:${clientPort}`,
-    controlEndpoint: `${formatEndpointHost(clientIp)}:${controlPort}`
+    controlEndpoint: `${formatEndpointHost(clientIp)}:${controlPort}`,
+    audioEndpoint: `${formatEndpointHost(clientIp)}:${audioPort}`
   };
 }
 

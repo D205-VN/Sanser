@@ -245,6 +245,28 @@ function handleNativeLog(entry = {}) {
       $("#clientRoleBadge").classList.remove("is-hidden");
       showToast("Native stream đã kết nối.", "success", 2500);
     }
+    if (/SNU1 UDP render listener ready/i.test(line)) {
+      appState.nativeInput = "UDP video listener";
+      streamStatus.textContent = "Native UDP video listener đã mở";
+    }
+    if (/SNA1 audio listener ready/i.test(line)) {
+      appState.nativeInput = "Audio UDP listener";
+      streamStatus.textContent = "Native renderer đã mở video + audio";
+    }
+    if (/SNA1_AUDIO_PLAYBACK/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNA1_AUDIO_PLAYBACK\s*/, "Audio ");
+    }
+    if (/SNA1_JITTER_(CONFIG|READY|RESET)/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNA1_JITTER_(CONFIG|READY|RESET)\s*/, "Audio jitter ");
+    }
+    if (/SNU1 render packets/i.test(line)) {
+      appState.nativeClientConnected = true;
+      appState.nativeRestartAttempts.client = 0;
+      hideConnecting();
+      streamStatus.textContent = "Native UDP SNV đang stream";
+      emptyStream.classList.add("is-hidden");
+      $("#clientRoleBadge").classList.remove("is-hidden");
+    }
     if (/SNINPUT_TX/i.test(line)) {
       appState.nativeInput = "TX sang Windows";
       streamStatus.textContent = "Native SNV đang stream | input hoạt động";
@@ -261,8 +283,23 @@ function handleNativeLog(entry = {}) {
       appState.nativeInput = "Waiting dedicated control";
       streamStatus.textContent = "Native SNV đang stream | chờ input socket riêng";
     }
+    if (/SNCONTROL_HELLO/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNCONTROL_HELLO(_ACK)?\s*/, "Control ");
+      clientStats.textContent = line.replace(/^.*SNCONTROL_HELLO(_ACK)?\s*/, "Control ");
+    }
+    if (/SNCONTROL inputBatch/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNCONTROL\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNCONTROL\s*/, "Control ");
+    }
     if (/SNINPUT_QUEUE/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNINPUT_QUEUE\s*/, "Input queue ");
+    }
+    if (/SNINPUT_BATCH_TX/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNINPUT_BATCH_TX\s*/, "Input batch ");
+    }
+    if (/SNINPUT_ACK/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_ACK\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_ACK\s*/, "Input ack ");
     }
     if (/SNINPUT_RTT/i.test(line)) {
       appState.nativeInput = line.replace(/^.*SNINPUT_RTT\s*/, "");
@@ -277,6 +314,12 @@ function handleNativeLog(entry = {}) {
     }
     if (/SNV1_RENDER_STATS/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNV1_RENDER_STATS\s*/, "Render ");
+    }
+    if (/SNU1_STATS/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNU1_STATS\s*/, "UDP ");
+    }
+    if (/SNA1_AUDIO_STATS/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNA1_AUDIO_STATS\s*/, "Audio ");
     }
     if (/listener stays open for reconnect/i.test(line)) {
       appState.nativeClientConnected = false;
@@ -295,8 +338,20 @@ function handleNativeLog(entry = {}) {
     if (/SNV1 H\.264 packet stream/i.test(line)) {
       $("#captureStatus").textContent = "Native host đang encode H.264";
     }
+    if (/SNU1 UDP video connected/i.test(line)) {
+      $("#captureStatus").textContent = "Native host đang stream UDP video";
+    }
+    if (/SNA1 audio UDP connected/i.test(line)) {
+      $("#captureStatus").textContent = "Native host đang stream UDP video + audio";
+    }
+    if (/SNA1_AUDIO_CAPTURE/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNA1_AUDIO_CAPTURE\s*/, "Audio ");
+    }
     if (/SNV1_STATS/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNV1_STATS\s*/, "Native ");
+    }
+    if (/SNA1_AUDIO_STATS/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNA1_AUDIO_STATS\s*/, "Audio ");
     }
     if (/SNFEEDBACK|SNV1_ADAPT|SNV1_ENCODER_RESTART/i.test(line)) {
       hostStats.textContent = line.replace(/^.*(SNFEEDBACK|SNV1_ADAPT|SNV1_ENCODER_RESTART)\s*/, "Native ");
@@ -311,9 +366,15 @@ function handleNativeLog(entry = {}) {
         ? "Native SNV | input backchannel riêng hoạt động"
         : "Native SNV | input backchannel hoạt động";
     }
+    if (/SNCONTROL_HELLO_ACK/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNCONTROL_HELLO_ACK\s*/, "Control ");
+    }
     if (/SNINPUT_APPLIED/i.test(line)) {
       appState.nativeInput = line.replace(/^.*SNINPUT_APPLIED\s*/, "");
       hostStats.textContent = line.replace(/^.*SNINPUT_APPLIED/, "Input");
+    }
+    if (/SNINPUT_BATCH/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNINPUT_BATCH\s*/, "Input batch ");
     }
   }
   updateNativeDiagnostics();
@@ -903,20 +964,23 @@ async function connectNativeToDevice(device) {
 
     const port = readNativePort();
     const controlPort = nativeControlPort(port);
+    const audioPort = nativeAudioPort(port);
     showConnecting(device.name || "máy chủ");
-    streamStatus.textContent = `Đang mở native renderer trên cổng ${port}/${controlPort}...`;
+    streamStatus.textContent = `Đang mở native renderer trên cổng ${port}/${controlPort}/${audioPort}...`;
     $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
     appState.nativeClientConnected = false;
     appState.nativeClientDesired = true;
     appState.nativeRestartAttempts.client = 0;
     clearNativeRestart("client");
 
-    const clientOptions = { port, controlPort, logInput: true, fullscreen: true, hideCursor: true, relativeMouse: true };
+    const clientOptions = { port, controlPort, audioPort, audioJitterMs: 24, videoTransport: "udp", logInput: true, fullscreen: true, hideCursor: true, relativeMouse: true };
     appState.nativeClientOptions = clientOptions;
     await window.sanserNative.startClient(clientOptions);
     const networkInfo = await window.sanserNative.networkInfo?.().catch(() => null);
     const clientIp = chooseNativeClientIp(device, networkInfo?.addresses || []);
-    const endpointLabel = clientIp ? `${clientIp}:${port} + ${clientIp}:${controlPort}` : `auto:${port} + auto:${controlPort}`;
+    const endpointLabel = clientIp
+      ? `${clientIp}:${port} + ${clientIp}:${controlPort} + audio ${clientIp}:${audioPort}`
+      : `auto:${port} + auto:${controlPort} + audio auto:${audioPort}`;
     appState.nativeEndpoint = endpointLabel;
     appState.nativeInput = "Listener opened";
     await refreshNativeStatus();
@@ -936,10 +1000,11 @@ async function connectNativeToDevice(device) {
         deviceId: device.id,
         quality: readClientQuality(),
         native: {
-          transport: "snv-tcp",
+          transport: "snv-udp",
           clientIp,
           port,
-          controlPort
+          controlPort,
+          audioPort
         }
       }
     });
@@ -1020,9 +1085,12 @@ async function startNativeHostForRoom(room) {
   const endpoint = room.native?.clientEndpoint;
   if (!endpoint) throw new Error("Native room thiếu endpoint của Mac client.");
   const controlEndpoint = room.native?.controlEndpoint || "";
+  const audioEndpoint = room.native?.audioEndpoint || "";
 
   appState.nativeHostRooms.add(room.id);
-  appState.nativeEndpoint = controlEndpoint ? `${endpoint} + ${controlEndpoint}` : endpoint;
+  appState.nativeEndpoint = [endpoint, controlEndpoint, audioEndpoint ? `audio ${audioEndpoint}` : ""]
+    .filter(Boolean)
+    .join(" + ");
   appState.nativeInput = "Host connecting";
   appState.nativeHostDesired = true;
   appState.nativeRestartAttempts.host = 0;
@@ -1033,6 +1101,9 @@ async function startNativeHostForRoom(room) {
   const hostOptions = {
     endpoint,
     controlEndpoint,
+    audioEndpoint,
+    videoTransport: room.native?.transport === "snv-udp" ? "udp" : "tcp",
+    udpPacing: true,
     fps: room.quality?.fps || Number($("#hostFps").value || 60),
     bitrateMbps: room.quality?.bitrateMbps || Number($("#hostBitrate").value || 28),
     keyframeInterval: 1,
@@ -1045,9 +1116,9 @@ async function startNativeHostForRoom(room) {
 
 function handleNativeClientAccepted(room) {
   appState.clientRoom = room;
-  appState.nativeEndpoint = room.native?.controlEndpoint
-    ? `${room.native.clientEndpoint} + ${room.native.controlEndpoint}`
-    : (room.native?.clientEndpoint || appState.nativeEndpoint);
+  appState.nativeEndpoint = [room.native?.clientEndpoint, room.native?.controlEndpoint, room.native?.audioEndpoint ? `audio ${room.native.audioEndpoint}` : ""]
+    .filter(Boolean)
+    .join(" + ") || appState.nativeEndpoint;
   appState.nativeInput = "Client accepted";
   streamStatus.textContent = "Native renderer đang chờ Windows host";
   $(".stream-dock").classList.add("is-visible");
@@ -1287,15 +1358,19 @@ function isNativeTransport() {
 }
 
 function isNativeRoom(room) {
-  return room?.native?.transport === "snv-tcp";
+  return room?.native?.transport === "snv-tcp" || room?.native?.transport === "snv-udp";
 }
 
 function readNativePort() {
-  return Math.round(clamp(Number($("#nativeListenPort")?.value || NATIVE_DEFAULT_PORT), 1, 65534));
+  return Math.round(clamp(Number($("#nativeListenPort")?.value || NATIVE_DEFAULT_PORT), 1, 65533));
 }
 
 function nativeControlPort(videoPort) {
   return Math.round(clamp(Number(videoPort || NATIVE_DEFAULT_PORT) + 1, 1, 65535));
+}
+
+function nativeAudioPort(videoPort) {
+  return Math.round(clamp(Number(videoPort || NATIVE_DEFAULT_PORT) + 2, 1, 65535));
 }
 
 function attachHostTransport(pc, sender, quality) {

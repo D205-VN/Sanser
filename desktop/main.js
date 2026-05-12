@@ -292,11 +292,17 @@ function startNativeClient(options = {}) {
     throw new Error(`Không tìm thấy sanser-native-client tại ${executable}. Hãy build bằng npm run native:client-mac:build.`);
   }
 
-  const port = clampInt(options.port, 1, 65535, 7777);
+  const port = clampInt(options.port, 1, 65533, 7777);
   const controlPort = clampInt(options.controlPort, 0, 65535, port < 65535 ? port + 1 : 0);
+  const audioPort = clampInt(options.audioPort, 0, 65535, port < 65534 ? port + 2 : 0);
+  const audioJitterMs = clampInt(options.audioJitterMs, 0, 120, 24);
+  const videoTransport = String(options.videoTransport || "tcp").toLowerCase();
   const maxPackets = clampInt(options.maxPackets, 0, Number.MAX_SAFE_INTEGER, 0);
   const args = ["--listen-render-snv", String(port)];
   if (controlPort > 0) args.push("--control-port", String(controlPort));
+  if (audioPort > 0) args.push("--audio-port", String(audioPort));
+  if (audioPort > 0) args.push("--audio-jitter-ms", String(audioJitterMs));
+  if (videoTransport === "udp") args.push("--udp-video");
   if (maxPackets > 0) args.push("--max-packets", String(maxPackets));
   if (options.logInput !== false) args.push("--log-input");
   if (options.fullscreen !== false) args.push("--fullscreen");
@@ -320,6 +326,10 @@ function startNativeHost(options = {}) {
   if (controlEndpoint && !/^\[?[A-Za-z0-9:._-]+\]?:\d+$/.test(controlEndpoint)) {
     throw new Error("Native host cần controlEndpoint dạng HOST:PORT.");
   }
+  const audioEndpoint = String(options.audioEndpoint || "").trim();
+  if (audioEndpoint && !/^\[?[A-Za-z0-9:._-]+\]?:\d+$/.test(audioEndpoint)) {
+    throw new Error("Native host cần audioEndpoint dạng HOST:PORT.");
+  }
 
   stopNativeProcess("host");
   const executable = resolveNativeHostPath();
@@ -330,6 +340,8 @@ function startNativeHost(options = {}) {
   const fps = clampInt(options.fps, 30, 120, 60);
   const bitrateMbps = clampInt(options.bitrateMbps, 4, 120, 28);
   const keyframeInterval = clampInt(options.keyframeInterval, 1, 10, 1);
+  const videoTransport = String(options.videoTransport || "tcp").toLowerCase();
+  const connectFlag = videoTransport === "udp" ? "--udp-connect" : "--tcp-connect";
   const args = [
     "--encode-pipe",
     "h264",
@@ -341,10 +353,12 @@ function startNativeHost(options = {}) {
     String(bitrateMbps * 1000000),
     "--keyframe-interval",
     String(keyframeInterval),
-    "--tcp-connect",
+    connectFlag,
     endpoint
   ];
   if (controlEndpoint) args.push("--control-connect", controlEndpoint);
+  if (audioEndpoint) args.push("--audio-udp-connect", audioEndpoint);
+  if (videoTransport === "udp" && options.udpPacing === false) args.push("--no-udp-pacing");
   if (options.lowLatencyEncoder !== false) args.push("--low-latency-encoder");
   else args.push("--no-low-latency-encoder");
   if (options.softwareEncoder) args.push("--software-encoder");
