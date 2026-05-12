@@ -195,6 +195,15 @@ function getIceServers() {
   return iceServers;
 }
 
+function networkMode() {
+  return String(process.env.NETWORK_MODE || "").trim().toLowerCase();
+}
+
+function iceTransportPolicy(hasTurn) {
+  if (networkMode() === "tailscale") return "all";
+  return process.env.ICE_TRANSPORT_POLICY || (hasTurn ? "relay" : "all");
+}
+
 async function cleanOfflineDevices() {
   const cutoff = Date.now() - OFFLINE_AFTER_MS;
   await pool.query('UPDATE devices SET online = false WHERE online = true AND last_seen_at <= $1', [cutoff]);
@@ -323,7 +332,8 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, {
       iceServers,
       hasTurn,
-      iceTransportPolicy: process.env.ICE_TRANSPORT_POLICY || (hasTurn ? "relay" : "all")
+      networkMode: networkMode() || "default",
+      iceTransportPolicy: iceTransportPolicy(hasTurn)
     });
     return;
   }

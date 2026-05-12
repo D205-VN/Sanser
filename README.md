@@ -70,18 +70,25 @@ http://WINDOWS_LAN_IP:5174
 
 After both apps login with the same account on that server, the Windows computer appears automatically in `Computers`.
 
-## TURN for hard networks
+## Tailscale mode
 
-The app uses WebRTC. Same-LAN connections usually work with STUN, but different networks, strict NAT, or Windows firewall rules can still block direct P2P. Configure a TURN server in `.env` when clients show ICE connection failures:
+For free cross-network testing without router port forwarding, install Tailscale on both computers and sign in to the same tailnet:
+
+```bash
+npm run tailscale:install
+```
+
+The desktop app also checks this automatically at startup when `NETWORK_MODE=tailscale`; if Tailscale is missing, it offers to install it using Homebrew on macOS or winget on Windows.
+
+Then set this in `.env` on both computers:
 
 ```text
 STUN_URLS=stun:stun.l.google.com:19302
-TURN_URLS=turn:YOUR_TURN_HOST:3478
-TURN_USERNAME=your-username
-TURN_CREDENTIAL=your-password
+NETWORK_MODE=tailscale
+ICE_TRANSPORT_POLICY=all
 ```
 
-To self-host TURN with Homebrew/coturn or Docker, use the setup in [`turn/`](turn/README.md).
+Restart Sanser on both machines. Tailscale must stay connected while streaming. If Windows uses a packaged `.exe`, rebuild and copy the latest app after code changes.
 
 ## Smoothness notes
 

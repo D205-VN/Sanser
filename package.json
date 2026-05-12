@@ -9,6 +9,7 @@
     "desktop": "electron .",
     "start": "electron .",
     "check": "node --check server.js && node --check public/app.js && node --check desktop/main.js",
+    "tailscale:install": "node scripts/install-tailscale.js",
     "dist:win": "electron-builder --win portable --x64",
     "dist:win:installer": "electron-builder --win nsis --x64",
     "dist:mac": "electron-builder --mac zip --arm64",
@@ -31,6 +32,7 @@
     "files": [
       "desktop/**/*",
       "public/**/*",
+      "scripts/**/*",
       "server.js",
       "package.json",
       "README.md"
