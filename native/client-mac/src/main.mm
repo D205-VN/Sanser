@@ -919,7 +919,9 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 } // namespace
 
-@interface SanserMetalView : MTKView
+@interface SanserMetalView : MTKView {
+  NSTrackingArea* _trackingArea;
+}
 @end
 
 @implementation SanserMetalView
@@ -943,6 +945,28 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 - (void)viewDidMoveToWindow {
   [super viewDidMoveToWindow];
+  [[self window] makeFirstResponder:self];
+  [[self window] setAcceptsMouseMovedEvents:YES];
+}
+
+- (void)updateTrackingAreas {
+  [super updateTrackingAreas];
+  if (_trackingArea) {
+    [self removeTrackingArea:_trackingArea];
+  }
+  _trackingArea = [[NSTrackingArea alloc] initWithRect:[self bounds]
+                                               options:NSTrackingMouseMoved
+                                                     | NSTrackingMouseEnteredAndExited
+                                                     | NSTrackingActiveAlways
+                                                     | NSTrackingEnabledDuringMouseDrag
+                                                     | NSTrackingInVisibleRect
+                                                 owner:self
+                                              userInfo:nil];
+  [self addTrackingArea:_trackingArea];
+}
+
+- (void)mouseEntered:(NSEvent*)event {
+  (void)event;
   [[self window] makeFirstResponder:self];
   [[self window] setAcceptsMouseMovedEvents:YES];
 }
