@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <VideoToolbox/VideoToolbox.h>
+#import <dispatch/dispatch.h>
 
 #include <chrono>
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
@@ -80,6 +82,7 @@ void printHelp() {
     << "sanser-native-client --probe\n"
     << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
     << "sanser-native-client --listen-snv PORT [--max-packets N]\n"
+    << "sanser-native-client --listen-render-snv PORT [--max-packets N]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
@@ -88,6 +91,7 @@ void printHelp() {
     << "  --probe           Print VideoToolbox hardware decode and Metal availability\n"
     << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
     << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
+    << "  --listen-render-snv P Listen over TCP, decode with VideoToolbox, render with Metal\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --metal-test      Open a Metal window and log native input events to stdout\n"
     << "  --seconds N       Auto-close Metal test after N seconds; 0 keeps it open\n"
@@ -396,6 +400,11 @@ std::vector<std::uint8_t> buildAvccSample(const std::vector<NalUnit>& nals) {
 
 class VtH264Decoder {
 public:
+  using FrameCallback = void (*)(void* context, CVImageBufferRef imageBuffer);
+
+  VtH264Decoder(FrameCallback callback = nullptr, void* callbackContext = nullptr)
+    : frameCallback_(callback), frameCallbackContext_(callbackContext) {}
+
   ~VtH264Decoder() {
     if (session_) {
       VTDecompressionSessionWaitForAsynchronousFrames(session_);
@@ -560,6 +569,9 @@ private:
     auto* self = static_cast<VtH264Decoder*>(decompressionOutputRefCon);
     if (status == noErr && imageBuffer) {
       self->decodedFrames_ += 1;
+      if (self->frameCallback_) {
+        self->frameCallback_(self->frameCallbackContext_, imageBuffer);
+      }
       if (self->decodedFrames_ == 1) {
         self->decodedWidth_ = static_cast<std::uint32_t>(CVPixelBufferGetWidth(imageBuffer));
         self->decodedHeight_ = static_cast<std::uint32_t>(CVPixelBufferGetHeight(imageBuffer));
@@ -578,6 +590,8 @@ private:
   std::uint64_t decodeErrors_ = 0;
   std::uint32_t decodedWidth_ = 0;
   std::uint32_t decodedHeight_ = 0;
+  FrameCallback frameCallback_ = nullptr;
+  void* frameCallbackContext_ = nullptr;
 };
 
 struct DecodeSummary {
@@ -943,7 +957,298 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 @end
 
+@interface SanserVideoRenderer : NSObject <MTKViewDelegate>
+- (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view;
+- (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer;
+@end
+
+@implementation SanserVideoRenderer {
+  id<MTLDevice> _device;
+  id<MTLCommandQueue> _commandQueue;
+  id<MTLRenderPipelineState> _pipeline;
+  CVMetalTextureCacheRef _textureCache;
+  CVPixelBufferRef _latestPixelBuffer;
+  NSLock* _lock;
+  std::uint64_t _submittedBuffers;
+}
+
+- (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view {
+  self = [super init];
+  if (!self) return nil;
+
+  _device = device;
+  _commandQueue = [device newCommandQueue];
+  _lock = [[NSLock alloc] init];
+
+  CVReturn cacheResult = CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device, nullptr, &_textureCache);
+  if (cacheResult != kCVReturnSuccess || !_textureCache) {
+    std::cerr << "CVMetalTextureCacheCreate failed: " << cacheResult << "\n";
+    return nil;
+  }
+
+  NSString* shaderSource =
+    @"#include <metal_stdlib>\n"
+     @"using namespace metal;\n"
+     @"struct VertexOut { float4 position [[position]]; float2 uv; };\n"
+     @"vertex VertexOut vertex_main(uint vid [[vertex_id]]) {\n"
+     @"  float2 pos[6] = { {-1,-1}, {1,-1}, {-1,1}, {-1,1}, {1,-1}, {1,1} };\n"
+     @"  float2 uv[6] = { {0,1}, {1,1}, {0,0}, {0,0}, {1,1}, {1,0} };\n"
+     @"  VertexOut out;\n"
+     @"  out.position = float4(pos[vid], 0, 1);\n"
+     @"  out.uv = uv[vid];\n"
+     @"  return out;\n"
+     @"}\n"
+     @"fragment float4 fragment_video(VertexOut in [[stage_in]], texture2d<float> yTex [[texture(0)]], texture2d<float> uvTex [[texture(1)]]) {\n"
+     @"  constexpr sampler s(address::clamp_to_edge, filter::linear);\n"
+     @"  float y = yTex.sample(s, in.uv).r;\n"
+     @"  float2 uv = uvTex.sample(s, in.uv).rg - float2(0.5, 0.5);\n"
+     @"  y = max((y - 0.0625) * 1.164383, 0.0);\n"
+     @"  float3 rgb;\n"
+     @"  rgb.r = y + 1.792741 * uv.y;\n"
+     @"  rgb.g = y - 0.213249 * uv.x - 0.532909 * uv.y;\n"
+     @"  rgb.b = y + 2.112402 * uv.x;\n"
+     @"  return float4(saturate(rgb), 1.0);\n"
+     @"}\n";
+
+  NSError* error = nil;
+  id<MTLLibrary> library = [device newLibraryWithSource:shaderSource options:nil error:&error];
+  if (!library) {
+    std::cerr << "Video Metal shader compile failed: " << nsStringToUtf8([error localizedDescription]) << "\n";
+    return nil;
+  }
+
+  MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+  descriptor.vertexFunction = [library newFunctionWithName:@"vertex_main"];
+  descriptor.fragmentFunction = [library newFunctionWithName:@"fragment_video"];
+  descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+
+  _pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (!_pipeline) {
+    std::cerr << "Video Metal pipeline creation failed: " << nsStringToUtf8([error localizedDescription]) << "\n";
+    return nil;
+  }
+
+  return self;
+}
+
+- (void)dealloc {
+  [_lock lock];
+  if (_latestPixelBuffer) {
+    CVPixelBufferRelease(_latestPixelBuffer);
+    _latestPixelBuffer = nullptr;
+  }
+  [_lock unlock];
+  if (_textureCache) {
+    CFRelease(_textureCache);
+    _textureCache = nullptr;
+  }
+}
+
+- (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+  if (!pixelBuffer) return;
+  CVPixelBufferRetain(pixelBuffer);
+  [_lock lock];
+  if (_latestPixelBuffer) {
+    CVPixelBufferRelease(_latestPixelBuffer);
+  }
+  _latestPixelBuffer = pixelBuffer;
+  _submittedBuffers += 1;
+  [_lock unlock];
+}
+
+- (void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size {
+  (void)view;
+  (void)size;
+}
+
+- (void)drawInMTKView:(MTKView*)view {
+  MTLRenderPassDescriptor* pass = [view currentRenderPassDescriptor];
+  id<CAMetalDrawable> drawable = [view currentDrawable];
+  if (!pass || !drawable) return;
+
+  CVPixelBufferRef pixelBuffer = nullptr;
+  [_lock lock];
+  if (_latestPixelBuffer) {
+    pixelBuffer = CVPixelBufferRetain(_latestPixelBuffer);
+  }
+  [_lock unlock];
+
+  id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
+  id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+
+  if (pixelBuffer && CVPixelBufferGetPlaneCount(pixelBuffer) >= 2) {
+    const std::size_t width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+    const std::size_t height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+    const std::size_t uvWidth = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1);
+    const std::size_t uvHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1);
+
+    CVMetalTextureRef yTextureRef = nullptr;
+    CVMetalTextureRef uvTextureRef = nullptr;
+    CVReturn yResult = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
+                                                                 _textureCache,
+                                                                 pixelBuffer,
+                                                                 nullptr,
+                                                                 MTLPixelFormatR8Unorm,
+                                                                 width,
+                                                                 height,
+                                                                 0,
+                                                                 &yTextureRef);
+    CVReturn uvResult = CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
+                                                                  _textureCache,
+                                                                  pixelBuffer,
+                                                                  nullptr,
+                                                                  MTLPixelFormatRG8Unorm,
+                                                                  uvWidth,
+                                                                  uvHeight,
+                                                                  1,
+                                                                  &uvTextureRef);
+    if (yResult == kCVReturnSuccess && uvResult == kCVReturnSuccess && yTextureRef && uvTextureRef) {
+      id<MTLTexture> yTexture = CVMetalTextureGetTexture(yTextureRef);
+      id<MTLTexture> uvTexture = CVMetalTextureGetTexture(uvTextureRef);
+      [encoder setRenderPipelineState:_pipeline];
+      [encoder setFragmentTexture:yTexture atIndex:0];
+      [encoder setFragmentTexture:uvTexture atIndex:1];
+      [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    }
+    if (yTextureRef) CFRelease(yTextureRef);
+    if (uvTextureRef) CFRelease(uvTextureRef);
+  }
+
+  [encoder endEncoding];
+  [commandBuffer presentDrawable:drawable];
+  [commandBuffer commit];
+
+  if (pixelBuffer) {
+    CVPixelBufferRelease(pixelBuffer);
+  }
+}
+
+@end
+
 namespace {
+
+void submitFrameToVideoRenderer(void* context, CVImageBufferRef imageBuffer) {
+  auto* renderer = (__bridge SanserVideoRenderer*)context;
+  [renderer submitPixelBuffer:(CVPixelBufferRef)imageBuffer];
+}
+
+void decodeTcpStreamToRenderer(std::uint16_t port,
+                               std::uint64_t maxPackets,
+                               void* retainedRendererContext) {
+  @autoreleasepool {
+    try {
+      ScopedFd server(socket(AF_INET, SOCK_STREAM, 0));
+      if (server.get() < 0) {
+        throw std::runtime_error("Could not create TCP listener socket.");
+      }
+
+      int reuse = 1;
+      setsockopt(server.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+      sockaddr_in address{};
+      address.sin_family = AF_INET;
+      address.sin_addr.s_addr = htonl(INADDR_ANY);
+      address.sin_port = htons(port);
+      if (bind(server.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        throw std::runtime_error("Could not bind TCP render listener on port " + std::to_string(port));
+      }
+      if (listen(server.get(), 1) != 0) {
+        throw std::runtime_error("Could not listen on TCP render port " + std::to_string(port));
+      }
+
+      std::cout << "SNV1 Metal render listener ready on 0.0.0.0:" << port << "\n";
+      std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect MAC_TAILSCALE_IP:" << port << "\n";
+
+      sockaddr_in peerAddress{};
+      socklen_t peerLength = sizeof(peerAddress);
+      ScopedFd client(accept(server.get(), reinterpret_cast<sockaddr*>(&peerAddress), &peerLength));
+      if (client.get() < 0) {
+        throw std::runtime_error("TCP accept failed.");
+      }
+
+      char peerIp[INET_ADDRSTRLEN]{};
+      inet_ntop(AF_INET, &peerAddress.sin_addr, peerIp, sizeof(peerIp));
+      std::cout << "SNV1 render client connected from " << peerIp << ":" << ntohs(peerAddress.sin_port) << "\n";
+
+      VtH264Decoder decoder(submitFrameToVideoRenderer, retainedRendererContext);
+      DecodeSummary summary;
+      while (maxPackets == 0 || summary.packets < maxPackets) {
+        SnvPacket packet;
+        if (!readSnvPacketFromFd(client.get(), packet)) {
+          break;
+        }
+        processSnvPacket(decoder, summary, packet);
+        if (summary.packets % 60 == 0) {
+          std::cout << "SNV1 render packets=" << summary.packets
+                    << " decoded=" << decoder.decodedFrames()
+                    << " errors=" << decoder.decodeErrors()
+                    << "\n";
+        }
+      }
+
+      decoder.flush();
+      printDecodeSummary("tcp-render:" + std::to_string(port), summary, decoder);
+    } catch (const std::exception& error) {
+      std::cerr << "SNV1 render listener error: " << error.what() << "\n";
+    }
+
+    CFRelease((CFTypeRef)retainedRendererContext);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [NSApp terminate:nil];
+    });
+  }
+}
+
+int runVideoRenderTcp(std::uint16_t port, std::uint64_t maxPackets) {
+  @autoreleasepool {
+    id<MTLDevice> device = defaultMetalDevice();
+    if (!device) {
+      throw std::runtime_error("Metal is not available on this Mac.");
+    }
+
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+    const NSRect frame = NSMakeRect(0, 0, 1280, 720);
+    const NSWindowStyleMask style = NSWindowStyleMaskTitled
+                                  | NSWindowStyleMaskClosable
+                                  | NSWindowStyleMaskMiniaturizable
+                                  | NSWindowStyleMaskResizable;
+    NSWindow* window = [[NSWindow alloc] initWithContentRect:frame
+                                                   styleMask:style
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    [window setTitle:@"Sanser Native Client - SNV1 Metal Render"];
+
+    SanserMetalView* view = [[SanserMetalView alloc] initWithFrame:frame device:device];
+    [view setColorPixelFormat:MTLPixelFormatBGRA8Unorm];
+    [view setPreferredFramesPerSecond:60];
+    [view setPaused:NO];
+    [view setEnableSetNeedsDisplay:NO];
+
+    SanserVideoRenderer* renderer = [[SanserVideoRenderer alloc] initWithDevice:device view:view];
+    if (!renderer) {
+      throw std::runtime_error("Failed to create video Metal renderer.");
+    }
+
+    [view setDelegate:renderer];
+    [window setContentView:view];
+    [window center];
+    [window makeKeyAndOrderFront:nil];
+    [window makeFirstResponder:view];
+    [NSApp activateIgnoringOtherApps:YES];
+
+    void* rendererContext = (__bridge_retained void*)renderer;
+    std::thread worker([port, maxPackets, rendererContext]() {
+      decodeTcpStreamToRenderer(port, maxPackets, rendererContext);
+    });
+    worker.detach();
+
+    std::cout << "Metal video renderer running on " << nsStringToUtf8([device name]) << "\n";
+    [NSApp run];
+  }
+  return 0;
+}
 
 int runMetalTest(double seconds) {
   @autoreleasepool {
@@ -1003,12 +1308,14 @@ struct Options {
   bool probe = false;
   bool decodeSnv = false;
   bool listenSnv = false;
+  bool listenRenderSnv = false;
   bool metalTest = false;
   bool clipboardRead = false;
   bool clipboardWrite = false;
   bool help = false;
   std::uint64_t maxPackets = 0;
   std::uint16_t listenPort = 0;
+  std::uint16_t listenRenderPort = 0;
   double seconds = 5;
   std::string snvFile;
   std::string clipboardText;
@@ -1035,6 +1342,12 @@ Options parseOptions(int argc, char** argv) {
       if (port == 0 || port > 65535) throw std::runtime_error("--listen-snv port must be 1-65535");
       options.listenSnv = true;
       options.listenPort = static_cast<std::uint16_t>(port);
+    } else if (arg == "--listen-render-snv") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --listen-render-snv");
+      const auto port = std::stoul(argv[++i]);
+      if (port == 0 || port > 65535) throw std::runtime_error("--listen-render-snv port must be 1-65535");
+      options.listenRenderSnv = true;
+      options.listenRenderPort = static_cast<std::uint16_t>(port);
     } else if (arg == "--max-packets") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --max-packets");
       options.maxPackets = static_cast<std::uint64_t>(std::stoull(argv[++i]));
@@ -1070,6 +1383,7 @@ int main(int argc, char** argv) {
     if (options.probe) return runProbe();
     if (options.decodeSnv) return decodeSnvFile(options.snvFile, options.maxPackets);
     if (options.listenSnv) return listenSnvTcp(options.listenPort, options.maxPackets);
+    if (options.listenRenderSnv) return runVideoRenderTcp(options.listenRenderPort, options.maxPackets);
     if (options.clipboardRead) return clipboardRead();
     if (options.clipboardWrite) return clipboardWrite(options.clipboardText);
     if (options.metalTest) return runMetalTest(options.seconds);

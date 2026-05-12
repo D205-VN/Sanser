@@ -140,7 +140,8 @@ npm run native:client-mac:build
 npm run native:client-mac:probe
 npm run native:client-mac:decode-snv -- /path/to/capture_h264.snv
 npm run native:client-mac:listen-snv -- 7777 --max-packets 180
+npm run native:client-mac:listen-render-snv -- 7777 --max-packets 180
 ./native/client-mac/build/sanser-native-client --metal-test --seconds 5
 ```
 
-This does not replace the Electron/WebRTC client view yet. The next native-client step is rendering decoded `CVPixelBuffer` frames as Metal textures and then wiring the packet source to a realtime transport.
+This does not replace the Electron/WebRTC client view yet. The native client can now render decoded `CVPixelBuffer` frames as Metal NV12 textures; the next step is wiring this native window/helper into the Electron app flow and then moving from TCP to RTP or UDP/QUIC.

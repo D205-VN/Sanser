@@ -18,6 +18,7 @@
     "native:client-mac:probe": "./native/client-mac/build/sanser-native-client --probe",
     "native:client-mac:decode-snv": "./native/client-mac/build/sanser-native-client --decode-snv",
     "native:client-mac:listen-snv": "./native/client-mac/build/sanser-native-client --listen-snv",
+    "native:client-mac:listen-render-snv": "./native/client-mac/build/sanser-native-client --listen-render-snv",
     "dist:win": "electron-builder --win portable --x64",
     "dist:win:installer": "electron-builder --win nsis --x64",
     "dist:mac": "electron-builder --mac zip --arm64",

@@ -7,6 +7,7 @@ Current scope:
 - VideoToolbox hardware decode capability probe
 - SNV1 H.264 packet file parser
 - VideoToolbox decode test from Windows native host `.snv` captures
+- TCP SNV1 receiver with VideoToolbox decode and Metal render
 - Metal render test window
 - Native mouse, keyboard, scroll event logging from the Metal view
 - Native clipboard read/write probe
@@ -14,7 +15,6 @@ Current scope:
 Not included yet:
 
 - Realtime H.264/H.265/AV1 network packet decode
-- CVPixelBuffer-to-Metal texture render path
 - Jitter buffer
 - Audio decode/playback
 - Integration with the Electron client stream view
@@ -67,6 +67,22 @@ Then start the Windows native host with the Mac Tailscale IP:
 ```
 
 The Mac command decodes packets as they arrive and prints the same decode summary. This is Phase 6C's first network transport: TCP over Tailscale, before RTP/UDP/QUIC.
+
+## TCP SNV1 Metal Render
+
+Start the macOS native client with a Metal render window:
+
+```bash
+npm run native:client-mac:listen-render-snv -- 7777 --max-packets 180
+```
+
+Then start the Windows native host:
+
+```powershell
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect MAC_TAILSCALE_IP:7777
+```
+
+Decoded `CVPixelBuffer` frames are submitted to a Metal renderer and displayed as NV12 textures.
 
 ## Metal Render Test
 
