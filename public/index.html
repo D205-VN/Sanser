@@ -217,6 +217,35 @@
             </div>
             <div class="request-list" id="requestList"></div>
           </section>
+
+          <section class="dark-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Native Diagnostics</h2>
+                <p id="nativeDiagSummary">Chưa có phiên native.</p>
+              </div>
+              <button class="secondary-action" id="refreshNativeStatusButton" type="button">Kiểm tra</button>
+            </div>
+            <div class="native-diag-grid">
+              <div class="native-diag-cell">
+                <span>Client</span>
+                <strong id="nativeClientState">Idle</strong>
+              </div>
+              <div class="native-diag-cell">
+                <span>Host</span>
+                <strong id="nativeHostState">Idle</strong>
+              </div>
+              <div class="native-diag-cell">
+                <span>Endpoint</span>
+                <strong id="nativeEndpointState">--</strong>
+              </div>
+              <div class="native-diag-cell">
+                <span>Input</span>
+                <strong id="nativeInputState">--</strong>
+              </div>
+            </div>
+            <div class="native-log" id="nativeLogList"></div>
+          </section>
         </section>
 
         <!-- SETTINGS VIEW -->

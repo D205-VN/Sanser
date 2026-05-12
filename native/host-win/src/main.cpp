@@ -291,7 +291,7 @@ std::wstring utf8ToWide(const std::string& value) {
   return wide;
 }
 
-bool movePointerNormalized(double normalizedX, double normalizedY) {
+POINT normalizedToScreenPoint(double normalizedX, double normalizedY) {
   InputBounds bounds;
   {
     std::lock_guard<std::mutex> lock(gInputBoundsMutex);
@@ -306,22 +306,42 @@ bool movePointerNormalized(double normalizedX, double normalizedY) {
   const double y = std::clamp(normalizedY, 0.0, 1.0);
   const int screenX = left + static_cast<int>(std::lround(x * static_cast<double>(width - 1)));
   const int screenY = top + static_cast<int>(std::lround(y * static_cast<double>(height - 1)));
-  if (SetCursorPos(screenX, screenY) != 0) return true;
+  return POINT{static_cast<LONG>(screenX), static_cast<LONG>(screenY)};
+}
+
+bool cursorNearTarget(const POINT& target, POINT* actualOut = nullptr) {
+  POINT actual{};
+  if (!GetCursorPos(&actual)) return false;
+  if (actualOut) *actualOut = actual;
+  return std::abs(actual.x - target.x) <= 2 && std::abs(actual.y - target.y) <= 2;
+}
+
+bool movePointerNormalized(double normalizedX, double normalizedY) {
+  const POINT target = normalizedToScreenPoint(normalizedX, normalizedY);
+
+  ClipCursor(nullptr);
+  if (SetCursorPos(target.x, target.y) != 0 && cursorNearTarget(target)) return true;
 
   const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
   const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
   const int virtualWidth = std::max(GetSystemMetrics(SM_CXVIRTUALSCREEN), 1);
   const int virtualHeight = std::max(GetSystemMetrics(SM_CYVIRTUALSCREEN), 1);
+  const LONG absoluteX = static_cast<LONG>(std::lround((target.x - virtualLeft) * 65535.0 / std::max(virtualWidth - 1, 1)));
+  const LONG absoluteY = static_cast<LONG>(std::lround((target.y - virtualTop) * 65535.0 / std::max(virtualHeight - 1, 1)));
+
   INPUT input{};
   input.type = INPUT_MOUSE;
-  input.mi.dx = static_cast<LONG>(std::lround((screenX - virtualLeft) * 65535.0 / std::max(virtualWidth - 1, 1)));
-  input.mi.dy = static_cast<LONG>(std::lround((screenY - virtualTop) * 65535.0 / std::max(virtualHeight - 1, 1)));
+  input.mi.dx = absoluteX;
+  input.mi.dy = absoluteY;
   input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-  SendInput(1, &input, sizeof(input));
+  if (SendInput(1, &input, sizeof(input)) == 1 && cursorNearTarget(target)) return true;
 
-  POINT actual{};
-  if (!GetCursorPos(&actual)) return false;
-  return std::abs(actual.x - screenX) <= 2 && std::abs(actual.y - screenY) <= 2;
+  mouse_event(input.mi.dwFlags,
+              static_cast<DWORD>(absoluteX),
+              static_cast<DWORD>(absoluteY),
+              0,
+              0);
+  return cursorNearTarget(target);
 }
 
 DWORD mouseButtonFlag(int button, bool down) {
@@ -512,12 +532,14 @@ void handleControlPayload(const std::string& json) {
     const auto now = std::chrono::steady_clock::now();
     if (now - lastMoveLog > std::chrono::milliseconds(250)) {
       lastMoveLog = now;
+      const POINT target = normalizedToScreenPoint(x, y);
       POINT cursor{};
       GetCursorPos(&cursor);
       std::cerr << "SNINPUT_APPLIED pointer-move"
                 << " x=" << x
                 << " y=" << y
                 << " moved=" << (moved ? "yes" : "no")
+                << " target=" << target.x << "," << target.y
                 << " cursor=" << cursor.x << "," << cursor.y
                 << "\n";
     }
@@ -526,6 +548,7 @@ void handleControlPayload(const std::string& json) {
     const double y = jsonDoubleValue(json, "y");
     const bool moved = movePointerNormalized(x, y);
     const bool clicked = sendMouseButton(jsonIntValue(json, "button"), type == "pointer-down");
+    const POINT target = normalizedToScreenPoint(x, y);
     POINT cursor{};
     GetCursorPos(&cursor);
     std::cerr << "SNINPUT_APPLIED " << type
@@ -534,6 +557,7 @@ void handleControlPayload(const std::string& json) {
               << " y=" << y
               << " moved=" << (moved ? "yes" : "no")
               << " sent=" << (clicked ? "yes" : "no")
+              << " target=" << target.x << "," << target.y
               << " cursor=" << cursor.x << "," << cursor.y
               << "\n";
   } else if (type == "wheel") {

@@ -215,13 +215,23 @@ bool gLogInputEvents = false;
 bool sendNativeInputJson(const std::string& json) {
   const bool sent = gNativeInputSender && gNativeInputSender->sendJson(json);
   if (gLogInputEvents) {
-    std::cout << (sent ? "SNINPUT_TX " : "SNINPUT_LOCAL ") << json << "\n";
+    const bool isMove = json.find("\"type\":\"pointer-move\"") != std::string::npos;
+    static auto lastMoveLog = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (!isMove || now - lastMoveLog > std::chrono::milliseconds(250)) {
+      if (isMove) lastMoveLog = now;
+      std::cout << (sent ? "SNINPUT_TX " : "SNINPUT_LOCAL ") << json << "\n";
+    }
   }
   return sent;
 }
 
-std::string pointerEventJson(const char* type, NSEvent* event, NSView* view) {
-  const NSPoint point = [view convertPoint:[event locationInWindow] fromView:nil];
+std::string pointerJsonFromPoint(const char* type,
+                                 NSPoint point,
+                                 NSView* view,
+                                 NSInteger button,
+                                 CGFloat dx,
+                                 CGFloat dy) {
   const NSRect bounds = [view bounds];
   const double width = std::max<double>(bounds.size.width, 1.0);
   const double height = std::max<double>(bounds.size.height, 1.0);
@@ -231,11 +241,21 @@ std::string pointerEventJson(const char* type, NSEvent* event, NSView* view) {
   out << "{\"type\":\"" << type
       << "\",\"x\":" << x
       << ",\"y\":" << y
-      << ",\"button\":" << [event buttonNumber]
-      << ",\"dx\":" << [event scrollingDeltaX]
-      << ",\"dy\":" << [event scrollingDeltaY]
+      << ",\"button\":" << button
+      << ",\"dx\":" << dx
+      << ",\"dy\":" << dy
       << "}";
   return out.str();
+}
+
+std::string pointerEventJson(const char* type, NSEvent* event, NSView* view) {
+  const NSPoint point = [view convertPoint:[event locationInWindow] fromView:nil];
+  return pointerJsonFromPoint(type,
+                              point,
+                              view,
+                              [event buttonNumber],
+                              [event scrollingDeltaX],
+                              [event scrollingDeltaY]);
 }
 
 std::string keyEventJson(const char* type, NSEvent* event) {
@@ -921,6 +941,9 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 @interface SanserMetalView : MTKView {
   NSTrackingArea* _trackingArea;
+  NSTimer* _mousePollTimer;
+  NSPoint _lastPolledPoint;
+  BOOL _hasPolledPoint;
 }
 @end
 
@@ -945,8 +968,28 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 - (void)viewDidMoveToWindow {
   [super viewDidMoveToWindow];
+  if (![self window]) {
+    [_mousePollTimer invalidate];
+    _mousePollTimer = nil;
+    _hasPolledPoint = NO;
+    return;
+  }
+
   [[self window] makeFirstResponder:self];
   [[self window] setAcceptsMouseMovedEvents:YES];
+  if (!_mousePollTimer) {
+    __weak SanserMetalView* weakSelf = self;
+    _mousePollTimer = [NSTimer timerWithTimeInterval:(1.0 / 120.0)
+                                             repeats:YES
+                                               block:^(NSTimer*) {
+                                                 [weakSelf pollMouseLocation];
+                                               }];
+    [[NSRunLoop mainRunLoop] addTimer:_mousePollTimer forMode:NSRunLoopCommonModes];
+  }
+}
+
+- (void)dealloc {
+  [_mousePollTimer invalidate];
 }
 
 - (void)updateTrackingAreas {
@@ -969,6 +1012,29 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   (void)event;
   [[self window] makeFirstResponder:self];
   [[self window] setAcceptsMouseMovedEvents:YES];
+}
+
+- (void)pollMouseLocation {
+  NSWindow* window = [self window];
+  if (!window || ![window isVisible]) return;
+
+  const NSPoint windowPoint = [window mouseLocationOutsideOfEventStream];
+  const NSPoint point = [self convertPoint:windowPoint fromView:nil];
+  if (!NSPointInRect(point, [self bounds])) {
+    _hasPolledPoint = NO;
+    return;
+  }
+
+  if (_hasPolledPoint &&
+      std::abs(point.x - _lastPolledPoint.x) < 0.5 &&
+      std::abs(point.y - _lastPolledPoint.y) < 0.5) {
+    return;
+  }
+
+  _lastPolledPoint = point;
+  _hasPolledPoint = YES;
+  [[self window] makeFirstResponder:self];
+  sendNativeInputJson(pointerJsonFromPoint("pointer-move", point, self, 0, 0, 0));
 }
 
 - (void)keyDown:(NSEvent*)event {

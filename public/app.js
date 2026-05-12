@@ -16,6 +16,10 @@ const appState = {
   realtimeChannel: null,
   nativeClientConnected: false,
   nativeHostRooms: new Set(),
+  nativeLogs: [],
+  nativeEndpoint: "",
+  nativeInput: "",
+  nativeStatus: null,
   pendingRequests: new Map(),
   heartbeatTimer: null,
   mouseTimer: 0,
@@ -85,6 +89,12 @@ const emptyStream = $("#emptyStream");
 const clientStats = $("#clientStats");
 const hostStats = $("#hostStats");
 const videoShell = $("#videoShell");
+const nativeDiagSummary = $("#nativeDiagSummary");
+const nativeClientState = $("#nativeClientState");
+const nativeHostState = $("#nativeHostState");
+const nativeEndpointState = $("#nativeEndpointState");
+const nativeInputState = $("#nativeInputState");
+const nativeLogList = $("#nativeLogList");
 
 let authMode = "login";
 
@@ -133,6 +143,7 @@ function bindUi() {
   $("#stopHostButton").addEventListener("click", stopHost);
   $("#captureButton").addEventListener("click", () => captureScreen().catch(() => {}));
   $("#applyServerButton").addEventListener("click", applyServerUrl);
+  $("#refreshNativeStatusButton")?.addEventListener("click", refreshNativeStatus);
   document.addEventListener("keydown", handleDocumentKey, true);
   document.addEventListener("keyup", handleDocumentKey, true);
 
@@ -206,13 +217,16 @@ function bindUi() {
 }
 
 function bindNativeEvents() {
+  updateNativeDiagnostics();
   if (!window.sanserNative?.onLog) return;
   window.sanserNative.onLog(handleNativeLog);
   window.sanserNative.onExit(handleNativeExit);
+  refreshNativeStatus();
 }
 
 function handleNativeLog(entry = {}) {
   const line = String(entry.line || "");
+  pushNativeLog(entry.role || "native", line);
   if (entry.role === "client") {
     if (/SNV1 render client connected/i.test(line)) {
       appState.nativeClientConnected = true;
@@ -224,9 +238,11 @@ function handleNativeLog(entry = {}) {
       showToast("Native stream đã kết nối.", "success", 2500);
     }
     if (/SNINPUT_TX/i.test(line)) {
+      appState.nativeInput = "TX sang Windows";
       streamStatus.textContent = "Native SNV đang stream | input hoạt động";
     }
     if (/SNINPUT_LOCAL/i.test(line)) {
+      appState.nativeInput = "Local, chưa có backchannel";
       streamStatus.textContent = "Native input đang local | chờ Windows backchannel";
       if (/pointer-down/i.test(line)) {
         showToast("Click đã vào cửa sổ native, nhưng Windows host chưa nối input backchannel.", "warning", 3500);
@@ -241,15 +257,20 @@ function handleNativeLog(entry = {}) {
       $("#captureStatus").textContent = line.replace(/^.*SNINPUT target bounds/, "Input target");
     }
     if (/SNINPUT control backchannel enabled/i.test(line)) {
+      appState.nativeInput = "Backchannel active";
       hostStats.textContent = "Native SNV | input backchannel hoạt động";
     }
     if (/SNINPUT_APPLIED/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_APPLIED\s*/, "");
       hostStats.textContent = line.replace(/^.*SNINPUT_APPLIED/, "Input");
     }
   }
+  updateNativeDiagnostics();
 }
 
 function handleNativeExit(payload = {}) {
+  pushNativeLog(payload.role || "native", `exited ${payload.signal || payload.code || ""}`.trim());
+  appState.nativeStatus = payload.status || appState.nativeStatus;
   if (payload.role === "client" && appState.clientRoom && isNativeRoom(appState.clientRoom)) {
     streamStatus.textContent = "Native renderer đã dừng";
   }
@@ -258,6 +279,60 @@ function handleNativeExit(payload = {}) {
     $("#captureStatus").textContent = "Native host đã dừng";
     hostStats.textContent = "Native SNV inactive";
   }
+  updateNativeDiagnostics();
+}
+
+async function refreshNativeStatus() {
+  if (!window.sanserNative?.status) {
+    appState.nativeStatus = null;
+    updateNativeDiagnostics("Native launcher chỉ có trong desktop app.");
+    return;
+  }
+  try {
+    appState.nativeStatus = await window.sanserNative.status();
+    const knownLogs = Object.values(appState.nativeStatus.logs || {}).flat();
+    if (knownLogs.length) {
+      appState.nativeLogs = knownLogs
+        .sort((a, b) => Number(a.at || 0) - Number(b.at || 0))
+        .slice(-30)
+        .map((entry) => ({
+          role: entry.role || "native",
+          line: entry.line || "",
+          at: entry.at || Date.now()
+        }));
+    }
+    updateNativeDiagnostics();
+  } catch (error) {
+    updateNativeDiagnostics(error.message || "Không đọc được native status.");
+  }
+}
+
+function pushNativeLog(role, line) {
+  if (!line) return;
+  appState.nativeLogs.push({ role, line, at: Date.now() });
+  if (appState.nativeLogs.length > 30) appState.nativeLogs.shift();
+}
+
+function updateNativeDiagnostics(message = "") {
+  if (!nativeDiagSummary) return;
+  const status = appState.nativeStatus || {};
+  const clientRunning = Boolean(status.client?.running);
+  const hostRunning = Boolean(status.host?.running);
+  nativeClientState.textContent = clientRunning ? `Running pid ${status.client.pid}` : "Idle";
+  nativeHostState.textContent = hostRunning ? `Running pid ${status.host.pid}` : "Idle";
+  nativeEndpointState.textContent = appState.nativeEndpoint || "--";
+  nativeInputState.textContent = appState.nativeInput || "--";
+
+  const active = clientRunning || hostRunning || appState.nativeClientConnected;
+  nativeDiagSummary.textContent = message || (active
+    ? "Native session đang hoạt động hoặc vừa có log."
+    : "Chưa có phiên native.");
+
+  if (!nativeLogList) return;
+  const logs = appState.nativeLogs.slice(-8).reverse();
+  nativeLogList.innerHTML = logs.length
+    ? logs.map((entry) => `<div class="native-log-line"><strong>${escapeHtml(entry.role)}</strong> ${escapeHtml(entry.line)}</div>`).join("")
+    : `<div class="native-log-line">Chưa có native log.</div>`;
 }
 
 function handleDocumentKey(event) {
@@ -592,6 +667,8 @@ async function stopHost() {
     await window.sanserNative.stopHost().catch(() => {});
   }
   appState.nativeHostRooms.clear();
+  appState.nativeInput = "Host stopped";
+  await refreshNativeStatus();
   if (appState.hostDevice) {
     await api("/api/host/offline", { method: "POST", body: { deviceId: appState.hostDevice.id } }).catch(() => {});
   }
@@ -722,6 +799,9 @@ async function connectNativeToDevice(device) {
     const networkInfo = await window.sanserNative.networkInfo?.().catch(() => null);
     const clientIp = chooseNativeClientIp(device, networkInfo?.addresses || []);
     const endpointLabel = clientIp ? `${clientIp}:${port}` : `auto:${port}`;
+    appState.nativeEndpoint = endpointLabel;
+    appState.nativeInput = "Listener opened";
+    await refreshNativeStatus();
 
     appState._connectTimeout = setTimeout(() => {
       if (!appState.nativeClientConnected) {
@@ -748,6 +828,7 @@ async function connectNativeToDevice(device) {
     streamStatus.textContent = `Native renderer chờ ${device.name || "host"} connect (${endpointLabel})`;
     emptyStream.classList.add("is-hidden");
     $(".stream-dock").classList.add("is-visible");
+    updateNativeDiagnostics();
   } catch (error) {
     hideConnecting();
     if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
@@ -757,6 +838,8 @@ async function connectNativeToDevice(device) {
     showToast(error.message || "Không mở được native renderer.", "error");
     connectError.textContent = error.message || "Native connection failed";
     streamStatus.textContent = "Chờ kết nối";
+    appState.nativeInput = error.message || "Native client start failed";
+    updateNativeDiagnostics();
   }
 }
 
@@ -816,6 +899,8 @@ async function startNativeHostForRoom(room) {
   if (!endpoint) throw new Error("Native room thiếu endpoint của Mac client.");
 
   appState.nativeHostRooms.add(room.id);
+  appState.nativeEndpoint = endpoint;
+  appState.nativeInput = "Host connecting";
   $("#captureStatus").textContent = `Native host đang connect ${endpoint}`;
   $("#hostRoleBadge").classList.remove("is-hidden");
   hostStats.textContent = "Native SNV starting";
@@ -824,13 +909,17 @@ async function startNativeHostForRoom(room) {
     fps: room.quality?.fps || Number($("#hostFps").value || 60),
     bitrateMbps: room.quality?.bitrateMbps || Number($("#hostBitrate").value || 28)
   });
+  await refreshNativeStatus();
 }
 
 function handleNativeClientAccepted(room) {
   appState.clientRoom = room;
+  appState.nativeEndpoint = room.native?.clientEndpoint || appState.nativeEndpoint;
+  appState.nativeInput = "Client accepted";
   streamStatus.textContent = "Native renderer đang chờ Windows host";
   $(".stream-dock").classList.add("is-visible");
   emptyStream.classList.add("is-hidden");
+  updateNativeDiagnostics();
 }
 
 function handleNativeClosed(room) {
@@ -840,6 +929,7 @@ function handleNativeClosed(room) {
       if (window.sanserNative?.stopHost) window.sanserNative.stopHost().catch(() => {});
       $("#captureStatus").textContent = "Native client disconnected";
       hostStats.textContent = "Native SNV inactive";
+      refreshNativeStatus();
     }
     return;
   }
@@ -1322,6 +1412,8 @@ async function cleanupClientPeer() {
     await window.sanserNative.stopClient().catch(() => {});
   }
   appState.nativeClientConnected = false;
+  appState.nativeInput = "Client idle";
+  await refreshNativeStatus();
   if (appState.clientPeer) appState.clientPeer.close();
   appState.clientPeer = null;
   appState.clientRoom = null;
