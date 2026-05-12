@@ -498,7 +498,6 @@ async function connectToDevice(deviceId) {
 
   try {
     showConnecting(device.name || 'máy chủ');
-    $(".stream-dock").classList.add("is-visible");
     streamStatus.textContent = "Đang kết nối...";
     $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
 
@@ -565,7 +564,6 @@ async function startHostPeer(room) {
 
 async function startClientPeer(room) {
   cleanupClientPeer();
-  $(".stream-dock").classList.add("is-visible");
   appState.clientRoom = room;
   appState.clientPeer = createPeerConnection(room, "client");
   appState.clientPeer.ontrack = async (event) => {
@@ -573,11 +571,12 @@ async function startClientPeer(room) {
     if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
     remoteVideo.srcObject = event.streams[0];
     emptyStream.classList.add("is-hidden");
+    $(".stream-dock").classList.add("is-visible");
     streamStatus.textContent = "Đang stream";
     $("#clientRoleBadge").classList.remove("is-hidden");
     showToast('Kết nối thành công! Đang stream...', 'success');
 
-    // Fullscreen on stream arrival
+    // Fullscreen immediately on stream arrival
     try {
       const vs = document.getElementById("videoShell");
       if (vs.requestFullscreen) await vs.requestFullscreen();
