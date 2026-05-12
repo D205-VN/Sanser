@@ -374,6 +374,7 @@ async function startHost(options = {}) {
   });
   appState.hostDevice = data.device;
   $("#hostStatus").textContent = "Online";
+  $("#hostRoleBadge").classList.remove("is-hidden");
   startHeartbeat();
   if (capture) {
     await captureScreen().catch((error) => {
@@ -405,6 +406,7 @@ async function stopHost() {
   stopLocalStream();
   appState.hostDevice = null;
   $("#hostStatus").textContent = "Offline";
+  $("#hostRoleBadge").classList.add("is-hidden");
   $("#captureStatus").textContent = "Screen capture inactive";
 }
 
@@ -482,6 +484,18 @@ async function connectToDevice(deviceId) {
     });
     appState.clientRoom = data.room;
     streamStatus.textContent = "Connecting";
+    $("#clientRoleBadge").classList.remove("is-hidden");
+    
+    // Request fullscreen
+    try {
+      if (document.documentElement.requestFullscreen) {
+        await document.documentElement.requestFullscreen();
+      } else if (document.documentElement.webkitRequestFullscreen) {
+        await document.documentElement.webkitRequestFullscreen();
+      }
+    } catch (e) {
+      console.warn("Fullscreen error:", e);
+    }
   } catch (error) {
     connectError.textContent = error.message;
     streamStatus.textContent = "Idle";
@@ -731,14 +745,24 @@ async function disconnectClient() {
   cleanupClientPeer();
 }
 
-function cleanupClientPeer() {
+async function cleanupClientPeer() {
   if (appState.clientPeer) appState.clientPeer.close();
   appState.clientPeer = null;
   appState.clientRoom = null;
   appState.inputChannel = null;
   remoteVideo.srcObject = null;
   emptyStream.classList.remove("is-hidden");
+  $("#clientRoleBadge").classList.add("is-hidden");
   streamStatus.textContent = "Idle";
+  
+  // Exit fullscreen
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else if (document.webkitFullscreenElement) {
+      await document.webkitExitFullscreen();
+    }
+  } catch (e) {}
 }
 
 function readQuality() {

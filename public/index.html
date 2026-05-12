@@ -107,6 +107,7 @@
                 <strong>No active stream</strong>
                 <span id="selectedDeviceLabel">Choose an online computer.</span>
               </div>
+              <div class="role-badge is-hidden" id="clientRoleBadge">Vai trò: CLIENT (Người điều khiển)</div>
               <div class="stats-overlay" id="clientStats">FPS -- | -- Mbps | RTT -- ms</div>
             </div>
             <p class="form-error" id="connectError"></p>
@@ -173,7 +174,10 @@
                 </div>
                 <button class="secondary-action" id="captureButton" type="button">Capture Screen</button>
               </div>
-              <video class="preview-video" id="hostPreview" autoplay muted playsinline></video>
+              <div style="position:relative;">
+                <video class="preview-video" id="hostPreview" autoplay muted playsinline></video>
+                <div class="role-badge is-hidden" id="hostRoleBadge">Vai trò: HOST (Máy chủ)</div>
+              </div>
               <div class="stats-strip" id="hostStats">Outbound FPS -- | -- Mbps</div>
             </section>
           </div>

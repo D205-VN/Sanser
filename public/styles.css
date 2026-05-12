@@ -586,6 +586,27 @@ input:disabled {
   display: none;
 }
 
+.role-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 2px solid var(--blue);
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 800;
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 10;
+}
+
+.role-badge.is-hidden {
+  display: none;
+}
+
 .join-bar {
   position: fixed;
   left: 104px;
