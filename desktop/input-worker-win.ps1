@@ -100,6 +100,10 @@ function Get-VirtualKey($key, $code) {
   return 0
 }
 
+function Is-ModifierKey($vk) {
+  return $vk -eq $VK_SHIFT -or $vk -eq $VK_CONTROL -or $vk -eq $VK_MENU -or $vk -eq $VK_LWIN
+}
+
 function Send-Key($vk, $up) {
   $input = New-Object NativeInput+INPUT
   $input.type = $INPUT_KEYBOARD
@@ -121,6 +125,10 @@ function Send-Modifiers($payload, $up) {
 function Send-KeyStroke($payload, $down) {
   $vk = Get-VirtualKey $payload.key $payload.code
   if ($vk -eq 0) { return }
+  if (Is-ModifierKey $vk) {
+    Send-Key $vk (-not $down)
+    return
+  }
   if ($down) {
     Send-Modifiers $payload $false
     Send-Key $vk $false

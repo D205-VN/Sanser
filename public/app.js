@@ -89,12 +89,24 @@ init();
 function init() {
   bindUi();
   hydrateDefaults();
+  applyPerformanceDefaults();
   hydrateSettings();
   if (appState.token) {
     api("/api/me").then(({ user }) => enterApp(user)).catch(() => showAuth());
   } else {
     showAuth();
   }
+}
+
+function applyPerformanceDefaults() {
+  if (localStorage.getItem("gr_perf_defaults_v3") === "1") return;
+  localStorage.setItem("gr_setting_clientResolution", "720p");
+  localStorage.setItem("gr_setting_clientFps", "30");
+  localStorage.setItem("gr_setting_clientBitrate", "8");
+  localStorage.setItem("gr_setting_hostFps", "30");
+  localStorage.setItem("gr_setting_hostBitrate", "8");
+  localStorage.setItem("gr_setting_codecPreference", "VP8");
+  localStorage.setItem("gr_perf_defaults_v3", "1");
 }
 
 function bindUi() {
@@ -184,7 +196,15 @@ function bindUi() {
     event.preventDefault();
   });
   videoShell.addEventListener("keyup", (event) => {
-    sendInputEvent({ type: "key-up", key: event.key, code: event.code });
+    sendInputEvent({
+      type: "key-up",
+      key: event.key,
+      code: event.code,
+      alt: event.altKey,
+      ctrl: event.ctrlKey,
+      shift: event.shiftKey,
+      meta: event.metaKey
+    });
     event.preventDefault();
   });
 }
@@ -742,7 +762,7 @@ function setCodecPreference(transceiver, preferred) {
   if (!RTCRtpSender.getCapabilities || !transceiver.setCodecPreferences) return;
   const caps = RTCRtpSender.getCapabilities("video");
   if (!caps?.codecs?.length) return;
-  const target = String(preferred || "H264").toLowerCase();
+  const target = String(preferred || "VP8").toLowerCase();
   const sorted = [...caps.codecs].sort((a, b) => {
     const aHit = a.mimeType.toLowerCase().includes(target) ? 0 : 1;
     const bHit = b.mimeType.toLowerCase().includes(target) ? 0 : 1;
@@ -764,10 +784,38 @@ function sendPointerMove(event) {
 }
 
 function pointerPayload(type, event) {
-  const rect = videoShell.getBoundingClientRect();
+  const rect = videoContentRect();
   const x = clamp01((event.clientX - rect.left) / rect.width);
   const y = clamp01((event.clientY - rect.top) / rect.height);
-  return { type, x, y, button: event.button, buttons: event.buttons };
+  return {
+    type,
+    x,
+    y,
+    button: event.button,
+    buttons: event.buttons,
+    sourceWidth: remoteVideo.videoWidth || 0,
+    sourceHeight: remoteVideo.videoHeight || 0
+  };
+}
+
+function videoContentRect() {
+  const shell = videoShell.getBoundingClientRect();
+  const videoWidth = remoteVideo.videoWidth || 16;
+  const videoHeight = remoteVideo.videoHeight || 9;
+  const videoRatio = videoWidth / videoHeight;
+  const shellRatio = shell.width / shell.height;
+  let width = shell.width;
+  let height = shell.height;
+  let left = shell.left;
+  let top = shell.top;
+  if (shellRatio > videoRatio) {
+    width = shell.height * videoRatio;
+    left = shell.left + (shell.width - width) / 2;
+  } else {
+    height = shell.width / videoRatio;
+    top = shell.top + (shell.height - height) / 2;
+  }
+  return { left, top, width, height };
 }
 
 function sendInputEvent(payload) {
@@ -874,11 +922,11 @@ async function cleanupClientPeer() {
 
 function readQuality() {
   return {
-    preset: "1080p",
-    width: 1920,
-    height: 1080,
-    fps: Number($("#hostFps").value || 60),
-    bitrateMbps: Number($("#hostBitrate").value || 35),
+    preset: "720p",
+    width: 1280,
+    height: 720,
+    fps: Number($("#hostFps").value || 30),
+    bitrateMbps: Number($("#hostBitrate").value || 8),
     preferCodec: $("#codecPreference").value
   };
 }
@@ -896,8 +944,8 @@ function readClientQuality() {
     preset,
     width,
     height,
-    fps: Number($("#clientFps").value || 60),
-    bitrateMbps: Number($("#clientBitrate").value || 35),
+    fps: Number($("#clientFps").value || 30),
+    bitrateMbps: Number($("#clientBitrate").value || 8),
     preferCodec: $("#codecPreference").value
   };
 }

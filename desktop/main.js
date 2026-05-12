@@ -341,11 +341,28 @@ function resolveInputWorkerPath() {
 }
 
 function screenPoint(payload) {
-  const bounds = screen.getPrimaryDisplay().workArea;
+  const bounds = targetDisplayBounds(payload);
   return {
     x: Math.round(bounds.x + clamp01(Number(payload.x || 0)) * bounds.width),
     y: Math.round(bounds.y + clamp01(Number(payload.y || 0)) * bounds.height)
   };
+}
+
+function targetDisplayBounds(payload) {
+  const displays = screen.getAllDisplays();
+  const sourceWidth = Number(payload.sourceWidth || 0);
+  const sourceHeight = Number(payload.sourceHeight || 0);
+  if (sourceWidth > 0 && sourceHeight > 0) {
+    const sourceRatio = sourceWidth / sourceHeight;
+    const byRatio = displays
+      .map((display) => ({
+        display,
+        diff: Math.abs((display.bounds.width / display.bounds.height) - sourceRatio)
+      }))
+      .sort((a, b) => a.diff - b.diff)[0];
+    if (byRatio) return byRatio.display.bounds;
+  }
+  return screen.getPrimaryDisplay().bounds;
 }
 
 function mouseButton(button) {

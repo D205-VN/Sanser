@@ -246,19 +246,19 @@
               <label class="setting-row">
                 <span><strong>Độ phân giải</strong><small>Kích thước stream phía client.</small></span>
                 <select id="clientResolution">
-                  <option value="720p">720p</option>
-                  <option value="1080p" selected>1080p</option>
+                  <option value="720p" selected>720p</option>
+                  <option value="1080p">1080p</option>
                   <option value="1440p">1440p</option>
                   <option value="low-latency">Low Latency</option>
                 </select>
               </label>
               <label class="setting-row">
                 <span><strong>FPS</strong><small>Giá trị cao hơn cần mạng mạnh hơn.</small></span>
-                <input id="clientFps" type="number" min="30" max="120" step="10" value="60">
+                <input id="clientFps" type="number" min="30" max="120" step="10" value="30">
               </label>
               <label class="setting-row">
                 <span><strong>Bitrate</strong><small>Mbps gửi từ host.</small></span>
-                <input id="clientBitrate" type="number" min="4" max="120" step="1" value="35">
+                <input id="clientBitrate" type="number" min="4" max="120" step="1" value="8">
               </label>
               <label class="setting-row">
                 <span><strong>Overlay</strong><small>Hiển thị stats khi kết nối.</small></span>
@@ -282,18 +282,18 @@
               </label>
               <label class="setting-row">
                 <span><strong>Host FPS</strong><small>Tốc độ khung hình chụp.</small></span>
-                <input id="hostFps" type="number" min="30" max="120" step="10" value="60">
+                <input id="hostFps" type="number" min="30" max="120" step="10" value="30">
               </label>
               <label class="setting-row">
                 <span><strong>Host Bitrate</strong><small>Mbps mặc định cho phiên mới.</small></span>
-                <input id="hostBitrate" type="number" min="4" max="120" step="1" value="35">
+                <input id="hostBitrate" type="number" min="4" max="120" step="1" value="8">
               </label>
               <label class="setting-row">
                 <span><strong>Video Codec</strong><small>Bộ mã hóa WebRTC ưu tiên.</small></span>
                 <select id="codecPreference">
-                  <option value="H264" selected>H.264</option>
+                  <option value="H264">H.264</option>
                   <option value="VP9">VP9</option>
-                  <option value="VP8">VP8</option>
+                  <option value="VP8" selected>VP8</option>
                 </select>
               </label>
             </div>

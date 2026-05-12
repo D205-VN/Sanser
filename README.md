@@ -83,7 +83,6 @@ The desktop app also checks this automatically at startup when `NETWORK_MODE=tai
 Then set this in `.env` on both computers:
 
 ```text
-STUN_URLS=stun:stun.l.google.com:19302
 NETWORK_MODE=tailscale
 ICE_TRANSPORT_POLICY=all
 ```

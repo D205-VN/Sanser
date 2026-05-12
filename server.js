@@ -182,6 +182,9 @@ function parseCsv(value) {
 }
 
 function getIceServers() {
+  if (networkMode() === "tailscale" && process.env.TAILSCALE_USE_STUN !== "1") {
+    return [];
+  }
   const stunUrls = parseCsv(process.env.STUN_URLS || DEFAULT_STUN_URLS);
   const turnUrls = parseCsv(process.env.TURN_URLS);
   const iceServers = [];
