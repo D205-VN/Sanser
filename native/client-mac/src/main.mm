@@ -84,7 +84,7 @@ void printHelp() {
     << "sanser-native-client --probe\n"
     << "sanser-native-client --decode-snv capture_h264.snv [--max-packets N]\n"
     << "sanser-native-client --listen-snv PORT [--max-packets N]\n"
-    << "sanser-native-client --listen-render-snv PORT [--max-packets N]\n"
+    << "sanser-native-client --listen-render-snv PORT [--max-packets N] [--log-input]\n"
     << "sanser-native-client --metal-test [--seconds 5]\n"
     << "sanser-native-client --clipboard-read\n"
     << "sanser-native-client --clipboard-write \"text\"\n"
@@ -95,6 +95,7 @@ void printHelp() {
     << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
     << "  --listen-render-snv P Listen over TCP, render with Metal, send native input back\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
+    << "  --log-input       Print each native input event for debugging\n"
     << "  --metal-test      Open a Metal window and log native input events to stdout\n"
     << "  --seconds N       Auto-close Metal test after N seconds; 0 keeps it open\n"
     << "  --clipboard-read  Print macOS pasteboard text\n"
@@ -207,10 +208,13 @@ private:
 };
 
 std::shared_ptr<NativeInputSender> gNativeInputSender;
+bool gLogInputEvents = false;
 
 bool sendNativeInputJson(const std::string& json) {
   const bool sent = gNativeInputSender && gNativeInputSender->sendJson(json);
-  std::cout << (sent ? "SNINPUT_TX " : "SNINPUT_LOCAL ") << json << "\n";
+  if (gLogInputEvents) {
+    std::cout << (sent ? "SNINPUT_TX " : "SNINPUT_LOCAL ") << json << "\n";
+  }
   return sent;
 }
 
@@ -922,6 +926,19 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   return YES;
 }
 
+- (BOOL)canBecomeKeyView {
+  return YES;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent*)event {
+  (void)event;
+  return YES;
+}
+
+- (NSView*)hitTest:(NSPoint)point {
+  return NSPointInRect(point, [self bounds]) ? self : nil;
+}
+
 - (void)viewDidMoveToWindow {
   [super viewDidMoveToWindow];
   [[self window] makeFirstResponder:self];
@@ -947,6 +964,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)mouseMoved:(NSEvent*)event {
+  [[self window] makeFirstResponder:self];
   logPointerEvent("pointer-move", event, self);
 }
 
@@ -963,6 +981,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)mouseDown:(NSEvent*)event {
+  [[self window] makeFirstResponder:self];
   logPointerEvent("pointer-down", event, self);
 }
 
@@ -971,6 +990,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)rightMouseDown:(NSEvent*)event {
+  [[self window] makeFirstResponder:self];
   logPointerEvent("pointer-down", event, self);
 }
 
@@ -979,6 +999,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)otherMouseDown:(NSEvent*)event {
+  [[self window] makeFirstResponder:self];
   logPointerEvent("pointer-down", event, self);
 }
 
@@ -987,6 +1008,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)scrollWheel:(NSEvent*)event {
+  if (std::abs([event scrollingDeltaX]) < 0.01 && std::abs([event scrollingDeltaY]) < 0.01) return;
   logPointerEvent("wheel", event, self);
 }
 
@@ -1444,6 +1466,7 @@ struct Options {
   bool metalTest = false;
   bool clipboardRead = false;
   bool clipboardWrite = false;
+  bool logInput = false;
   bool help = false;
   std::uint64_t maxPackets = 0;
   std::uint16_t listenPort = 0;
@@ -1485,6 +1508,8 @@ Options parseOptions(int argc, char** argv) {
       options.maxPackets = static_cast<std::uint64_t>(std::stoull(argv[++i]));
     } else if (arg == "--metal-test") {
       options.metalTest = true;
+    } else if (arg == "--log-input") {
+      options.logInput = true;
     } else if (arg == "--clipboard-read") {
       options.clipboardRead = true;
     } else if (arg == "--clipboard-write") {
@@ -1508,6 +1533,7 @@ Options parseOptions(int argc, char** argv) {
 int main(int argc, char** argv) {
   try {
     const Options options = parseOptions(argc, argv);
+    gLogInputEvents = options.logInput;
     if (options.help) {
       printHelp();
       return 0;
