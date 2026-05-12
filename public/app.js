@@ -8,6 +8,7 @@ const appState = {
   devices: [],
   hostDevice: null,
   localStream: null,
+  localStreamQuality: null,
   hostPeers: new Map(),
   clientPeer: null,
   clientRoom: null,
@@ -99,14 +100,14 @@ function init() {
 }
 
 function applyPerformanceDefaults() {
-  if (localStorage.getItem("gr_perf_defaults_v3") === "1") return;
-  localStorage.setItem("gr_setting_clientResolution", "720p");
-  localStorage.setItem("gr_setting_clientFps", "30");
-  localStorage.setItem("gr_setting_clientBitrate", "8");
-  localStorage.setItem("gr_setting_hostFps", "30");
-  localStorage.setItem("gr_setting_hostBitrate", "8");
+  if (localStorage.getItem("gr_perf_defaults_v5") === "1") return;
+  localStorage.setItem("gr_setting_clientResolution", "1080p");
+  localStorage.setItem("gr_setting_clientFps", "60");
+  localStorage.setItem("gr_setting_clientBitrate", "28");
+  localStorage.setItem("gr_setting_hostFps", "60");
+  localStorage.setItem("gr_setting_hostBitrate", "28");
   localStorage.setItem("gr_setting_codecPreference", "VP8");
-  localStorage.setItem("gr_perf_defaults_v3", "1");
+  localStorage.setItem("gr_perf_defaults_v5", "1");
 }
 
 function bindUi() {
@@ -492,12 +493,12 @@ async function stopHost() {
   $("#captureStatus").textContent = "Screen capture inactive";
 }
 
-async function captureScreen() {
+async function captureScreen(qualityOverride = null) {
   if (!navigator.mediaDevices?.getDisplayMedia) {
     $("#captureStatus").textContent = "Screen capture is not supported in this runtime";
     return null;
   }
-  const quality = appState.hostDevice?.quality || readQuality();
+  const quality = qualityOverride || appState.hostDevice?.quality || readQuality();
   stopLocalStream();
   const video = {
     width: { ideal: quality.width },
@@ -522,6 +523,10 @@ async function captureScreen() {
     appState.localStream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false });
   }
   hostPreview.srcObject = appState.localStream;
+  for (const track of appState.localStream.getVideoTracks()) {
+    track.contentHint = "motion";
+  }
+  appState.localStreamQuality = quality;
   $("#captureStatus").textContent = `${quality.width}x${quality.height} @ ${quality.fps} FPS`;
   return appState.localStream;
 }
@@ -530,6 +535,7 @@ function stopLocalStream() {
   if (!appState.localStream) return;
   appState.localStream.getTracks().forEach((track) => track.stop());
   appState.localStream = null;
+  appState.localStreamQuality = null;
   hostPreview.srcObject = null;
 }
 
@@ -591,8 +597,8 @@ async function startHostPeer(room) {
   if (!appState.hostDevice) {
     await startHost({ capture: false });
   }
-  if (!appState.localStream) {
-    await captureScreen();
+  if (!appState.localStream || !streamMatchesQuality(appState.localStreamQuality, room.quality)) {
+    await captureScreen(room.quality);
   }
   const pc = createPeerConnection(room, "host");
   appState.hostPeers.set(room.id, pc);
@@ -744,10 +750,11 @@ async function sendSignal(roomId, message) {
 
 async function tuneSender(sender, quality) {
   const params = sender.getParameters();
-  params.degradationPreference = "maintain-framerate";
+  params.degradationPreference = "balanced";
   params.encodings = [{
     maxBitrate: quality.bitrateMbps * 1000 * 1000,
     maxFramerate: quality.fps,
+    scaleResolutionDownBy: 1,
     priority: "high",
     networkPriority: "high"
   }];
@@ -756,6 +763,14 @@ async function tuneSender(sender, quality) {
   } catch {
     // Browser support for sender knobs varies.
   }
+}
+
+function streamMatchesQuality(current, next) {
+  if (!current || !next) return false;
+  return current.width === next.width
+    && current.height === next.height
+    && current.fps === next.fps
+    && current.bitrateMbps === next.bitrateMbps;
 }
 
 function setCodecPreference(transceiver, preferred) {
@@ -922,11 +937,11 @@ async function cleanupClientPeer() {
 
 function readQuality() {
   return {
-    preset: "720p",
-    width: 1280,
-    height: 720,
-    fps: Number($("#hostFps").value || 30),
-    bitrateMbps: Number($("#hostBitrate").value || 8),
+    preset: "1080p",
+    width: 1920,
+    height: 1080,
+    fps: Number($("#hostFps").value || 60),
+    bitrateMbps: Number($("#hostBitrate").value || 28),
     preferCodec: $("#codecPreference").value
   };
 }
@@ -944,8 +959,8 @@ function readClientQuality() {
     preset,
     width,
     height,
-    fps: Number($("#clientFps").value || 30),
-    bitrateMbps: Number($("#clientBitrate").value || 8),
+    fps: Number($("#clientFps").value || 60),
+    bitrateMbps: Number($("#clientBitrate").value || 28),
     preferCodec: $("#codecPreference").value
   };
 }
