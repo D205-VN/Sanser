@@ -1119,6 +1119,11 @@ bool jsonBoolValue(const std::string& json, const char* key, bool fallback = fal
   return fallback;
 }
 
+std::uint64_t steadyMicros() {
+  const auto now = std::chrono::steady_clock::now().time_since_epoch();
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+}
+
 bool unwrapSecureControlEnvelope(const std::string& envelope,
                                  const std::string& token,
                                  const char* direction,
@@ -3298,7 +3303,7 @@ private:
           << ",\"highFrequency\":" << high
           << ",\"led\":" << static_cast<unsigned int>(event.led)
           << ",\"durationMs\":120"
-          << ",\"sentSteadyMicros\":" << steadyMicros()
+          << ",\"sentSteadyMicros\":" << static_cast<unsigned long long>(steadyMicros())
           << "}";
       try {
         sendControlJson(out.str());
