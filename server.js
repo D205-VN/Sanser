@@ -237,6 +237,7 @@ function publicRoom(room) {
     clientSessionId: room.client_session_id || room.clientSessionId,
     clientName: room.client_name || room.clientName,
     quality: normalizeQuality(room.quality),
+    native: room.native || null,
     status: room.status || "accepted",
     createdAt: Number(room.created_at || room.createdAt),
     updatedAt: Number(room.updated_at || room.updatedAt)
@@ -674,12 +675,17 @@ function normalizeNativeRequest(input = {}, req) {
   const clientPort = clamp(Number(input.port || input.clientPort || 7777), 1, 65533);
   const controlPort = clamp(Number(input.controlPort || clientPort + 1), 1, 65535);
   const audioPort = clamp(Number(input.audioPort || clientPort + 2), 1, 65535);
+  const rawToken = String(input.sessionToken || "").trim();
+  const sessionToken = /^[A-Za-z0-9._~-]{16,256}$/.test(rawToken)
+    ? rawToken
+    : crypto.randomBytes(32).toString("hex");
   return {
     transport,
     clientIp,
     clientPort,
     controlPort,
     audioPort,
+    sessionToken,
     clientEndpoint: `${formatEndpointHost(clientIp)}:${clientPort}`,
     controlEndpoint: `${formatEndpointHost(clientIp)}:${controlPort}`,
     audioEndpoint: `${formatEndpointHost(clientIp)}:${audioPort}`

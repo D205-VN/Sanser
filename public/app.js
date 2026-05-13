@@ -259,6 +259,12 @@ function handleNativeLog(entry = {}) {
     if (/SNA1_JITTER_(CONFIG|READY|RESET)/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNA1_JITTER_(CONFIG|READY|RESET)\s*/, "Audio jitter ");
     }
+    if (/SNAV_SYNC/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNAV_SYNC\s*/, "A/V ");
+    }
+    if (/SNAV_DRIFT/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNAV_DRIFT\s*/, "A/V drift ");
+    }
     if (/SNU1 render packets/i.test(line)) {
       appState.nativeClientConnected = true;
       appState.nativeRestartAttempts.client = 0;
@@ -287,15 +293,52 @@ function handleNativeLog(entry = {}) {
       appState.nativeInput = line.replace(/^.*SNCONTROL_HELLO(_ACK)?\s*/, "Control ");
       clientStats.textContent = line.replace(/^.*SNCONTROL_HELLO(_ACK)?\s*/, "Control ");
     }
+    if (/SNCONTROL_AUTH failed/i.test(line)) {
+      appState.nativeInput = "Session auth failed";
+      clientStats.textContent = line.replace(/^.*SNCONTROL_AUTH\s*/, "Control auth ");
+    }
+    if (/SNCONTROL sessionAuth/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNCONTROL\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNCONTROL\s*/, "Control ");
+    }
+    if (/SNCONTROL packetAuth/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNCONTROL\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNCONTROL\s*/, "Control ");
+    }
+    if (/SNCONTROL_PACKET_AUTH rejected/i.test(line)) {
+      appState.nativeInput = "Packet auth rejected";
+      clientStats.textContent = line.replace(/^.*SNCONTROL_PACKET_AUTH\s*/, "Control auth ");
+    }
     if (/SNCONTROL inputBatch/i.test(line)) {
       appState.nativeInput = line.replace(/^.*SNCONTROL\s*/, "");
       clientStats.textContent = line.replace(/^.*SNCONTROL\s*/, "Control ");
+    }
+    if (/SNCONTROL_WATCHDOG/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNCONTROL_WATCHDOG\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNCONTROL_WATCHDOG\s*/, "Control watchdog ");
+      if (/timeout/i.test(line)) {
+        streamStatus.textContent = "Native control đang handshake lại";
+      }
+    }
+    if (/SNMEDIA_KEY_ROTATE/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNMEDIA_KEY_ROTATE\s*/, "Media key ");
+    }
+    if (/SNU1_PEER_|SNA1_PEER_/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*(SNU1|SNA1)_PEER_/, "UDP peer ");
     }
     if (/SNINPUT_QUEUE/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNINPUT_QUEUE\s*/, "Input queue ");
     }
     if (/SNINPUT_BATCH_TX/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNINPUT_BATCH_TX\s*/, "Input batch ");
+    }
+    if (/SNINPUT_RETRY_/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_RETRY_\w+\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_RETRY_\w+\s*/, "Input retry ");
+    }
+    if (/SNINPUT_PENDING/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_PENDING\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_PENDING\s*/, "Input pending ");
     }
     if (/SNINPUT_ACK/i.test(line)) {
       appState.nativeInput = line.replace(/^.*SNINPUT_ACK\s*/, "");
@@ -314,6 +357,30 @@ function handleNativeLog(entry = {}) {
     }
     if (/SNV1_RENDER_STATS/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNV1_RENDER_STATS\s*/, "Render ");
+    }
+    if (/SNV1_RENDER_ADAPT/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNV1_RENDER_ADAPT\s*/, "Render adapt ");
+    }
+    if (/SNV1_RENDER_FEEDBACK/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNV1_RENDER_FEEDBACK\s*/, "Render feedback ");
+    }
+    if (/SNV1_KEYFRAME_REQUEST_TX/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNV1_KEYFRAME_REQUEST_TX\s*/, "Keyframe request ");
+    }
+    if (/SNU1_NACK_TX/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNU1_NACK_TX\s*/, "UDP NACK ");
+    }
+    if (/SNU1_EPOCH_RESET/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNU1_EPOCH_RESET\s*/, "UDP epoch ");
+    }
+    if (/SNU1_JITTER_RESET/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNU1_JITTER_RESET\s*/, "UDP jitter ");
+    }
+    if (/SNU1_REPAIR_FEEDBACK/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNU1_REPAIR_FEEDBACK\s*/, "UDP repair ");
+    }
+    if (/SNV1_PACING_CONFIG/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNV1_PACING_CONFIG\s*/, "Video pacing ");
     }
     if (/SNU1_STATS/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNU1_STATS\s*/, "UDP ");
@@ -353,8 +420,17 @@ function handleNativeLog(entry = {}) {
     if (/SNA1_AUDIO_STATS/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNA1_AUDIO_STATS\s*/, "Audio ");
     }
-    if (/SNFEEDBACK|SNV1_ADAPT|SNV1_ENCODER_RESTART/i.test(line)) {
-      hostStats.textContent = line.replace(/^.*(SNFEEDBACK|SNV1_ADAPT|SNV1_ENCODER_RESTART)\s*/, "Native ");
+    if (/SNCONTROL_PACKET_AUTH rejected/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNCONTROL_PACKET_AUTH\s*/, "Control auth ");
+    }
+    if (/SNV1_ADAPT_HOLD/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_ADAPT_HOLD\s*/, "Adapt hold ");
+    } else if (/SNV1_RECOVERY_GATE/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_RECOVERY_GATE\s*/, "Recovery gate ");
+    } else if (/SNV1_FEEDBACK_STALE/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_FEEDBACK_STALE\s*/, "Feedback stale ");
+    } else if (/SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_RESTART|SNV1_KEYFRAME|SNU1_NACK|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*(SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_RESTART|SNV1_KEYFRAME_[A-Z_]+|SNU1_NACK_[A-Z_]+|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET)\s*/, "Native ");
     }
     if (/SNINPUT target bounds/i.test(line)) {
       $("#captureStatus").textContent = line.replace(/^.*SNINPUT target bounds/, "Input target");
@@ -366,6 +442,13 @@ function handleNativeLog(entry = {}) {
         ? "Native SNV | input backchannel riêng hoạt động"
         : "Native SNV | input backchannel hoạt động";
     }
+    if (/SNCONTROL_WATCHDOG/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNCONTROL_WATCHDOG\s*/, "Control watchdog ");
+      $("#captureStatus").textContent = "Native host đang reconnect input backchannel";
+    }
+    if (/SNINPUT dedicated control reconnect/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNINPUT\s*/, "Input ");
+    }
     if (/SNCONTROL_HELLO_ACK/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNCONTROL_HELLO_ACK\s*/, "Control ");
     }
@@ -375,6 +458,9 @@ function handleNativeLog(entry = {}) {
     }
     if (/SNINPUT_BATCH/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNINPUT_BATCH\s*/, "Input batch ");
+    }
+    if (/SNINPUT_SESSION/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNINPUT_SESSION\s*/, "Input session ");
     }
   }
   updateNativeDiagnostics();
@@ -965,6 +1051,7 @@ async function connectNativeToDevice(device) {
     const port = readNativePort();
     const controlPort = nativeControlPort(port);
     const audioPort = nativeAudioPort(port);
+    const sessionToken = makeNativeSessionToken();
     showConnecting(device.name || "máy chủ");
     streamStatus.textContent = `Đang mở native renderer trên cổng ${port}/${controlPort}/${audioPort}...`;
     $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
@@ -973,7 +1060,7 @@ async function connectNativeToDevice(device) {
     appState.nativeRestartAttempts.client = 0;
     clearNativeRestart("client");
 
-    const clientOptions = { port, controlPort, audioPort, audioJitterMs: 24, videoTransport: "udp", logInput: true, fullscreen: true, hideCursor: true, relativeMouse: true };
+    const clientOptions = { port, controlPort, audioPort, audioJitterMs: 24, videoTransport: "udp", logInput: true, fullscreen: true, hideCursor: true, relativeMouse: true, sessionToken };
     appState.nativeClientOptions = clientOptions;
     await window.sanserNative.startClient(clientOptions);
     const networkInfo = await window.sanserNative.networkInfo?.().catch(() => null);
@@ -1004,7 +1091,8 @@ async function connectNativeToDevice(device) {
           clientIp,
           port,
           controlPort,
-          audioPort
+          audioPort,
+          sessionToken
         }
       }
     });
@@ -1028,6 +1116,18 @@ async function connectNativeToDevice(device) {
     appState.nativeInput = error.message || "Native client start failed";
     updateNativeDiagnostics();
   }
+}
+
+function makeNativeSessionToken() {
+  const bytes = new Uint8Array(32);
+  if (window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 1) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function chooseNativeClientIp(device, addresses) {
@@ -1086,6 +1186,7 @@ async function startNativeHostForRoom(room) {
   if (!endpoint) throw new Error("Native room thiếu endpoint của Mac client.");
   const controlEndpoint = room.native?.controlEndpoint || "";
   const audioEndpoint = room.native?.audioEndpoint || "";
+  const sessionToken = String(room.native?.sessionToken || "");
 
   appState.nativeHostRooms.add(room.id);
   appState.nativeEndpoint = [endpoint, controlEndpoint, audioEndpoint ? `audio ${audioEndpoint}` : ""]
@@ -1107,7 +1208,8 @@ async function startNativeHostForRoom(room) {
     fps: room.quality?.fps || Number($("#hostFps").value || 60),
     bitrateMbps: room.quality?.bitrateMbps || Number($("#hostBitrate").value || 28),
     keyframeInterval: 1,
-    lowLatencyEncoder: true
+    lowLatencyEncoder: true,
+    sessionToken
   };
   appState.nativeHostOptions = hostOptions;
   await window.sanserNative.startHost(hostOptions);

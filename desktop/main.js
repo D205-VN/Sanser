@@ -296,8 +296,9 @@ function startNativeClient(options = {}) {
   const controlPort = clampInt(options.controlPort, 0, 65535, port < 65535 ? port + 1 : 0);
   const audioPort = clampInt(options.audioPort, 0, 65535, port < 65534 ? port + 2 : 0);
   const audioJitterMs = clampInt(options.audioJitterMs, 0, 120, 24);
-  const videoTransport = String(options.videoTransport || "tcp").toLowerCase();
+  const videoTransport = String(options.videoTransport || "udp").toLowerCase();
   const maxPackets = clampInt(options.maxPackets, 0, Number.MAX_SAFE_INTEGER, 0);
+  const sessionToken = sanitizeNativeSessionToken(options.sessionToken);
   const args = ["--listen-render-snv", String(port)];
   if (controlPort > 0) args.push("--control-port", String(controlPort));
   if (audioPort > 0) args.push("--audio-port", String(audioPort));
@@ -309,7 +310,12 @@ function startNativeClient(options = {}) {
   if (options.hideCursor !== false) args.push("--hide-cursor");
   if (options.relativeMouse !== false) args.push("--relative-mouse");
 
-  nativeProcesses.client = spawnNativeProcess("client", executable, args);
+  nativeProcesses.client = spawnNativeProcess(
+    "client",
+    executable,
+    args,
+    sessionToken ? { SANSER_NATIVE_SESSION_TOKEN: sessionToken } : {}
+  );
   return nativeStatus();
 }
 
@@ -340,7 +346,8 @@ function startNativeHost(options = {}) {
   const fps = clampInt(options.fps, 30, 120, 60);
   const bitrateMbps = clampInt(options.bitrateMbps, 4, 120, 28);
   const keyframeInterval = clampInt(options.keyframeInterval, 1, 10, 1);
-  const videoTransport = String(options.videoTransport || "tcp").toLowerCase();
+  const videoTransport = String(options.videoTransport || "udp").toLowerCase();
+  const sessionToken = sanitizeNativeSessionToken(options.sessionToken);
   const connectFlag = videoTransport === "udp" ? "--udp-connect" : "--tcp-connect";
   const args = [
     "--encode-pipe",
@@ -363,17 +370,23 @@ function startNativeHost(options = {}) {
   else args.push("--no-low-latency-encoder");
   if (options.softwareEncoder) args.push("--software-encoder");
 
-  nativeProcesses.host = spawnNativeProcess("host", executable, args);
+  nativeProcesses.host = spawnNativeProcess(
+    "host",
+    executable,
+    args,
+    sessionToken ? { SANSER_NATIVE_SESSION_TOKEN: sessionToken } : {}
+  );
   return nativeStatus();
 }
 
-function spawnNativeProcess(role, executable, args) {
+function spawnNativeProcess(role, executable, args, env = {}) {
   nativeLogs[role] = [];
   nativeLogBuffers[role] = "";
   appendNativeLog(role, `$ ${path.basename(executable)} ${args.join(" ")}`);
 
   const child = spawn(executable, args, {
     cwd: path.dirname(executable),
+    env: { ...process.env, ...env },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: false
   });
@@ -393,6 +406,11 @@ function spawnNativeProcess(role, executable, args) {
   });
 
   return child;
+}
+
+function sanitizeNativeSessionToken(value) {
+  const token = String(value || "").trim();
+  return /^[A-Za-z0-9._~-]{16,256}$/.test(token) ? token : "";
 }
 
 function consumeNativeLog(role, chunk) {

@@ -38,6 +38,7 @@ public:
   std::vector<EncodedVideoPacket> finish();
 
   bool setBitrate(std::uint32_t bitrate);
+  bool requestKeyframe();
   std::uint32_t bitrate() const;
   bool usingHardware() const;
 

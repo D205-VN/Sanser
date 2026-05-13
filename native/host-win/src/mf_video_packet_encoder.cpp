@@ -367,6 +367,34 @@ bool MfVideoPacketEncoder::setBitrate(std::uint32_t bitrate) {
   return true;
 }
 
+bool MfVideoPacketEncoder::requestKeyframe() {
+  ComPtr<ICodecAPI> codecApi;
+  const HRESULT queryHr = impl_->transform->QueryInterface(IID_PPV_ARGS(codecApi.GetAddressOf()));
+  if (FAILED(queryHr) || !codecApi) {
+    std::cerr << "SNV1_KEYFRAME_FORCE unavailable: " << hresultMessage(queryHr) << "\n";
+    return false;
+  }
+
+  VARIANT value{};
+  value.vt = VT_UI4;
+  value.ulVal = 1;
+  HRESULT forceHr = codecApi->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value);
+  if (FAILED(forceHr)) {
+    VARIANT boolValue{};
+    boolValue.vt = VT_BOOL;
+    boolValue.boolVal = VARIANT_TRUE;
+    forceHr = codecApi->SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &boolValue);
+  }
+
+  if (FAILED(forceHr)) {
+    std::cerr << "SNV1_KEYFRAME_FORCE ignored: " << hresultMessage(forceHr) << "\n";
+    return false;
+  }
+
+  std::cerr << "SNV1_KEYFRAME_FORCE api=codecapi requested=yes\n";
+  return true;
+}
+
 std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(const FrameBgra& frame) {
   if (frame.width != impl_->width || frame.height != impl_->height) {
     throw std::runtime_error("Frame dimensions do not match packet encoder dimensions.");
