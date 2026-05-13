@@ -1,7 +1,9 @@
 #import <Cocoa/Cocoa.h>
+#import <CoreHaptics/CoreHaptics.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <GameController/GameController.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -25,6 +27,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -413,6 +416,7 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       stopped_ = true;
       queue_.clear();
+      urgentQueue_.clear();
       pendingBatches_.clear();
     }
     condition_.notify_all();
@@ -426,6 +430,7 @@ public:
     fd_ = fd;
     fdGeneration_ += 1;
     queue_.clear();
+    urgentQueue_.clear();
     pausePendingBatchesLocked("fd-set");
     batchEnabled_ = false;
     controlAuthenticated_ = !authRequired_;
@@ -440,6 +445,7 @@ public:
       fd_ = -1;
       fdGeneration_ += 1;
       queue_.clear();
+      urgentQueue_.clear();
       pausePendingBatchesLocked("fd-clear");
       controlAuthenticated_ = !authRequired_;
       packetAuthEnabled_ = false;
@@ -457,6 +463,7 @@ public:
     packetAuthSequence_ = 0;
     batchEnabled_ = false;
     queue_.clear();
+    urgentQueue_.clear();
     pendingBatches_.clear();
   }
 
@@ -473,6 +480,7 @@ public:
       batchEnabled_ = false;
       packetAuthEnabled_ = false;
       queue_.clear();
+      urgentQueue_.clear();
       if (preservePending) {
         pausePendingBatchesLocked("auth-blocked");
       } else {
@@ -509,10 +517,48 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ < 0 || stopped_) return false;
     if (authRequired_ && !controlAuthenticated_ && !isAllowedBeforeAuth(json)) return false;
+    if (isPriorityInput(json)) {
+      const MoveFlushResult flush = flushPointerMovesToUrgentLocked();
+      trimUrgentQueueLocked();
+      urgentQueue_.push_back(json);
+      priorityQueuedEvents_ += 1;
+      if (flush.pushed > 0 || flush.compacted > 0 || flush.dropped > 0 ||
+          priorityQueuedEvents_ == 1 || priorityQueuedEvents_ % 120 == 0) {
+        std::cout << "SNINPUT_PRIORITY type=" << inputTypeName(json)
+                  << " queued=" << priorityQueuedEvents_
+                  << " dragging=" << boolText(jsonBoolField(json, "dragging"))
+                  << " buttons=" << jsonUint64Field(json, "buttons")
+                  << " flushedMoves=" << flush.pushed
+                  << " compactedMoves=" << flush.compacted
+                  << " droppedMoves=" << flush.dropped
+                  << " urgentPending=" << urgentQueue_.size()
+                  << " normalPending=" << queue_.size()
+                  << "\n";
+      }
+      condition_.notify_one();
+      return true;
+    }
     const bool isMove = isPointerMove(json);
+    if (isMove && applyPointerBackpressureLocked(json, std::chrono::steady_clock::now())) {
+      condition_.notify_one();
+      return true;
+    }
+    bool queued = false;
     if (isMove && !queue_.empty() && isPointerMove(queue_.back())) {
-      queue_.back() = json;
-    } else {
+      if (mergePointerMove(queue_.back(), json)) {
+        relativeCoalescedMoves_ += 1;
+        if (relativeCoalescedMoves_ == 1 || relativeCoalescedMoves_ % 240 == 0) {
+          std::cout << "SNINPUT_RELATIVE_COALESCE merged=" << relativeCoalescedMoves_
+                    << " pending=" << queue_.size()
+                    << "\n";
+        }
+        queued = true;
+      } else if (!isRelativePointerMove(json) && !isRelativePointerMove(queue_.back())) {
+        queue_.back() = json;
+        queued = true;
+      }
+    }
+    if (!queued) {
       while (queue_.size() >= maxQueueSize_) {
         if (!dropOldestPointerMoveLocked()) {
           queue_.pop_front();
@@ -524,19 +570,65 @@ public:
     return true;
   }
 
-  void observeInputAck(std::uint64_t sequence, std::uint64_t applied) {
+  void observeInputAck(std::uint64_t sequence,
+                       std::uint64_t applied,
+                       std::uint64_t events,
+                       double rttMs,
+                       double hostProcessMs,
+                       bool duplicate,
+                       bool stale,
+                       bool sessionMismatch,
+                       bool priorityAck) {
     if (sequence == 0) return;
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = pendingBatches_.find(sequence);
     if (it == pendingBatches_.end()) return;
     const std::uint32_t attempts = it->second.attempts;
+    const std::uint64_t sentSteadyMicros = it->second.sentSteadyMicros;
+    const bool priority = it->second.priority || priorityAck;
+    if (sentSteadyMicros > 0) {
+      const std::uint64_t nowMicros = steadyMicros();
+      if (nowMicros >= sentSteadyMicros) {
+        rttMs = static_cast<double>(nowMicros - sentSteadyMicros) / 1000.0;
+      }
+    }
+    const std::size_t pendingAfterAck = pendingBatches_.size() - 1;
     pendingBatches_.erase(it);
-    if (attempts > 1 || sequence == 1 || sequence % 120 == 0) {
+    const bool latencySpike = rttMs >= 80.0 || hostProcessMs >= 8.0 || pendingAfterAck > maxPendingBatches_ / 2;
+    inputAckWindowSamples_ += 1;
+    inputAckWindowRttSumMs_ += rttMs;
+    inputAckWindowRttMaxMs_ = std::max(inputAckWindowRttMaxMs_, rttMs);
+    inputAckWindowHostProcessMaxMs_ = std::max(inputAckWindowHostProcessMaxMs_, hostProcessMs);
+    if (priority || attempts > 1 || duplicate || stale || sessionMismatch || sequence == 1 || sequence % 120 == 0 || latencySpike) {
       std::cout << "SNINPUT_ACKED sequence=" << sequence
                 << " applied=" << applied
+                << " events=" << events
+                << " priority=" << boolText(priority)
                 << " attempts=" << attempts
-                << " pending=" << pendingBatches_.size()
+                << " pending=" << pendingAfterAck
+                << " duplicate=" << boolText(duplicate)
+                << " stale=" << boolText(stale)
+                << " sessionMismatch=" << boolText(sessionMismatch)
+                << " rttMs=" << std::fixed << std::setprecision(1) << rttMs
+                << " hostProcessMs=" << hostProcessMs
                 << "\n";
+    }
+    if (inputAckWindowSamples_ >= 60 || latencySpike) {
+      const double avgRttMs = inputAckWindowSamples_ > 0
+        ? inputAckWindowRttSumMs_ / static_cast<double>(inputAckWindowSamples_)
+        : 0.0;
+      std::cout << "SNINPUT_LATENCY samples=" << inputAckWindowSamples_
+                << " avgRttMs=" << std::fixed << std::setprecision(1) << avgRttMs
+                << " maxRttMs=" << inputAckWindowRttMaxMs_
+                << " hostProcessMaxMs=" << inputAckWindowHostProcessMaxMs_
+                << " pending=" << pendingAfterAck
+                << "\n";
+      if (inputAckWindowSamples_ >= 60) {
+        inputAckWindowSamples_ = 0;
+        inputAckWindowRttSumMs_ = 0.0;
+        inputAckWindowRttMaxMs_ = 0.0;
+        inputAckWindowHostProcessMaxMs_ = 0.0;
+      }
     }
     condition_.notify_one();
   }
@@ -545,12 +637,135 @@ private:
   struct PendingBatch {
     std::string json;
     std::size_t events = 0;
+    std::uint64_t sentSteadyMicros = 0;
     std::uint32_t attempts = 0;
+    bool priority = false;
     std::chrono::steady_clock::time_point lastSentAt;
   };
 
+  struct MoveFlushResult {
+    std::size_t pushed = 0;
+    std::size_t compacted = 0;
+    std::size_t dropped = 0;
+  };
+
+  static std::string inputTypeName(const std::string& json) {
+    const std::string needle = "\"type\"";
+    const std::size_t keyOffset = json.find(needle);
+    if (keyOffset == std::string::npos) return "unknown";
+    const std::size_t colon = json.find(':', keyOffset + needle.size());
+    if (colon == std::string::npos) return "unknown";
+    std::size_t offset = json.find_first_not_of(" \t\r\n", colon + 1);
+    if (offset == std::string::npos || json[offset] != '"') return "unknown";
+    ++offset;
+    const std::size_t end = json.find('"', offset);
+    if (end == std::string::npos || end <= offset) return "unknown";
+    return json.substr(offset, end - offset);
+  }
+
   static bool isPointerMove(const std::string& json) {
     return json.find("\"type\":\"pointer-move\"") != std::string::npos;
+  }
+
+  static bool jsonBoolField(const std::string& json, const char* key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const std::size_t keyOffset = json.find(needle);
+    if (keyOffset == std::string::npos) return false;
+    const std::size_t colon = json.find(':', keyOffset + needle.size());
+    if (colon == std::string::npos) return false;
+    std::size_t valueOffset = json.find_first_not_of(" \t\r\n", colon + 1);
+    if (valueOffset == std::string::npos) return false;
+    return json.compare(valueOffset, 4, "true") == 0;
+  }
+
+  static double jsonDoubleField(const std::string& json, const char* key, double fallback = 0.0) {
+    const std::string needle = std::string("\"") + key + "\"";
+    const std::size_t keyOffset = json.find(needle);
+    if (keyOffset == std::string::npos) return fallback;
+    const std::size_t colon = json.find(':', keyOffset + needle.size());
+    if (colon == std::string::npos) return fallback;
+    const char* start = json.c_str() + colon + 1;
+    char* end = nullptr;
+    const double value = std::strtod(start, &end);
+    return end != start && std::isfinite(value) ? value : fallback;
+  }
+
+  static std::uint64_t jsonUint64Field(const std::string& json, const char* key, std::uint64_t fallback = 0) {
+    const double value = jsonDoubleField(json, key, static_cast<double>(fallback));
+    return value > 0.0 ? static_cast<std::uint64_t>(std::llround(value)) : fallback;
+  }
+
+  static int jsonIntField(const std::string& json, const char* key, int fallback = 0) {
+    const double value = jsonDoubleField(json, key, static_cast<double>(fallback));
+    return std::isfinite(value) ? static_cast<int>(std::lround(value)) : fallback;
+  }
+
+  static bool isRelativePointerMove(const std::string& json) {
+    return isPointerMove(json) && jsonBoolField(json, "relative");
+  }
+
+  struct PointerMoveFields {
+    double x = 0.0;
+    double y = 0.0;
+    double dx = 0.0;
+    double dy = 0.0;
+    int button = 0;
+    std::uint64_t buttons = 0;
+    std::uint64_t coalesced = 0;
+    bool dragging = false;
+  };
+
+  static PointerMoveFields pointerMoveFields(const std::string& json) {
+    PointerMoveFields fields;
+    fields.x = jsonDoubleField(json, "x");
+    fields.y = jsonDoubleField(json, "y");
+    fields.dx = jsonDoubleField(json, "dx");
+    fields.dy = jsonDoubleField(json, "dy");
+    fields.button = jsonIntField(json, "button");
+    fields.buttons = jsonUint64Field(json, "buttons");
+    fields.coalesced = jsonUint64Field(json, "coalesced");
+    fields.dragging = jsonBoolField(json, "dragging");
+    return fields;
+  }
+
+  static std::string relativePointerMoveJson(const PointerMoveFields& fields) {
+    std::ostringstream out;
+    out << "{\"type\":\"pointer-move\""
+        << ",\"x\":" << fields.x
+        << ",\"y\":" << fields.y
+        << ",\"button\":" << fields.button
+        << ",\"buttons\":" << fields.buttons
+        << ",\"dx\":" << fields.dx
+        << ",\"dy\":" << fields.dy
+        << ",\"relative\":true"
+        << ",\"dragging\":" << (fields.dragging ? "true" : "false")
+        << ",\"coalesced\":" << fields.coalesced
+        << "}";
+    return out.str();
+  }
+
+  static bool mergeRelativePointerMove(std::string& queued, const std::string& incoming) {
+    if (!isRelativePointerMove(queued) || !isRelativePointerMove(incoming)) return false;
+    PointerMoveFields merged = pointerMoveFields(incoming);
+    const PointerMoveFields previous = pointerMoveFields(queued);
+    merged.dx += previous.dx;
+    merged.dy += previous.dy;
+    merged.buttons |= previous.buttons;
+    merged.dragging = merged.dragging || previous.dragging;
+    merged.coalesced += previous.coalesced + 1;
+    queued = relativePointerMoveJson(merged);
+    return true;
+  }
+
+  static bool mergePointerMove(std::string& queued, const std::string& incoming) {
+    if (!isPointerMove(queued) || !isPointerMove(incoming)) return false;
+    const bool queuedRelative = isRelativePointerMove(queued);
+    const bool incomingRelative = isRelativePointerMove(incoming);
+    if (queuedRelative || incomingRelative) {
+      return mergeRelativePointerMove(queued, incoming);
+    }
+    queued = incoming;
+    return true;
   }
 
   static bool isControlPing(const std::string& json) {
@@ -581,6 +796,24 @@ private:
     return json.find("\"type\":\"control-hello\"") != std::string::npos;
   }
 
+  static bool isPriorityInput(const std::string& json) {
+    if (isPointerMove(json) && jsonBoolField(json, "dragging")) return true;
+    const std::string type = inputTypeName(json);
+    return type == "pointer-down" ||
+           type == "pointer-up" ||
+           type == "wheel" ||
+           type == "input-reset" ||
+           type == "key-down" ||
+           type == "key-up" ||
+           type == "modifiers" ||
+           type == "clipboard" ||
+           type == "copy" ||
+           type == "cut" ||
+           type == "paste" ||
+           type == "select-all" ||
+           type == "gamepad-state";
+  }
+
   static bool isAllowedBeforeAuth(const std::string& json) {
     return isControlHello(json) || isControlPing(json);
   }
@@ -588,6 +821,195 @@ private:
   static bool isBatchable(const std::string& json) {
     return !isControlPing(json) && !isStreamStats(json) && !isUdpRepairStats(json) && !isRenderStats(json) &&
            !isKeyframeRequest(json) && !isVideoNack(json) && !isControlHello(json);
+  }
+
+  void trimUrgentQueueLocked() {
+    while (urgentQueue_.size() >= maxUrgentQueueSize_) {
+      urgentQueue_.pop_front();
+      droppedPriorityEvents_ += 1;
+      if (droppedPriorityEvents_ == 1 || droppedPriorityEvents_ % 16 == 0) {
+        std::cout << "SNINPUT_PRIORITY_DROP dropped=" << droppedPriorityEvents_
+                  << " urgentPending=" << urgentQueue_.size()
+                  << "\n";
+      }
+    }
+  }
+
+  MoveFlushResult flushPointerMovesToUrgentLocked() {
+    MoveFlushResult result;
+    std::deque<std::string> compactedMoves;
+    for (auto it = queue_.begin(); it != queue_.end();) {
+      if (!isPointerMove(*it)) {
+        ++it;
+        continue;
+      }
+      if (!compactedMoves.empty() && mergePointerMove(compactedMoves.back(), *it)) {
+        result.compacted += 1;
+      } else {
+        compactedMoves.push_back(std::move(*it));
+      }
+      it = queue_.erase(it);
+    }
+    while (compactedMoves.size() > maxPriorityMoveFlush_) {
+      compactedMoves.pop_front();
+      result.dropped += 1;
+    }
+    while (!compactedMoves.empty()) {
+      trimUrgentQueueLocked();
+      urgentQueue_.push_back(std::move(compactedMoves.front()));
+      compactedMoves.pop_front();
+      result.pushed += 1;
+    }
+    if (result.compacted > 0 || result.dropped > 0) {
+      priorityFlushedMoveCompacted_ += result.compacted;
+      priorityFlushedMoveDropped_ += result.dropped;
+      std::cout << "SNINPUT_PRIORITY_MOVE_FLUSH pushed=" << result.pushed
+                << " compacted=" << result.compacted
+                << " dropped=" << result.dropped
+                << " totalCompacted=" << priorityFlushedMoveCompacted_
+                << " totalDropped=" << priorityFlushedMoveDropped_
+                << " urgentPending=" << urgentQueue_.size()
+                << " normalPending=" << queue_.size()
+                << "\n";
+    }
+    return result;
+  }
+
+  bool inputPressureLocked(std::chrono::steady_clock::time_point now, std::string& reason) const {
+    if (urgentQueue_.size() >= backpressureUrgentThreshold_) {
+      reason = "urgent-queue";
+      return true;
+    }
+    if (queue_.size() >= backpressureQueueThreshold_) {
+      reason = "normal-queue";
+      return true;
+    }
+    if (pendingBatches_.size() >= backpressurePendingThreshold_) {
+      reason = "pending-batches";
+      return true;
+    }
+    for (const auto& entry : pendingBatches_) {
+      const auto age = now - entry.second.lastSentAt;
+      if (entry.second.priority && age >= backpressurePriorityAge_) {
+        reason = "priority-stall";
+        return true;
+      }
+      if (age >= backpressurePendingAge_) {
+        reason = "pending-age";
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool coalescePointerMoveIntoQueueLocked(const std::string& json) {
+    for (auto it = queue_.rbegin(); it != queue_.rend(); ++it) {
+      if (mergePointerMove(*it, json)) return true;
+    }
+    return false;
+  }
+
+  std::size_t compactPointerMovesLocked(const char* reason) {
+    std::deque<std::string> compactedQueue;
+    std::string pendingMove;
+    std::size_t compactedMoves = 0;
+
+    auto flushPendingMove = [&]() {
+      if (!pendingMove.empty()) {
+        compactedQueue.push_back(std::move(pendingMove));
+        pendingMove.clear();
+      }
+    };
+
+    for (auto& entry : queue_) {
+      if (!isPointerMove(entry)) {
+        flushPendingMove();
+        compactedQueue.push_back(std::move(entry));
+        continue;
+      }
+      if (pendingMove.empty()) {
+        pendingMove = std::move(entry);
+      } else if (mergePointerMove(pendingMove, entry)) {
+        compactedMoves += 1;
+      } else {
+        flushPendingMove();
+        pendingMove = std::move(entry);
+      }
+    }
+    flushPendingMove();
+
+    if (compactedMoves > 0) {
+      queue_ = std::move(compactedQueue);
+      backpressureCompactedMoves_ += compactedMoves;
+      std::cout << "SNINPUT_BACKPRESSURE action=compact"
+                << " reason=" << reason
+                << " compacted=" << compactedMoves
+                << " totalCompacted=" << backpressureCompactedMoves_
+                << " normalPending=" << queue_.size()
+                << " urgentPending=" << urgentQueue_.size()
+                << " pending=" << pendingBatches_.size()
+                << "\n";
+    }
+    return compactedMoves;
+  }
+
+  bool applyPointerBackpressureLocked(const std::string& json, std::chrono::steady_clock::time_point now) {
+    std::string reason;
+    if (!inputPressureLocked(now, reason)) return false;
+
+    compactPointerMovesLocked(reason.c_str());
+    if (coalescePointerMoveIntoQueueLocked(json)) {
+      backpressureCoalescedMoves_ += 1;
+      if (backpressureCoalescedMoves_ == 1 || backpressureCoalescedMoves_ % 120 == 0) {
+        std::cout << "SNINPUT_BACKPRESSURE action=coalesce"
+                  << " reason=" << reason
+                  << " coalesced=" << backpressureCoalescedMoves_
+                  << " normalPending=" << queue_.size()
+                  << " urgentPending=" << urgentQueue_.size()
+                  << " pending=" << pendingBatches_.size()
+                  << "\n";
+      }
+      return true;
+    }
+
+    if (queue_.size() >= maxBackpressureQueueSize_) {
+      backpressureDroppedMoves_ += 1;
+      if (backpressureDroppedMoves_ == 1 || backpressureDroppedMoves_ % 60 == 0) {
+        std::cout << "SNINPUT_BACKPRESSURE action=drop"
+                  << " reason=" << reason
+                  << " dropped=" << backpressureDroppedMoves_
+                  << " normalPending=" << queue_.size()
+                  << " urgentPending=" << urgentQueue_.size()
+                  << " pending=" << pendingBatches_.size()
+                  << "\n";
+      }
+      return true;
+    }
+    return false;
+  }
+
+  static bool priorityBatchHasAction(const std::vector<std::string>& batch) {
+    for (const auto& event : batch) {
+      if (!isPointerMove(event)) return true;
+    }
+    return false;
+  }
+
+  static std::size_t priorityBatchPointerMoves(const std::vector<std::string>& batch) {
+    return static_cast<std::size_t>(
+      std::count_if(batch.begin(), batch.end(), [](const std::string& event) {
+        return isPointerMove(event);
+      }));
+  }
+
+  static bool shouldAppendPriorityBatchEvent(const std::vector<std::string>& batch,
+                                             const std::string& next) {
+    if (batch.empty()) return true;
+    if (priorityBatchHasAction(batch)) return false;
+    if (isPointerMove(next)) {
+      return priorityBatchPointerMoves(batch) < maxPriorityPointerPrefix_;
+    }
+    return true;
   }
 
   bool dropOldestPointerMoveLocked() {
@@ -610,8 +1032,10 @@ private:
     while (true) {
       std::string json;
       std::uint64_t batchSequence = 0;
+      std::uint64_t batchSentSteadyMicros = 0;
       std::size_t batchEvents = 0;
       std::uint32_t retryAttempt = 0;
+      bool priorityBatch = false;
       bool retry = false;
       std::uint64_t generation = 0;
       int sendFd = -1;
@@ -619,35 +1043,39 @@ private:
         std::unique_lock<std::mutex> lock(mutex_);
         condition_.wait_for(lock, retryPollInterval_, [&] {
           const auto now = std::chrono::steady_clock::now();
-          return stopped_ || (fd_ >= 0 && (!queue_.empty() || hasRetryWorkLocked(now)));
+          return stopped_ || (fd_ >= 0 && (!urgentQueue_.empty() || !queue_.empty() || hasRetryWorkLocked(now)));
         });
         if (stopped_) return;
         if (fd_ < 0) continue;
         const auto wakeNow = std::chrono::steady_clock::now();
-        if (queue_.empty() && !hasRetryWorkLocked(wakeNow)) continue;
+        observePendingHealthLocked(wakeNow);
+        if (urgentQueue_.empty() && queue_.empty() && !hasRetryWorkLocked(wakeNow)) continue;
         generation = fdGeneration_;
         sendFd = dup(fd_);
         if (sendFd < 0) {
           fd_ = -1;
           fdGeneration_ += 1;
           queue_.clear();
+          urgentQueue_.clear();
           pausePendingBatchesLocked("dup-failed");
           std::cerr << "SNINPUT async dup failed; waiting for reconnect.\n";
           continue;
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (prepareRetryLocked(now, json, batchSequence, batchEvents, retryAttempt)) {
-          retry = true;
-        } else if (!queue_.empty()) {
+        auto takeBatchFromQueue = [&](std::deque<std::string>& sourceQueue) {
           std::vector<std::string> batch;
           const bool batchEnabled = batchEnabled_;
-          batch.push_back(std::move(queue_.front()));
-          queue_.pop_front();
+          const std::size_t maxEvents = priorityBatch ? maxPriorityBatchEvents_ : maxBatchEvents_;
+          batch.push_back(std::move(sourceQueue.front()));
+          sourceQueue.pop_front();
           if (batchEnabled && isBatchable(batch.front())) {
-            while (batch.size() < maxBatchEvents_ && !queue_.empty() && isBatchable(queue_.front())) {
-              batch.push_back(std::move(queue_.front()));
-              queue_.pop_front();
+            while (batch.size() < maxEvents && !sourceQueue.empty() && isBatchable(sourceQueue.front())) {
+              if (priorityBatch && !shouldAppendPriorityBatchEvent(batch, sourceQueue.front())) {
+                break;
+              }
+              batch.push_back(std::move(sourceQueue.front()));
+              sourceQueue.pop_front();
             }
           }
           const bool shouldBatch = batchEnabled &&
@@ -655,11 +1083,20 @@ private:
             (batch.size() > 1 || !isPointerMove(batch.front()));
           if (shouldBatch) {
             batchEvents = batch.size();
-            json = makeInputBatch(batch, batchSequence);
-            trackPendingBatchLocked(batchSequence, json, batchEvents, now);
+            json = makeInputBatch(batch, batchSequence, batchSentSteadyMicros, priorityBatch);
+            trackPendingBatchLocked(batchSequence, json, batchEvents, batchSentSteadyMicros, priorityBatch, now);
           } else {
             json = std::move(batch.front());
           }
+        };
+
+        if (!urgentQueue_.empty()) {
+          priorityBatch = true;
+          takeBatchFromQueue(urgentQueue_);
+        } else if (prepareRetryLocked(now, json, batchSequence, batchEvents, retryAttempt, priorityBatch)) {
+          retry = true;
+        } else if (!queue_.empty()) {
+          takeBatchFromQueue(queue_);
         } else {
           close(sendFd);
           continue;
@@ -670,6 +1107,7 @@ private:
         std::cout << "SNINPUT_RETRY_TX sequence=" << batchSequence
                   << " attempt=" << retryAttempt
                   << " events=" << batchEvents
+                  << " priority=" << boolText(priorityBatch)
                   << "\n";
       }
 
@@ -688,6 +1126,7 @@ private:
           fd_ = -1;
           fdGeneration_ += 1;
           queue_.clear();
+          urgentQueue_.clear();
           pausePendingBatchesLocked("send-failed");
         }
         std::cerr << "SNINPUT async send failed; waiting for reconnect.\n";
@@ -707,11 +1146,72 @@ private:
     return false;
   }
 
+  void observePendingHealthLocked(std::chrono::steady_clock::time_point now) {
+    if (pendingBatches_.empty() && urgentQueue_.empty() && queue_.empty()) return;
+
+    std::size_t priorityPending = 0;
+    std::size_t retryReady = 0;
+    double oldestMs = 0.0;
+    double priorityOldestMs = 0.0;
+    std::uint64_t oldestPrioritySequence = 0;
+    std::uint32_t oldestPriorityAttempts = 0;
+    std::size_t oldestPriorityEvents = 0;
+    for (const auto& entry : pendingBatches_) {
+      const double ageMs = std::chrono::duration<double, std::milli>(now - entry.second.lastSentAt).count();
+      oldestMs = std::max(oldestMs, ageMs);
+      if (ageMs >= static_cast<double>(retryDelay_.count())) {
+        retryReady += 1;
+      }
+      if (entry.second.priority) {
+        priorityPending += 1;
+        if (ageMs > priorityOldestMs) {
+          priorityOldestMs = ageMs;
+          oldestPrioritySequence = entry.first;
+          oldestPriorityAttempts = entry.second.attempts;
+          oldestPriorityEvents = entry.second.events;
+        }
+      }
+    }
+
+    const bool priorityStalled = priorityOldestMs >= 250.0;
+    const bool pressure = priorityStalled ||
+      priorityPending >= backpressurePriorityPendingThreshold_ ||
+      urgentQueue_.size() >= backpressureUrgentThreshold_ ||
+      queue_.size() >= backpressureQueueThreshold_ ||
+      pendingBatches_.size() >= backpressurePendingThreshold_;
+    if (pressure) {
+      compactPointerMovesLocked(priorityStalled ? "priority-stall" : "pressure");
+    }
+    if (priorityStalled &&
+        now - lastPriorityStallLogAt_ >= std::chrono::milliseconds(250)) {
+      lastPriorityStallLogAt_ = now;
+      std::cout << "SNINPUT_PRIORITY_STALL sequence=" << oldestPrioritySequence
+                << " ageMs=" << std::fixed << std::setprecision(1) << priorityOldestMs
+                << " attempts=" << oldestPriorityAttempts
+                << " events=" << oldestPriorityEvents
+                << " pending=" << pendingBatches_.size()
+                << "\n";
+    }
+
+    if (now - lastInputHealthLogAt_ >= std::chrono::seconds(1) || priorityStalled) {
+      lastInputHealthLogAt_ = now;
+      std::cout << "SNINPUT_HEALTH pending=" << pendingBatches_.size()
+                << " priorityPending=" << priorityPending
+                << " urgentPending=" << urgentQueue_.size()
+                << " normalPending=" << queue_.size()
+                << " retryReady=" << retryReady
+                << " oldestMs=" << std::fixed << std::setprecision(1) << oldestMs
+                << " priorityOldestMs=" << priorityOldestMs
+                << "\n";
+    }
+  }
+
   bool prepareRetryLocked(std::chrono::steady_clock::time_point now,
                           std::string& json,
                           std::uint64_t& sequence,
                           std::size_t& events,
-                          std::uint32_t& attempt) {
+                          std::uint32_t& attempt,
+                          bool& priority) {
     if (!canRetryPendingLocked()) return false;
     for (auto it = pendingBatches_.begin(); it != pendingBatches_.end();) {
       if (now - it->second.lastSentAt < retryDelay_) {
@@ -730,6 +1230,7 @@ private:
       sequence = it->first;
       json = it->second.json;
       events = it->second.events;
+      priority = it->second.priority;
       it->second.attempts += 1;
       attempt = it->second.attempts;
       it->second.lastSentAt = now;
@@ -741,6 +1242,8 @@ private:
   void trackPendingBatchLocked(std::uint64_t sequence,
                                const std::string& json,
                                std::size_t events,
+                               std::uint64_t sentSteadyMicros,
+                               bool priority,
                                std::chrono::steady_clock::time_point now) {
     while (pendingBatches_.size() >= maxPendingBatches_) {
       const auto dropped = pendingBatches_.begin();
@@ -751,7 +1254,7 @@ private:
                 << "\n";
       pendingBatches_.erase(dropped);
     }
-    pendingBatches_[sequence] = PendingBatch{json, events, 1, now};
+    pendingBatches_[sequence] = PendingBatch{json, events, sentSteadyMicros, 1, priority, now};
   }
 
   void pausePendingBatchesLocked(const char* reason) {
@@ -765,22 +1268,31 @@ private:
               << "\n";
   }
 
-  std::string makeInputBatch(const std::vector<std::string>& events, std::uint64_t& sequence) {
+  std::string makeInputBatch(const std::vector<std::string>& events,
+                             std::uint64_t& sequence,
+                             std::uint64_t& sentSteadyMicros,
+                             bool priority) {
     std::ostringstream out;
     sequence = ++batchSequence_;
+    sentSteadyMicros = steadyMicros();
     out << "{\"type\":\"input-batch\""
         << ",\"inputSessionId\":\"" << inputSessionId_ << "\""
         << ",\"sequence\":" << sequence
-        << ",\"sentSteadyMicros\":" << steadyMicros()
+        << ",\"sentSteadyMicros\":" << sentSteadyMicros
+        << ",\"priority\":" << (priority ? "true" : "false")
         << ",\"events\":[";
     for (std::size_t i = 0; i < events.size(); ++i) {
       if (i > 0) out << ",";
       out << events[i];
     }
     out << "]}";
-    if (events.size() > 1 && (sequence == 1 || sequence % 120 == 0)) {
+    if (priority || (events.size() > 1 && (sequence == 1 || sequence % 120 == 0))) {
       std::cout << "SNINPUT_BATCH_TX sequence=" << sequence
                 << " events=" << events.size()
+                << " priority=" << boolText(priority)
+                << " firstType=" << (events.empty() ? "none" : inputTypeName(events.front()))
+                << " lastType=" << (events.empty() ? "none" : inputTypeName(events.back()))
+                << " pointerMoves=" << priorityBatchPointerMoves(events)
                 << "\n";
     }
     return out.str();
@@ -816,11 +1328,26 @@ private:
   std::mutex mutex_;
   std::condition_variable condition_;
   std::deque<std::string> queue_;
+  std::deque<std::string> urgentQueue_;
   std::map<std::uint64_t, PendingBatch> pendingBatches_;
   const std::string inputSessionId_;
   std::thread worker_;
   std::uint64_t droppedPointerMoves_ = 0;
+  std::uint64_t relativeCoalescedMoves_ = 0;
+  std::uint64_t priorityQueuedEvents_ = 0;
+  std::uint64_t droppedPriorityEvents_ = 0;
+  std::uint64_t priorityFlushedMoveCompacted_ = 0;
+  std::uint64_t priorityFlushedMoveDropped_ = 0;
+  std::uint64_t backpressureCoalescedMoves_ = 0;
+  std::uint64_t backpressureDroppedMoves_ = 0;
+  std::uint64_t backpressureCompactedMoves_ = 0;
   std::uint64_t batchSequence_ = 0;
+  std::uint64_t inputAckWindowSamples_ = 0;
+  double inputAckWindowRttSumMs_ = 0.0;
+  double inputAckWindowRttMaxMs_ = 0.0;
+  double inputAckWindowHostProcessMaxMs_ = 0.0;
+  std::chrono::steady_clock::time_point lastInputHealthLogAt_{};
+  std::chrono::steady_clock::time_point lastPriorityStallLogAt_{};
   std::uint64_t fdGeneration_ = 0;
   int fd_ = -1;
   bool batchEnabled_ = false;
@@ -831,9 +1358,20 @@ private:
   std::string packetAuthToken_;
   std::uint64_t packetAuthSequence_ = 0;
   static constexpr std::size_t maxQueueSize_ = 512;
+  static constexpr std::size_t maxUrgentQueueSize_ = 256;
+  static constexpr std::size_t maxPriorityMoveFlush_ = 2;
+  static constexpr std::size_t maxPriorityPointerPrefix_ = 2;
+  static constexpr std::size_t maxPriorityBatchEvents_ = 4;
+  static constexpr std::size_t maxBackpressureQueueSize_ = 96;
+  static constexpr std::size_t backpressureQueueThreshold_ = 160;
+  static constexpr std::size_t backpressurePendingThreshold_ = 48;
+  static constexpr std::size_t backpressureUrgentThreshold_ = 16;
+  static constexpr std::size_t backpressurePriorityPendingThreshold_ = 4;
   static constexpr std::size_t maxBatchEvents_ = 24;
   static constexpr std::size_t maxPendingBatches_ = 128;
   static constexpr std::uint32_t maxBatchRetryAttempts_ = 4;
+  static constexpr auto backpressurePriorityAge_ = std::chrono::milliseconds(160);
+  static constexpr auto backpressurePendingAge_ = std::chrono::milliseconds(450);
   static constexpr auto retryDelay_ = std::chrono::milliseconds(85);
   static constexpr auto retryPollInterval_ = std::chrono::milliseconds(20);
 };
@@ -958,6 +1496,7 @@ std::shared_ptr<NativeInputSender> gNativeInputSender;
 bool gLogInputEvents = false;
 bool gRelativeMouse = false;
 bool gMouseGrabbed = false;
+std::uint32_t gMacModifierKeyMask = 0;
 std::string gExpectedSessionToken;
 std::string gControlSessionNonce;
 bool gHostPacketAuthVerified = false;
@@ -1106,6 +1645,24 @@ std::uint64_t jsonUint64Value(const std::string& json, const char* key, std::uin
   }
 }
 
+double jsonDoubleValue(const std::string& json, const char* key, double fallback = 0.0) {
+  const std::string needle = std::string("\"") + key + "\"";
+  const std::size_t keyOffset = json.find(needle);
+  if (keyOffset == std::string::npos) return fallback;
+  const std::size_t colon = json.find(':', keyOffset + needle.size());
+  if (colon == std::string::npos) return fallback;
+  const std::size_t valueOffset = skipJsonWhitespace(json, colon + 1);
+  try {
+    return std::stod(json.substr(valueOffset));
+  } catch (...) {
+    return fallback;
+  }
+}
+
+int jsonIntValue(const std::string& json, const char* key, int fallback = 0) {
+  return static_cast<int>(std::lround(jsonDoubleValue(json, key, static_cast<double>(fallback))));
+}
+
 bool jsonBoolValue(const std::string& json, const char* key, bool fallback = false) {
   const std::string needle = std::string("\"") + key + "\"";
   const std::size_t keyOffset = json.find(needle);
@@ -1191,6 +1748,91 @@ double backingScaleForView(NSView* view) {
   return screen ? std::max<double>([screen backingScaleFactor], 1.0) : 1.0;
 }
 
+std::uint32_t pointerButtonMask(NSInteger button) {
+  if (button < 0) return 0;
+  const auto capped = static_cast<std::uint32_t>(std::min<NSInteger>(button, 7));
+  return 1u << capped;
+}
+
+enum MacModifierKeyBits : std::uint32_t {
+  kMacModLeftShift = 1u << 0,
+  kMacModRightShift = 1u << 1,
+  kMacModLeftControl = 1u << 2,
+  kMacModRightControl = 1u << 3,
+  kMacModLeftOption = 1u << 4,
+  kMacModRightOption = 1u << 5,
+  kMacModLeftCommand = 1u << 6,
+  kMacModRightCommand = 1u << 7
+};
+
+std::uint32_t modifierKeyBitForMacKeyCode(unsigned short keyCode) {
+  switch (keyCode) {
+    case 56: return kMacModLeftShift;
+    case 60: return kMacModRightShift;
+    case 59: return kMacModLeftControl;
+    case 62: return kMacModRightControl;
+    case 58: return kMacModLeftOption;
+    case 61: return kMacModRightOption;
+    case 55: return kMacModLeftCommand;
+    case 54: return kMacModRightCommand;
+    default: return 0;
+  }
+}
+
+std::uint32_t modifierFamilyBitsForMacKeyCode(unsigned short keyCode) {
+  switch (keyCode) {
+    case 56:
+    case 60:
+      return kMacModLeftShift | kMacModRightShift;
+    case 59:
+    case 62:
+      return kMacModLeftControl | kMacModRightControl;
+    case 58:
+    case 61:
+      return kMacModLeftOption | kMacModRightOption;
+    case 55:
+    case 54:
+      return kMacModLeftCommand | kMacModRightCommand;
+    default:
+      return 0;
+  }
+}
+
+std::uint32_t normalizeModifierSnapshot(NSEventModifierFlags flags, std::uint32_t mask) {
+  auto syncFamily = [&](NSEventModifierFlags familyFlag,
+                        std::uint32_t familyBits,
+                        std::uint32_t fallbackBit) {
+    if ((flags & familyFlag) == 0) {
+      mask &= ~familyBits;
+    } else if ((mask & familyBits) == 0) {
+      mask |= fallbackBit;
+    }
+  };
+
+  syncFamily(NSEventModifierFlagShift, kMacModLeftShift | kMacModRightShift, kMacModLeftShift);
+  syncFamily(NSEventModifierFlagControl, kMacModLeftControl | kMacModRightControl, kMacModLeftControl);
+  syncFamily(NSEventModifierFlagOption, kMacModLeftOption | kMacModRightOption, kMacModLeftOption);
+  syncFamily(NSEventModifierFlagCommand, kMacModLeftCommand | kMacModRightCommand, kMacModLeftCommand);
+  return mask;
+}
+
+std::uint32_t modifierSnapshotForEvent(NSEvent* event, bool flagsChanged) {
+  const auto flags = [event modifierFlags];
+  std::uint32_t mask = gMacModifierKeyMask;
+  if (flagsChanged) {
+    const std::uint32_t bit = modifierKeyBitForMacKeyCode([event keyCode]);
+    const std::uint32_t familyBits = modifierFamilyBitsForMacKeyCode([event keyCode]);
+    if (bit != 0 && familyBits != 0) {
+      const bool down = (normalizeModifierSnapshot(flags, bit) & bit) != 0;
+      mask &= ~bit;
+      if (down) mask |= bit;
+    }
+  }
+  mask = normalizeModifierSnapshot(flags, mask);
+  gMacModifierKeyMask = mask;
+  return mask;
+}
+
 void setRelativeMouseGrab(bool enabled) {
   if (gMouseGrabbed == enabled) return;
   const CGError error = CGAssociateMouseAndMouseCursorPosition(enabled ? false : true);
@@ -1224,6 +1866,19 @@ bool sendNativeInputJson(const std::string& json) {
   return sent;
 }
 
+bool sendInputReset(const char* reason) {
+  std::ostringstream out;
+  out << "{\"type\":\"input-reset\""
+      << ",\"reason\":\"" << jsonEscape(reason ? reason : "unknown") << "\""
+      << ",\"sentSteadyMicros\":" << steadyMicros()
+      << "}";
+  const bool sent = sendNativeInputJson(out.str());
+  std::cout << "SNINPUT_RESET_TX reason=" << (reason ? reason : "unknown")
+            << " sent=" << boolText(sent)
+            << "\n";
+  return sent;
+}
+
 void sendControlPing(std::uint64_t sequence) {
   std::ostringstream out;
   out << "{\"type\":\"control-ping\""
@@ -1233,20 +1888,415 @@ void sendControlPing(std::uint64_t sequence) {
   sendNativeInputJson(out.str());
 }
 
+enum GamepadButtonBits : std::uint32_t {
+  kGamepadButtonA = 1u << 0,
+  kGamepadButtonB = 1u << 1,
+  kGamepadButtonX = 1u << 2,
+  kGamepadButtonY = 1u << 3,
+  kGamepadButtonLeftShoulder = 1u << 4,
+  kGamepadButtonRightShoulder = 1u << 5,
+  kGamepadButtonMenu = 1u << 6,
+  kGamepadButtonOptions = 1u << 7,
+  kGamepadButtonLeftThumbstick = 1u << 8,
+  kGamepadButtonRightThumbstick = 1u << 9,
+  kGamepadDpadUp = 1u << 10,
+  kGamepadDpadDown = 1u << 11,
+  kGamepadDpadLeft = 1u << 12,
+  kGamepadDpadRight = 1u << 13,
+  kGamepadLeftTriggerPressed = 1u << 14,
+  kGamepadRightTriggerPressed = 1u << 15
+};
+
+constexpr std::size_t kMaxGamepadSlots = 4;
+
+struct GamepadSnapshot {
+  bool connected = false;
+  std::uintptr_t controllerKey = 0;
+  std::string name;
+  std::uint32_t buttons = 0;
+  double lx = 0.0;
+  double ly = 0.0;
+  double rx = 0.0;
+  double ry = 0.0;
+  double lt = 0.0;
+  double rt = 0.0;
+};
+
+double gamepadAxisDeadzone(double value) {
+  return std::abs(value) < 0.08 ? 0.0 : std::clamp(value, -1.0, 1.0);
+}
+
+bool gamepadButtonPressed(GCControllerButtonInput* button, double threshold = 0.5) {
+  return button && [button value] >= threshold;
+}
+
+GCControllerButtonInput* optionalGamepadButton(id source, NSString* key) {
+  if (!source || !key) return nil;
+  @try {
+    id value = [source valueForKey:key];
+    if ([value isKindOfClass:[GCControllerButtonInput class]]) {
+      return (GCControllerButtonInput*)value;
+    }
+  } @catch (NSException*) {
+    return nil;
+  }
+  return nil;
+}
+
+std::uintptr_t gamepadControllerKey(GCController* controller) {
+  return controller ? reinterpret_cast<std::uintptr_t>((__bridge const void*)controller) : 0;
+}
+
+std::array<std::uintptr_t, kMaxGamepadSlots>& gamepadSlotKeys() {
+  static std::array<std::uintptr_t, kMaxGamepadSlots> slotKeys{};
+  return slotKeys;
+}
+
+GCController* gamepadControllerForSlot(std::size_t slot) {
+  if (slot >= kMaxGamepadSlots) return nil;
+  const std::uintptr_t key = gamepadSlotKeys()[slot];
+  if (key == 0) return nil;
+  NSArray<GCController*>* controllers = [GCController controllers];
+  for (GCController* controller in controllers) {
+    if (gamepadControllerKey(controller) == key) return controller;
+  }
+  return nil;
+}
+
+GamepadSnapshot readGamepadSnapshot(GCController* selected) {
+  GamepadSnapshot snapshot;
+  if (!selected) return snapshot;
+
+  GCExtendedGamepad* pad = [selected extendedGamepad];
+  if (!pad) return snapshot;
+
+  snapshot.connected = true;
+  snapshot.controllerKey = gamepadControllerKey(selected);
+  snapshot.name = nsStringToUtf8([selected vendorName] ?: [selected productCategory]);
+  snapshot.lx = gamepadAxisDeadzone([[pad.leftThumbstick xAxis] value]);
+  snapshot.ly = gamepadAxisDeadzone([[pad.leftThumbstick yAxis] value]);
+  snapshot.rx = gamepadAxisDeadzone([[pad.rightThumbstick xAxis] value]);
+  snapshot.ry = gamepadAxisDeadzone([[pad.rightThumbstick yAxis] value]);
+  snapshot.lt = std::clamp(static_cast<double>([[pad leftTrigger] value]), 0.0, 1.0);
+  snapshot.rt = std::clamp(static_cast<double>([[pad rightTrigger] value]), 0.0, 1.0);
+
+  if (gamepadButtonPressed([pad buttonA])) snapshot.buttons |= kGamepadButtonA;
+  if (gamepadButtonPressed([pad buttonB])) snapshot.buttons |= kGamepadButtonB;
+  if (gamepadButtonPressed([pad buttonX])) snapshot.buttons |= kGamepadButtonX;
+  if (gamepadButtonPressed([pad buttonY])) snapshot.buttons |= kGamepadButtonY;
+  if (gamepadButtonPressed([pad leftShoulder])) snapshot.buttons |= kGamepadButtonLeftShoulder;
+  if (gamepadButtonPressed([pad rightShoulder])) snapshot.buttons |= kGamepadButtonRightShoulder;
+  if (snapshot.lt >= 0.5) snapshot.buttons |= kGamepadLeftTriggerPressed;
+  if (snapshot.rt >= 0.5) snapshot.buttons |= kGamepadRightTriggerPressed;
+  if (gamepadButtonPressed([[pad dpad] up])) snapshot.buttons |= kGamepadDpadUp;
+  if (gamepadButtonPressed([[pad dpad] down])) snapshot.buttons |= kGamepadDpadDown;
+  if (gamepadButtonPressed([[pad dpad] left])) snapshot.buttons |= kGamepadDpadLeft;
+  if (gamepadButtonPressed([[pad dpad] right])) snapshot.buttons |= kGamepadDpadRight;
+  if (gamepadButtonPressed(optionalGamepadButton(pad, @"buttonMenu"))) snapshot.buttons |= kGamepadButtonMenu;
+  if (gamepadButtonPressed(optionalGamepadButton(pad, @"buttonOptions"))) snapshot.buttons |= kGamepadButtonOptions;
+  if (gamepadButtonPressed(optionalGamepadButton([pad leftThumbstick], @"button"))) {
+    snapshot.buttons |= kGamepadButtonLeftThumbstick;
+  }
+  if (gamepadButtonPressed(optionalGamepadButton([pad rightThumbstick], @"button"))) {
+    snapshot.buttons |= kGamepadButtonRightThumbstick;
+  }
+  return snapshot;
+}
+
+std::array<GamepadSnapshot, kMaxGamepadSlots> readGamepadSnapshots() {
+  auto& slotKeys = gamepadSlotKeys();
+  std::array<GamepadSnapshot, kMaxGamepadSlots> snapshots{};
+  NSArray<GCController*>* controllers = [GCController controllers];
+  std::vector<GCController*> activeControllers;
+  std::vector<std::uintptr_t> activeKeys;
+
+  for (GCController* controller in controllers) {
+    if (![controller extendedGamepad]) continue;
+    const std::uintptr_t key = gamepadControllerKey(controller);
+    if (key == 0) continue;
+    activeControllers.push_back(controller);
+    activeKeys.push_back(key);
+  }
+
+  for (std::size_t slot = 0; slot < slotKeys.size(); ++slot) {
+    if (slotKeys[slot] == 0) continue;
+    const bool stillPresent = std::find(activeKeys.begin(), activeKeys.end(), slotKeys[slot]) != activeKeys.end();
+    if (!stillPresent) {
+      std::cout << "SNINPUT_GAMEPAD_SLOT action=release"
+                << " index=" << slot
+                << " key=" << slotKeys[slot]
+                << "\n";
+      slotKeys[slot] = 0;
+    }
+  }
+
+  for (std::size_t activeIndex = 0; activeIndex < activeControllers.size(); ++activeIndex) {
+    GCController* controller = activeControllers[activeIndex];
+    const std::uintptr_t key = activeKeys[activeIndex];
+    auto slotIt = std::find(slotKeys.begin(), slotKeys.end(), key);
+    if (slotIt == slotKeys.end()) {
+      slotIt = std::find(slotKeys.begin(), slotKeys.end(), static_cast<std::uintptr_t>(0));
+      if (slotIt == slotKeys.end()) continue;
+      *slotIt = key;
+      const std::size_t slot = static_cast<std::size_t>(std::distance(slotKeys.begin(), slotIt));
+      std::cout << "SNINPUT_GAMEPAD_SLOT action=assign"
+                << " index=" << slot
+                << " key=" << key
+                << " name=\"" << nsStringToUtf8([controller vendorName] ?: [controller productCategory])
+                << "\"\n";
+    }
+
+    const std::size_t slot = static_cast<std::size_t>(std::distance(slotKeys.begin(), slotIt));
+    snapshots[slot] = readGamepadSnapshot(controller);
+  }
+  return snapshots;
+}
+
+bool gamepadSnapshotChanged(const GamepadSnapshot& left, const GamepadSnapshot& right) {
+  constexpr double axisEpsilon = 0.025;
+  constexpr double triggerEpsilon = 0.025;
+  return left.connected != right.connected ||
+         left.controllerKey != right.controllerKey ||
+         left.buttons != right.buttons ||
+         std::abs(left.lx - right.lx) > axisEpsilon ||
+         std::abs(left.ly - right.ly) > axisEpsilon ||
+         std::abs(left.rx - right.rx) > axisEpsilon ||
+         std::abs(left.ry - right.ry) > axisEpsilon ||
+         std::abs(left.lt - right.lt) > triggerEpsilon ||
+         std::abs(left.rt - right.rt) > triggerEpsilon ||
+         left.name != right.name;
+}
+
+void pollAndSendGamepadState() {
+  static std::array<GamepadSnapshot, kMaxGamepadSlots> lastSnapshots{};
+  static std::array<bool, kMaxGamepadSlots> hasLastSnapshots{};
+  static std::array<std::chrono::steady_clock::time_point, kMaxGamepadSlots> lastSentAts{};
+  static std::array<std::chrono::steady_clock::time_point, kMaxGamepadSlots> lastLogAts{};
+  static std::uint64_t sequence = 0;
+
+  const auto snapshots = readGamepadSnapshots();
+  const auto now = std::chrono::steady_clock::now();
+
+  for (std::size_t index = 0; index < snapshots.size(); ++index) {
+    const GamepadSnapshot& snapshot = snapshots[index];
+    const bool hadSnapshot = hasLastSnapshots[index];
+    const GamepadSnapshot previous = lastSnapshots[index];
+    if (!hadSnapshot && !snapshot.connected) {
+      hasLastSnapshots[index] = true;
+      lastSnapshots[index] = snapshot;
+      continue;
+    }
+
+    const bool changed = !hadSnapshot || gamepadSnapshotChanged(snapshot, previous);
+    const bool heartbeat = snapshot.connected && now - lastSentAts[index] >= std::chrono::milliseconds(500);
+    const bool disconnectNotice = hadSnapshot && previous.connected && !snapshot.connected;
+    if (!changed && !heartbeat && !disconnectNotice) continue;
+
+    lastSnapshots[index] = snapshot;
+    hasLastSnapshots[index] = true;
+    lastSentAts[index] = now;
+
+    std::ostringstream out;
+    out << "{\"type\":\"gamepad-state\""
+        << ",\"sequence\":" << ++sequence
+        << ",\"index\":" << index
+        << ",\"slotCount\":" << snapshots.size()
+        << ",\"controllerKey\":" << snapshot.controllerKey
+        << ",\"connected\":" << jsonBool(snapshot.connected)
+        << ",\"name\":\"" << jsonEscape(snapshot.name.c_str()) << "\""
+        << ",\"buttons\":" << snapshot.buttons
+        << ",\"lx\":" << snapshot.lx
+        << ",\"ly\":" << snapshot.ly
+        << ",\"rx\":" << snapshot.rx
+        << ",\"ry\":" << snapshot.ry
+        << ",\"lt\":" << snapshot.lt
+        << ",\"rt\":" << snapshot.rt
+        << ",\"preferredBackend\":\"virtual-xinput\""
+        << ",\"fallback\":\"keyboard-mouse\""
+        << ",\"sentSteadyMicros\":" << steadyMicros()
+        << "}";
+    const bool sent = sendNativeInputJson(out.str());
+
+    const bool important = !hadSnapshot ||
+                           previous.connected != snapshot.connected ||
+                           previous.buttons != snapshot.buttons;
+    if (important || now - lastLogAts[index] >= std::chrono::milliseconds(500)) {
+      lastLogAts[index] = now;
+      std::cout << "SNINPUT_GAMEPAD_STATE sequence=" << sequence
+                << " index=" << index
+                << " slots=" << snapshots.size()
+                << " key=" << snapshot.controllerKey
+                << " sent=" << boolText(sent)
+                << " connected=" << boolText(snapshot.connected)
+                << " name=\"" << snapshot.name << "\""
+                << " buttons=" << snapshot.buttons
+                << " lx=" << std::fixed << std::setprecision(2) << snapshot.lx
+                << " ly=" << snapshot.ly
+                << " rx=" << snapshot.rx
+                << " ry=" << snapshot.ry
+                << " lt=" << snapshot.lt
+                << " rt=" << snapshot.rt
+                << " preferredBackend=virtual-xinput"
+                << "\n";
+    }
+  }
+}
+
+NSMutableDictionary<NSNumber*, CHHapticEngine*>* gamepadHapticEngines() {
+  static NSMutableDictionary<NSNumber*, CHHapticEngine*>* engines = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    engines = [NSMutableDictionary dictionary];
+  });
+  return engines;
+}
+
+void applyGamepadRumbleOnMain(std::size_t index,
+                              double lowFrequency,
+                              double highFrequency,
+                              double durationMs,
+                              std::uint64_t sequence) {
+  if (index >= kMaxGamepadSlots) return;
+  if (@available(macOS 11.0, *)) {
+    GCController* controller = gamepadControllerForSlot(index);
+    if (!controller || ![controller haptics]) {
+      std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+                << " index=" << index
+                << " applied=no"
+                << " reason=no-haptics"
+                << "\n";
+      return;
+    }
+
+    NSNumber* key = [NSNumber numberWithUnsignedLongLong:static_cast<unsigned long long>(index)];
+    NSMutableDictionary<NSNumber*, CHHapticEngine*>* engines = gamepadHapticEngines();
+    CHHapticEngine* engine = [engines objectForKey:key];
+    if (!engine) {
+      engine = [[controller haptics] createEngineWithLocality:GCHapticsLocalityDefault];
+      if (engine) [engines setObject:engine forKey:key];
+    }
+    if (!engine) {
+      std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+                << " index=" << index
+                << " applied=no"
+                << " reason=engine-unavailable"
+                << "\n";
+      return;
+    }
+
+    const double low = std::clamp(lowFrequency, 0.0, 1.0);
+    const double high = std::clamp(highFrequency, 0.0, 1.0);
+    if (low <= 0.001 && high <= 0.001) {
+      [engine stopWithCompletionHandler:nil];
+      std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+                << " index=" << index
+                << " applied=yes"
+                << " action=stop"
+                << "\n";
+      return;
+    }
+
+    NSError* error = nil;
+    if (![engine startAndReturnError:&error]) {
+      std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+                << " index=" << index
+                << " applied=no"
+                << " reason=start-failed"
+                << "\n";
+      return;
+    }
+
+    const double intensity = std::clamp(std::max(low, high), 0.0, 1.0);
+    const double sharpness = std::clamp(high / std::max(0.001, low + high), 0.0, 1.0);
+    const NSTimeInterval duration = std::clamp(durationMs / 1000.0, 0.03, 0.5);
+    NSArray<CHHapticEventParameter*>* parameters = @[
+      [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:static_cast<float>(intensity)],
+      [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:static_cast<float>(sharpness)]
+    ];
+    CHHapticEvent* event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+                                                         parameters:parameters
+                                                       relativeTime:0
+                                                           duration:duration];
+    CHHapticPattern* pattern = [[CHHapticPattern alloc] initWithEvents:@[event]
+                                                            parameters:@[]
+                                                                 error:&error];
+    if (!pattern || error) {
+      std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+                << " index=" << index
+                << " applied=no"
+                << " reason=pattern-failed"
+                << "\n";
+      return;
+    }
+
+    id<CHHapticPatternPlayer> player = [engine createPlayerWithPattern:pattern error:&error];
+    if (!player || error || ![player startAtTime:0 error:&error]) {
+      std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+                << " index=" << index
+                << " applied=no"
+                << " reason=player-failed"
+                << "\n";
+      return;
+    }
+
+    std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+              << " index=" << index
+              << " applied=yes"
+              << " low=" << low
+              << " high=" << high
+              << " durationMs=" << durationMs
+              << "\n";
+  } else {
+    std::cout << "SNINPUT_GAMEPAD_RUMBLE sequence=" << sequence
+              << " index=" << index
+              << " applied=no"
+              << " reason=macos-unavailable"
+              << "\n";
+  }
+}
+
+void applyGamepadRumblePayload(const std::string& payload) {
+  const std::size_t index = static_cast<std::size_t>(std::clamp(jsonIntValue(payload, "index", 0), 0, 3));
+  const std::uint64_t sequence = jsonUint64Value(payload, "sequence");
+  const double low = std::clamp(jsonDoubleValue(payload, "lowFrequency"), 0.0, 1.0);
+  const double high = std::clamp(jsonDoubleValue(payload, "highFrequency"), 0.0, 1.0);
+  const double durationMs = std::clamp(jsonDoubleValue(payload, "durationMs", 120.0), 20.0, 500.0);
+  dispatch_async(dispatch_get_main_queue(), ^{
+    applyGamepadRumbleOnMain(index, low, high, durationMs, sequence);
+  });
+}
+
 bool sendKeyframeRequest(const std::string& reason,
                          std::uint64_t videoSequence,
                          std::uint64_t dropped,
-                         std::uint64_t decodeErrors) {
+                         std::uint64_t decodeErrors,
+                         std::chrono::milliseconds cooldown = std::chrono::milliseconds(500),
+                         bool* suppressedOut = nullptr) {
   static std::mutex mutex;
   static auto lastSentAt = std::chrono::steady_clock::time_point{};
   static std::uint64_t requestSequence = 0;
 
+  if (suppressedOut) {
+    *suppressedOut = false;
+  }
   const auto now = std::chrono::steady_clock::now();
   std::uint64_t sequence = 0;
   {
     std::lock_guard<std::mutex> lock(mutex);
     if (lastSentAt.time_since_epoch().count() != 0 &&
-        now - lastSentAt < std::chrono::milliseconds(500)) {
+        now - lastSentAt < cooldown) {
+      const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastSentAt);
+      const auto remainingMs = cooldown > elapsedMs ? cooldown - elapsedMs : std::chrono::milliseconds(0);
+      if (suppressedOut) {
+        *suppressedOut = true;
+      }
+      std::cout << "SNV1_KEYFRAME_REQUEST_SUPPRESS reason=" << reason
+                << " cooldownMs=" << cooldown.count()
+                << " remainingMs=" << remainingMs.count()
+                << " videoSequence=" << videoSequence
+                << " dropped=" << dropped
+                << " decodeErrors=" << decodeErrors
+                << "\n";
       return false;
     }
     lastSentAt = now;
@@ -1260,6 +2310,7 @@ bool sendKeyframeRequest(const std::string& reason,
       << ",\"videoSequence\":" << videoSequence
       << ",\"dropped\":" << dropped
       << ",\"decodeErrors\":" << decodeErrors
+      << ",\"cooldownMs\":" << cooldown.count()
       << ",\"sentSteadyMicros\":" << steadyMicros()
       << "}";
   const bool sent = sendNativeInputJson(out.str());
@@ -1269,6 +2320,7 @@ bool sendKeyframeRequest(const std::string& reason,
             << " videoSequence=" << videoSequence
             << " dropped=" << dropped
             << " decodeErrors=" << decodeErrors
+            << " cooldownMs=" << cooldown.count()
             << "\n";
   return sent;
 }
@@ -1335,6 +2387,7 @@ void sendControlHello() {
       << ",\"keyframeRequest\":true"
       << ",\"videoNack\":true"
       << ",\"udpRepairStats\":true"
+      << ",\"gamepadRumble\":true"
       << ",\"sessionAuth\":" << jsonBool(!gExpectedSessionToken.empty())
       << ",\"packetAuth\":" << jsonBool(!gExpectedSessionToken.empty())
       << ",\"mediaCrypto\":" << jsonBool(!gExpectedSessionToken.empty());
@@ -1382,6 +2435,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
     const bool keyframeRequest = jsonBoolValue(payload, "keyframeRequest");
     const bool videoNack = jsonBoolValue(payload, "videoNack");
     const bool udpRepairStats = jsonBoolValue(payload, "udpRepairStats");
+    const bool gamepadRumble = jsonBoolValue(payload, "gamepadRumble");
     const bool sessionAuth = jsonBoolValue(payload, "sessionAuth");
     const bool packetAuth = jsonBoolValue(payload, "packetAuth");
     const bool mediaCrypto = jsonBoolValue(payload, "mediaCrypto");
@@ -1417,11 +2471,17 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
               << " keyframeRequest=" << boolText(keyframeRequest)
               << " videoNack=" << boolText(videoNack)
               << " udpRepairStats=" << boolText(udpRepairStats)
+              << " gamepadRumble=" << boolText(gamepadRumble)
               << " sessionAuth=" << (needsSessionAuth ? "verified" : "disabled")
               << " packetAuth=" << boolText(gHostPacketAuthVerified)
               << " mediaEpoch=" << gMediaCryptoEpoch
               << "\n";
     return HostControlEvent::HelloAck;
+  }
+
+  if (payload.find("\"type\":\"gamepad-rumble\"") != std::string::npos) {
+    applyGamepadRumblePayload(payload);
+    return HostControlEvent::Other;
   }
 
   const std::uint64_t sentSteadyMicros = jsonUint64Value(payload, "sentSteadyMicros");
@@ -1434,11 +2494,23 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
   if (payload.find("\"type\":\"input-ack\"") != std::string::npos) {
     const std::uint64_t sequence = jsonUint64Value(payload, "sequence");
     const std::uint64_t applied = jsonUint64Value(payload, "applied");
+    const std::uint64_t events = jsonUint64Value(payload, "events");
+    const std::uint64_t processedMicros = jsonUint64Value(payload, "processedMicros");
+    const double hostProcessMs = static_cast<double>(processedMicros) / 1000.0;
     const bool duplicate = jsonBoolValue(payload, "duplicate");
     const bool stale = jsonBoolValue(payload, "stale");
     const bool sessionMismatch = jsonBoolValue(payload, "sessionMismatch");
+    const bool priority = jsonBoolValue(payload, "priority");
     if (gNativeInputSender) {
-      gNativeInputSender->observeInputAck(sequence, applied);
+      gNativeInputSender->observeInputAck(sequence,
+                                          applied,
+                                          events,
+                                          rttMs,
+                                          hostProcessMs,
+                                          duplicate,
+                                          stale,
+                                          sessionMismatch,
+                                          priority);
     }
     static auto lastAckLog = std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
@@ -1446,10 +2518,13 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
       lastAckLog = now;
       std::cout << "SNINPUT_ACK sequence=" << sequence
                 << " applied=" << applied
+                << " events=" << events
                 << " duplicate=" << boolText(duplicate)
                 << " stale=" << boolText(stale)
                 << " sessionMismatch=" << boolText(sessionMismatch)
+                << " priority=" << boolText(priority)
                 << " rttMs=" << std::fixed << std::setprecision(1) << rttMs
+                << " hostProcessMs=" << hostProcessMs
                 << "\n";
     }
     return HostControlEvent::InputAck;
@@ -1463,7 +2538,9 @@ std::string pointerJsonFromPoint(const char* type,
                                  NSInteger button,
                                  CGFloat dx,
                                  CGFloat dy,
-                                 bool relative) {
+                                 bool relative,
+                                 bool dragging,
+                                 std::uint32_t buttons) {
   const NSRect bounds = [view bounds];
   const double width = std::max<double>(bounds.size.width, 1.0);
   const double height = std::max<double>(bounds.size.height, 1.0);
@@ -1474,14 +2551,20 @@ std::string pointerJsonFromPoint(const char* type,
       << "\",\"x\":" << x
       << ",\"y\":" << y
       << ",\"button\":" << button
+      << ",\"buttons\":" << buttons
       << ",\"dx\":" << dx
       << ",\"dy\":" << dy
       << ",\"relative\":" << jsonBool(relative)
+      << ",\"dragging\":" << jsonBool(dragging)
       << "}";
   return out.str();
 }
 
-std::string pointerEventJson(const char* type, NSEvent* event, NSView* view) {
+std::string pointerEventJson(const char* type,
+                             NSEvent* event,
+                             NSView* view,
+                             std::uint32_t buttons,
+                             bool dragging) {
   const NSPoint point = [view convertPoint:[event locationInWindow] fromView:nil];
   const bool wheel = std::strcmp(type, "wheel") == 0;
   const double scale = backingScaleForView(view);
@@ -1493,16 +2576,25 @@ std::string pointerEventJson(const char* type, NSEvent* event, NSView* view) {
                               [event buttonNumber],
                               dx,
                               dy,
-                              gRelativeMouse);
+                              gRelativeMouse,
+                              dragging,
+                              buttons);
 }
 
 std::string keyEventJson(const char* type, NSEvent* event) {
   const std::string text = jsonEscape([[event charactersIgnoringModifiers] UTF8String]);
+  const std::string characters = jsonEscape([[event characters] UTF8String]);
+  const bool flagsChanged = std::strcmp(type, "modifiers") == 0;
+  const bool repeat = [event type] == NSEventTypeKeyDown && [event isARepeat];
+  const std::uint32_t modifierKeys = modifierSnapshotForEvent(event, flagsChanged);
   std::ostringstream out;
   out << "{\"type\":\"" << type
       << "\",\"key\":\"" << text
+      << "\",\"characters\":\"" << characters
       << "\",\"keyCode\":" << [event keyCode]
       << ",\"modifiers\":" << static_cast<unsigned long long>([event modifierFlags])
+      << ",\"modifierKeys\":" << modifierKeys
+      << ",\"repeat\":" << jsonBool(repeat)
       << "}";
   return out.str();
 }
@@ -1537,8 +2629,12 @@ bool sendCommandShortcut(NSEvent* event) {
   return false;
 }
 
-void logPointerEvent(const char* type, NSEvent* event, NSView* view) {
-  sendNativeInputJson(pointerEventJson(type, event, view));
+void logPointerEvent(const char* type,
+                     NSEvent* event,
+                     NSView* view,
+                     std::uint32_t buttons = 0,
+                     bool dragging = false) {
+  sendNativeInputJson(pointerEventJson(type, event, view, buttons, dragging));
 }
 
 void logKeyEvent(const char* type, NSEvent* event) {
@@ -2115,6 +3211,20 @@ struct ClientStreamStats {
   double ageSumMs = 0.0;
   double ageMaxMs = 0.0;
   std::uint64_t ageSamples = 0;
+  double decodeWorkSumMs = 0.0;
+  double decodeWorkMaxMs = 0.0;
+  std::uint64_t decodeWorkSamples = 0;
+  std::uint64_t decodeWorkOverBudget = 0;
+  std::uint64_t latencyDropped = 0;
+  std::uint64_t totalLatencyDropped = 0;
+  std::uint64_t keyframeWaitDropped = 0;
+  std::uint64_t latencyKeyframeRequests = 0;
+  std::uint64_t latencyKeyframeSuppressed = 0;
+  double latencyLateMaxMs = 0.0;
+  std::uint64_t latencyBaseMediaMicros = 0;
+  std::uint64_t latencyBaseSteadyMicros = 0;
+  bool hasLatencyBase = false;
+  bool waitingForLatencyKeyframe = false;
 
   void observe(const SnvPacket& packet) {
     ++windowPackets;
@@ -2145,12 +3255,94 @@ struct ClientStreamStats {
     }
   }
 
+  void observeDecodeWork(std::uint64_t durationMicros, std::uint64_t workMicros) {
+    const double workMs = static_cast<double>(workMicros) / 1000.0;
+    decodeWorkSumMs += workMs;
+    decodeWorkMaxMs = std::max(decodeWorkMaxMs, workMs);
+    decodeWorkSamples += 1;
+
+    const std::uint64_t budgetMicros = std::clamp<std::uint64_t>(
+      durationMicros > 0 ? durationMicros : 16667,
+      4000,
+      50000);
+    if (workMicros > budgetMicros) {
+      decodeWorkOverBudget += 1;
+    }
+  }
+
+  void observeLatencyKeyframeRequest(bool sent, bool suppressed) {
+    if (sent) {
+      latencyKeyframeRequests += 1;
+    } else if (suppressed) {
+      latencyKeyframeSuppressed += 1;
+    }
+  }
+
+  bool shouldDropBeforeDecode(const SnvPacket& packet, std::string& reason) {
+    const bool keyframe = (packet.flags & 1u) != 0;
+    const std::uint64_t now = steadyMicros();
+    const std::uint64_t durationMicros = std::clamp<std::uint64_t>(
+      packet.durationMicros > 0 ? packet.durationMicros : 16667,
+      4000,
+      50000);
+    const std::uint64_t maxLateMicros = std::clamp<std::uint64_t>(
+      durationMicros * 7,
+      70000,
+      180000);
+
+    if (!hasLatencyBase || packet.timestampMicros == 0 ||
+        packet.timestampMicros + maxLateMicros < latencyBaseMediaMicros ||
+        keyframe) {
+      hasLatencyBase = packet.timestampMicros > 0;
+      latencyBaseMediaMicros = packet.timestampMicros;
+      latencyBaseSteadyMicros = now;
+      if (keyframe) {
+        waitingForLatencyKeyframe = false;
+      }
+      return false;
+    }
+
+    if (waitingForLatencyKeyframe) {
+      latencyDropped += 1;
+      totalLatencyDropped += 1;
+      keyframeWaitDropped += 1;
+      reason = "await-keyframe";
+      return true;
+    }
+
+    if (packet.timestampMicros < latencyBaseMediaMicros) {
+      return false;
+    }
+    const std::uint64_t expectedSteadyMicros =
+      latencyBaseSteadyMicros + (packet.timestampMicros - latencyBaseMediaMicros);
+    if (now <= expectedSteadyMicros + maxLateMicros) {
+      return false;
+    }
+
+    const double lateMs = static_cast<double>(now - expectedSteadyMicros) / 1000.0;
+    latencyLateMaxMs = std::max(latencyLateMaxMs, lateMs);
+    latencyDropped += 1;
+    totalLatencyDropped += 1;
+    waitingForLatencyKeyframe = true;
+    reason = "late";
+    return true;
+  }
+
   void resetWindow() {
     windowPackets = 0;
     windowDropped = 0;
     ageSumMs = 0.0;
     ageMaxMs = 0.0;
     ageSamples = 0;
+    decodeWorkSumMs = 0.0;
+    decodeWorkMaxMs = 0.0;
+    decodeWorkSamples = 0;
+    decodeWorkOverBudget = 0;
+    latencyDropped = 0;
+    keyframeWaitDropped = 0;
+    latencyKeyframeRequests = 0;
+    latencyKeyframeSuppressed = 0;
+    latencyLateMaxMs = 0.0;
   }
 
   void resetSequencing() {
@@ -2163,8 +3355,31 @@ struct ClientStreamStats {
     ageSumMs = 0.0;
     ageMaxMs = 0.0;
     ageSamples = 0;
+    decodeWorkSumMs = 0.0;
+    decodeWorkMaxMs = 0.0;
+    decodeWorkSamples = 0;
+    decodeWorkOverBudget = 0;
+    latencyDropped = 0;
+    totalLatencyDropped = 0;
+    keyframeWaitDropped = 0;
+    latencyKeyframeRequests = 0;
+    latencyKeyframeSuppressed = 0;
+    latencyLateMaxMs = 0.0;
+    latencyBaseMediaMicros = 0;
+    latencyBaseSteadyMicros = 0;
+    hasLatencyBase = false;
+    waitingForLatencyKeyframe = false;
   }
 };
+
+void recordSkippedSnvPacket(DecodeSummary& summary, const SnvPacket& packet) {
+  if (!summary.hasFirstSequence) {
+    summary.firstSequence = packet.sequence;
+    summary.hasFirstSequence = true;
+  }
+  summary.lastSequence = packet.sequence;
+  summary.packets += 1;
+}
 
 void processSnvPacket(VtH264Decoder& decoder, DecodeSummary& summary, const SnvPacket& packet) {
   if (packet.codec != 1) {
@@ -3737,6 +4952,7 @@ void serviceControlSocket(int fd) {
                   << " action=rehandshake\n";
       }
       if (!controlDegraded && gNativeInputSender) {
+        sendInputReset("control-pong-timeout");
         gNativeInputSender->setControlAuthenticated(false);
         gNativeInputSender->setPacketAuthEnabled(false);
         gNativeInputSender->setBatchEnabled(false);
@@ -3833,10 +5049,16 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   NSTimer* _mousePollTimer;
   NSPoint _lastPolledPoint;
   BOOL _hasPolledPoint;
+  std::uint32_t _activeMouseButtons;
 }
+- (void)clearActiveMouseButtons;
 @end
 
 @implementation SanserMetalView
+
+- (void)clearActiveMouseButtons {
+  _activeMouseButtons = 0;
+}
 
 - (BOOL)acceptsFirstResponder {
   return YES;
@@ -3906,6 +5128,10 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 - (void)pollMouseLocation {
   NSWindow* window = [self window];
   if (!window || ![window isVisible]) return;
+  if (gRelativeMouse && gMouseGrabbed) {
+    _hasPolledPoint = NO;
+    return;
+  }
 
   const NSPoint windowPoint = [window mouseLocationOutsideOfEventStream];
   const NSPoint point = [self convertPoint:windowPoint fromView:nil];
@@ -3926,7 +5152,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   _lastPolledPoint = point;
   _hasPolledPoint = YES;
   [[self window] makeFirstResponder:self];
-  sendNativeInputJson(pointerJsonFromPoint("pointer-move", point, self, 0, dx, dy, gRelativeMouse));
+  sendNativeInputJson(pointerJsonFromPoint("pointer-move", point, self, 0, dx, dy, gRelativeMouse, false, 0));
 }
 
 - (void)keyDown:(NSEvent*)event {
@@ -3949,46 +5175,55 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 - (void)mouseMoved:(NSEvent*)event {
   [[self window] makeFirstResponder:self];
-  logPointerEvent("pointer-move", event, self);
+  logPointerEvent("pointer-move", event, self, _activeMouseButtons, _activeMouseButtons != 0);
 }
 
 - (void)mouseDragged:(NSEvent*)event {
-  logPointerEvent("pointer-move", event, self);
+  _activeMouseButtons |= pointerButtonMask([event buttonNumber]);
+  logPointerEvent("pointer-move", event, self, _activeMouseButtons, true);
 }
 
 - (void)rightMouseDragged:(NSEvent*)event {
-  logPointerEvent("pointer-move", event, self);
+  _activeMouseButtons |= pointerButtonMask([event buttonNumber]);
+  logPointerEvent("pointer-move", event, self, _activeMouseButtons, true);
 }
 
 - (void)otherMouseDragged:(NSEvent*)event {
-  logPointerEvent("pointer-move", event, self);
+  _activeMouseButtons |= pointerButtonMask([event buttonNumber]);
+  logPointerEvent("pointer-move", event, self, _activeMouseButtons, true);
 }
 
 - (void)mouseDown:(NSEvent*)event {
   [[self window] makeFirstResponder:self];
-  logPointerEvent("pointer-down", event, self);
+  _activeMouseButtons |= pointerButtonMask([event buttonNumber]);
+  logPointerEvent("pointer-down", event, self, _activeMouseButtons, false);
 }
 
 - (void)mouseUp:(NSEvent*)event {
-  logPointerEvent("pointer-up", event, self);
+  logPointerEvent("pointer-up", event, self, _activeMouseButtons, false);
+  _activeMouseButtons &= ~pointerButtonMask([event buttonNumber]);
 }
 
 - (void)rightMouseDown:(NSEvent*)event {
   [[self window] makeFirstResponder:self];
-  logPointerEvent("pointer-down", event, self);
+  _activeMouseButtons |= pointerButtonMask([event buttonNumber]);
+  logPointerEvent("pointer-down", event, self, _activeMouseButtons, false);
 }
 
 - (void)rightMouseUp:(NSEvent*)event {
-  logPointerEvent("pointer-up", event, self);
+  logPointerEvent("pointer-up", event, self, _activeMouseButtons, false);
+  _activeMouseButtons &= ~pointerButtonMask([event buttonNumber]);
 }
 
 - (void)otherMouseDown:(NSEvent*)event {
   [[self window] makeFirstResponder:self];
-  logPointerEvent("pointer-down", event, self);
+  _activeMouseButtons |= pointerButtonMask([event buttonNumber]);
+  logPointerEvent("pointer-down", event, self, _activeMouseButtons, false);
 }
 
 - (void)otherMouseUp:(NSEvent*)event {
-  logPointerEvent("pointer-up", event, self);
+  logPointerEvent("pointer-up", event, self, _activeMouseButtons, false);
+  _activeMouseButtons &= ~pointerButtonMask([event buttonNumber]);
 }
 
 - (void)scrollWheel:(NSEvent*)event {
@@ -4131,9 +5366,12 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   std::uint64_t _drawCalls;
   std::uint64_t _droppedQueueFrames;
   std::uint64_t _droppedLateFrames;
-  std::uint64_t _heldForPacing;
-  std::uint64_t _pacingResets;
-  std::uint64_t _lastTargetDelayMicros;
+	  std::uint64_t _coalescedFrames;
+	  std::uint64_t _heldForPacing;
+	  std::uint64_t _pacingResets;
+  std::uint64_t _queuePressurePacingResets;
+  std::uint64_t _queuePressureResetLogMicros;
+	  std::uint64_t _lastTargetDelayMicros;
   std::uint64_t _adaptiveDelayMicros;
   std::uint64_t _adaptiveIncreases;
   std::uint64_t _adaptiveDecreases;
@@ -4283,9 +5521,73 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   }
 
   _lastTargetDelayMicros = targetDelayMicros;
-  if (frame.mediaTimestampMicros > 0) _lastSubmittedMediaMicros = frame.mediaTimestampMicros;
-  if (frame.packetSequence > 0) _lastSubmittedPacketSequence = frame.packetSequence;
-  _frameQueue.push_back(frame);
+	  if (frame.mediaTimestampMicros > 0) _lastSubmittedMediaMicros = frame.mediaTimestampMicros;
+	  if (frame.packetSequence > 0) _lastSubmittedPacketSequence = frame.packetSequence;
+  const std::size_t queueDepthBeforeSubmit = _frameQueue.size();
+  std::uint64_t queuePressureCoalesced = 0;
+  bool queuePressureReset = false;
+	  auto frameIsNewerThan = [&](const QueuedVideoFrame& queued) {
+	    if (frame.packetSequence > 0 && queued.packetSequence > 0) {
+	      return frame.packetSequence > queued.packetSequence;
+    }
+    if (frame.mediaTimestampMicros > 0 && queued.mediaTimestampMicros > 0) {
+      return frame.mediaTimestampMicros > queued.mediaTimestampMicros;
+    }
+    return frame.sequence > queued.sequence;
+  };
+	  auto dropQueuedFrontAsCoalesced = [&]() {
+	    if (_frameQueue.front().pixelBuffer) CVPixelBufferRelease(_frameQueue.front().pixelBuffer);
+	    _frameQueue.pop_front();
+	    _coalescedFrames += 1;
+    queuePressureCoalesced += 1;
+	  };
+  constexpr std::size_t lowLatencyQueueDepth = 2;
+  while (!_frameQueue.empty() && frameIsNewerThan(_frameQueue.front())) {
+    const bool queueIsDeep = _frameQueue.size() >= lowLatencyQueueDepth;
+    const bool frontIsAlreadyLate = frame.queuedAtMicros > _frameQueue.front().presentAtMicros &&
+      frame.queuedAtMicros - _frameQueue.front().presentAtMicros > (maxLateMicros / 2);
+	    if (!queueIsDeep && !frontIsAlreadyLate) {
+	      break;
+	    }
+    queuePressureReset = true;
+	    dropQueuedFrontAsCoalesced();
+	  }
+  if ((queuePressureReset || queueDepthBeforeSubmit >= 3) &&
+      !_frameQueue.empty() &&
+      frameIsNewerThan(_frameQueue.front())) {
+    while (!_frameQueue.empty() && frameIsNewerThan(_frameQueue.front())) {
+      dropQueuedFrontAsCoalesced();
+    }
+    queuePressureReset = true;
+  }
+
+  if (queuePressureReset) {
+    const std::uint64_t lowLatencyDelayMicros = baseTargetDelayMicros;
+    frame.presentAtMicros = frame.queuedAtMicros + lowLatencyDelayMicros;
+    if (frame.mediaTimestampMicros > 0) {
+      _pacingTimelineValid = true;
+      _pacingBaseMediaMicros = frame.mediaTimestampMicros;
+      _pacingBaseSteadyMicros = frame.presentAtMicros;
+    } else {
+      _pacingTimelineValid = false;
+    }
+    _pacingResets += 1;
+    _queuePressurePacingResets += 1;
+    if (_queuePressureResetLogMicros == 0 ||
+        frame.queuedAtMicros - _queuePressureResetLogMicros > 250000) {
+      _queuePressureResetLogMicros = frame.queuedAtMicros;
+      std::cout << "SNV1_RENDER_QUEUE_RESET reason=queue-pressure"
+                << " queueBefore=" << queueDepthBeforeSubmit
+                << " coalescedNow=" << queuePressureCoalesced
+                << " targetDelayMs=" << std::fixed << std::setprecision(1)
+                << (static_cast<double>(targetDelayMicros) / 1000.0)
+                << " lowLatencyDelayMs=" << (static_cast<double>(lowLatencyDelayMicros) / 1000.0)
+                << " packetSequence=" << frame.packetSequence
+                << "\n";
+    }
+  }
+
+	  _frameQueue.push_back(frame);
   constexpr std::size_t maxQueueDepth = 5;
   while (_frameQueue.size() > maxQueueDepth) {
     if (_frameQueue.front().pixelBuffer) CVPixelBufferRelease(_frameQueue.front().pixelBuffer);
@@ -4404,11 +5706,13 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     std::uint64_t draws = 0;
     std::uint64_t rendered = 0;
     std::size_t queueDepth = 0;
-    std::uint64_t droppedQueue = 0;
-    std::uint64_t droppedLate = 0;
-    std::uint64_t held = 0;
-    std::uint64_t pacingReset = 0;
-    double targetDelayMs = 0.0;
+	    std::uint64_t droppedQueue = 0;
+	    std::uint64_t droppedLate = 0;
+	    std::uint64_t coalesced = 0;
+	    std::uint64_t held = 0;
+	    std::uint64_t pacingReset = 0;
+    std::uint64_t queuePressureReset = 0;
+	    double targetDelayMs = 0.0;
     double avgRenderAgeMs = -1.0;
     double maxRenderAgeMs = 0.0;
     double avgPresentLateMs = -1.0;
@@ -4421,11 +5725,13 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     draws = _drawCalls;
     rendered = _renderedBuffers;
     queueDepth = _frameQueue.size();
-    droppedQueue = _droppedQueueFrames;
-    droppedLate = _droppedLateFrames;
-    held = _heldForPacing;
-    pacingReset = _pacingResets;
-    targetDelayMs = static_cast<double>(_lastTargetDelayMicros) / 1000.0;
+	    droppedQueue = _droppedQueueFrames;
+	    droppedLate = _droppedLateFrames;
+	    coalesced = _coalescedFrames;
+	    held = _heldForPacing;
+	    pacingReset = _pacingResets;
+    queuePressureReset = _queuePressurePacingResets;
+	    targetDelayMs = static_cast<double>(_lastTargetDelayMicros) / 1000.0;
     avgRenderAgeMs = _renderAgeSamples > 0
       ? _renderAgeSumMs / static_cast<double>(_renderAgeSamples)
       : -1.0;
@@ -4434,19 +5740,23 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
       ? _presentLateSumMs / static_cast<double>(_presentLateSamples)
       : -1.0;
     maxPresentLateMs = _presentLateMaxMs;
-    const bool renderCongested = droppedQueue > 0 ||
-      droppedLate > 0 ||
-      queueDepth >= 4 ||
+	    const bool renderCongested = droppedQueue > 0 ||
+	      droppedLate > 0 ||
+	      coalesced > 0 ||
+	      queueDepth >= 4 ||
       pacingReset > 1 ||
-      (avgPresentLateMs >= 0.0 && avgPresentLateMs > 9.0) ||
+      queuePressureReset > 0 ||
+	      (avgPresentLateMs >= 0.0 && avgPresentLateMs > 9.0) ||
       maxPresentLateMs > 20.0 ||
       maxRenderAgeMs > 85.0;
     const bool renderClear = rendered > 0 &&
-      droppedQueue == 0 &&
-      droppedLate == 0 &&
-      queueDepth <= 1 &&
+	      droppedQueue == 0 &&
+	      droppedLate == 0 &&
+	      coalesced == 0 &&
+	      queueDepth <= 1 &&
       pacingReset == 0 &&
-      (avgPresentLateMs < 0.0 || avgPresentLateMs < 4.0) &&
+      queuePressureReset == 0 &&
+	      (avgPresentLateMs < 0.0 || avgPresentLateMs < 4.0) &&
       maxPresentLateMs < 12.0 &&
       maxRenderAgeMs < 55.0;
     const std::uint64_t oldAdaptiveDelayMicros = _adaptiveDelayMicros;
@@ -4475,9 +5785,10 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
                 << (static_cast<double>(_adaptiveDelayMicros) / 1000.0)
                 << " previousMs=" << (static_cast<double>(oldAdaptiveDelayMicros) / 1000.0)
                 << " reason=" << (renderCongested ? "congested" : "clear")
-                << " droppedQueue=" << droppedQueue
-                << " droppedLate=" << droppedLate
-                << " queueDepth=" << queueDepth
+	                << " droppedQueue=" << droppedQueue
+	                << " droppedLate=" << droppedLate
+	                << " coalesced=" << coalesced
+	                << " queueDepth=" << queueDepth
                 << " avgPresentLateMs=" << avgPresentLateMs
                 << " maxPresentLateMs=" << maxPresentLateMs
                 << "\n";
@@ -4487,11 +5798,13 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     adaptiveDown = _adaptiveDecreases;
     _drawCalls = 0;
     _renderedBuffers = 0;
-    _droppedQueueFrames = 0;
-    _droppedLateFrames = 0;
-    _heldForPacing = 0;
-    _pacingResets = 0;
-    _adaptiveIncreases = 0;
+	    _droppedQueueFrames = 0;
+	    _droppedLateFrames = 0;
+	    _coalescedFrames = 0;
+	    _heldForPacing = 0;
+	    _pacingResets = 0;
+    _queuePressurePacingResets = 0;
+	    _adaptiveIncreases = 0;
     _adaptiveDecreases = 0;
     _renderAgeSumMs = 0.0;
     _renderAgeMaxMs = 0.0;
@@ -4504,12 +5817,14 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 
     std::cout << "SNV1_RENDER_STATS draws=" << draws
               << " rendered=" << rendered
-              << " queueDepth=" << queueDepth
-              << " droppedQueue=" << droppedQueue
-              << " droppedLate=" << droppedLate
-              << " held=" << held
-              << " pacingReset=" << pacingReset
-              << std::fixed << std::setprecision(1)
+	              << " queueDepth=" << queueDepth
+	              << " droppedQueue=" << droppedQueue
+	              << " droppedLate=" << droppedLate
+	              << " coalesced=" << coalesced
+	              << " held=" << held
+	              << " pacingReset=" << pacingReset
+              << " queuePressureReset=" << queuePressureReset
+	              << std::fixed << std::setprecision(1)
               << " targetDelayMs=" << targetDelayMs
               << " adaptiveDelayMs=" << adaptiveDelayMs
               << " adaptiveUp=" << adaptiveUp
@@ -4527,11 +5842,13 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
              << ",\"draws\":" << draws
              << ",\"rendered\":" << rendered
              << ",\"queueDepth\":" << queueDepth
-             << ",\"droppedQueue\":" << droppedQueue
-             << ",\"droppedLate\":" << droppedLate
-             << ",\"held\":" << held
-             << ",\"pacingReset\":" << pacingReset
-             << ",\"targetDelayMs\":" << targetDelayMs
+	             << ",\"droppedQueue\":" << droppedQueue
+	             << ",\"droppedLate\":" << droppedLate
+	             << ",\"coalesced\":" << coalesced
+	             << ",\"held\":" << held
+	             << ",\"pacingReset\":" << pacingReset
+             << ",\"queuePressureReset\":" << queuePressureReset
+	             << ",\"targetDelayMs\":" << targetDelayMs
              << ",\"adaptiveDelayMs\":" << adaptiveDelayMs
              << ",\"adaptiveUp\":" << adaptiveUp
              << ",\"adaptiveDown\":" << adaptiveDown
@@ -4542,8 +5859,8 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
              << "}";
     const bool feedbackSent = sendNativeInputJson(feedback.str());
     std::cout << "SNV1_RENDER_FEEDBACK sent=" << boolText(feedbackSent)
-              << " source=render"
-              << " pressureFields=droppedQueue,droppedLate,presentLate,queueDepth,adaptiveDelay\n";
+	              << " source=render"
+	              << " pressureFields=droppedQueue,droppedLate,coalesced,presentLate,queueDepth,adaptiveDelay\n";
   }
 }
 
@@ -4876,10 +6193,17 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
           if (!readSnvPacketFromFd(client.get(), packet)) {
             break;
           }
-          if (avSyncClock) avSyncClock->observeVideoPacket(packet.hostUnixMicros);
-          stats.observe(packet);
-          processSnvPacket(decoder, summary, packet);
-          totalPackets += 1;
+	          if (avSyncClock) avSyncClock->observeVideoPacket(packet.hostUnixMicros);
+	          stats.observe(packet);
+	          std::string latencyDropReason;
+	          if (stats.shouldDropBeforeDecode(packet, latencyDropReason)) {
+	            recordSkippedSnvPacket(summary, packet);
+	          } else {
+	            const std::uint64_t decodeWorkStartedAt = steadyMicros();
+	            processSnvPacket(decoder, summary, packet);
+	            stats.observeDecodeWork(packet.durationMicros, steadyMicros() - decodeWorkStartedAt);
+	          }
+	          totalPackets += 1;
           if (summary.packets % 60 == 0) {
             std::cout << "SNV1 render packets=" << summary.packets
                       << " total=" << totalPackets
@@ -4888,6 +6212,9 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
                       << "\n";
             const double avgAgeMs = stats.ageSamples > 0
               ? stats.ageSumMs / static_cast<double>(stats.ageSamples)
+              : -1.0;
+            const double decodeAvgMs = stats.decodeWorkSamples > 0
+              ? stats.decodeWorkSumMs / static_cast<double>(stats.decodeWorkSamples)
               : -1.0;
             const std::uint64_t currentDecodeErrors = decoder.decodeErrors();
             const std::uint64_t decodeErrorDelta = currentDecodeErrors >= lastFeedbackDecodeErrors
@@ -4899,8 +6226,16 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
                      << " decoded=" << decoder.decodedFrames()
                      << " dropped=" << stats.windowDropped
                      << " totalDropped=" << stats.totalDropped
-                     << " decodeErrors=" << currentDecodeErrors
-                     << " jitterMs=" << stats.jitterMs;
+	                     << " decodeErrors=" << currentDecodeErrors
+	                     << " jitterMs=" << stats.jitterMs
+	                     << " decodeAvgMs=" << decodeAvgMs
+	                     << " decodeMaxMs=" << stats.decodeWorkMaxMs
+	                     << " decodeOverBudget=" << stats.decodeWorkOverBudget
+	                     << " latencyDropped=" << stats.latencyDropped
+	                     << " keyframeWaitDropped=" << stats.keyframeWaitDropped
+	                     << " latencyKeyframeReq=" << stats.latencyKeyframeRequests
+	                     << " latencyKeyframeSuppress=" << stats.latencyKeyframeSuppressed
+	                     << " latencyLateMaxMs=" << stats.latencyLateMaxMs;
             if (avgAgeMs >= 0.0) {
               statLine << " avgAgeMs=" << avgAgeMs
                        << " maxAgeMs=" << stats.ageMaxMs;
@@ -4909,10 +6244,19 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
             }
             std::cout << statLine.str() << "\n";
 
-            if (stats.windowDropped > 0) {
-              sendKeyframeRequest("tcp-sequence-gap",
-                                  summary.lastSequence,
-                                  stats.windowDropped,
+	            if (stats.latencyDropped > 0) {
+	              bool suppressed = false;
+	              const bool sent = sendKeyframeRequest("client-latency-drop",
+	                                                    summary.lastSequence,
+	                                                    stats.latencyDropped,
+	                                                    currentDecodeErrors,
+	                                                    std::chrono::milliseconds(1500),
+	                                                    &suppressed);
+	              stats.observeLatencyKeyframeRequest(sent, suppressed);
+	            } else if (stats.windowDropped > 0) {
+	              sendKeyframeRequest("tcp-sequence-gap",
+	                                  summary.lastSequence,
+	                                  stats.windowDropped,
                                   currentDecodeErrors);
             } else if (decodeErrorDelta > 0) {
               sendKeyframeRequest("decode-error",
@@ -4932,7 +6276,17 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
                      << ",\"jitterMs\":" << stats.jitterMs
                      << ",\"avgAgeMs\":" << avgAgeMs
                      << ",\"maxAgeMs\":" << (avgAgeMs >= 0.0 ? stats.ageMaxMs : -1.0)
-                     << "}";
+                     << ",\"decodeAvgMs\":" << decodeAvgMs
+	                     << ",\"decodeMaxMs\":" << stats.decodeWorkMaxMs
+	                     << ",\"decodeSamples\":" << stats.decodeWorkSamples
+	                     << ",\"decodeOverBudget\":" << stats.decodeWorkOverBudget
+	                     << ",\"latencyDropped\":" << stats.latencyDropped
+	                     << ",\"totalLatencyDropped\":" << stats.totalLatencyDropped
+	                     << ",\"keyframeWaitDropped\":" << stats.keyframeWaitDropped
+	                     << ",\"latencyKeyframeRequests\":" << stats.latencyKeyframeRequests
+	                     << ",\"latencyKeyframeSuppressed\":" << stats.latencyKeyframeSuppressed
+	                     << ",\"latencyLateMaxMs\":" << stats.latencyLateMaxMs
+	                     << "}";
             sendNativeInputJson(feedback.str());
             lastFeedbackDecodeErrors = currentDecodeErrors;
             stats.resetWindow();
@@ -5042,10 +6396,17 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         }
 
         SnvPacket packet;
-        while (jitterBuffer.popReady(packet)) {
-          if (avSyncClock) avSyncClock->observeVideoPacket(packet.hostUnixMicros);
-          stats.observe(packet);
-          processSnvPacket(decoder, summary, packet);
+	        while (jitterBuffer.popReady(packet)) {
+	          if (avSyncClock) avSyncClock->observeVideoPacket(packet.hostUnixMicros);
+	          stats.observe(packet);
+	          std::string latencyDropReason;
+	          if (stats.shouldDropBeforeDecode(packet, latencyDropReason)) {
+	            recordSkippedSnvPacket(summary, packet);
+	          } else {
+	            const std::uint64_t decodeWorkStartedAt = steadyMicros();
+	            processSnvPacket(decoder, summary, packet);
+	            stats.observeDecodeWork(packet.durationMicros, steadyMicros() - decodeWorkStartedAt);
+	          }
 
           if (summary.packets == 1 || summary.packets % 60 == 0) {
             std::cout << "SNU1 render packets=" << summary.packets
@@ -5054,6 +6415,9 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                       << "\n";
             const double avgAgeMs = stats.ageSamples > 0
               ? stats.ageSumMs / static_cast<double>(stats.ageSamples)
+              : -1.0;
+            const double decodeAvgMs = stats.decodeWorkSamples > 0
+              ? stats.decodeWorkSumMs / static_cast<double>(stats.decodeWorkSamples)
               : -1.0;
             const std::uint64_t currentDecodeErrors = decoder.decodeErrors();
             const std::uint64_t decodeErrorDelta = currentDecodeErrors >= lastFeedbackDecodeErrors
@@ -5065,8 +6429,16 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                      << " decoded=" << decoder.decodedFrames()
                      << " dropped=" << stats.windowDropped
                      << " totalDropped=" << stats.totalDropped
-                     << " decodeErrors=" << currentDecodeErrors
-                     << " jitterMs=" << stats.jitterMs;
+	                     << " decodeErrors=" << currentDecodeErrors
+	                     << " jitterMs=" << stats.jitterMs
+	                     << " decodeAvgMs=" << decodeAvgMs
+	                     << " decodeMaxMs=" << stats.decodeWorkMaxMs
+	                     << " decodeOverBudget=" << stats.decodeWorkOverBudget
+	                     << " latencyDropped=" << stats.latencyDropped
+	                     << " keyframeWaitDropped=" << stats.keyframeWaitDropped
+	                     << " latencyKeyframeReq=" << stats.latencyKeyframeRequests
+	                     << " latencyKeyframeSuppress=" << stats.latencyKeyframeSuppressed
+	                     << " latencyLateMaxMs=" << stats.latencyLateMaxMs;
             if (avgAgeMs >= 0.0) {
               statLine << " avgAgeMs=" << avgAgeMs
                        << " maxAgeMs=" << stats.ageMaxMs;
@@ -5075,10 +6447,19 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
             }
             std::cout << statLine.str() << "\n";
 
-            if (stats.windowDropped > 0) {
-              sendKeyframeRequest("udp-sequence-gap",
-                                  summary.lastSequence,
-                                  stats.windowDropped,
+	            if (stats.latencyDropped > 0) {
+	              bool suppressed = false;
+	              const bool sent = sendKeyframeRequest("client-latency-drop",
+	                                                    summary.lastSequence,
+	                                                    stats.latencyDropped,
+	                                                    currentDecodeErrors,
+	                                                    std::chrono::milliseconds(1500),
+	                                                    &suppressed);
+	              stats.observeLatencyKeyframeRequest(sent, suppressed);
+	            } else if (stats.windowDropped > 0) {
+	              sendKeyframeRequest("udp-sequence-gap",
+	                                  summary.lastSequence,
+	                                  stats.windowDropped,
                                   currentDecodeErrors);
             } else if (decodeErrorDelta > 0) {
               sendKeyframeRequest("decode-error",
@@ -5098,7 +6479,17 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                      << ",\"jitterMs\":" << stats.jitterMs
                      << ",\"avgAgeMs\":" << avgAgeMs
                      << ",\"maxAgeMs\":" << (avgAgeMs >= 0.0 ? stats.ageMaxMs : -1.0)
-                     << "}";
+                     << ",\"decodeAvgMs\":" << decodeAvgMs
+	                     << ",\"decodeMaxMs\":" << stats.decodeWorkMaxMs
+	                     << ",\"decodeSamples\":" << stats.decodeWorkSamples
+	                     << ",\"decodeOverBudget\":" << stats.decodeWorkOverBudget
+	                     << ",\"latencyDropped\":" << stats.latencyDropped
+	                     << ",\"totalLatencyDropped\":" << stats.totalLatencyDropped
+	                     << ",\"keyframeWaitDropped\":" << stats.keyframeWaitDropped
+	                     << ",\"latencyKeyframeRequests\":" << stats.latencyKeyframeRequests
+	                     << ",\"latencyKeyframeSuppressed\":" << stats.latencyKeyframeSuppressed
+	                     << ",\"latencyLateMaxMs\":" << stats.latencyLateMaxMs
+	                     << "}";
             sendNativeInputJson(feedback.str());
             lastFeedbackDecodeErrors = currentDecodeErrors;
             stats.resetWindow();
@@ -5283,6 +6674,8 @@ int runVideoRenderTcp(std::uint16_t port,
                                                                             queue:[NSOperationQueue mainQueue]
                                                                        usingBlock:^(NSNotification* notification) {
                                                                          (void)notification;
+                                                                         sendInputReset("mac-resign-active");
+                                                                         [view clearActiveMouseButtons];
                                                                          restoreRelativeMouseGrab();
                                                                        }];
     id activeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidBecomeActiveNotification
@@ -5292,14 +6685,43 @@ int runVideoRenderTcp(std::uint16_t port,
                                                                         (void)notification;
                                                                         if (gRelativeMouse) setRelativeMouseGrab(true);
                                                                       }];
+    id gamepadConnectObserver = [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification
+                                                                                  object:nil
+                                                                                   queue:[NSOperationQueue mainQueue]
+                                                                              usingBlock:^(NSNotification* notification) {
+                                                                                GCController* controller = (GCController*)[notification object];
+                                                                                std::cout << "SNINPUT_GAMEPAD connected name=\""
+                                                                                          << nsStringToUtf8([controller vendorName] ?: [controller productCategory])
+                                                                                          << "\"\n";
+                                                                                pollAndSendGamepadState();
+                                                                              }];
+    id gamepadDisconnectObserver = [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidDisconnectNotification
+                                                                                     object:nil
+                                                                                      queue:[NSOperationQueue mainQueue]
+                                                                                 usingBlock:^(NSNotification* notification) {
+                                                                                   GCController* controller = (GCController*)[notification object];
+                                                                                   std::cout << "SNINPUT_GAMEPAD disconnected name=\""
+                                                                                             << nsStringToUtf8([controller vendorName] ?: [controller productCategory])
+                                                                                             << "\"\n";
+                                                                                   pollAndSendGamepadState();
+                                                                                 }];
     id closeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification
                                                                           object:window
                                                                            queue:[NSOperationQueue mainQueue]
                                                                       usingBlock:^(NSNotification* notification) {
                                                                         (void)notification;
+                                                                        sendInputReset("window-close");
+                                                                        [view clearActiveMouseButtons];
                                                                         restoreRelativeMouseGrab();
                                                                         [NSApp terminate:nil];
                                                                       }];
+    [GCController startWirelessControllerDiscoveryWithCompletionHandler:nil];
+    NSTimer* gamepadPollTimer = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
+                                                       repeats:YES
+                                                         block:^(NSTimer*) {
+                                                           pollAndSendGamepadState();
+                                                         }];
+    [[NSRunLoop mainRunLoop] addTimer:gamepadPollTimer forMode:NSRunLoopCommonModes];
 
     auto inputSender = std::make_shared<NativeInputSender>();
     inputSender->setAuthRequired(!gExpectedSessionToken.empty(), gExpectedSessionToken);
@@ -5337,7 +6759,13 @@ int runVideoRenderTcp(std::uint16_t port,
     [NSApp run];
     [[NSNotificationCenter defaultCenter] removeObserver:resignObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:activeObserver];
+    [[NSNotificationCenter defaultCenter] removeObserver:gamepadConnectObserver];
+    [[NSNotificationCenter defaultCenter] removeObserver:gamepadDisconnectObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
+    [gamepadPollTimer invalidate];
+    [GCController stopWirelessControllerDiscovery];
+    sendInputReset("renderer-exit");
+    [view clearActiveMouseButtons];
     restoreRelativeMouseGrab();
     if (hideCursor) {
       [NSCursor unhide];

@@ -329,6 +329,30 @@ function handleNativeLog(entry = {}) {
     if (/SNINPUT_QUEUE/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNINPUT_QUEUE\s*/, "Input queue ");
     }
+    if (/SNINPUT_RELATIVE_COALESCE/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_RELATIVE_COALESCE\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_RELATIVE_COALESCE\s*/, "Relative mouse ");
+    }
+    if (/SNINPUT_PRIORITY/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_PRIORITY\w*\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_PRIORITY\w*\s*/, "Input priority ");
+    }
+    if (/SNINPUT_GAMEPAD(?:_(?:RUMBLE|STATE|SLOT))?/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_GAMEPAD(?:_(?:RUMBLE|STATE|SLOT))?\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_GAMEPAD(?:_(?:RUMBLE|STATE|SLOT))?\s*/, "Gamepad ");
+    }
+    if (/SNINPUT_RESET_TX/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_RESET_TX\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_RESET_TX\s*/, "Input reset ");
+    }
+    if (/SNINPUT_HEALTH/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_HEALTH\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_HEALTH\s*/, "Input health ");
+    }
+    if (/SNINPUT_BACKPRESSURE/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_BACKPRESSURE\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_BACKPRESSURE\s*/, "Input backpressure ");
+    }
     if (/SNINPUT_BATCH_TX/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNINPUT_BATCH_TX\s*/, "Input batch ");
     }
@@ -340,7 +364,15 @@ function handleNativeLog(entry = {}) {
       appState.nativeInput = line.replace(/^.*SNINPUT_PENDING\s*/, "");
       clientStats.textContent = line.replace(/^.*SNINPUT_PENDING\s*/, "Input pending ");
     }
-    if (/SNINPUT_ACK/i.test(line)) {
+    if (/SNINPUT_LATENCY/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_LATENCY\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_LATENCY\s*/, "Input latency ");
+    }
+    if (/SNINPUT_ACKED/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_ACKED\s*/, "");
+      clientStats.textContent = line.replace(/^.*SNINPUT_ACKED\s*/, "Input acked ");
+    }
+    if (/SNINPUT_ACK\s/i.test(line)) {
       appState.nativeInput = line.replace(/^.*SNINPUT_ACK\s*/, "");
       clientStats.textContent = line.replace(/^.*SNINPUT_ACK\s*/, "Input ack ");
     }
@@ -357,6 +389,9 @@ function handleNativeLog(entry = {}) {
     }
     if (/SNV1_RENDER_STATS/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNV1_RENDER_STATS\s*/, "Render ");
+    }
+    if (/SNV1_RENDER_QUEUE_RESET/i.test(line)) {
+      clientStats.textContent = line.replace(/^.*SNV1_RENDER_QUEUE_RESET\s*/, "Render reset ");
     }
     if (/SNV1_RENDER_ADAPT/i.test(line)) {
       clientStats.textContent = line.replace(/^.*SNV1_RENDER_ADAPT\s*/, "Render adapt ");
@@ -429,6 +464,16 @@ function handleNativeLog(entry = {}) {
       hostStats.textContent = line.replace(/^.*SNV1_RECOVERY_GATE\s*/, "Recovery gate ");
     } else if (/SNV1_FEEDBACK_STALE/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNV1_FEEDBACK_STALE\s*/, "Feedback stale ");
+    } else if (/SNV1_STARTUP_WARMUP/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_STARTUP_WARMUP\s*/, "Startup ");
+    } else if (/SNU1_UDP_PACING_CLAMP/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNU1_UDP_PACING_CLAMP\s*/, "UDP pace ");
+    } else if (/SNV1_HOST_(FRAME|TIMELINE)_SKIP/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_HOST_(FRAME|TIMELINE)_SKIP(_ARM|_APPLY)?\s*/, "Host skip ");
+    } else if (/SNV1_HOST_OVERLOAD/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_HOST_OVERLOAD\s*/, "Host load ");
+    } else if (/SNV1_STAGE_PROFILE/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_STAGE_PROFILE\s*/, "Host profile ");
     } else if (/SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_RESTART|SNV1_KEYFRAME|SNU1_NACK|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET/i.test(line)) {
       hostStats.textContent = line.replace(/^.*(SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_RESTART|SNV1_KEYFRAME_[A-Z_]+|SNU1_NACK_[A-Z_]+|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET)\s*/, "Native ");
     }
@@ -452,9 +497,29 @@ function handleNativeLog(entry = {}) {
     if (/SNCONTROL_HELLO_ACK/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNCONTROL_HELLO_ACK\s*/, "Control ");
     }
+    if (/SNINPUT_MODIFIERS_SYNC/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_MODIFIERS_SYNC\s*/, "");
+      hostStats.textContent = line.replace(/^.*SNINPUT_MODIFIERS_SYNC\s*/, "Input modifiers ");
+    }
+    if (/SNINPUT_GAMEPAD(?:_(?:BACKEND|RESET|RUMBLE_TX|SLOT|WATCHDOG))?/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_GAMEPAD(?:_(?:BACKEND|RESET|RUMBLE_TX|SLOT|WATCHDOG))?\s*/, "");
+      hostStats.textContent = line.replace(/^.*SNINPUT_GAMEPAD(?:_(?:BACKEND|RESET|RUMBLE_TX|SLOT|WATCHDOG))?\s*/, "Gamepad ");
+    }
     if (/SNINPUT_APPLIED/i.test(line)) {
       appState.nativeInput = line.replace(/^.*SNINPUT_APPLIED\s*/, "");
       hostStats.textContent = line.replace(/^.*SNINPUT_APPLIED/, "Input");
+    }
+    if (/SNINPUT_RESET/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_RESET\s*/, "");
+      hostStats.textContent = line.replace(/^.*SNINPUT_RESET\s*/, "Input reset ");
+    }
+    if (/SNINPUT_HEALTH/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_HEALTH\s*/, "");
+      hostStats.textContent = line.replace(/^.*SNINPUT_HEALTH\s*/, "Input health ");
+    }
+    if (/SNINPUT_WATCHDOG/i.test(line)) {
+      appState.nativeInput = line.replace(/^.*SNINPUT_WATCHDOG\s*/, "");
+      hostStats.textContent = line.replace(/^.*SNINPUT_WATCHDOG\s*/, "Input watchdog ");
     }
     if (/SNINPUT_BATCH/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNINPUT_BATCH\s*/, "Input batch ");
