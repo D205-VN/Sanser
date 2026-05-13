@@ -6,6 +6,7 @@
 #include <mfidl.h>
 #include <mftransform.h>
 #include <objbase.h>
+#include <strmif.h>
 #include <wrl/client.h>
 
 #include <algorithm>
