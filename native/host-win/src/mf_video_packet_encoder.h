@@ -5,10 +5,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 struct VideoPacketEncodeOptions {
   VideoCodec codec = VideoCodec::H264;
+  std::string encoderPreference = "auto";
   std::uint32_t fps = 60;
   std::uint32_t bitrate = 28000000;
   std::uint32_t keyframeIntervalSeconds = 1;
@@ -40,7 +42,10 @@ public:
   bool setBitrate(std::uint32_t bitrate);
   bool requestKeyframe();
   std::uint32_t bitrate() const;
+  VideoCodec codec() const;
   bool usingHardware() const;
+  std::string encoderName() const;
+  std::string encoderBackend() const;
 
 private:
   struct Impl;

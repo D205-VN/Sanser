@@ -1,6 +1,8 @@
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const dgram = require("dgram");
+const crypto = require("crypto");
 const { spawn, spawnSync } = require("child_process");
 const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen, session, shell } = require("electron");
 const { startServer } = require("../server");
@@ -19,6 +21,16 @@ const nativeLogBuffers = {
 const nativeLogs = {
   client: [],
   host: []
+};
+const NATIVE_DISCOVERY_PORT = 47777;
+const NATIVE_DISCOVERY_TTL_MS = 12000;
+const nativeDiscovery = {
+  socket: null,
+  timer: null,
+  id: "",
+  peers: new Map(),
+  lastClientOptions: null,
+  lastHostOptions: null
 };
 
 const gotLock = app.requestSingleInstanceLock();
@@ -51,6 +63,7 @@ app.on("before-quit", () => {
   if (serverHandle?.server) {
     serverHandle.server.close();
   }
+  stopNativeDiscovery();
   if (nativeInputWorker) {
     nativeInputWorker.kill();
   }
@@ -64,6 +77,7 @@ async function boot() {
   installScreenCaptureHandler();
   installInputHandler();
   installNativeHandlers();
+  startNativeDiscovery();
   serverHandle = await startEmbeddedServer();
   createWindow(`http://127.0.0.1:${serverHandle.port}`);
 }
@@ -275,10 +289,174 @@ function installInputHandler() {
 function installNativeHandlers() {
   ipcMain.handle("sanser:native-status", () => nativeStatus());
   ipcMain.handle("sanser:native-network-info", () => nativeNetworkInfo());
+  ipcMain.handle("sanser:native-discovery", () => nativeDiscoveryStatus());
+  ipcMain.handle("sanser:native-discovery-refresh", () => {
+    sendNativeDiscoveryBeacon("manual");
+    return nativeDiscoveryStatus();
+  });
   ipcMain.handle("sanser:native-start-client", (_event, options = {}) => startNativeClient(options));
   ipcMain.handle("sanser:native-stop-client", () => stopNativeProcess("client"));
   ipcMain.handle("sanser:native-start-host", (_event, options = {}) => startNativeHost(options));
   ipcMain.handle("sanser:native-stop-host", () => stopNativeProcess("host"));
+}
+
+function discoveryIdPath() {
+  return path.join(app.getPath("userData"), "native-discovery-id");
+}
+
+function ensureNativeDiscoveryId() {
+  if (nativeDiscovery.id) return nativeDiscovery.id;
+  const file = discoveryIdPath();
+  try {
+    const saved = fs.readFileSync(file, "utf8").trim();
+    if (/^[a-f0-9-]{16,64}$/i.test(saved)) {
+      nativeDiscovery.id = saved;
+      return nativeDiscovery.id;
+    }
+  } catch (_) {
+    // Missing discovery id is normal on first launch.
+  }
+  nativeDiscovery.id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString("hex");
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, nativeDiscovery.id);
+  } catch (error) {
+    appendNativeLog("discovery", `id persist failed: ${error.message || error}`);
+  }
+  return nativeDiscovery.id;
+}
+
+function startNativeDiscovery() {
+  if (nativeDiscovery.socket) return;
+  ensureNativeDiscoveryId();
+
+  const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  nativeDiscovery.socket = socket;
+  socket.on("error", (error) => {
+    appendNativeLog("discovery", `UDP discovery error: ${error.message || error}`);
+  });
+  socket.on("message", (message, remote) => {
+    handleNativeDiscoveryMessage(message, remote);
+  });
+  socket.bind(NATIVE_DISCOVERY_PORT, "0.0.0.0", () => {
+    try {
+      socket.setBroadcast(true);
+    } catch (error) {
+      appendNativeLog("discovery", `broadcast disabled: ${error.message || error}`);
+    }
+    sendNativeDiscoveryBeacon("startup");
+    nativeDiscovery.timer = setInterval(() => sendNativeDiscoveryBeacon("interval"), 2000);
+    appendNativeLog("discovery", `LAN discovery listening udp:${NATIVE_DISCOVERY_PORT}`);
+  });
+}
+
+function stopNativeDiscovery() {
+  if (nativeDiscovery.timer) clearInterval(nativeDiscovery.timer);
+  nativeDiscovery.timer = null;
+  if (nativeDiscovery.socket) {
+    try {
+      nativeDiscovery.socket.close();
+    } catch (_) {
+      // Socket may already be closed during app shutdown.
+    }
+  }
+  nativeDiscovery.socket = null;
+}
+
+function nativeDiscoveryPayload(reason) {
+  const clientOptions = nativeDiscovery.lastClientOptions || {};
+  const hostOptions = nativeDiscovery.lastHostOptions || {};
+  return {
+    magic: "SANSER_DISCOVERY_V1",
+    version: 1,
+    id: ensureNativeDiscoveryId(),
+    reason,
+    hostname: os.hostname(),
+    platform: process.platform,
+    app: app.getName(),
+    addresses: localNetworkAddresses(),
+    native: {
+      clientRunning: Boolean(nativeProcesses.client && !nativeProcesses.client.killed),
+      hostRunning: Boolean(nativeProcesses.host && !nativeProcesses.host.killed),
+      clientPort: Number(clientOptions.port || 0),
+      controlPort: Number(clientOptions.controlPort || 0),
+      audioPort: Number(clientOptions.audioPort || 0),
+      hostEndpoint: String(hostOptions.endpoint || ""),
+      hostControlEndpoint: String(hostOptions.controlEndpoint || ""),
+      hostAudioEndpoint: String(hostOptions.audioEndpoint || ""),
+      videoTransport: String(clientOptions.videoTransport || hostOptions.videoTransport || "udp")
+    },
+    sentAt: Date.now()
+  };
+}
+
+function broadcastTargets() {
+  const targets = new Set(["255.255.255.255"]);
+  for (const entry of localNetworkAddresses()) {
+    const address = ipv4ToInt(entry.address);
+    const mask = ipv4ToInt(entry.netmask);
+    if (address === null || mask === null) continue;
+    const broadcast = (address | (~mask >>> 0)) >>> 0;
+    targets.add(intToIpv4(broadcast));
+  }
+  return Array.from(targets);
+}
+
+function sendNativeDiscoveryBeacon(reason = "manual") {
+  const socket = nativeDiscovery.socket;
+  if (!socket) return;
+  const payload = Buffer.from(JSON.stringify(nativeDiscoveryPayload(reason)));
+  for (const target of broadcastTargets()) {
+    socket.send(payload, 0, payload.length, NATIVE_DISCOVERY_PORT, target, (error) => {
+      if (error && reason === "manual") {
+        appendNativeLog("discovery", `beacon failed ${target}: ${error.message || error}`);
+      }
+    });
+  }
+}
+
+function handleNativeDiscoveryMessage(message, remote) {
+  let payload = null;
+  try {
+    payload = JSON.parse(message.toString("utf8"));
+  } catch (_) {
+    return;
+  }
+  if (payload?.magic !== "SANSER_DISCOVERY_V1" || !payload.id || payload.id === nativeDiscovery.id) return;
+
+  const peer = {
+    id: String(payload.id),
+    hostname: String(payload.hostname || ""),
+    platform: String(payload.platform || ""),
+    app: String(payload.app || ""),
+    remoteAddress: remote.address,
+    addresses: Array.isArray(payload.addresses) ? payload.addresses : [],
+    native: payload.native || {},
+    lastSeenAt: Date.now()
+  };
+  nativeDiscovery.peers.set(peer.id, peer);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("sanser:native-discovery", nativeDiscoveryStatus());
+  }
+}
+
+function nativeDiscoveryStatus() {
+  pruneNativeDiscoveryPeers();
+  return {
+    id: nativeDiscovery.id,
+    port: NATIVE_DISCOVERY_PORT,
+    peers: Array.from(nativeDiscovery.peers.values())
+      .sort((a, b) => b.lastSeenAt - a.lastSeenAt)
+  };
+}
+
+function pruneNativeDiscoveryPeers() {
+  const now = Date.now();
+  for (const [id, peer] of nativeDiscovery.peers) {
+    if (now - Number(peer.lastSeenAt || 0) > NATIVE_DISCOVERY_TTL_MS) {
+      nativeDiscovery.peers.delete(id);
+    }
+  }
 }
 
 function startNativeClient(options = {}) {
@@ -296,16 +474,23 @@ function startNativeClient(options = {}) {
   const controlPort = clampInt(options.controlPort, 0, 65535, port < 65535 ? port + 1 : 0);
   const audioPort = clampInt(options.audioPort, 0, 65535, port < 65534 ? port + 2 : 0);
   const audioJitterMs = clampInt(options.audioJitterMs, 0, 120, 24);
+  const audioDevice = String(options.audioDevice || "").trim();
+  const audioVolume = clampNumber(options.audioVolume, 0, 1, 1);
+  const audioMuted = options.audioMuted === true;
   const videoTransport = String(options.videoTransport || "udp").toLowerCase();
   const maxPackets = clampInt(options.maxPackets, 0, Number.MAX_SAFE_INTEGER, 0);
   const sessionToken = sanitizeNativeSessionToken(options.sessionToken);
+  nativeDiscovery.lastClientOptions = { ...options, port, controlPort, audioPort, videoTransport };
   const args = ["--listen-render-snv", String(port)];
   if (controlPort > 0) args.push("--control-port", String(controlPort));
   if (audioPort > 0) args.push("--audio-port", String(audioPort));
   if (audioPort > 0) args.push("--audio-jitter-ms", String(audioJitterMs));
+  if (audioPort > 0 && audioDevice) args.push("--audio-device", audioDevice);
+  if (audioPort > 0) args.push("--audio-volume", audioVolume.toFixed(3));
+  if (audioPort > 0 && audioMuted) args.push("--audio-muted");
   if (videoTransport === "udp") args.push("--udp-video");
   if (maxPackets > 0) args.push("--max-packets", String(maxPackets));
-  if (options.logInput !== false) args.push("--log-input");
+  if (options.logInput === true) args.push("--log-input");
   if (options.fullscreen !== false) args.push("--fullscreen");
   if (options.hideCursor !== false) args.push("--hide-cursor");
   if (options.relativeMouse !== false) args.push("--relative-mouse");
@@ -316,6 +501,7 @@ function startNativeClient(options = {}) {
     args,
     sessionToken ? { SANSER_NATIVE_SESSION_TOKEN: sessionToken } : {}
   );
+  sendNativeDiscoveryBeacon("client-start");
   return nativeStatus();
 }
 
@@ -347,11 +533,14 @@ function startNativeHost(options = {}) {
   const bitrateMbps = clampInt(options.bitrateMbps, 4, 120, 28);
   const keyframeInterval = clampInt(options.keyframeInterval, 1, 10, 1);
   const videoTransport = String(options.videoTransport || "udp").toLowerCase();
+  const videoCodec = normalizeNativeVideoCodec(options.videoCodec);
+  const encoderPreference = String(options.encoderPreference || "auto").toLowerCase();
   const sessionToken = sanitizeNativeSessionToken(options.sessionToken);
+  nativeDiscovery.lastHostOptions = { ...options, fps, bitrateMbps, keyframeInterval, videoTransport, videoCodec };
   const connectFlag = videoTransport === "udp" ? "--udp-connect" : "--tcp-connect";
   const args = [
     "--encode-pipe",
-    "h264",
+    videoCodec,
     "--fps",
     String(fps),
     "--interval-ms",
@@ -365,6 +554,9 @@ function startNativeHost(options = {}) {
   ];
   if (controlEndpoint) args.push("--control-connect", controlEndpoint);
   if (audioEndpoint) args.push("--audio-udp-connect", audioEndpoint);
+  if (/^(auto|nvenc|amf|qsv|mf|software)$/.test(encoderPreference)) {
+    args.push("--encoder", encoderPreference);
+  }
   if (videoTransport === "udp" && options.udpPacing === false) args.push("--no-udp-pacing");
   if (options.lowLatencyEncoder !== false) args.push("--low-latency-encoder");
   else args.push("--no-low-latency-encoder");
@@ -376,6 +568,7 @@ function startNativeHost(options = {}) {
     args,
     sessionToken ? { SANSER_NATIVE_SESSION_TOKEN: sessionToken } : {}
   );
+  sendNativeDiscoveryBeacon("host-start");
   return nativeStatus();
 }
 
@@ -423,6 +616,7 @@ function consumeNativeLog(role, chunk) {
 }
 
 function appendNativeLog(role, line) {
+  if (!nativeLogs[role]) nativeLogs[role] = [];
   const entry = {
     role,
     line,
@@ -440,6 +634,7 @@ function stopNativeProcess(role) {
   if (!child) return nativeStatus();
   nativeProcesses[role] = null;
   if (!child.killed) child.kill();
+  sendNativeDiscoveryBeacon(`${role}-stop`);
   return nativeStatus();
 }
 
@@ -485,6 +680,29 @@ function networkAddressPriority(name, address) {
   return 10;
 }
 
+function ipv4ToInt(value) {
+  const parts = String(value || "").split(".");
+  if (parts.length !== 4) return null;
+  let result = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    const number = Number(part);
+    if (number < 0 || number > 255) return null;
+    result = (result << 8) | number;
+  }
+  return result >>> 0;
+}
+
+function intToIpv4(value) {
+  const number = Number(value) >>> 0;
+  return [
+    (number >>> 24) & 255,
+    (number >>> 16) & 255,
+    (number >>> 8) & 255,
+    number & 255
+  ].join(".");
+}
+
 function processStatus(role) {
   const child = nativeProcesses[role];
   return {
@@ -512,6 +730,18 @@ function clampInt(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, Math.round(number)));
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
+}
+
+function normalizeNativeVideoCodec(value) {
+  const codec = String(value || "h264").toLowerCase();
+  if (codec === "hevc" || codec === "h265" || codec === "h.265") return "hevc";
+  return "h264";
 }
 
 function sendHostInput(payload) {

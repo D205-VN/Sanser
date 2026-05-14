@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
+#import <CoreAudio/CoreAudio.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -47,6 +48,9 @@
 
 namespace {
 
+constexpr std::uint32_t kSnvCodecH264 = 1;
+constexpr std::uint32_t kSnvCodecHevc = 2;
+
 CMVideoCodecType fourcc(char a, char b, char c, char d) {
   return (static_cast<CMVideoCodecType>(a) << 24)
        | (static_cast<CMVideoCodecType>(b) << 16)
@@ -72,6 +76,22 @@ std::string jsonEscape(const char* value) {
 
 std::string nsStringToUtf8(NSString* value) {
   return value ? std::string([value UTF8String] ?: "") : "";
+}
+
+std::string cfStringToUtf8(CFStringRef value) {
+  if (!value) return "";
+  char buffer[1024]{};
+  if (CFStringGetCString(value, buffer, sizeof(buffer), kCFStringEncodingUTF8)) {
+    return buffer;
+  }
+  const CFIndex length = CFStringGetLength(value);
+  const CFIndex maxSize = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+  std::string out(static_cast<std::size_t>(std::max<CFIndex>(maxSize, 1)), '\0');
+  if (!CFStringGetCString(value, out.data(), out.size(), kCFStringEncodingUTF8)) {
+    return "";
+  }
+  out.resize(std::strlen(out.c_str()));
+  return out;
 }
 
 std::string boolText(bool value) {
@@ -115,6 +135,10 @@ void printHelp() {
     << "  --control-port P  Dedicated native input/stats TCP port; defaults to render port + 1, 0 disables\n"
     << "  --audio-port P   Listen for SNA1/SNA2 UDP float PCM audio; defaults to render port + 2, 0 disables\n"
     << "  --audio-jitter-ms N Target SNA1 audio jitter buffer, default 24 ms\n"
+    << "  --audio-device UID Output audio device UID; default uses the current macOS output\n"
+    << "  --audio-volume N Client playback volume 0.0-1.0, default 1.0\n"
+    << "  --audio-muted    Start client audio muted\n"
+    << "  --list-audio-devices Print macOS output audio device UIDs\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --log-input       Print each native input event for debugging\n"
     << "  --fullscreen      Open the Metal renderer fullscreen\n"
@@ -132,6 +156,90 @@ void printCodecSupport(const char* label, CMVideoCodecType codec) {
     supported = VTIsHardwareDecodeSupported(codec);
   }
   std::cout << "VideoToolbox " << label << " hardware decode: " << boolText(supported) << "\n";
+}
+
+std::string audioObjectString(AudioObjectID objectId, AudioObjectPropertySelector selector) {
+  AudioObjectPropertyAddress address{selector, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+  CFStringRef value = nullptr;
+  UInt32 size = sizeof(value);
+  if (AudioObjectGetPropertyData(objectId, &address, 0, nullptr, &size, &value) != noErr || !value) {
+    return "";
+  }
+  std::string out = cfStringToUtf8(value);
+  CFRelease(value);
+  return out;
+}
+
+std::uint32_t audioOutputChannelCount(AudioDeviceID deviceId) {
+  AudioObjectPropertyAddress address{
+    kAudioDevicePropertyStreamConfiguration,
+    kAudioDevicePropertyScopeOutput,
+    kAudioObjectPropertyElementMain
+  };
+  UInt32 size = 0;
+  if (AudioObjectGetPropertyDataSize(deviceId, &address, 0, nullptr, &size) != noErr || size == 0) {
+    return 0;
+  }
+  std::vector<std::uint8_t> storage(size);
+  auto* bufferList = reinterpret_cast<AudioBufferList*>(storage.data());
+  if (AudioObjectGetPropertyData(deviceId, &address, 0, nullptr, &size, bufferList) != noErr) {
+    return 0;
+  }
+
+  std::uint32_t channels = 0;
+  for (UInt32 i = 0; i < bufferList->mNumberBuffers; ++i) {
+    channels += bufferList->mBuffers[i].mNumberChannels;
+  }
+  return channels;
+}
+
+AudioDeviceID defaultOutputAudioDevice() {
+  AudioDeviceID deviceId = kAudioObjectUnknown;
+  UInt32 size = sizeof(deviceId);
+  AudioObjectPropertyAddress address{
+    kAudioHardwarePropertyDefaultOutputDevice,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+  };
+  if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, nullptr, &size, &deviceId) != noErr) {
+    return kAudioObjectUnknown;
+  }
+  return deviceId;
+}
+
+int listAudioOutputDevices() {
+  AudioObjectPropertyAddress address{
+    kAudioHardwarePropertyDevices,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+  };
+  UInt32 size = 0;
+  OSStatus status = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, nullptr, &size);
+  if (status != noErr) {
+    throw std::runtime_error("AudioObjectGetPropertyDataSize(devices): OSStatus " + std::to_string(status));
+  }
+  std::vector<AudioDeviceID> devices(size / sizeof(AudioDeviceID));
+  if (!devices.empty()) {
+    status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, nullptr, &size, devices.data());
+    if (status != noErr) {
+      throw std::runtime_error("AudioObjectGetPropertyData(devices): OSStatus " + std::to_string(status));
+    }
+  }
+
+  const AudioDeviceID defaultDevice = defaultOutputAudioDevice();
+  std::cout << "macOS output audio devices:\n";
+  for (AudioDeviceID deviceId : devices) {
+    const std::uint32_t channels = audioOutputChannelCount(deviceId);
+    if (channels == 0) continue;
+    const std::string uid = audioObjectString(deviceId, kAudioDevicePropertyDeviceUID);
+    const std::string name = audioObjectString(deviceId, kAudioObjectPropertyName);
+    std::cout << "  " << (deviceId == defaultDevice ? "* " : "- ")
+              << (name.empty() ? "Unknown" : name)
+              << " uid=\"" << uid << "\""
+              << " channels=" << channels
+              << "\n";
+  }
+  return 0;
 }
 
 int runProbe() {
@@ -1493,6 +1601,19 @@ private:
 };
 
 std::shared_ptr<NativeInputSender> gNativeInputSender;
+
+struct ControlRttWindow {
+  std::uint64_t samples = 0;
+  double avgMs = -1.0;
+  double maxMs = -1.0;
+  double smoothedMs = -1.0;
+};
+
+std::mutex gControlRttMutex;
+std::uint64_t gControlRttSamples = 0;
+double gControlRttSumMs = 0.0;
+double gControlRttMaxMs = 0.0;
+double gControlRttSmoothedMs = -1.0;
 bool gLogInputEvents = false;
 bool gRelativeMouse = false;
 bool gMouseGrabbed = false;
@@ -1864,6 +1985,40 @@ bool sendNativeInputJson(const std::string& json) {
     }
   }
   return sent;
+}
+
+void recordControlRtt(double rttMs) {
+  if (!std::isfinite(rttMs) || rttMs < 0.0 || rttMs > 5000.0) return;
+  std::lock_guard<std::mutex> lock(gControlRttMutex);
+  if (gControlRttSmoothedMs < 0.0 || std::abs(rttMs - gControlRttSmoothedMs) > 250.0) {
+    gControlRttSmoothedMs = rttMs;
+  } else {
+    gControlRttSmoothedMs = (gControlRttSmoothedMs * 0.82) + (rttMs * 0.18);
+  }
+  gControlRttSamples += 1;
+  gControlRttSumMs += rttMs;
+  gControlRttMaxMs = std::max(gControlRttMaxMs, rttMs);
+}
+
+ControlRttWindow takeControlRttWindow() {
+  std::lock_guard<std::mutex> lock(gControlRttMutex);
+  ControlRttWindow window;
+  window.samples = gControlRttSamples;
+  window.avgMs = gControlRttSamples > 0
+    ? gControlRttSumMs / static_cast<double>(gControlRttSamples)
+    : gControlRttSmoothedMs;
+  window.maxMs = gControlRttSamples > 0 ? gControlRttMaxMs : gControlRttSmoothedMs;
+  window.smoothedMs = gControlRttSmoothedMs;
+  gControlRttSamples = 0;
+  gControlRttSumMs = 0.0;
+  gControlRttMaxMs = 0.0;
+  return window;
+}
+
+double packetLossPercent(std::uint64_t lost, std::uint64_t received) {
+  const std::uint64_t total = lost + received;
+  if (total == 0) return 0.0;
+  return (static_cast<double>(lost) * 100.0) / static_cast<double>(total);
 }
 
 bool sendInputReset(const char* reason) {
@@ -2338,7 +2493,7 @@ bool sendVideoNackRequest(const std::string& reason,
   {
     std::lock_guard<std::mutex> lock(mutex);
     if (lastSentAt.time_since_epoch().count() != 0 &&
-        now - lastSentAt < std::chrono::milliseconds(35)) {
+        now - lastSentAt < std::chrono::milliseconds(15)) {
       return false;
     }
     lastSentAt = now;
@@ -2350,7 +2505,7 @@ bool sendVideoNackRequest(const std::string& reason,
       << ",\"sequence\":" << sequence
       << ",\"reason\":\"" << jsonEscape(reason.c_str()) << "\""
       << ",\"packetIds\":[";
-  const std::size_t count = std::min<std::size_t>(packetIds.size(), 32);
+  const std::size_t count = std::min<std::size_t>(packetIds.size(), 96);
   for (std::size_t i = 0; i < count; ++i) {
     if (i > 0) out << ",";
     out << packetIds[i];
@@ -2487,6 +2642,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
   const std::uint64_t sentSteadyMicros = jsonUint64Value(payload, "sentSteadyMicros");
   if (sentSteadyMicros == 0) return HostControlEvent::Other;
   const double rttMs = static_cast<double>(steadyMicros() - sentSteadyMicros) / 1000.0;
+  recordControlRtt(rttMs);
   if (payload.find("\"type\":\"control-pong\"") != std::string::npos) {
     std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
     return HostControlEvent::Pong;
@@ -2785,6 +2941,14 @@ struct NalUnit {
   std::uint8_t type = 0;
 };
 
+std::uint8_t nalUnitType(const std::vector<std::uint8_t>& bytes, std::uint32_t codec) {
+  if (bytes.empty()) return 0;
+  if (codec == kSnvCodecHevc) {
+    return bytes.size() >= 2 ? static_cast<std::uint8_t>((bytes[0] >> 1) & 0x3f) : 0;
+  }
+  return static_cast<std::uint8_t>(bytes[0] & 0x1f);
+}
+
 SnvPacket parseSnvHeader(const std::uint8_t* header, std::size_t headerSize) {
   if (headerSize < 52) {
     throw std::runtime_error("SNV1 header too small.");
@@ -2897,7 +3061,7 @@ std::size_t annexBStartCodeSize(const std::vector<std::uint8_t>& data, std::size
   return 0;
 }
 
-std::vector<NalUnit> parseAnnexBNalUnits(const std::vector<std::uint8_t>& payload) {
+std::vector<NalUnit> parseAnnexBNalUnits(const std::vector<std::uint8_t>& payload, std::uint32_t codec) {
   std::vector<NalUnit> nals;
   std::size_t offset = 0;
   while (offset < payload.size()) {
@@ -2917,7 +3081,7 @@ std::vector<NalUnit> parseAnnexBNalUnits(const std::vector<std::uint8_t>& payloa
       NalUnit nal;
       nal.bytes.assign(payload.begin() + static_cast<std::ptrdiff_t>(nalStart),
                        payload.begin() + static_cast<std::ptrdiff_t>(next));
-      nal.type = nal.bytes.empty() ? 0 : (nal.bytes[0] & 0x1f);
+      nal.type = nalUnitType(nal.bytes, codec);
       nals.push_back(std::move(nal));
     }
     offset = next;
@@ -2925,7 +3089,7 @@ std::vector<NalUnit> parseAnnexBNalUnits(const std::vector<std::uint8_t>& payloa
   return nals;
 }
 
-std::vector<NalUnit> parseAvccNalUnits(const std::vector<std::uint8_t>& payload) {
+std::vector<NalUnit> parseAvccNalUnits(const std::vector<std::uint8_t>& payload, std::uint32_t codec) {
   std::vector<NalUnit> nals;
   std::size_t offset = 0;
   while (offset + 4 <= payload.size()) {
@@ -2938,7 +3102,7 @@ std::vector<NalUnit> parseAvccNalUnits(const std::vector<std::uint8_t>& payload)
     NalUnit nal;
     nal.bytes.assign(payload.begin() + static_cast<std::ptrdiff_t>(offset),
                      payload.begin() + static_cast<std::ptrdiff_t>(offset + size));
-    nal.type = nal.bytes.empty() ? 0 : (nal.bytes[0] & 0x1f);
+    nal.type = nalUnitType(nal.bytes, codec);
     nals.push_back(std::move(nal));
     offset += size;
   }
@@ -2946,17 +3110,21 @@ std::vector<NalUnit> parseAvccNalUnits(const std::vector<std::uint8_t>& payload)
   return nals;
 }
 
-std::vector<NalUnit> parseNalUnits(const std::vector<std::uint8_t>& payload) {
-  auto nals = parseAnnexBNalUnits(payload);
+std::vector<NalUnit> parseNalUnits(const std::vector<std::uint8_t>& payload, std::uint32_t codec) {
+  auto nals = parseAnnexBNalUnits(payload, codec);
   if (!nals.empty()) return nals;
-  return parseAvccNalUnits(payload);
+  return parseAvccNalUnits(payload, codec);
 }
 
-std::vector<std::uint8_t> buildAvccSample(const std::vector<NalUnit>& nals) {
+std::vector<std::uint8_t> buildAvccSample(const std::vector<NalUnit>& nals, std::uint32_t codec) {
   std::vector<std::uint8_t> sample;
   for (const auto& nal : nals) {
     if (nal.bytes.empty()) continue;
-    if (nal.type == 7 || nal.type == 8 || nal.type == 9) continue;
+    if (codec == kSnvCodecHevc) {
+      if (nal.type == 32 || nal.type == 33 || nal.type == 34 || nal.type == 35) continue;
+    } else {
+      if (nal.type == 7 || nal.type == 8 || nal.type == 9) continue;
+    }
     appendBe32(sample, static_cast<std::uint32_t>(nal.bytes.size()));
     sample.insert(sample.end(), nal.bytes.begin(), nal.bytes.end());
   }
@@ -2983,15 +3151,36 @@ public:
     }
   }
 
-  void observeParameterSets(const std::vector<NalUnit>& nals) {
+  void observeParameterSets(std::uint32_t codec, const std::vector<NalUnit>& nals) {
     bool changed = false;
+    if (codec_ != codec) {
+      resetSession();
+      codec_ = codec;
+      vps_.clear();
+      sps_.clear();
+      pps_.clear();
+      changed = true;
+    }
     for (const auto& nal : nals) {
-      if (nal.type == 7 && nal.bytes != sps_) {
-        sps_ = nal.bytes;
-        changed = true;
-      } else if (nal.type == 8 && nal.bytes != pps_) {
-        pps_ = nal.bytes;
-        changed = true;
+      if (codec == kSnvCodecHevc) {
+        if (nal.type == 32 && nal.bytes != vps_) {
+          vps_ = nal.bytes;
+          changed = true;
+        } else if (nal.type == 33 && nal.bytes != sps_) {
+          sps_ = nal.bytes;
+          changed = true;
+        } else if (nal.type == 34 && nal.bytes != pps_) {
+          pps_ = nal.bytes;
+          changed = true;
+        }
+      } else {
+        if (nal.type == 7 && nal.bytes != sps_) {
+          sps_ = nal.bytes;
+          changed = true;
+        } else if (nal.type == 8 && nal.bytes != pps_) {
+          pps_ = nal.bytes;
+          changed = true;
+        }
       }
     }
     if (changed) {
@@ -3000,7 +3189,8 @@ public:
   }
 
   bool ready() const {
-    return !sps_.empty() && !pps_.empty();
+    if (codec_ == kSnvCodecHevc) return !vps_.empty() && !sps_.empty() && !pps_.empty();
+    return codec_ == kSnvCodecH264 && !sps_.empty() && !pps_.empty();
   }
 
   bool decode(const SnvPacket& packet, const std::vector<std::uint8_t>& avccSample) {
@@ -3104,15 +3294,32 @@ private:
   void ensureSession(std::uint32_t width, std::uint32_t height) {
     if (session_) return;
 
-    const uint8_t* parameterSets[] = { sps_.data(), pps_.data() };
-    const size_t parameterSetSizes[] = { sps_.size(), pps_.size() };
-    checkStatus(CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,
-                                                                    2,
-                                                                    parameterSets,
-                                                                    parameterSetSizes,
-                                                                    4,
-                                                                    &format_),
-                "CMVideoFormatDescriptionCreateFromH264ParameterSets");
+    if (codec_ == kSnvCodecHevc) {
+      if (@available(macOS 10.13, *)) {
+        const uint8_t* parameterSets[] = { vps_.data(), sps_.data(), pps_.data() };
+        const size_t parameterSetSizes[] = { vps_.size(), sps_.size(), pps_.size() };
+        checkStatus(CMVideoFormatDescriptionCreateFromHEVCParameterSets(kCFAllocatorDefault,
+                                                                        3,
+                                                                        parameterSets,
+                                                                        parameterSetSizes,
+                                                                        4,
+                                                                        nullptr,
+                                                                        &format_),
+                    "CMVideoFormatDescriptionCreateFromHEVCParameterSets");
+      } else {
+        throw std::runtime_error("HEVC decode requires macOS 10.13 or newer.");
+      }
+    } else {
+      const uint8_t* parameterSets[] = { sps_.data(), pps_.data() };
+      const size_t parameterSetSizes[] = { sps_.size(), pps_.size() };
+      checkStatus(CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault,
+                                                                      2,
+                                                                      parameterSets,
+                                                                      parameterSetSizes,
+                                                                      4,
+                                                                      &format_),
+                  "CMVideoFormatDescriptionCreateFromH264ParameterSets");
+    }
 
     VTDecompressionOutputCallbackRecord callback{};
     callback.decompressionOutputCallback = &VtH264Decoder::outputCallback;
@@ -3176,6 +3383,8 @@ private:
     }
   }
 
+  std::uint32_t codec_ = 0;
+  std::vector<std::uint8_t> vps_;
   std::vector<std::uint8_t> sps_;
   std::vector<std::uint8_t> pps_;
   CMVideoFormatDescriptionRef format_ = nullptr;
@@ -3382,8 +3591,8 @@ void recordSkippedSnvPacket(DecodeSummary& summary, const SnvPacket& packet) {
 }
 
 void processSnvPacket(VtH264Decoder& decoder, DecodeSummary& summary, const SnvPacket& packet) {
-  if (packet.codec != 1) {
-    throw std::runtime_error("Only H.264 SNV1 codec packets are supported.");
+  if (packet.codec != kSnvCodecH264 && packet.codec != kSnvCodecHevc) {
+    throw std::runtime_error("Only H.264 and H.265/HEVC SNV1 codec packets are supported.");
   }
   if (!summary.hasFirstSequence) {
     summary.firstSequence = packet.sequence;
@@ -3393,15 +3602,15 @@ void processSnvPacket(VtH264Decoder& decoder, DecodeSummary& summary, const SnvP
   summary.packets += 1;
   if (packet.flags & 1) ++summary.keyframes;
 
-  const auto nals = parseNalUnits(packet.payload);
+  const auto nals = parseNalUnits(packet.payload, packet.codec);
   summary.nalUnits += nals.size();
-  decoder.observeParameterSets(nals);
+  decoder.observeParameterSets(packet.codec, nals);
   if (!decoder.ready()) {
     ++summary.skippedNoParameters;
     return;
   }
 
-  const auto sample = buildAvccSample(nals);
+  const auto sample = buildAvccSample(nals, packet.codec);
   if (sample.empty()) {
     ++summary.skippedEmptySamples;
     return;
@@ -3677,7 +3886,7 @@ public:
     const std::uint64_t highestPacketId = hasHighestPacketId ? highestIt->second : 0;
     if (hasHighestPacketId && header.packetId > highestPacketId + 1) {
       for (std::uint64_t missing = highestPacketId + 1;
-           missing < header.packetId && missing - highestPacketId <= 64;
+           missing < header.packetId && missing - highestPacketId <= 256;
            ++missing) {
         recordNackPacket(stats, missing);
       }
@@ -3740,7 +3949,7 @@ public:
       return true;
     }
 
-    if (assemblies_.size() > 128) {
+    if (assemblies_.size() > 256) {
       recordNackPacket(stats, assemblies_.begin()->first.packetId);
       assemblies_.erase(assemblies_.begin());
       stats.droppedAssemblies += 1;
@@ -3773,11 +3982,11 @@ private:
 
   void recordNackPacket(UdpVideoStats& stats, std::uint64_t packetId) {
     if (packetId == 0) return;
-    if (stats.nackPacketIds.size() < 64 &&
+    if (stats.nackPacketIds.size() < 128 &&
         std::find(stats.nackPacketIds.begin(), stats.nackPacketIds.end(), packetId) == stats.nackPacketIds.end()) {
       stats.nackPacketIds.push_back(packetId);
     }
-    if (stats.newNackPacketIds.size() >= 64) {
+    if (stats.newNackPacketIds.size() >= 128) {
       return;
     }
     if (std::find(stats.newNackPacketIds.begin(), stats.newNackPacketIds.end(), packetId) != stats.newNackPacketIds.end()) {
@@ -3789,7 +3998,7 @@ private:
   void prune(UdpVideoStats& stats) {
     const auto now = std::chrono::steady_clock::now();
     for (auto it = assemblies_.begin(); it != assemblies_.end();) {
-      if (now - it->second.createdAt > std::chrono::milliseconds(500)) {
+      if (now - it->second.createdAt > std::chrono::milliseconds(850)) {
         recordNackPacket(stats, it->first.packetId);
         it = assemblies_.erase(it);
         stats.droppedAssemblies += 1;
@@ -3861,7 +4070,7 @@ public:
       const MissingPacket& missing = item.second;
       const bool neverSent = missing.sendCount == 0;
       const bool retryDue = missing.sendCount < maxRetries_ &&
-        now - missing.lastSentAt >= std::chrono::milliseconds(80);
+        now - missing.lastSentAt >= std::chrono::milliseconds(55);
       if (neverSent || retryDue) {
         packetIds.push_back(item.first);
         if (packetIds.size() >= maxBatchPackets_) break;
@@ -3890,8 +4099,8 @@ public:
     for (const auto& item : pending_) {
       const MissingPacket& missing = item.second;
       if ((missing.sendCount >= maxRetries_ &&
-           now - missing.firstSeenAt >= std::chrono::milliseconds(320)) ||
-          now - missing.firstSeenAt >= std::chrono::milliseconds(700)) {
+           now - missing.firstSeenAt >= std::chrono::milliseconds(450)) ||
+          now - missing.firstSeenAt >= std::chrono::milliseconds(1100)) {
         needsKeyframe = true;
         break;
       }
@@ -3941,9 +4150,9 @@ private:
   std::uint64_t windowTimedOutPackets_ = 0;
   std::uint64_t mediaGeneration_ = 0;
   bool hasMediaGeneration_ = false;
-  static constexpr std::size_t maxPendingPackets_ = 128;
-  static constexpr std::size_t maxBatchPackets_ = 32;
-  static constexpr std::uint32_t maxRetries_ = 3;
+  static constexpr std::size_t maxPendingPackets_ = 256;
+  static constexpr std::size_t maxBatchPackets_ = 96;
+  static constexpr std::uint32_t maxRetries_ = 4;
 };
 
 struct UdpVideoJitterWindowStats {
@@ -4151,8 +4360,19 @@ public:
   void observeVideoPacket(std::uint64_t hostUnixMicros) {
     if (hostUnixMicros == 0) return;
     std::lock_guard<std::mutex> lock(mutex_);
+    const std::uint64_t nowSteadyMicros = steadyMicros();
+    const double sampleOffsetMicros = static_cast<double>(hostUnixMicros) -
+      static_cast<double>(nowSteadyMicros);
+    if (!valid_ ||
+        !hasHostOffset_ ||
+        std::abs(sampleOffsetMicros - hostMinusSteadyMicros_) > 500000.0) {
+      hostMinusSteadyMicros_ = sampleOffsetMicros;
+      hasHostOffset_ = true;
+    } else {
+      hostMinusSteadyMicros_ = (hostMinusSteadyMicros_ * 0.90) + (sampleOffsetMicros * 0.10);
+    }
     lastVideoHostUnixMicros_ = hostUnixMicros;
-    lastVideoSteadyMicros_ = steadyMicros();
+    lastVideoSteadyMicros_ = nowSteadyMicros;
     valid_ = true;
   }
 
@@ -4167,8 +4387,10 @@ public:
       : 0;
     if (elapsedMicros > 1500000) return false;
 
-    const std::uint64_t estimatedVideoHostNow = lastVideoHostUnixMicros_ + elapsedMicros;
-    leadMs = (static_cast<double>(audioHostUnixMicros) - static_cast<double>(estimatedVideoHostNow)) / 1000.0;
+    const double estimatedVideoHostNow = hasHostOffset_
+      ? static_cast<double>(nowSteady) + hostMinusSteadyMicros_
+      : static_cast<double>(lastVideoHostUnixMicros_ + elapsedMicros);
+    leadMs = (static_cast<double>(audioHostUnixMicros) - estimatedVideoHostNow) / 1000.0;
     return leadMs > -5000.0 && leadMs < 5000.0;
   }
 
@@ -4176,6 +4398,8 @@ private:
   mutable std::mutex mutex_;
   std::uint64_t lastVideoHostUnixMicros_ = 0;
   std::uint64_t lastVideoSteadyMicros_ = 0;
+  double hostMinusSteadyMicros_ = 0.0;
+  bool hasHostOffset_ = false;
   bool valid_ = false;
 };
 
@@ -4233,9 +4457,18 @@ struct AudioDriftCorrectionResult {
   int frameDelta = 0;
 };
 
+struct AudioOutputSettings {
+  std::string deviceUid;
+  double volume = 1.0;
+  bool muted = false;
+};
+
 class AudioQueuePcmPlayer {
 public:
-  AudioQueuePcmPlayer() = default;
+  explicit AudioQueuePcmPlayer(AudioOutputSettings settings = {})
+    : outputDeviceUid_(std::move(settings.deviceUid)),
+      volume_(std::clamp(settings.volume, 0.0, 1.0)),
+      muted_(settings.muted) {}
 
   ~AudioQueuePcmPlayer() {
     AudioQueueRef oldQueue = nullptr;
@@ -4330,9 +4563,7 @@ private:
     description.mChannelsPerFrame = channels;
     description.mBitsPerChannel = 32;
 
-    AudioQueueRef createdQueue = nullptr;
-    checkStatus(AudioQueueNewOutput(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
-                "AudioQueueNewOutput");
+    AudioQueueRef createdQueue = createOutputQueue(description, false);
     queue_ = createdQueue;
     sampleRate_ = sampleRate;
     channels_ = channels;
@@ -4349,7 +4580,49 @@ private:
               << " channels=" << channels_
               << " buffers=" << bufferCount
               << " bufferBytes=" << maxBufferBytes_
+              << " device=\"" << (activeOutputDeviceUid_.empty() ? "default" : activeOutputDeviceUid_) << "\""
+              << " requestedDevice=\"" << (outputDeviceUid_.empty() ? "default" : outputDeviceUid_) << "\""
+              << " deviceFallback=" << boolText(deviceFallback_)
+              << " volume=" << std::fixed << std::setprecision(2) << volume_
+              << " muted=" << boolText(muted_)
               << "\n";
+  }
+
+  AudioQueueRef createOutputQueue(const AudioStreamBasicDescription& description, bool forceDefault) {
+    AudioQueueRef createdQueue = nullptr;
+    checkStatus(AudioQueueNewOutput(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
+                "AudioQueueNewOutput");
+
+    activeOutputDeviceUid_ = "";
+    deviceFallback_ = false;
+    if (!forceDefault && !outputDeviceUid_.empty()) {
+      CFStringRef uid = CFStringCreateWithCString(kCFAllocatorDefault,
+                                                  outputDeviceUid_.c_str(),
+                                                  kCFStringEncodingUTF8);
+      const OSStatus deviceStatus = uid
+        ? AudioQueueSetProperty(createdQueue, kAudioQueueProperty_CurrentDevice, &uid, sizeof(uid))
+        : paramErr;
+      if (uid) CFRelease(uid);
+      if (deviceStatus == noErr) {
+        activeOutputDeviceUid_ = outputDeviceUid_;
+      } else {
+        std::cerr << "SNA1_AUDIO_DEVICE_FALLBACK requested=\"" << outputDeviceUid_
+                  << "\" status=" << deviceStatus
+                  << " fallback=default\n";
+        disposeQueue(createdQueue);
+        createdQueue = nullptr;
+        deviceFallback_ = true;
+        checkStatus(AudioQueueNewOutput(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
+                    "AudioQueueNewOutput(default)");
+      }
+    }
+
+    const Float32 effectiveVolume = muted_ ? 0.0f : static_cast<Float32>(volume_);
+    const OSStatus volumeStatus = AudioQueueSetParameter(createdQueue, kAudioQueueParam_Volume, effectiveVolume);
+    if (volumeStatus != noErr) {
+      std::cerr << "SNA1_AUDIO_VOLUME warning status=" << volumeStatus << "\n";
+    }
+    return createdQueue;
   }
 
   void recycle(AudioQueueBufferRef buffer) {
@@ -4365,6 +4638,11 @@ private:
   std::uint16_t channels_ = 0;
   std::uint32_t maxBufferBytes_ = 0;
   std::uint64_t queueDrops_ = 0;
+  std::string outputDeviceUid_;
+  std::string activeOutputDeviceUid_;
+  double volume_ = 1.0;
+  bool muted_ = false;
+  bool deviceFallback_ = false;
 };
 
 class AudioJitterBuffer {
@@ -4515,6 +4793,8 @@ private:
     hasExpectedSequence_ = false;
     hasHighestSequence_ = false;
     missingStartedAt_ = {};
+    hasSmoothedAvLead_ = false;
+    smoothedAvLeadMs_ = 0.0;
   }
 
   void switchSequencingMediaEpochLocked(std::uint64_t mediaEpoch) {
@@ -4570,6 +4850,16 @@ private:
     }
     stats_.avLeadSumMs += leadMs;
     stats_.avLeadSamples += 1;
+  }
+
+  double smoothedAvLeadLocked(double leadMs) {
+    if (!hasSmoothedAvLead_ || std::abs(leadMs - smoothedAvLeadMs_) > 250.0) {
+      smoothedAvLeadMs_ = leadMs;
+      hasSmoothedAvLead_ = true;
+      return smoothedAvLeadMs_;
+    }
+    smoothedAvLeadMs_ = (smoothedAvLeadMs_ * 0.82) + (leadMs * 0.18);
+    return smoothedAvLeadMs_;
   }
 
   void recordDriftCorrectionLocked(const AudioDriftCorrectionResult& result) {
@@ -4669,15 +4959,16 @@ private:
       return false;
     }
     recordAvLeadLocked(leadMs);
-    it->second.avLeadMs = leadMs;
+    const double decisionLeadMs = smoothedAvLeadLocked(leadMs);
+    it->second.avLeadMs = decisionLeadMs;
     it->second.hasAvLead = true;
 
-    if (leadMs > audioLeadHoldMs_ && bufferedDurationMsLocked() < maxDelayMs_) {
+    if (decisionLeadMs > audioLeadHoldMs_ && bufferedDurationMsLocked() < maxDelayMs_) {
       stats_.avHoldDecisions += 1;
       return true;
     }
 
-    if (leadMs < -audioLagDropMs_ && buffer_.size() > 1) {
+    if (decisionLeadMs < -audioLagDropMs_ && buffer_.size() > 1) {
       const std::uint64_t droppedSequence = it->first;
       buffer_.erase(it);
       expectedSequence_ = droppedSequence + 1;
@@ -4831,8 +5122,10 @@ private:
   bool hasMediaGeneration_ = false;
   bool hasActiveMediaEpoch_ = false;
   bool hasSequencingMediaEpoch_ = false;
+  bool hasSmoothedAvLead_ = false;
   bool started_ = false;
   bool stopped_ = false;
+  double smoothedAvLeadMs_ = 0.0;
 };
 
 class ScopedFd {
@@ -5835,10 +6128,15 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
               << " maxPresentLateMs=" << maxPresentLateMs
               << "\n";
 
+    const ControlRttWindow controlRtt = takeControlRttWindow();
     std::ostringstream feedback;
     feedback << std::fixed << std::setprecision(1)
              << "{\"type\":\"stream-stats\""
              << ",\"source\":\"render\""
+             << ",\"rttMs\":" << controlRtt.avgMs
+             << ",\"rttMaxMs\":" << controlRtt.maxMs
+             << ",\"rttSmoothedMs\":" << controlRtt.smoothedMs
+             << ",\"rttSamples\":" << controlRtt.samples
              << ",\"draws\":" << draws
              << ",\"rendered\":" << rendered
              << ",\"queueDepth\":" << queueDepth
@@ -5924,7 +6222,7 @@ void listenUdpAudio(std::uint16_t audioPort,
       std::cout << "SNA1_JITTER_CONFIG targetMs=" << std::fixed << std::setprecision(1)
                 << jitter.targetJitterMs()
                 << "\n";
-      std::cout << "SNAV_SYNC audioLeadHoldMs=90.0 audioLagDropMs=180.0 clock=video-host-unix\n";
+      std::cout << "SNAV_SYNC audioLeadHoldMs=90.0 audioLagDropMs=180.0 clock=video-host-unix-ewma\n";
       std::cout << "SNAV_DRIFT mode=soft-resample deadbandMs=12.0 fullScaleMs=120.0 maxAdjustPct=1.25\n";
 
       std::array<std::uint8_t, 65536> datagramBuffer{};
@@ -6194,7 +6492,15 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
             break;
           }
 	          if (avSyncClock) avSyncClock->observeVideoPacket(packet.hostUnixMicros);
+            const std::uint64_t droppedBeforeObserve = stats.windowDropped;
 	          stats.observe(packet);
+            if (stats.windowDropped > droppedBeforeObserve) {
+              sendKeyframeRequest("tcp-sequence-gap-immediate",
+                                  packet.sequence,
+                                  stats.windowDropped - droppedBeforeObserve,
+                                  decoder.decodeErrors(),
+                                  std::chrono::milliseconds(350));
+            }
 	          std::string latencyDropReason;
 	          if (stats.shouldDropBeforeDecode(packet, latencyDropReason)) {
 	            recordSkippedSnvPacket(summary, packet);
@@ -6244,20 +6550,30 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
             }
             std::cout << statLine.str() << "\n";
 
-	            if (stats.latencyDropped > 0) {
+	            if (stats.keyframeWaitDropped > 0) {
+	              bool suppressed = false;
+	              const bool sent = sendKeyframeRequest("await-keyframe",
+	                                                    summary.lastSequence,
+	                                                    stats.keyframeWaitDropped,
+	                                                    currentDecodeErrors,
+	                                                    std::chrono::milliseconds(650),
+	                                                    &suppressed);
+	              stats.observeLatencyKeyframeRequest(sent, suppressed);
+	            } else if (stats.latencyDropped > 0) {
 	              bool suppressed = false;
 	              const bool sent = sendKeyframeRequest("client-latency-drop",
 	                                                    summary.lastSequence,
 	                                                    stats.latencyDropped,
 	                                                    currentDecodeErrors,
-	                                                    std::chrono::milliseconds(1500),
+	                                                    std::chrono::milliseconds(1000),
 	                                                    &suppressed);
 	              stats.observeLatencyKeyframeRequest(sent, suppressed);
 	            } else if (stats.windowDropped > 0) {
 	              sendKeyframeRequest("tcp-sequence-gap",
 	                                  summary.lastSequence,
 	                                  stats.windowDropped,
-                                  currentDecodeErrors);
+                                  currentDecodeErrors,
+                                  std::chrono::milliseconds(350));
             } else if (decodeErrorDelta > 0) {
               sendKeyframeRequest("decode-error",
                                   summary.lastSequence,
@@ -6265,13 +6581,21 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
                                   currentDecodeErrors);
             }
 
+            const ControlRttWindow controlRtt = takeControlRttWindow();
+            const double lossPct = packetLossPercent(stats.windowDropped, stats.windowPackets);
             std::ostringstream feedback;
             feedback << std::fixed << std::setprecision(1)
                      << "{\"type\":\"stream-stats\""
+                     << ",\"source\":\"tcp\""
                      << ",\"packets\":" << stats.windowPackets
                      << ",\"decoded\":" << decoder.decodedFrames()
                      << ",\"dropped\":" << stats.windowDropped
                      << ",\"totalDropped\":" << stats.totalDropped
+                     << ",\"lossPercent\":" << lossPct
+                     << ",\"rttMs\":" << controlRtt.avgMs
+                     << ",\"rttMaxMs\":" << controlRtt.maxMs
+                     << ",\"rttSmoothedMs\":" << controlRtt.smoothedMs
+                     << ",\"rttSamples\":" << controlRtt.samples
                      << ",\"decodeErrors\":" << currentDecodeErrors
                      << ",\"jitterMs\":" << stats.jitterMs
                      << ",\"avgAgeMs\":" << avgAgeMs
@@ -6398,7 +6722,15 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         SnvPacket packet;
 	        while (jitterBuffer.popReady(packet)) {
 	          if (avSyncClock) avSyncClock->observeVideoPacket(packet.hostUnixMicros);
+            const std::uint64_t droppedBeforeObserve = stats.windowDropped;
 	          stats.observe(packet);
+            if (stats.windowDropped > droppedBeforeObserve) {
+              sendKeyframeRequest("udp-sequence-gap-immediate",
+                                  packet.sequence,
+                                  stats.windowDropped - droppedBeforeObserve,
+                                  decoder.decodeErrors(),
+                                  std::chrono::milliseconds(350));
+            }
 	          std::string latencyDropReason;
 	          if (stats.shouldDropBeforeDecode(packet, latencyDropReason)) {
 	            recordSkippedSnvPacket(summary, packet);
@@ -6447,20 +6779,30 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
             }
             std::cout << statLine.str() << "\n";
 
-	            if (stats.latencyDropped > 0) {
+	            if (stats.keyframeWaitDropped > 0) {
+	              bool suppressed = false;
+	              const bool sent = sendKeyframeRequest("await-keyframe",
+	                                                    summary.lastSequence,
+	                                                    stats.keyframeWaitDropped,
+	                                                    currentDecodeErrors,
+	                                                    std::chrono::milliseconds(650),
+	                                                    &suppressed);
+	              stats.observeLatencyKeyframeRequest(sent, suppressed);
+	            } else if (stats.latencyDropped > 0) {
 	              bool suppressed = false;
 	              const bool sent = sendKeyframeRequest("client-latency-drop",
 	                                                    summary.lastSequence,
 	                                                    stats.latencyDropped,
 	                                                    currentDecodeErrors,
-	                                                    std::chrono::milliseconds(1500),
+	                                                    std::chrono::milliseconds(1000),
 	                                                    &suppressed);
 	              stats.observeLatencyKeyframeRequest(sent, suppressed);
 	            } else if (stats.windowDropped > 0) {
 	              sendKeyframeRequest("udp-sequence-gap",
 	                                  summary.lastSequence,
 	                                  stats.windowDropped,
-                                  currentDecodeErrors);
+                                  currentDecodeErrors,
+                                  std::chrono::milliseconds(350));
             } else if (decodeErrorDelta > 0) {
               sendKeyframeRequest("decode-error",
                                   summary.lastSequence,
@@ -6468,13 +6810,21 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                                   currentDecodeErrors);
             }
 
+            const ControlRttWindow controlRtt = takeControlRttWindow();
+            const double lossPct = packetLossPercent(stats.windowDropped, stats.windowPackets);
             std::ostringstream feedback;
             feedback << std::fixed << std::setprecision(1)
                      << "{\"type\":\"stream-stats\""
+                     << ",\"source\":\"udp\""
                      << ",\"packets\":" << stats.windowPackets
                      << ",\"decoded\":" << decoder.decodedFrames()
                      << ",\"dropped\":" << stats.windowDropped
                      << ",\"totalDropped\":" << stats.totalDropped
+                     << ",\"lossPercent\":" << lossPct
+                     << ",\"rttMs\":" << controlRtt.avgMs
+                     << ",\"rttMaxMs\":" << controlRtt.maxMs
+                     << ",\"rttSmoothedMs\":" << controlRtt.smoothedMs
+                     << ",\"rttSamples\":" << controlRtt.samples
                      << ",\"decodeErrors\":" << currentDecodeErrors
                      << ",\"jitterMs\":" << stats.jitterMs
                      << ",\"avgAgeMs\":" << avgAgeMs
@@ -6501,6 +6851,9 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         if (statsSeconds >= 1.0) {
           const UdpVideoNackWindowStats nackWindow = nackController.takeWindowStats();
           const UdpVideoJitterWindowStats jitterWindow = jitterBuffer.takeWindowStats();
+          const ControlRttWindow controlRtt = takeControlRttWindow();
+          const double repairLossPct = packetLossPercent(nackWindow.sentPackets + nackWindow.timedOutPackets,
+                                                         udpStats.completedPackets);
           std::cout << "SNU1_STATS datagrams=" << udpStats.datagrams
                     << " fragments=" << udpStats.fragments
                     << " retransmitFragments=" << udpStats.retransmitFragments
@@ -6535,7 +6888,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           const std::uint64_t repairSequence = ++repairFeedbackSequence;
           std::ostringstream repairFeedback;
           repairFeedback << "{\"type\":\"udp-repair-stats\""
-                         << ",\"sequence\":" << repairSequence
+	                         << ",\"sequence\":" << repairSequence
                          << ",\"datagrams\":" << udpStats.datagrams
                          << ",\"fragments\":" << udpStats.fragments
                          << ",\"retransmitFragments\":" << udpStats.retransmitFragments
@@ -6555,8 +6908,13 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                          << ",\"nackPending\":" << nackController.pendingCount()
                          << ",\"nackSent\":" << nackWindow.sentPackets
                          << ",\"nackRecovered\":" << nackWindow.recoveredPackets
-                         << ",\"nackTimedOut\":" << nackWindow.timedOutPackets
-                         << ",\"jitterPending\":" << jitterBuffer.pendingCount()
+	                         << ",\"nackTimedOut\":" << nackWindow.timedOutPackets
+                         << ",\"lossPercent\":" << std::fixed << std::setprecision(1) << repairLossPct
+                         << ",\"rttMs\":" << controlRtt.avgMs
+                         << ",\"rttMaxMs\":" << controlRtt.maxMs
+                         << ",\"rttSmoothedMs\":" << controlRtt.smoothedMs
+                         << ",\"rttSamples\":" << controlRtt.samples
+	                         << ",\"jitterPending\":" << jitterBuffer.pendingCount()
                          << ",\"jitterReleased\":" << jitterWindow.releasedPackets
                          << ",\"jitterHeld\":" << jitterWindow.heldTicks
                          << ",\"jitterSkipped\":" << jitterWindow.skippedSequences
@@ -6574,10 +6932,12 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           const bool repairSent = sendNativeInputJson(repairFeedback.str());
           std::cout << "SNU1_REPAIR_FEEDBACK sequence=" << repairSequence
                     << " sent=" << boolText(repairSent)
-                    << " nackSent=" << nackWindow.sentPackets
-                    << " nackRecovered=" << nackWindow.recoveredPackets
-                    << " nackTimedOut=" << nackWindow.timedOutPackets
-                    << " jitterSkipped=" << jitterWindow.skippedSequences
+	                    << " nackSent=" << nackWindow.sentPackets
+	                    << " nackRecovered=" << nackWindow.recoveredPackets
+	                    << " nackTimedOut=" << nackWindow.timedOutPackets
+                    << " lossPercent=" << std::fixed << std::setprecision(1) << repairLossPct
+                    << " rttMs=" << controlRtt.avgMs
+	                    << " jitterSkipped=" << jitterWindow.skippedSequences
                     << " replayRejected=" << udpStats.replayRejectedDatagrams
                     << " peerRejected=" << udpStats.peerRejectedDatagrams
                     << " rekeyGrace=" << udpStats.rekeyGraceDatagrams
@@ -6614,6 +6974,7 @@ int runVideoRenderTcp(std::uint16_t port,
                       std::uint16_t controlPort,
                       std::uint16_t audioPort,
                       double audioJitterMs,
+                      AudioOutputSettings audioSettings,
                       bool udpVideo,
                       std::uint64_t maxPackets,
                       bool fullscreen,
@@ -6729,7 +7090,7 @@ int runVideoRenderTcp(std::uint16_t port,
     auto avSyncClock = std::make_shared<AvSyncClock>();
 
     if (audioPort > 0) {
-      auto audioPlayer = std::make_shared<AudioQueuePcmPlayer>();
+      auto audioPlayer = std::make_shared<AudioQueuePcmPlayer>(audioSettings);
       std::thread audioWorker([audioPort, audioJitterMs, audioPlayer, avSyncClock]() {
         listenUdpAudio(audioPort, audioJitterMs, audioPlayer, avSyncClock);
       });
@@ -6755,6 +7116,9 @@ int runVideoRenderTcp(std::uint16_t port,
               << " controlPort=" << controlPort
               << " audioPort=" << audioPort
               << " audioJitterMs=" << std::fixed << std::setprecision(1) << audioJitterMs
+              << " audioDevice=\"" << (audioSettings.deviceUid.empty() ? "default" : audioSettings.deviceUid) << "\""
+              << " audioVolume=" << std::setprecision(2) << audioSettings.volume
+              << " audioMuted=" << boolText(audioSettings.muted)
               << "\n";
     [NSApp run];
     [[NSNotificationCenter defaultCenter] removeObserver:resignObserver];
@@ -6841,6 +7205,7 @@ struct Options {
   bool hideCursor = false;
   bool relativeMouse = false;
   bool udpVideo = false;
+  bool listAudioDevices = false;
   bool help = false;
   std::uint64_t maxPackets = 0;
   std::uint16_t listenPort = 0;
@@ -6850,10 +7215,13 @@ struct Options {
   bool controlPortProvided = false;
   bool audioPortProvided = false;
   double audioJitterMs = 24.0;
+  double audioVolume = 1.0;
+  bool audioMuted = false;
   double seconds = 5;
   std::string snvFile;
   std::string clipboardText;
   std::string sessionToken;
+  std::string audioDeviceUid;
 };
 
 Options parseOptions(int argc, char** argv) {
@@ -6901,6 +7269,16 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--audio-jitter-ms") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --audio-jitter-ms");
       options.audioJitterMs = std::clamp(std::atof(argv[++i]), 0.0, 120.0);
+    } else if (arg == "--audio-device") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --audio-device");
+      options.audioDeviceUid = argv[++i];
+    } else if (arg == "--audio-volume") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --audio-volume");
+      options.audioVolume = std::clamp(std::atof(argv[++i]), 0.0, 1.0);
+    } else if (arg == "--audio-muted" || arg == "--audio-mute") {
+      options.audioMuted = true;
+    } else if (arg == "--list-audio-devices") {
+      options.listAudioDevices = true;
     } else if (arg == "--session-token") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --session-token");
       options.sessionToken = argv[++i];
@@ -6961,6 +7339,7 @@ int main(int argc, char** argv) {
       printHelp();
       return 0;
     }
+    if (options.listAudioDevices) return listAudioOutputDevices();
     if (options.probe) return runProbe();
     if (options.decodeSnv) return decodeSnvFile(options.snvFile, options.maxPackets);
     if (options.listenSnv) return listenSnvTcp(options.listenPort, options.maxPackets);
@@ -6984,6 +7363,7 @@ int main(int argc, char** argv) {
                                controlPort,
                                audioPort,
                                options.audioJitterMs,
+                               AudioOutputSettings{options.audioDeviceUid, options.audioVolume, options.audioMuted},
                                options.udpVideo,
                                options.maxPackets,
                                options.fullscreen,

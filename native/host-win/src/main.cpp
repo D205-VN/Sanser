@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -199,6 +200,10 @@ struct StreamFeedbackSnapshot {
   double jitterMs = 0.0;
   double avgAgeMs = -1.0;
   double maxAgeMs = -1.0;
+  double rttMs = -1.0;
+  double rttMaxMs = -1.0;
+  double rttSmoothedMs = -1.0;
+  double lossPercent = 0.0;
   std::uint64_t decodeSamples = 0;
   std::uint64_t decodeOverBudget = 0;
   double decodeAvgMs = -1.0;
@@ -253,6 +258,10 @@ struct UdpRepairFeedbackSnapshot {
   std::uint64_t nackSent = 0;
   std::uint64_t nackRecovered = 0;
   std::uint64_t nackTimedOut = 0;
+  double rttMs = -1.0;
+  double rttMaxMs = -1.0;
+  double rttSmoothedMs = -1.0;
+  double lossPercent = 0.0;
   std::uint64_t jitterPending = 0;
   std::uint64_t jitterReleased = 0;
   std::uint64_t jitterHeld = 0;
@@ -356,7 +365,7 @@ void requestVideoRetransmit(const std::string& reason,
                             std::uint64_t clientSequence,
                             std::vector<std::uint64_t> packetIds) {
   if (packetIds.empty()) return;
-  if (packetIds.size() > 64) packetIds.resize(64);
+  if (packetIds.size() > 128) packetIds.resize(128);
 
   VideoNackSnapshot snapshot;
   {
@@ -399,6 +408,7 @@ struct Options {
   std::uint32_t fps = 30;
   std::uint32_t bitrate = 28000000;
   std::uint32_t keyframeIntervalSeconds = 1;
+  std::string encoderPreference = "auto";
   VideoCodec codec = VideoCodec::H264;
   bool pipe = false;
   bool encode = false;
@@ -425,7 +435,7 @@ struct PipeFrameHeader {
 struct EncodedPacketHeader {
   char magic[4] = {'S', 'N', 'V', '1'};
   std::uint32_t headerSize = sizeof(EncodedPacketHeader);
-  std::uint32_t codec = 1; // 1 = H.264
+  std::uint32_t codec = 1; // 1 = H.264, 2 = H.265/HEVC
   std::uint32_t packetFormat = 1; // 1 = compressed sample bytes as emitted by Media Foundation
   std::uint32_t width = 0;
   std::uint32_t height = 0;
@@ -437,6 +447,18 @@ struct EncodedPacketHeader {
   std::uint64_t hostUnixMicros = 0;
 };
 #pragma pack(pop)
+
+std::uint32_t snvCodecId(VideoCodec codec) {
+  switch (codec) {
+    case VideoCodec::H264:
+      return 1;
+    case VideoCodec::Hevc:
+      return 2;
+    case VideoCodec::Av1:
+      break;
+  }
+  return 1;
+}
 
 #ifdef _WIN32
 #pragma pack(push, 1)
@@ -552,6 +574,9 @@ Options parseOptions(int argc, char** argv) {
       options.bitrate = readUintArg(argc, argv, i, "--bitrate");
     } else if (arg == "--keyframe-interval") {
       options.keyframeIntervalSeconds = std::max<std::uint32_t>(1, readUintArg(argc, argv, i, "--keyframe-interval"));
+    } else if (arg == "--encoder") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --encoder");
+      options.encoderPreference = argv[++i];
     } else if (arg == "--low-latency-encoder") {
       options.lowLatencyEncoder = true;
     } else if (arg == "--no-low-latency-encoder") {
@@ -587,9 +612,10 @@ Options parseOptions(int argc, char** argv) {
         << "  --pipe           Write BGRA frames to stdout with SNF1 headers\n"
         << "  --fps N          Target FPS in pipe/encode mode, default 30\n"
         << "  --encode CODEC   Encode captured frames with Media Foundation: h264, hevc, av1\n"
-        << "  --encode-pipe CODEC Encode H.264 packets to stdout or --packet-file with SNV1 headers\n"
+        << "  --encode-pipe CODEC Encode H.264/H.265 packets to stdout or --packet-file with SNV1 headers\n"
         << "  --bitrate N      Target encode bitrate, default 28000000\n"
         << "  --keyframe-interval N Seconds between keyframes in SNV1 mode, default 1\n"
+        << "  --encoder NAME   Encoder preference: auto, nvenc, amf, qsv, mf, software\n"
         << "  SNV1 network mode adapts bitrate and frame pacing from client feedback\n"
         << "  --low-latency-encoder Enable low-latency encoder hints, default on\n"
         << "  --no-low-latency-encoder Disable low-latency encoder hints\n"
@@ -1083,7 +1109,7 @@ std::uint64_t jsonUint64Value(const std::string& json, const char* key, std::uin
 
 std::vector<std::uint64_t> jsonUint64ArrayValue(const std::string& json,
                                                 const char* key,
-                                                std::size_t maxValues = 64) {
+                                                std::size_t maxValues = 128) {
   std::vector<std::uint64_t> values;
   std::size_t offset = findJsonValue(json, key);
   if (offset == std::string::npos || offset >= json.size() || json[offset] != '[') return values;
@@ -2669,6 +2695,10 @@ void handleStreamStatsPayload(const std::string& json) {
   feedback.jitterMs = jsonDoubleValue(json, "jitterMs");
   feedback.avgAgeMs = jsonDoubleValue(json, "avgAgeMs", -1.0);
   feedback.maxAgeMs = jsonDoubleValue(json, "maxAgeMs", -1.0);
+  feedback.rttMs = jsonDoubleValue(json, "rttMs", -1.0);
+  feedback.rttMaxMs = jsonDoubleValue(json, "rttMaxMs", -1.0);
+  feedback.rttSmoothedMs = jsonDoubleValue(json, "rttSmoothedMs", -1.0);
+  feedback.lossPercent = jsonDoubleValue(json, "lossPercent", 0.0);
   feedback.decodeSamples = jsonUint64Value(json, "decodeSamples");
   feedback.decodeOverBudget = jsonUint64Value(json, "decodeOverBudget");
   feedback.decodeAvgMs = jsonDoubleValue(json, "decodeAvgMs", -1.0);
@@ -2696,7 +2726,9 @@ void handleStreamStatsPayload(const std::string& json) {
   feedback.renderAvgPresentLateMs = jsonDoubleValue(json, "avgPresentLateMs", -1.0);
   feedback.renderMaxPresentLateMs = jsonDoubleValue(json, "maxPresentLateMs", -1.0);
 
-  const bool hasNetworkSample = feedback.packets > 0 || feedback.dropped > 0 || feedback.totalDropped > 0;
+  const bool hasRttSample = feedback.rttMs >= 0.0 || feedback.rttMaxMs >= 0.0 || feedback.rttSmoothedMs >= 0.0;
+  const bool hasLossSample = feedback.lossPercent > 0.0 || feedback.dropped > 0 || feedback.totalDropped > 0;
+  const bool hasNetworkSample = feedback.packets > 0 || hasLossSample || hasRttSample;
   const bool hasDecodeSample = feedback.decodeSamples > 0 || feedback.decodeOverBudget > 0 ||
                                feedback.decodeAvgMs >= 0.0 || feedback.decodeMaxMs >= 0.0;
   const bool hasLatencyDropSample = feedback.latencyDropped > 0 ||
@@ -2708,12 +2740,23 @@ void handleStreamStatsPayload(const std::string& json) {
 	                               feedback.renderDroppedQueue > 0 || feedback.renderDroppedLate > 0 ||
 	                               feedback.renderCoalesced > 0 || feedback.renderQueuePressureReset > 0;
 
-  const bool networkSevere = feedback.dropped > 0 || feedback.jitterMs > 35.0 ||
+  const bool networkSevere = feedback.dropped > 0 ||
+                             feedback.lossPercent >= 4.0 ||
+                             feedback.rttMs > 180.0 ||
+                             feedback.rttMaxMs > 260.0 ||
+                             feedback.jitterMs > 35.0 ||
                              feedback.avgAgeMs > 180.0 || feedback.maxAgeMs > 260.0;
-  const bool networkCongested = feedback.jitterMs > 16.0 ||
+  const bool networkCongested = feedback.lossPercent >= 1.0 ||
+                                feedback.rttMs > 90.0 ||
+                                feedback.rttMaxMs > 160.0 ||
+                                feedback.jitterMs > 16.0 ||
                                 feedback.avgAgeMs > 90.0 || feedback.maxAgeMs > 150.0;
   const bool networkClear = hasNetworkSample &&
-                            feedback.dropped == 0 && feedback.jitterMs < 8.0 &&
+                            feedback.dropped == 0 &&
+                            feedback.lossPercent < 0.5 &&
+                            (feedback.rttMs < 0.0 || feedback.rttMs < 65.0) &&
+                            (feedback.rttMaxMs < 0.0 || feedback.rttMaxMs < 120.0) &&
+                            feedback.jitterMs < 8.0 &&
                             (feedback.avgAgeMs < 0.0 || feedback.avgAgeMs < 70.0) &&
                             (feedback.maxAgeMs < 0.0 || feedback.maxAgeMs < 120.0);
 
@@ -2803,6 +2846,9 @@ void handleStreamStatsPayload(const std::string& json) {
             << " packets=" << feedback.packets
             << " dropped=" << feedback.dropped
             << " totalDropped=" << feedback.totalDropped
+            << " lossPercent=" << feedback.lossPercent
+            << " rttMs=" << feedback.rttMs
+            << " rttMaxMs=" << feedback.rttMaxMs
             << " jitterMs=" << feedback.jitterMs
             << " avgAgeMs=" << feedback.avgAgeMs
             << " maxAgeMs=" << feedback.maxAgeMs;
@@ -2860,6 +2906,10 @@ void handleUdpRepairStatsPayload(const std::string& json) {
   feedback.nackSent = jsonUint64Value(json, "nackSent");
   feedback.nackRecovered = jsonUint64Value(json, "nackRecovered");
   feedback.nackTimedOut = jsonUint64Value(json, "nackTimedOut");
+  feedback.lossPercent = jsonDoubleValue(json, "lossPercent", 0.0);
+  feedback.rttMs = jsonDoubleValue(json, "rttMs", -1.0);
+  feedback.rttMaxMs = jsonDoubleValue(json, "rttMaxMs", -1.0);
+  feedback.rttSmoothedMs = jsonDoubleValue(json, "rttSmoothedMs", -1.0);
   feedback.jitterPending = jsonUint64Value(json, "jitterPending");
   feedback.jitterReleased = jsonUint64Value(json, "jitterReleased");
   feedback.jitterHeld = jsonUint64Value(json, "jitterHeld");
@@ -2875,6 +2925,9 @@ void handleUdpRepairStatsPayload(const std::string& json) {
   feedback.videoSequence = jsonUint64Value(json, "videoSequence");
 
   const bool severe = feedback.nackTimedOut > 0 ||
+                      feedback.lossPercent >= 4.0 ||
+                      feedback.rttMs > 180.0 ||
+                      feedback.rttMaxMs > 260.0 ||
                       feedback.jitterSkipped > 0 ||
                       feedback.malformed > 0 ||
                       feedback.authRejected > 0 ||
@@ -2882,6 +2935,9 @@ void handleUdpRepairStatsPayload(const std::string& json) {
                       feedback.jitterKeyframeReset > 0 ||
                       feedback.nackPending >= 8;
   const bool congested = feedback.nackSent >= 3 ||
+                         feedback.lossPercent >= 1.0 ||
+                         feedback.rttMs > 90.0 ||
+                         feedback.rttMaxMs > 160.0 ||
                          feedback.nackPending > 0 ||
                          feedback.retransmitCompleted > 0 ||
                          feedback.retransmitFragments > 0 ||
@@ -2912,10 +2968,13 @@ void handleUdpRepairStatsPayload(const std::string& json) {
   std::cerr << "SNUDP_REPAIR pressure=" << pressureLabel(feedback.pressure)
             << " clientSequence=" << feedback.clientSequence
             << " nackSent=" << feedback.nackSent
-            << " nackRecovered=" << feedback.nackRecovered
-            << " nackTimedOut=" << feedback.nackTimedOut
-            << " nackPending=" << feedback.nackPending
-            << " retransmitCompleted=" << feedback.retransmitCompleted
+	            << " nackRecovered=" << feedback.nackRecovered
+	            << " nackTimedOut=" << feedback.nackTimedOut
+	            << " nackPending=" << feedback.nackPending
+            << " lossPercent=" << feedback.lossPercent
+            << " rttMs=" << feedback.rttMs
+            << " rttMaxMs=" << feedback.rttMaxMs
+	            << " retransmitCompleted=" << feedback.retransmitCompleted
             << " jitterSkipped=" << feedback.jitterSkipped
             << " jitterHeld=" << feedback.jitterHeld
             << " jitterGenerationReset=" << feedback.jitterGenerationReset
@@ -3986,7 +4045,7 @@ private:
   std::uint64_t nextPacketId_ = 1;
   std::map<std::uint64_t, PacketCacheEntry> packetCache_;
   std::deque<std::uint64_t> packetCacheOrder_;
-  static constexpr std::size_t maxPacketCache_ = 180;
+  static constexpr std::size_t maxPacketCache_ = 600;
   std::uint64_t retransmittedPackets_ = 0;
   std::uint64_t packetCacheGeneration_ = 0;
   std::uint64_t windowCacheResets_ = 0;
@@ -4009,7 +4068,9 @@ using Microsoft::WRL::ComPtr;
 
 enum class WasapiSampleFormat {
   Float32,
-  Pcm16
+  Pcm16,
+  Pcm24,
+  Pcm32
 };
 
 struct WasapiFormatInfo {
@@ -4199,11 +4260,41 @@ public:
   WasapiLoopbackAudioSender& operator=(const WasapiLoopbackAudioSender&) = delete;
 
 private:
+  class WasapiRestartError : public std::runtime_error {
+  public:
+    explicit WasapiRestartError(const std::string& message) : std::runtime_error(message) {}
+  };
+
+  static bool isRecoverableWasapiHr(HRESULT hr) {
+    switch (hr) {
+      case AUDCLNT_E_DEVICE_INVALIDATED:
+      case AUDCLNT_E_RESOURCES_INVALIDATED:
+      case AUDCLNT_E_SERVICE_NOT_RUNNING:
+      case AUDCLNT_E_ENDPOINT_CREATE_FAILED:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   static void requireHr(HRESULT hr, const char* label) {
     if (FAILED(hr)) {
       std::ostringstream out;
       out << label << " failed hr=0x" << std::hex << static_cast<unsigned long>(hr);
+      if (isRecoverableWasapiHr(hr)) {
+        throw WasapiRestartError(out.str());
+      }
       throw std::runtime_error(out.str());
+    }
+  }
+
+  static WasapiSampleFormat pcmFormatForBits(std::uint16_t bitsPerSample) {
+    switch (bitsPerSample) {
+      case 16: return WasapiSampleFormat::Pcm16;
+      case 24: return WasapiSampleFormat::Pcm24;
+      case 32: return WasapiSampleFormat::Pcm32;
+      default:
+        throw std::runtime_error("Unsupported WASAPI PCM bits=" + std::to_string(bitsPerSample));
     }
   }
 
@@ -4223,6 +4314,11 @@ private:
       info.sampleFormat = WasapiSampleFormat::Pcm16;
       return info;
     }
+    if (format->wFormatTag == WAVE_FORMAT_PCM &&
+        (format->wBitsPerSample == 24 || format->wBitsPerSample == 32)) {
+      info.sampleFormat = pcmFormatForBits(format->wBitsPerSample);
+      return info;
+    }
     if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
         format->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)) {
       const auto* extensible = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(format);
@@ -4236,6 +4332,11 @@ private:
         info.sampleFormat = WasapiSampleFormat::Pcm16;
         return info;
       }
+      if (IsEqualGUID(extensible->SubFormat, KSDATAFORMAT_SUBTYPE_PCM) &&
+          (format->wBitsPerSample == 24 || format->wBitsPerSample == 32)) {
+        info.sampleFormat = pcmFormatForBits(format->wBitsPerSample);
+        return info;
+      }
     }
 
     throw std::runtime_error("Unsupported WASAPI mix format tag=" + std::to_string(format->wFormatTag) +
@@ -4246,20 +4347,36 @@ private:
     switch (format) {
       case WasapiSampleFormat::Float32: return "float32";
       case WasapiSampleFormat::Pcm16: return "pcm16";
+      case WasapiSampleFormat::Pcm24: return "pcm24";
+      case WasapiSampleFormat::Pcm32: return "pcm32";
     }
     return "unknown";
   }
 
   static float sampleAt(const BYTE* data,
-                        WasapiSampleFormat format,
-                        std::uint16_t channels,
+                        const WasapiFormatInfo& format,
                         std::uint32_t frame,
                         std::uint16_t channel) {
-    const std::size_t index = static_cast<std::size_t>(frame) * channels + channel;
-    if (format == WasapiSampleFormat::Float32) {
-      return reinterpret_cast<const float*>(data)[index];
+    const std::size_t sampleIndex = static_cast<std::size_t>(frame) * format.channels + channel;
+    switch (format.sampleFormat) {
+      case WasapiSampleFormat::Float32:
+        return reinterpret_cast<const float*>(data)[sampleIndex];
+      case WasapiSampleFormat::Pcm16:
+        return static_cast<float>(reinterpret_cast<const std::int16_t*>(data)[sampleIndex]) / 32768.0f;
+      case WasapiSampleFormat::Pcm24: {
+        const std::size_t byteIndex = sampleIndex * 3;
+        std::int32_t sample = static_cast<std::int32_t>(data[byteIndex]) |
+          (static_cast<std::int32_t>(data[byteIndex + 1]) << 8) |
+          (static_cast<std::int32_t>(data[byteIndex + 2]) << 16);
+        if (sample & 0x800000) {
+          sample |= ~0xFFFFFF;
+        }
+        return static_cast<float>(sample) / 8388608.0f;
+      }
+      case WasapiSampleFormat::Pcm32:
+        return static_cast<float>(reinterpret_cast<const std::int32_t*>(data)[sampleIndex]) / 2147483648.0f;
     }
-    return static_cast<float>(reinterpret_cast<const std::int16_t*>(data)[index]) / 32768.0f;
+    return 0.0f;
   }
 
   static void convertToStereoFloat(const BYTE* data,
@@ -4271,43 +4388,81 @@ private:
     if (silent || !data) return;
 
     for (std::uint32_t frame = 0; frame < frameCount; ++frame) {
-      const float left = sampleAt(data, format.sampleFormat, format.channels, frame, 0);
+      const float left = sampleAt(data, format, frame, 0);
       const float right = format.channels > 1
-        ? sampleAt(data, format.sampleFormat, format.channels, frame, 1)
+        ? sampleAt(data, format, frame, 1)
         : left;
       output[static_cast<std::size_t>(frame) * 2] = std::clamp(left, -1.0f, 1.0f);
       output[static_cast<std::size_t>(frame) * 2 + 1] = std::clamp(right, -1.0f, 1.0f);
     }
   }
 
-  void run() {
-    HRESULT coinit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool comInitialized = SUCCEEDED(coinit);
-    if (coinit == RPC_E_CHANGED_MODE) {
-      coinit = S_OK;
+  static const char* roleLabel(ERole role) {
+    switch (role) {
+      case eConsole: return "console";
+      case eMultimedia: return "multimedia";
+      case eCommunications: return "communications";
+      default: return "unknown";
+    }
+  }
+
+  static double referenceTimeToMs(REFERENCE_TIME value) {
+    return static_cast<double>(value) / 10000.0;
+  }
+
+  static ComPtr<IMMDevice> defaultRenderEndpoint(IMMDeviceEnumerator* enumerator, ERole* selectedRole) {
+    if (!enumerator) throw std::runtime_error("WASAPI device enumerator is null.");
+
+    const std::array<ERole, 3> roles{eConsole, eMultimedia, eCommunications};
+    HRESULT lastHr = E_FAIL;
+    for (ERole role : roles) {
+      ComPtr<IMMDevice> device;
+      const HRESULT hr = enumerator->GetDefaultAudioEndpoint(eRender, role, device.GetAddressOf());
+      if (SUCCEEDED(hr) && device) {
+        if (selectedRole) *selectedRole = role;
+        return device;
+      }
+      lastHr = hr;
     }
 
+    std::ostringstream out;
+    out << "GetDefaultAudioEndpoint failed for all render roles hr=0x"
+        << std::hex << static_cast<unsigned long>(lastHr);
+    throw std::runtime_error(out.str());
+  }
+
+  void runCaptureSession(UdpAudioClient& audioClient, IMMDeviceEnumerator* enumerator) {
     HANDLE event = nullptr;
     HANDLE avrtHandle = nullptr;
     DWORD avrtTaskIndex = 0;
     WAVEFORMATEX* mixFormat = nullptr;
+    bool wasapiStarted = false;
+    ComPtr<IAudioClient> wasapiClient;
+
+    auto cleanup = [&]() {
+      if (wasapiStarted && wasapiClient) {
+        wasapiClient->Stop();
+        wasapiStarted = false;
+      }
+      wakeEvent_ = nullptr;
+      if (avrtHandle) {
+        AvRevertMmThreadCharacteristics(avrtHandle);
+        avrtHandle = nullptr;
+      }
+      if (event) {
+        CloseHandle(event);
+        event = nullptr;
+      }
+      if (mixFormat) {
+        CoTaskMemFree(mixFormat);
+        mixFormat = nullptr;
+      }
+    };
+
     try {
-      requireHr(coinit, "CoInitializeEx");
+      ERole selectedRole = eConsole;
+      ComPtr<IMMDevice> device = defaultRenderEndpoint(enumerator, &selectedRole);
 
-      UdpAudioClient audioClient(endpoint_, mediaCrypto_);
-      ComPtr<IMMDeviceEnumerator> enumerator;
-      requireHr(CoCreateInstance(__uuidof(MMDeviceEnumerator),
-                                 nullptr,
-                                 CLSCTX_ALL,
-                                 __uuidof(IMMDeviceEnumerator),
-                                 reinterpret_cast<void**>(enumerator.GetAddressOf())),
-                "CoCreateInstance(MMDeviceEnumerator)");
-
-      ComPtr<IMMDevice> device;
-      requireHr(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, device.GetAddressOf()),
-                "GetDefaultAudioEndpoint");
-
-      ComPtr<IAudioClient> wasapiClient;
       requireHr(device->Activate(__uuidof(IAudioClient),
                                  CLSCTX_ALL,
                                  nullptr,
@@ -4323,7 +4478,11 @@ private:
       REFERENCE_TIME defaultPeriod = 0;
       REFERENCE_TIME minimumPeriod = 0;
       requireHr(wasapiClient->GetDevicePeriod(&defaultPeriod, &minimumPeriod), "IAudioClient::GetDevicePeriod");
-      const REFERENCE_TIME bufferDuration = defaultPeriod > 0 ? defaultPeriod : 100000;
+      REFERENCE_TIME bufferDuration = defaultPeriod > 0 ? std::max<REFERENCE_TIME>(defaultPeriod * 2, 100000) : 200000;
+      if (minimumPeriod > 0) {
+        bufferDuration = std::max(bufferDuration, minimumPeriod);
+      }
+
       requireHr(wasapiClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                          AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                          bufferDuration,
@@ -4345,11 +4504,20 @@ private:
                 "IAudioClient::GetService(IAudioCaptureClient)");
 
       avrtHandle = AvSetMmThreadCharacteristicsW(L"Audio", &avrtTaskIndex);
+      if (avrtHandle) {
+        AvSetMmThreadPriority(avrtHandle, AVRT_PRIORITY_CRITICAL);
+      }
       requireHr(wasapiClient->Start(), "IAudioClient::Start");
+      wasapiStarted = true;
       std::cerr << "SNA1_AUDIO_CAPTURE sampleRate=" << format.sampleRate
                 << " sourceChannels=" << format.channels
                 << " sendChannels=2"
                 << " format=" << formatLabel(format.sampleFormat)
+                << " bits=" << format.bitsPerSample
+                << " role=" << roleLabel(selectedRole)
+                << " devicePeriodMs=" << std::fixed << std::setprecision(2) << referenceTimeToMs(defaultPeriod)
+                << " minimumPeriodMs=" << referenceTimeToMs(minimumPeriod)
+                << " bufferMs=" << referenceTimeToMs(bufferDuration)
                 << "\n";
 
       std::vector<float> stereoSamples;
@@ -4358,12 +4526,17 @@ private:
       std::uint64_t statsFrames = 0;
       std::uint64_t statsBytes = 0;
       std::uint64_t statsSilentFrames = 0;
+      std::uint64_t statsDiscontinuityFrames = 0;
+      std::uint64_t statsDiscontinuityPackets = 0;
+      std::uint64_t statsTimeouts = 0;
 
       while (running_) {
         const DWORD wait = WaitForSingleObject(event, 200);
         if (!running_) break;
-        if (wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT) {
-          throw std::runtime_error("WASAPI audio wait failed.");
+        if (wait == WAIT_TIMEOUT) {
+          statsTimeouts += 1;
+        } else if (wait != WAIT_OBJECT_0) {
+          throw WasapiRestartError("WASAPI audio wait failed.");
         }
 
         UINT32 packetFrames = 0;
@@ -4375,12 +4548,17 @@ private:
           requireHr(captureClient->GetBuffer(&data, &frameCount, &flags, nullptr, nullptr),
                     "IAudioCaptureClient::GetBuffer");
           const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+          const bool discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
           convertToStereoFloat(data, frameCount, format, silent, stereoSamples);
           requireHr(captureClient->ReleaseBuffer(frameCount), "IAudioCaptureClient::ReleaseBuffer");
           statsPackets += audioClient.sendStereoFloat(format.sampleRate, stereoSamples.data(), frameCount);
           statsFrames += frameCount;
           statsBytes += static_cast<std::uint64_t>(frameCount) * 2 * sizeof(float);
           if (silent) statsSilentFrames += frameCount;
+          if (discontinuity) {
+            statsDiscontinuityFrames += frameCount;
+            statsDiscontinuityPackets += 1;
+          }
           requireHr(captureClient->GetNextPacketSize(&packetFrames), "IAudioCaptureClient::GetNextPacketSize");
         }
 
@@ -4392,30 +4570,68 @@ private:
                     << " frames=" << statsFrames
                     << " kbps=" << std::fixed << std::setprecision(1) << kbps
                     << " silentFrames=" << statsSilentFrames
+                    << " discontinuityPackets=" << statsDiscontinuityPackets
+                    << " discontinuityFrames=" << statsDiscontinuityFrames
+                    << " timeouts=" << statsTimeouts
                     << "\n";
           statsStartedAt = statsNow;
           statsPackets = 0;
           statsFrames = 0;
           statsBytes = 0;
           statsSilentFrames = 0;
+          statsDiscontinuityFrames = 0;
+          statsDiscontinuityPackets = 0;
+          statsTimeouts = 0;
         }
       }
+      cleanup();
+    } catch (...) {
+      cleanup();
+      throw;
+    }
+  }
 
-      wasapiClient->Stop();
+  void run() {
+    HRESULT coinit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool comInitialized = SUCCEEDED(coinit);
+    if (coinit == RPC_E_CHANGED_MODE) {
+      coinit = S_OK;
+    }
+
+    try {
+      requireHr(coinit, "CoInitializeEx");
+
+      UdpAudioClient audioClient(endpoint_, mediaCrypto_);
+      ComPtr<IMMDeviceEnumerator> enumerator;
+      requireHr(CoCreateInstance(__uuidof(MMDeviceEnumerator),
+                                 nullptr,
+                                 CLSCTX_ALL,
+                                 __uuidof(IMMDeviceEnumerator),
+                                 reinterpret_cast<void**>(enumerator.GetAddressOf())),
+                "CoCreateInstance(MMDeviceEnumerator)");
+
+      std::uint32_t restartAttempt = 0;
+      while (running_) {
+        try {
+          runCaptureSession(audioClient, enumerator.Get());
+          restartAttempt = 0;
+        } catch (const WasapiRestartError& error) {
+          if (!running_) break;
+          restartAttempt += 1;
+          const std::uint32_t delayMs = std::min<std::uint32_t>(2000, 150 * restartAttempt);
+          std::cerr << "SNA1_AUDIO_RESTART attempt=" << restartAttempt
+                    << " delayMs=" << delayMs
+                    << " reason=\"" << error.what() << "\"\n";
+          const auto wakeAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+          while (running_ && std::chrono::steady_clock::now() < wakeAt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+          }
+        }
+      }
     } catch (const std::exception& error) {
       std::cerr << "SNA1_AUDIO_CAPTURE error: " << error.what() << "\n";
     }
 
-    wakeEvent_ = nullptr;
-    if (avrtHandle) {
-      AvRevertMmThreadCharacteristics(avrtHandle);
-    }
-    if (event) {
-      CloseHandle(event);
-    }
-    if (mixFormat) {
-      CoTaskMemFree(mixFormat);
-    }
     if (comInitialized) {
       CoUninitialize();
     }
@@ -4446,8 +4662,10 @@ std::vector<std::uint8_t> makeEncodedPacketBytes(const EncodedVideoPacket& packe
                                                  std::uint32_t width,
                                                  std::uint32_t height,
                                                  std::uint64_t sequence,
+                                                 VideoCodec codec,
                                                  bool hardware) {
   EncodedPacketHeader header;
+  header.codec = snvCodecId(codec);
   header.width = width;
   header.height = height;
   header.sequence = sequence;
@@ -4470,8 +4688,9 @@ void writeEncodedPacket(std::ostream& output,
                         std::uint32_t width,
                         std::uint32_t height,
                         std::uint64_t sequence,
+                        VideoCodec codec,
                         bool hardware) {
-  const auto bytes = makeEncodedPacketBytes(packet, width, height, sequence, hardware);
+  const auto bytes = makeEncodedPacketBytes(packet, width, height, sequence, codec, hardware);
   output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 }
 
@@ -4587,8 +4806,8 @@ void drawSoftwareCursor(FrameBgra& frame, const DesktopDuplicator& duplicator) {
 #endif
 
 int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
-  if (options.codec != VideoCodec::H264) {
-    throw std::runtime_error("--encode-pipe currently supports h264 only.");
+  if (options.codec == VideoCodec::Av1) {
+    throw std::runtime_error("--encode-pipe currently supports h264 and hevc only.");
   }
   const bool hasNetworkVideo = !options.tcpConnect.empty() || !options.udpConnect.empty();
   if (hasNetworkVideo && !options.packetFile.empty()) {
@@ -4692,24 +4911,43 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 #endif
 
   VideoPacketEncodeOptions encodeOptions;
-  encodeOptions.codec = VideoCodec::H264;
+  encodeOptions.codec = options.codec;
+  encodeOptions.encoderPreference = options.encoderPreference;
   encodeOptions.fps = options.fps;
   encodeOptions.bitrate = initialAdaptiveBitrate;
   encodeOptions.hardware = options.hardwareEncoder;
   encodeOptions.lowLatency = options.lowLatencyEncoder;
   encodeOptions.keyframeIntervalSeconds = options.keyframeIntervalSeconds;
 
-  auto encoder = std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), encodeOptions);
+  auto makePacketEncoder = [&](VideoPacketEncodeOptions& requestedOptions,
+                               const char* reason) {
+    try {
+      return std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), requestedOptions);
+    } catch (const std::exception& error) {
+      if (requestedOptions.codec == VideoCodec::Hevc) {
+        std::cerr << "SNV1_CODEC_FALLBACK requested=hevc fallback=h264 reason="
+                  << (reason ? reason : "encoder-create")
+                  << " error=\"" << error.what() << "\"\n";
+        requestedOptions.codec = VideoCodec::H264;
+        return std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), requestedOptions);
+      }
+      throw;
+    }
+  };
+
+  auto encoder = makePacketEncoder(encodeOptions, "initial");
   auto restartEncoder = [&](std::uint32_t bitrate, const char* reason) -> bool {
     auto nextOptions = encodeOptions;
     nextOptions.bitrate = bitrate;
     try {
-      auto replacement = std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), nextOptions);
+      auto replacement = makePacketEncoder(nextOptions, reason);
       encoder = std::move(replacement);
       encodeOptions = nextOptions;
       std::cerr << "SNV1_ENCODER_RESTART reason=" << reason
                 << " bitrate=" << bitrate
                 << " hardware=" << (encoder->usingHardware() ? "yes" : "no")
+                << " backend=" << encoder->encoderBackend()
+                << " name=\"" << encoder->encoderName() << "\""
                 << "\n";
       return true;
     } catch (const std::exception& error) {
@@ -4721,10 +4959,13 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     }
   };
 
-  std::cerr << "SNV1 H.264 packet stream: "
+  std::cerr << "SNV1 " << videoCodecName(encoder->codec()) << " packet stream: "
             << duplicator.width() << "x" << duplicator.height()
             << " @ " << options.fps << " FPS, " << options.bitrate << " bps, "
             << (encoder->usingHardware() ? "hardware encoder" : "software encoder")
+            << " codec=" << videoCodecName(encoder->codec())
+            << " backend=" << encoder->encoderBackend()
+            << " name=\"" << encoder->encoderName() << "\""
             << ", lowLatency=" << (options.lowLatencyEncoder ? "yes" : "no")
             << ", keyframeInterval=" << options.keyframeIntervalSeconds << "s"
             << (!options.udpConnect.empty()
@@ -4840,6 +5081,13 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint64_t seenFeedbackSequence = 0;
   std::uint64_t seenUdpRepairFeedbackSequence = 0;
   std::uint64_t seenKeyframeRequestSequence = 0;
+  std::uint64_t awaitingKeyframeRequestSequence = 0;
+  std::uint64_t awaitingKeyframeClientSequence = 0;
+  std::uint64_t awaitingKeyframeVideoSequence = 0;
+  std::string awaitingKeyframeReason = "none";
+  std::uint32_t awaitingKeyframeFrames = 0;
+  std::uint32_t awaitingKeyframeAttempts = 0;
+  auto lastKeyframeRecoveryApplyAt = std::chrono::steady_clock::time_point{};
   std::uint64_t seenVideoNackSequence = 0;
   std::uint32_t clearFeedbackWindows = 0;
   std::uint32_t clearUdpRepairWindows = 0;
@@ -4949,7 +5197,10 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 		    const auto pendingKeyframeRequest = latestKeyframeRequest();
 		    const bool hasPendingKeyframeRequest = pendingKeyframeRequest.sequence != 0 &&
 		                                           pendingKeyframeRequest.sequence != seenKeyframeRequestSequence;
+    const bool hasPendingKeyframeRetry = awaitingKeyframeRequestSequence != 0 &&
+                                         awaitingKeyframeFrames >= 3;
     const bool mustSendRecoveryFrame = hasPendingKeyframeRequest
+      || hasPendingKeyframeRetry
 	#ifdef _WIN32
       || hasPendingMediaEpochKeyframe
 	#endif
@@ -4995,7 +5246,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      const bool cursorOk = GetCursorPos(&cursor) != 0;
       const bool cursorChanged = cursorOk
         && (!hasLastCursor || cursor.x != lastCursor.x || cursor.y != lastCursor.y);
-      if (hasLastCleanFrame && (hasPendingKeyframeRequest || hasPendingMediaEpochKeyframe)) {
+      if (hasLastCleanFrame && (hasPendingKeyframeRequest || hasPendingKeyframeRetry || hasPendingMediaEpochKeyframe)) {
         frame = lastCleanFrame;
         ++statsRefreshFrames;
       } else if (hasLastCleanFrame && cursorChanged) {
@@ -5063,25 +5314,53 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     }
 #endif
 
-    if (hasPendingKeyframeRequest) {
+    if (hasPendingKeyframeRequest || hasPendingKeyframeRetry) {
+      const bool retry = !hasPendingKeyframeRequest && hasPendingKeyframeRetry;
+      const std::uint64_t requestSequence = hasPendingKeyframeRequest
+        ? pendingKeyframeRequest.sequence
+        : awaitingKeyframeRequestSequence;
+      const std::uint64_t clientSequence = hasPendingKeyframeRequest
+        ? pendingKeyframeRequest.clientSequence
+        : awaitingKeyframeClientSequence;
+      const std::uint64_t videoSequence = hasPendingKeyframeRequest
+        ? pendingKeyframeRequest.videoSequence
+        : awaitingKeyframeVideoSequence;
+      const std::string requestReason = hasPendingKeyframeRequest
+        ? pendingKeyframeRequest.reason
+        : awaitingKeyframeReason;
       bool forced = encoder->requestKeyframe();
       bool restarted = false;
-      if (!forced) {
-        const auto now = std::chrono::steady_clock::now();
+      const auto now = std::chrono::steady_clock::now();
+      const bool retryNeedsRestart = retry && awaitingKeyframeAttempts >= 2;
+      if (!forced || retryNeedsRestart) {
         const bool enoughCooldown = lastEncoderRestartAt.time_since_epoch().count() == 0
-          || now - lastEncoderRestartAt > std::chrono::seconds(2);
-        if (enoughCooldown && restartEncoder(currentAdaptiveBitrate, "keyframe-request")) {
+          || now - lastEncoderRestartAt > std::chrono::milliseconds(1200);
+        if (enoughCooldown && restartEncoder(currentAdaptiveBitrate,
+                                             retryNeedsRestart ? "keyframe-idr-miss" : "keyframe-request")) {
           lastEncoderRestartAt = now;
           restarted = true;
           forced = true;
         }
       }
-      seenKeyframeRequestSequence = pendingKeyframeRequest.sequence;
-      std::cerr << "SNV1_KEYFRAME_APPLY sequence=" << pendingKeyframeRequest.sequence
-                << " reason=" << pendingKeyframeRequest.reason
-                << " videoSequence=" << pendingKeyframeRequest.videoSequence
+      if (hasPendingKeyframeRequest) {
+        seenKeyframeRequestSequence = pendingKeyframeRequest.sequence;
+      }
+      awaitingKeyframeRequestSequence = requestSequence;
+      awaitingKeyframeClientSequence = clientSequence;
+      awaitingKeyframeVideoSequence = videoSequence;
+      awaitingKeyframeReason = requestReason.empty() ? "client" : requestReason;
+      awaitingKeyframeFrames = 0;
+      awaitingKeyframeAttempts += 1;
+      lastKeyframeRecoveryApplyAt = now;
+      std::cerr << "SNV1_KEYFRAME_APPLY sequence=" << requestSequence
+                << " clientSequence=" << clientSequence
+                << " reason=" << awaitingKeyframeReason
+                << " videoSequence=" << videoSequence
+                << " retry=" << (retry ? "yes" : "no")
+                << " attempt=" << awaitingKeyframeAttempts
                 << " forced=" << (forced ? "yes" : "no")
                 << " restarted=" << (restarted ? "yes" : "no")
+                << " awaitIdr=yes"
                 << "\n";
     }
 
@@ -5091,21 +5370,29 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    const auto encodeFinishedAt = std::chrono::steady_clock::now();
 	    std::uint64_t framePacketizeMicros = 0;
 	    std::uint64_t frameSendMicros = 0;
+    bool frameHadKeyframe = false;
+    std::uint64_t frameKeyframeSequence = 0;
 	    for (const auto& packet : packets) {
 	      const auto packetizeStartedAt = std::chrono::steady_clock::now();
 	      const auto streamPacket = normalizePacketTimestamp(
 	        packet,
 	        currentStreamDurationMicros());
+      const std::uint64_t streamSequence = sequence++;
       const auto bytes = makeEncodedPacketBytes(streamPacket,
                                                 duplicator.width(),
                                                 duplicator.height(),
-	                                                sequence++,
+	                                                streamSequence,
+                                                encoder->codec(),
 	                                                encoder->usingHardware());
 	      const auto packetizeFinishedAt = std::chrono::steady_clock::now();
 	      framePacketizeMicros += microsBetween(packetizeStartedAt, packetizeFinishedAt);
 	      ++statsPackets;
 	      statsBytes += bytes.size();
-	      if (packet.keyframe) ++statsKeyframes;
+	      if (packet.keyframe) {
+        ++statsKeyframes;
+        frameHadKeyframe = true;
+        frameKeyframeSequence = streamSequence;
+      }
 	      const auto sendStartedAt = std::chrono::steady_clock::now();
 	#ifdef _WIN32
 	      if (tcpClient) {
@@ -5124,6 +5411,39 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      const auto sendFinishedAt = std::chrono::steady_clock::now();
 	      frameSendMicros += microsBetween(sendStartedAt, sendFinishedAt);
 	    }
+    if (awaitingKeyframeRequestSequence != 0) {
+      if (frameHadKeyframe) {
+        const double waitedMs = lastKeyframeRecoveryApplyAt.time_since_epoch().count() == 0
+          ? 0.0
+          : std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - lastKeyframeRecoveryApplyAt).count();
+        std::cerr << "SNV1_KEYFRAME_RECOVERED sequence=" << awaitingKeyframeRequestSequence
+                  << " clientSequence=" << awaitingKeyframeClientSequence
+                  << " reason=" << awaitingKeyframeReason
+                  << " keyframeSequence=" << frameKeyframeSequence
+                  << " framesWaited=" << awaitingKeyframeFrames
+                  << " attempts=" << awaitingKeyframeAttempts
+                  << " waitedMs=" << std::fixed << std::setprecision(1) << waitedMs
+                  << "\n";
+        awaitingKeyframeRequestSequence = 0;
+        awaitingKeyframeClientSequence = 0;
+        awaitingKeyframeVideoSequence = 0;
+        awaitingKeyframeReason = "none";
+        awaitingKeyframeFrames = 0;
+        awaitingKeyframeAttempts = 0;
+        lastKeyframeRecoveryApplyAt = {};
+      } else {
+        awaitingKeyframeFrames += 1;
+        if (awaitingKeyframeFrames == 3 || awaitingKeyframeFrames % 3 == 0) {
+          std::cerr << "SNV1_KEYFRAME_WAIT sequence=" << awaitingKeyframeRequestSequence
+                    << " reason=" << awaitingKeyframeReason
+                    << " frames=" << awaitingKeyframeFrames
+                    << " attempts=" << awaitingKeyframeAttempts
+                    << " nextAction=" << (awaitingKeyframeAttempts >= 2 ? "restart" : "force")
+                    << "\n";
+        }
+      }
+    }
 	#ifdef _WIN32
 	    if (!tcpClient && !udpClient)
 	#endif
@@ -5526,23 +5846,31 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
         lastUdpRepairFeedbackWindow = statsFeedbackWindowSequence;
         std::uint32_t nextBitrate = currentAdaptiveBitrate;
         std::uint32_t nextFps = currentAdaptiveFps;
+        const bool repairTransportSevere = repairFeedback.lossPercent >= 4.0 ||
+                                           repairFeedback.rttMs > 180.0 ||
+                                           repairFeedback.rttMaxMs > 260.0;
+        const bool repairTransportCongested = repairFeedback.lossPercent >= 1.0 ||
+                                              repairFeedback.rttMs > 90.0 ||
+                                              repairFeedback.rttMaxMs > 160.0;
         if (repairFeedback.pressure >= 2) {
           clearUdpRepairWindows = 0;
           clearFeedbackWindows = 0;
           clearFrameFeedbackWindows = 0;
-          nextBitrate = static_cast<std::uint32_t>(static_cast<double>(currentAdaptiveBitrate) * 0.76);
+          nextBitrate = static_cast<std::uint32_t>(
+            static_cast<double>(currentAdaptiveBitrate) * (repairTransportSevere ? 0.64 : 0.76));
           if (adaptiveFramePacing) {
             nextFps = static_cast<std::uint32_t>(
-              std::floor(static_cast<double>(currentAdaptiveFps) * 0.84));
+              std::floor(static_cast<double>(currentAdaptiveFps) * (repairTransportSevere ? 0.78 : 0.84)));
           }
         } else if (repairFeedback.pressure == 1) {
           clearUdpRepairWindows = 0;
           clearFeedbackWindows = 0;
           clearFrameFeedbackWindows = 0;
-          nextBitrate = static_cast<std::uint32_t>(static_cast<double>(currentAdaptiveBitrate) * 0.90);
+          nextBitrate = static_cast<std::uint32_t>(
+            static_cast<double>(currentAdaptiveBitrate) * (repairTransportCongested ? 0.82 : 0.90));
           if (adaptiveFramePacing) {
             nextFps = static_cast<std::uint32_t>(
-              std::floor(static_cast<double>(currentAdaptiveFps) * 0.95));
+              std::floor(static_cast<double>(currentAdaptiveFps) * (repairTransportCongested ? 0.90 : 0.95)));
           }
 	        } else if (repairFeedback.pressure < 0) {
 	          if (renderRecoveryHoldActive() || clientPressureHoldActive()) {
@@ -5611,8 +5939,10 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                       << " maxFps=" << maxAdaptiveFps
                       << " frameDelayMs=" << std::fixed << std::setprecision(1)
                       << (static_cast<double>(adaptiveFrameDelay.count()) / 1000.0)
-                      << " captureTimeoutMs=" << adaptiveCaptureTimeoutMs
-                      << " nackSent=" << repairFeedback.nackSent
+	                      << " captureTimeoutMs=" << adaptiveCaptureTimeoutMs
+                      << " lossPercent=" << repairFeedback.lossPercent
+                      << " rttMs=" << repairFeedback.rttMs
+	                      << " nackSent=" << repairFeedback.nackSent
                       << " nackTimedOut=" << repairFeedback.nackTimedOut
                       << " jitterSkipped=" << repairFeedback.jitterSkipped
                       << "\n";
@@ -5647,9 +5977,12 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                     << " pressure=" << pressureLabel(repairFeedback.pressure)
                     << " requestedMbps=" << (static_cast<double>(nextBitrate) / 1000000.0)
                     << " currentMbps=" << (static_cast<double>(currentAdaptiveBitrate) / 1000000.0)
-                    << " applied=" << (applied ? "yes" : "no")
-                    << " restarted=" << (restarted ? "yes" : "no")
-                    << " nackSent=" << repairFeedback.nackSent
+	                    << " applied=" << (applied ? "yes" : "no")
+	                    << " restarted=" << (restarted ? "yes" : "no")
+                    << " lossPercent=" << repairFeedback.lossPercent
+                    << " rttMs=" << repairFeedback.rttMs
+                    << " rttMaxMs=" << repairFeedback.rttMaxMs
+	                    << " nackSent=" << repairFeedback.nackSent
                     << " nackRecovered=" << repairFeedback.nackRecovered
                     << " nackTimedOut=" << repairFeedback.nackTimedOut
                     << " nackPending=" << repairFeedback.nackPending
@@ -5700,10 +6033,20 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	                                      feedback.jitterMs > 16.0 ||
 	                                      feedback.avgAgeMs > 90.0 ||
 	                                      feedback.maxAgeMs > 150.0);
+	        const bool transportSevere = feedback.lossPercent >= 4.0 ||
+	                                     feedback.rttMs > 180.0 ||
+	                                     feedback.rttMaxMs > 260.0;
+	        const bool transportCongested = feedback.lossPercent >= 1.0 ||
+	                                        feedback.rttMs > 90.0 ||
+	                                        feedback.rttMaxMs > 160.0;
 	        std::string clientAdaptMode = "balanced";
 	        double clientBitrateFactor = feedback.pressure >= 2 ? 0.72 : 0.88;
 	        double clientFpsFactor = feedback.pressure >= 2 ? 0.80 : 0.92;
-	        if (latencyPressure) {
+	        if (transportSevere || transportCongested) {
+	          clientAdaptMode = "rtt-loss";
+	          clientBitrateFactor = transportSevere ? 0.62 : 0.78;
+	          clientFpsFactor = transportSevere ? 0.80 : 0.90;
+	        } else if (latencyPressure) {
 	          clientAdaptMode = "latency-drop";
 	          clientBitrateFactor = feedback.pressure >= 2 ? 0.70 : 0.84;
 	          clientFpsFactor = feedback.pressure >= 2 ? 0.76 : 0.88;
@@ -5832,10 +6175,13 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                       << " maxFps=" << maxAdaptiveFps
 	                      << " frameDelayMs=" << std::fixed << std::setprecision(1)
 	                      << (static_cast<double>(adaptiveFrameDelay.count()) / 1000.0)
-	                      << " captureTimeoutMs=" << adaptiveCaptureTimeoutMs
-	                      << " adaptMode=" << clientAdaptMode
-	                      << " bitrateFactor=" << clientBitrateFactor
-	                      << " fpsFactor=" << clientFpsFactor;
+		                      << " captureTimeoutMs=" << adaptiveCaptureTimeoutMs
+		                      << " adaptMode=" << clientAdaptMode
+		                      << " bitrateFactor=" << clientBitrateFactor
+		                      << " fpsFactor=" << clientFpsFactor
+		                      << " lossPercent=" << feedback.lossPercent
+		                      << " rttMs=" << feedback.rttMs
+		                      << " rttMaxMs=" << feedback.rttMaxMs;
             if (feedback.source == "render" || feedback.rendered > 0) {
 	              std::cerr << " renderQueue=" << feedback.renderQueueDepth
 	                        << " renderDropQ=" << feedback.renderDroppedQueue
@@ -5891,10 +6237,13 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                     << " currentMbps=" << (static_cast<double>(currentAdaptiveBitrate) / 1000000.0)
 	                    << " applied=" << (applied ? "yes" : "no")
 	                    << " restarted=" << (restarted ? "yes" : "no")
-	                    << " adaptMode=" << clientAdaptMode
-	                    << " bitrateFactor=" << clientBitrateFactor
-	                    << " fpsFactor=" << clientFpsFactor
-	                    << " jitterMs=" << feedback.jitterMs
+		                    << " adaptMode=" << clientAdaptMode
+		                    << " bitrateFactor=" << clientBitrateFactor
+		                    << " fpsFactor=" << clientFpsFactor
+		                    << " lossPercent=" << feedback.lossPercent
+		                    << " rttMs=" << feedback.rttMs
+		                    << " rttMaxMs=" << feedback.rttMaxMs
+		                    << " jitterMs=" << feedback.jitterMs
                       << " avgAgeMs=" << feedback.avgAgeMs
                       << " dropped=" << feedback.dropped;
           if (hasDecodeFeedback) {
@@ -5978,6 +6327,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                                               duplicator.width(),
                                               duplicator.height(),
                                               sequence++,
+                                              encoder->codec(),
                                               encoder->usingHardware());
 #ifdef _WIN32
     if (tcpClient) {

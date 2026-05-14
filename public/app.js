@@ -26,6 +26,18 @@ const appState = {
   nativeHostOptions: null,
   nativeRestartTimers: { client: null, host: null },
   nativeRestartAttempts: { client: 0, host: 0 },
+  nativeDiscovery: { peers: [], port: 0, updatedAt: 0 },
+  nativeDiscoveryTimer: null,
+  nativeHealth: {
+    summary: "Chưa có số liệu lag.",
+    severity: "idle",
+    issueAt: 0,
+    video: "--",
+    host: "--",
+    network: "--",
+    render: "--",
+    input: "--"
+  },
   pendingRequests: new Map(),
   heartbeatTimer: null,
   mouseTimer: 0,
@@ -41,7 +53,36 @@ const TRANSPORT_ADJUST_INTERVAL_MS = 1800;
 const NATIVE_TRANSPORT = "native-snv";
 const NATIVE_DEFAULT_PORT = 7777;
 const NATIVE_DEFAULT_CLIENT_IP = "100.100.83.44";
-const NATIVE_RESTART_LIMIT = 5;
+const NATIVE_RESTART_LIMIT = 20;
+const NATIVE_QUALITY_PROFILES = {
+  lan: {
+    preset: "1080p",
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    bitrateMbps: 28,
+    mouseRate: 120,
+    label: "LAN 1080p60 28Mbps"
+  },
+  wifi: {
+    preset: "low-latency",
+    width: 1600,
+    height: 900,
+    fps: 60,
+    bitrateMbps: 18,
+    mouseRate: 90,
+    label: "Wi-Fi 900p60 18Mbps"
+  },
+  tailscale: {
+    preset: "720p",
+    width: 1280,
+    height: 720,
+    fps: 30,
+    bitrateMbps: 12,
+    mouseRate: 60,
+    label: "Tailscale 720p30 12Mbps"
+  }
+};
 
 localStorage.setItem("gr_session_id", appState.sessionId);
 localStorage.setItem("gr_device_id", appState.deviceId);
@@ -101,6 +142,10 @@ const nativeClientState = $("#nativeClientState");
 const nativeHostState = $("#nativeHostState");
 const nativeEndpointState = $("#nativeEndpointState");
 const nativeInputState = $("#nativeInputState");
+const nativeVideoState = $("#nativeVideoState");
+const nativeHostLoadState = $("#nativeHostLoadState");
+const nativeNetworkState = $("#nativeNetworkState");
+const nativeRenderState = $("#nativeRenderState");
 const nativeLogList = $("#nativeLogList");
 
 let authMode = "login";
@@ -121,17 +166,33 @@ function init() {
 }
 
 function applyPerformanceDefaults() {
-  if (localStorage.getItem("gr_perf_defaults_v6") === "1") return;
-  localStorage.setItem("gr_setting_clientResolution", "1080p");
-  localStorage.setItem("gr_setting_clientFps", "60");
-  localStorage.setItem("gr_setting_clientBitrate", "28");
-  localStorage.setItem("gr_setting_hostFps", "60");
-  localStorage.setItem("gr_setting_hostBitrate", "28");
+  if (localStorage.getItem("gr_perf_defaults_v7") === "1") return;
+  const looksLikeOldDefault = (
+    (localStorage.getItem("gr_setting_clientResolution") || "1080p") === "1080p" &&
+    (localStorage.getItem("gr_setting_clientFps") || "60") === "60" &&
+    (localStorage.getItem("gr_setting_clientBitrate") || "28") === "28" &&
+    (localStorage.getItem("gr_setting_hostFps") || "60") === "60" &&
+    (localStorage.getItem("gr_setting_hostBitrate") || "28") === "28"
+  );
+  if (looksLikeOldDefault) {
+    localStorage.setItem("gr_setting_clientResolution", "720p");
+    localStorage.setItem("gr_setting_clientFps", "30");
+    localStorage.setItem("gr_setting_clientBitrate", "12");
+    localStorage.setItem("gr_setting_hostFps", "30");
+    localStorage.setItem("gr_setting_hostBitrate", "12");
+  }
+  localStorage.setItem("gr_setting_nativeQualityProfile", "auto");
+  localStorage.setItem("gr_setting_encoderPreference", "auto");
+  localStorage.setItem("gr_setting_nativeVideoCodec", "h264");
   localStorage.setItem("gr_setting_codecPreference", "H264");
   localStorage.setItem("gr_setting_transportMode", NATIVE_TRANSPORT);
   localStorage.setItem("gr_setting_nativeListenPort", String(NATIVE_DEFAULT_PORT));
   localStorage.setItem("gr_setting_nativeClientIp", NATIVE_DEFAULT_CLIENT_IP);
-  localStorage.setItem("gr_perf_defaults_v6", "1");
+  localStorage.setItem("gr_setting_nativeAudioJitterMs", "24");
+  localStorage.setItem("gr_setting_nativeAudioVolume", "100");
+  localStorage.setItem("gr_setting_nativeAudioMute", "off");
+  localStorage.setItem("gr_setting_nativeAudioDevice", "");
+  localStorage.setItem("gr_perf_defaults_v7", "1");
 }
 
 function bindUi() {
@@ -170,10 +231,17 @@ function bindUi() {
     "hostEnabled",
     "hostFps",
     "hostBitrate",
+    "encoderPreference",
+    "nativeVideoCodec",
     "codecPreference",
     "transportMode",
+    "nativeQualityProfile",
     "nativeListenPort",
     "nativeClientIp",
+    "nativeAudioJitterMs",
+    "nativeAudioDevice",
+    "nativeAudioVolume",
+    "nativeAudioMute",
     "mouseRate",
     "disconnectHotkey",
     "overlayHotkey",
@@ -228,16 +296,29 @@ function bindNativeEvents() {
   if (!window.sanserNative?.onLog) return;
   window.sanserNative.onLog(handleNativeLog);
   window.sanserNative.onExit(handleNativeExit);
+  if (window.sanserNative.onDiscovery) {
+    window.sanserNative.onDiscovery((payload) => {
+      applyNativeDiscovery(payload);
+    });
+  }
   refreshNativeStatus();
+  refreshNativeDiscovery(true).catch(() => {});
+  if (appState.nativeDiscoveryTimer) clearInterval(appState.nativeDiscoveryTimer);
+  appState.nativeDiscoveryTimer = setInterval(() => {
+    refreshNativeDiscovery(false).catch(() => {});
+  }, 5000);
 }
 
 function handleNativeLog(entry = {}) {
   const line = String(entry.line || "");
-  pushNativeLog(entry.role || "native", line);
-  if (entry.role === "client") {
+  const role = entry.role || "native";
+  pushNativeLog(role, line);
+  updateNativeHealthFromLog(role, line);
+  if (role === "client") {
     if (/SNV1 render client connected/i.test(line)) {
       appState.nativeClientConnected = true;
       appState.nativeRestartAttempts.client = 0;
+      clearNativeRestart("client");
       hideConnecting();
       if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
       streamStatus.textContent = "Native SNV đang stream";
@@ -268,6 +349,7 @@ function handleNativeLog(entry = {}) {
     if (/SNU1 render packets/i.test(line)) {
       appState.nativeClientConnected = true;
       appState.nativeRestartAttempts.client = 0;
+      clearNativeRestart("client");
       hideConnecting();
       streamStatus.textContent = "Native UDP SNV đang stream";
       emptyStream.classList.add("is-hidden");
@@ -436,9 +518,11 @@ function handleNativeLog(entry = {}) {
       }
     }
   }
-  if (entry.role === "host") {
-    if (/SNV1 H\.264 packet stream/i.test(line)) {
-      $("#captureStatus").textContent = "Native host đang encode H.264";
+  if (role === "host") {
+    if (/SNV1 (H\.264|H\.265|H\.265\/HEVC) packet stream/i.test(line)) {
+      $("#captureStatus").textContent = /H\.265|HEVC/i.test(line)
+        ? "Native host đang encode HEVC"
+        : "Native host đang encode H.264";
     }
     if (/SNU1 UDP video connected/i.test(line)) {
       $("#captureStatus").textContent = "Native host đang stream UDP video";
@@ -474,14 +558,15 @@ function handleNativeLog(entry = {}) {
       hostStats.textContent = line.replace(/^.*SNV1_HOST_OVERLOAD\s*/, "Host load ");
     } else if (/SNV1_STAGE_PROFILE/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNV1_STAGE_PROFILE\s*/, "Host profile ");
-    } else if (/SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_RESTART|SNV1_KEYFRAME|SNU1_NACK|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET/i.test(line)) {
-      hostStats.textContent = line.replace(/^.*(SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_RESTART|SNV1_KEYFRAME_[A-Z_]+|SNU1_NACK_[A-Z_]+|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET)\s*/, "Native ");
+    } else if (/SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_(SELECTED|RESTART)|SNV1_CODEC_FALLBACK|SNV1_KEYFRAME|SNU1_NACK|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*(SNFEEDBACK|SNUDP_REPAIR|SNV1_ADAPT|SNV1_FRAME_ADAPT|SNV1_ENCODER_(?:SELECTED|RESTART)|SNV1_CODEC_FALLBACK|SNV1_KEYFRAME_[A-Z_]+|SNU1_NACK_[A-Z_]+|SNU1_RETRANSMIT_CACHE_RESET|SNMEDIA_KEY_ROTATE|SNMEDIA_AUTHSEQ_RESET)\s*/, "Native ");
     }
     if (/SNINPUT target bounds/i.test(line)) {
       $("#captureStatus").textContent = line.replace(/^.*SNINPUT target bounds/, "Input target");
     }
     if (/SNINPUT control backchannel enabled/i.test(line)) {
       appState.nativeRestartAttempts.host = 0;
+      clearNativeRestart("host");
       appState.nativeInput = /dedicated=yes/i.test(line) ? "Dedicated backchannel active" : "Backchannel active";
       hostStats.textContent = /dedicated=yes/i.test(line)
         ? "Native SNV | input backchannel riêng hoạt động"
@@ -585,7 +670,9 @@ function scheduleNativeRestart(role, reason = "") {
     return false;
   }
 
-  const delay = Math.min(1000 * nextAttempt, 5000);
+  const exponential = Math.min(750 * (2 ** Math.min(nextAttempt - 1, 4)), 12000);
+  const jitter = Math.round(Math.random() * 350);
+  const delay = exponential + jitter;
   appState.nativeInput = `${role} reconnect ${nextAttempt}/${NATIVE_RESTART_LIMIT}`;
   pushNativeLog(role, `reconnect in ${delay}ms${reason ? ` (${reason})` : ""}`);
   updateNativeDiagnostics();
@@ -628,10 +715,175 @@ async function refreshNativeStatus() {
   }
 }
 
+function applyNativeDiscovery(payload = {}) {
+  const peers = Array.isArray(payload.peers) ? payload.peers : [];
+  appState.nativeDiscovery = {
+    peers,
+    port: Number(payload.port || 0),
+    updatedAt: Date.now()
+  };
+  if (peers.length > 0) {
+    const activePeers = peers.filter((peer) => peer?.native?.clientRunning || peer?.native?.hostRunning).length;
+    appState.nativeHealth.network = `LAN discovery ${peers.length} peer${activePeers ? `, active ${activePeers}` : ""}`;
+    appState.nativeHealth.issueAt = Date.now();
+  }
+  updateNativeDiagnostics();
+}
+
+async function refreshNativeDiscovery(force = false) {
+  if (!window.sanserNative?.discovery) return null;
+  const payload = force && window.sanserNative.refreshDiscovery
+    ? await window.sanserNative.refreshDiscovery()
+    : await window.sanserNative.discovery();
+  applyNativeDiscovery(payload || {});
+  return appState.nativeDiscovery;
+}
+
 function pushNativeLog(role, line) {
   if (!line) return;
   appState.nativeLogs.push({ role, line, at: Date.now() });
   if (appState.nativeLogs.length > 30) appState.nativeLogs.shift();
+}
+
+function nativeMetric(line, name) {
+  const match = String(line || "").match(new RegExp(`(?:^|\\s)${name}=([^\\s]+)`, "i"));
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function nativeMetricText(line, name) {
+  const match = String(line || "").match(new RegExp(`(?:^|\\s)${name}=([^\\s]+)`, "i"));
+  return match ? match[1] : "";
+}
+
+function fmtNativeMs(value) {
+  return Number.isFinite(value) ? `${value.toFixed(value >= 10 ? 0 : 1)}ms` : "--";
+}
+
+function fmtNativeMbps(value) {
+  return Number.isFinite(value) ? `${value.toFixed(value >= 10 ? 0 : 1)}Mbps` : "--";
+}
+
+function noteNativeIssue(severity, message) {
+  const rank = { idle: 0, ok: 1, warn: 2, bad: 3 };
+  const now = Date.now();
+  const health = appState.nativeHealth;
+  const currentRank = rank[health.severity] || 0;
+  const nextRank = rank[severity] || 0;
+  if (nextRank >= currentRank || now - health.issueAt > 4000) {
+    health.severity = severity;
+    health.summary = message;
+    health.issueAt = now;
+  }
+}
+
+function updateNativeHealthFromLog(role, line) {
+  const health = appState.nativeHealth;
+  if (/SNV1_ENCODER_SELECTED/i.test(line)) {
+    const backend = nativeMetricText(line, "backend") || "unknown";
+    const hardware = nativeMetricText(line, "hardware") || "--";
+    health.host = `${backend} hardware=${hardware}`;
+    noteNativeIssue("ok", `Windows encoder: ${backend}.`);
+    return;
+  }
+
+  if (/SNV1_KEYFRAME_WAIT/i.test(line)) {
+    const frames = nativeMetric(line, "frames") || 0;
+    health.video = `IDR recovery waiting ${frames} frames`;
+    noteNativeIssue("warn", "Host đang chờ encoder xuất IDR frame.");
+    return;
+  }
+
+  if (/SNV1_KEYFRAME_RECOVERED/i.test(line)) {
+    const attempts = nativeMetric(line, "attempts") || 1;
+    health.video = `IDR recovered attempts=${attempts}`;
+    noteNativeIssue("ok", "IDR/keyframe recovery đã xong.");
+    return;
+  }
+
+  if (/SNV1_CODEC_FALLBACK/i.test(line)) {
+    health.video = "HEVC fallback H.264";
+    noteNativeIssue("warn", "Windows không dùng được HEVC, đã fallback H.264.");
+    return;
+  }
+
+  if (/SNV1_STAGE_PROFILE/i.test(line)) {
+    const bottleneck = nativeMetricText(line, "bottleneck") || "unknown";
+    const bottleneckMs = nativeMetric(line, "bottleneckMs");
+    const budgetMs = nativeMetric(line, "budgetMs");
+    health.host = `${bottleneck} ${fmtNativeMs(bottleneckMs)}/${fmtNativeMs(budgetMs)}`;
+    if (Number.isFinite(bottleneckMs) && Number.isFinite(budgetMs) && bottleneckMs > budgetMs * 1.05) {
+      noteNativeIssue("bad", `Lag do Windows host quá tải ở bước ${bottleneck}.`);
+    } else {
+      noteNativeIssue("ok", "Host encode/capture đang trong ngân sách frame.");
+    }
+    return;
+  }
+
+  if (/SNV1_STATS/i.test(line) && role === "host") {
+    const fps = nativeMetric(line, "fps");
+    const targetFps = nativeMetric(line, "targetFps");
+    const mbps = nativeMetric(line, "mbps");
+    const overBudget = nativeMetric(line, "hostOverBudget") || 0;
+    const lateSkips = nativeMetric(line, "hostLateSkips") || 0;
+    health.video = `Host ${Number.isFinite(fps) ? fps.toFixed(1) : "--"}/${Number.isFinite(targetFps) ? targetFps : "--"}fps ${fmtNativeMbps(mbps)}`;
+    if (overBudget > 0 || lateSkips > 0) {
+      noteNativeIssue("warn", "Host đang bỏ hoặc trễ frame, cần giảm FPS/bitrate.");
+    }
+    return;
+  }
+
+  if (/SNV1_CLIENT_STATS/i.test(line)) {
+    const jitterMs = nativeMetric(line, "jitterMs") || 0;
+    const dropped = nativeMetric(line, "dropped") || 0;
+    const latencyDropped = nativeMetric(line, "latencyDropped") || 0;
+    const decodeAvgMs = nativeMetric(line, "decodeAvgMs");
+    const decodeOverBudget = nativeMetric(line, "decodeOverBudget") || 0;
+    health.network = `jitter ${fmtNativeMs(jitterMs)} drop ${dropped}`;
+    if (Number.isFinite(decodeAvgMs)) {
+      health.render = `decode ${fmtNativeMs(decodeAvgMs)} over ${decodeOverBudget}`;
+    }
+    if (dropped > 0 || jitterMs > 16 || latencyDropped > 0) {
+      noteNativeIssue("warn", "Client đang nhận video không đều hoặc frame đã quá trễ.");
+    }
+    return;
+  }
+
+  if (/SNU1_STATS/i.test(line)) {
+    const droppedAssemblies = nativeMetric(line, "droppedAssemblies") || 0;
+    const jitterSkipped = nativeMetric(line, "jitterSkipped") || 0;
+    const jitterLate = nativeMetric(line, "jitterLate") || 0;
+    const retransmits = nativeMetric(line, "retransmitCompleted") || 0;
+    health.network = `drop ${droppedAssemblies} skip ${jitterSkipped} late ${jitterLate}`;
+    if (droppedAssemblies > 0 || jitterSkipped > 0 || jitterLate > 0 || retransmits > 0) {
+      noteNativeIssue("bad", "UDP/Tailscale đang mất hoặc trễ packet.");
+    }
+    return;
+  }
+
+  if (/SNV1_RENDER_STATS/i.test(line)) {
+    const queueDepth = nativeMetric(line, "queueDepth") || 0;
+    const droppedQueue = nativeMetric(line, "droppedQueue") || 0;
+    const droppedLate = nativeMetric(line, "droppedLate") || 0;
+    const avgRenderAgeMs = nativeMetric(line, "avgRenderAgeMs");
+    const maxPresentLateMs = nativeMetric(line, "maxPresentLateMs") || 0;
+    health.render = `queue ${queueDepth} age ${fmtNativeMs(avgRenderAgeMs)} late ${fmtNativeMs(maxPresentLateMs)}`;
+    if (queueDepth > 2 || droppedQueue > 0 || droppedLate > 0 || maxPresentLateMs > 40) {
+      noteNativeIssue("warn", "Mac render queue đang tích frame, hình sẽ giật/trễ.");
+    }
+    return;
+  }
+
+  if (/SNINPUT_LATENCY/i.test(line)) {
+    const avgRttMs = nativeMetric(line, "avgRttMs");
+    const maxRttMs = nativeMetric(line, "maxRttMs");
+    const pending = nativeMetric(line, "pending") || 0;
+    health.input = `RTT ${fmtNativeMs(avgRttMs)} max ${fmtNativeMs(maxRttMs)} pending ${pending}`;
+    if ((avgRttMs || 0) > 80 || (maxRttMs || 0) > 140 || pending > 4) {
+      noteNativeIssue("warn", "Input backchannel đang trễ, chuột sẽ giật.");
+    }
+  }
 }
 
 function updateNativeDiagnostics(message = "") {
@@ -642,10 +894,19 @@ function updateNativeDiagnostics(message = "") {
   nativeClientState.textContent = clientRunning ? `Running pid ${status.client.pid}` : "Idle";
   nativeHostState.textContent = hostRunning ? `Running pid ${status.host.pid}` : "Idle";
   nativeEndpointState.textContent = appState.nativeEndpoint || "--";
-  nativeInputState.textContent = appState.nativeInput || "--";
+  nativeInputState.textContent = appState.nativeHealth.input !== "--"
+    ? `${appState.nativeInput || "Input"} | ${appState.nativeHealth.input}`
+    : appState.nativeInput || "--";
+  if (nativeVideoState) nativeVideoState.textContent = appState.nativeHealth.video;
+  if (nativeHostLoadState) nativeHostLoadState.textContent = appState.nativeHealth.host;
+  if (nativeNetworkState) nativeNetworkState.textContent = appState.nativeHealth.network;
+  if (nativeRenderState) nativeRenderState.textContent = appState.nativeHealth.render;
 
   const active = clientRunning || hostRunning || appState.nativeClientConnected;
-  nativeDiagSummary.textContent = message || (active
+  const healthFresh = Date.now() - appState.nativeHealth.issueAt < 10000;
+  nativeDiagSummary.textContent = message || (healthFresh
+    ? appState.nativeHealth.summary
+    : active
     ? "Native session đang hoạt động hoặc vừa có log."
     : "Chưa có phiên native.");
 
@@ -701,8 +962,26 @@ function hydrateSettings() {
     $("#nativeClientIp").value = NATIVE_DEFAULT_CLIENT_IP;
     localStorage.setItem("gr_setting_nativeClientIp", NATIVE_DEFAULT_CLIENT_IP);
   }
+  if ($("#nativeQualityProfile") && !localStorage.getItem("gr_setting_nativeQualityProfile")) {
+    $("#nativeQualityProfile").value = "auto";
+    localStorage.setItem("gr_setting_nativeQualityProfile", "auto");
+  }
+  const nativeAudioDefaults = {
+    nativeAudioJitterMs: "24",
+    nativeAudioVolume: "100",
+    nativeAudioMute: "off",
+    nativeAudioDevice: ""
+  };
+  for (const [id, value] of Object.entries(nativeAudioDefaults)) {
+    const input = $(`#${id}`);
+    if (input && !localStorage.getItem(`gr_setting_${id}`)) {
+      input.value = value;
+      localStorage.setItem(`gr_setting_${id}`, value);
+    }
+  }
   normalizeTransportSetting();
   applyLiveSetting("statsMode");
+  syncNativeQualityProfileFields(false);
 }
 
 function normalizeTransportSetting() {
@@ -1116,6 +1395,7 @@ async function connectNativeToDevice(device) {
     const port = readNativePort();
     const controlPort = nativeControlPort(port);
     const audioPort = nativeAudioPort(port);
+    const audioSettings = readNativeAudioSettings();
     const sessionToken = makeNativeSessionToken();
     showConnecting(device.name || "máy chủ");
     streamStatus.textContent = `Đang mở native renderer trên cổng ${port}/${controlPort}/${audioPort}...`;
@@ -1125,16 +1405,36 @@ async function connectNativeToDevice(device) {
     appState.nativeRestartAttempts.client = 0;
     clearNativeRestart("client");
 
-    const clientOptions = { port, controlPort, audioPort, audioJitterMs: 24, videoTransport: "udp", logInput: true, fullscreen: true, hideCursor: true, relativeMouse: true, sessionToken };
+    const clientOptions = {
+      port,
+      controlPort,
+      audioPort,
+      audioJitterMs: audioSettings.jitterMs,
+      audioDevice: audioSettings.device,
+      audioVolume: audioSettings.volume,
+      audioMuted: audioSettings.muted,
+      videoTransport: "udp",
+      logInput: false,
+      fullscreen: true,
+      hideCursor: true,
+      relativeMouse: true,
+      sessionToken
+    };
     appState.nativeClientOptions = clientOptions;
     await window.sanserNative.startClient(clientOptions);
+    const discovery = await refreshNativeDiscovery(true).catch(() => appState.nativeDiscovery);
     const networkInfo = await window.sanserNative.networkInfo?.().catch(() => null);
-    const clientIp = chooseNativeClientIp(device, networkInfo?.addresses || []);
+    const networkAddresses = networkInfo?.addresses || [];
+    const clientIp = chooseNativeClientIp(device, networkAddresses, discovery?.peers || []);
+    const nativeQuality = readClientQuality({ device, addresses: networkAddresses, clientIp });
     const endpointLabel = clientIp
       ? `${clientIp}:${port} + ${clientIp}:${controlPort} + audio ${clientIp}:${audioPort}`
       : `auto:${port} + auto:${controlPort} + audio auto:${audioPort}`;
     appState.nativeEndpoint = endpointLabel;
     appState.nativeInput = "Listener opened";
+    appState.nativeHealth.video = nativeQuality.label || `${nativeQuality.width}x${nativeQuality.height} ${nativeQuality.fps}fps`;
+    appState.nativeHealth.summary = `Profile ${nativeQuality.label || nativeQuality.resolvedNetworkProfile || "manual"} đang dùng cho phiên native.`;
+    appState.nativeHealth.issueAt = Date.now();
     await refreshNativeStatus();
 
     appState._connectTimeout = setTimeout(() => {
@@ -1150,13 +1450,14 @@ async function connectNativeToDevice(device) {
       body: {
         sessionId: appState.sessionId,
         deviceId: device.id,
-        quality: readClientQuality(),
+        quality: nativeQuality,
         native: {
           transport: "snv-udp",
           clientIp,
           port,
           controlPort,
           audioPort,
+          qualityProfile: nativeQuality.resolvedNetworkProfile || nativeQuality.networkProfile || "manual",
           sessionToken
         }
       }
@@ -1195,17 +1496,31 @@ function makeNativeSessionToken() {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function chooseNativeClientIp(device, addresses) {
+function chooseNativeClientIp(device, addresses, discoveryPeers = []) {
   const override = String($("#nativeClientIp")?.value || "").trim();
   if (override) return override;
 
   const usable = (addresses || []).filter((entry) => entry?.address && !entry.address.startsWith("127."));
   if (!usable.length) return "";
 
-  const hostIp = String(device.ip || "");
-  const sameSubnet = usable.find((entry) => ipv4SameSubnet(entry.address, hostIp, entry.netmask));
-  if (sameSubnet) return sameSubnet.address;
+  const hostCandidates = [String(device.ip || "")];
+  for (const peer of discoveryPeers || []) {
+    if (!peer) continue;
+    if (peer.remoteAddress) hostCandidates.push(String(peer.remoteAddress));
+    for (const entry of peer.addresses || []) {
+      if (entry?.address) hostCandidates.push(String(entry.address));
+    }
+  }
 
+  for (const hostIp of hostCandidates) {
+    const sameSubnet = usable.find((entry) => ipv4SameSubnet(entry.address, hostIp, entry.netmask));
+    if (sameSubnet) {
+      appState.nativeHealth.network = `LAN discovery matched ${sameSubnet.name || "interface"} ${sameSubnet.address}`;
+      return sameSubnet.address;
+    }
+  }
+
+  const hostIp = hostCandidates.find(Boolean) || "";
   if (/^100\./.test(hostIp)) {
     const tailscale = usable.find((entry) => /^100\./.test(entry.address));
     if (tailscale) return tailscale.address;
@@ -1272,10 +1587,14 @@ async function startNativeHostForRoom(room) {
     udpPacing: true,
     fps: room.quality?.fps || Number($("#hostFps").value || 60),
     bitrateMbps: room.quality?.bitrateMbps || Number($("#hostBitrate").value || 28),
+    qualityProfile: room.quality?.resolvedNetworkProfile || room.native?.qualityProfile || "manual",
+    videoCodec: room.quality?.nativeCodec || selectedNativeVideoCodec(),
+    encoderPreference: $("#encoderPreference")?.value || "auto",
     keyframeInterval: 1,
     lowLatencyEncoder: true,
     sessionToken
   };
+  hostStats.textContent = `Native SNV starting | ${String(hostOptions.videoCodec).toUpperCase()} | ${room.quality?.label || `${hostOptions.fps}fps ${hostOptions.bitrateMbps}Mbps`}`;
   appState.nativeHostOptions = hostOptions;
   await window.sanserNative.startHost(hostOptions);
   await refreshNativeStatus();
@@ -1538,6 +1857,17 @@ function nativeControlPort(videoPort) {
 
 function nativeAudioPort(videoPort) {
   return Math.round(clamp(Number(videoPort || NATIVE_DEFAULT_PORT) + 2, 1, 65535));
+}
+
+function readNativeAudioSettings() {
+  const jitterMs = Math.round(clamp(Number($("#nativeAudioJitterMs")?.value || 24), 0, 120));
+  const volumePercent = clamp(Number($("#nativeAudioVolume")?.value || 100), 0, 100);
+  return {
+    jitterMs,
+    device: String($("#nativeAudioDevice")?.value || "").trim(),
+    volume: volumePercent / 100,
+    muted: $("#nativeAudioMute")?.value === "on"
+  };
 }
 
 function attachHostTransport(pc, sender, quality) {
@@ -1832,7 +2162,24 @@ function readQuality() {
   };
 }
 
-function readClientQuality() {
+function qualityForProfile(profileName, source = profileName) {
+  const profile = NATIVE_QUALITY_PROFILES[profileName];
+  if (!profile) return null;
+  return {
+    preset: profile.preset,
+    width: profile.width,
+    height: profile.height,
+    fps: profile.fps,
+    bitrateMbps: profile.bitrateMbps,
+    preferCodec: $("#codecPreference").value,
+    nativeCodec: selectedNativeVideoCodec(),
+    networkProfile: source,
+    resolvedNetworkProfile: profileName,
+    label: profile.label
+  };
+}
+
+function readManualClientQuality() {
   const preset = $("#clientResolution").value;
   const presets = {
     "720p": [1280, 720],
@@ -1847,14 +2194,96 @@ function readClientQuality() {
     height,
     fps: Number($("#clientFps").value || 60),
     bitrateMbps: Number($("#clientBitrate").value || 28),
-    preferCodec: $("#codecPreference").value
+    preferCodec: $("#codecPreference").value,
+    nativeCodec: selectedNativeVideoCodec(),
+    networkProfile: "manual",
+    resolvedNetworkProfile: "manual",
+    label: `${preset} ${Number($("#clientFps").value || 60)}fps ${Number($("#clientBitrate").value || 28)}Mbps`
   };
 }
 
+function selectedNativeQualityProfile() {
+  return $("#nativeQualityProfile")?.value || "auto";
+}
+
+function selectedNativeVideoCodec() {
+  const value = String($("#nativeVideoCodec")?.value || "h264").toLowerCase();
+  return value === "hevc" || value === "h265" ? "hevc" : "h264";
+}
+
+function isPrivateIpv4(address) {
+  return /^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[0-1])\./.test(String(address || ""));
+}
+
+function isWifiInterfaceName(name) {
+  return /wi-?fi|wlan|wireless|airport|en0/i.test(String(name || ""));
+}
+
+function inferNativeQualityProfile(device, addresses = [], clientIp = "") {
+  const selectedIp = String(clientIp || $("#nativeClientIp")?.value || "").trim();
+  const hostIp = String(device?.ip || "");
+  const selectedEntry = (addresses || []).find((entry) => entry?.address === selectedIp) || null;
+
+  if (/^100\./.test(selectedIp) || /^100\./.test(hostIp)) return "tailscale";
+  if (selectedEntry && isWifiInterfaceName(selectedEntry.name)) return "wifi";
+  if (selectedEntry && isPrivateIpv4(selectedEntry.address) && !isWifiInterfaceName(selectedEntry.name)) return "lan";
+  if (isPrivateIpv4(selectedIp) || isPrivateIpv4(hostIp)) return "wifi";
+  return "tailscale";
+}
+
+function readClientQuality(context = {}) {
+  const requestedProfile = selectedNativeQualityProfile();
+  if (requestedProfile === "manual") return readManualClientQuality();
+  const resolvedProfile = requestedProfile === "auto"
+    ? inferNativeQualityProfile(context.device, context.addresses, context.clientIp)
+    : requestedProfile;
+  return qualityForProfile(resolvedProfile, requestedProfile) || readManualClientQuality();
+}
+
+function syncNativeQualityProfileFields(save = true) {
+  const profileName = selectedNativeQualityProfile();
+  const profile = NATIVE_QUALITY_PROFILES[profileName];
+  if (!profile) return;
+
+  const updates = {
+    clientResolution: profile.preset,
+    clientFps: String(profile.fps),
+    clientBitrate: String(profile.bitrateMbps),
+    hostFps: String(profile.fps),
+    hostBitrate: String(profile.bitrateMbps),
+    mouseRate: String(profile.mouseRate)
+  };
+
+  for (const [id, value] of Object.entries(updates)) {
+    const input = $(`#${id}`);
+    if (!input) continue;
+    input.value = value;
+    if (save) localStorage.setItem(`gr_setting_${id}`, value);
+  }
+}
+
 function applyLiveSetting(id) {
+  if (["clientResolution", "clientFps", "clientBitrate", "hostFps", "hostBitrate"].includes(id) &&
+      selectedNativeQualityProfile() !== "manual") {
+    const profileInput = $("#nativeQualityProfile");
+    if (profileInput) {
+      profileInput.value = "manual";
+      localStorage.setItem("gr_setting_nativeQualityProfile", "manual");
+    }
+  }
   if (id === "statsMode" || id === "overlayMode") {
     const hidden = $("#statsMode").value === "off" || $("#overlayMode").value === "off";
     clientStats.classList.toggle("is-hidden", hidden);
+  }
+  if (id === "nativeQualityProfile") {
+    syncNativeQualityProfileFields(true);
+    const profile = NATIVE_QUALITY_PROFILES[selectedNativeQualityProfile()];
+    if (profile) {
+      appState.nativeHealth.video = profile.label;
+      appState.nativeHealth.summary = `Profile ${profile.label} đã áp dụng.`;
+      appState.nativeHealth.issueAt = Date.now();
+      updateNativeDiagnostics();
+    }
   }
   if (id === "hostEnabled") {
     if ($("#hostEnabled").value === "on" && appState.user) {

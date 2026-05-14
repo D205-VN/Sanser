@@ -10,18 +10,21 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <iterator>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
 namespace {
 
 constexpr GUID kSubtypeH264 = {0x34363248, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+constexpr GUID kSubtypeHevc = {0x43564548, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 
 struct FrameNv12 {
   std::uint32_t width = 0;
@@ -38,10 +41,15 @@ void checkHr(HRESULT hr, const char* label) {
 }
 
 const GUID& codecSubtype(VideoCodec codec) {
-  if (codec != VideoCodec::H264) {
-    throw std::runtime_error("Packet encoder currently supports H.264 only.");
+  switch (codec) {
+    case VideoCodec::H264:
+      return kSubtypeH264;
+    case VideoCodec::Hevc:
+      return kSubtypeHevc;
+    case VideoCodec::Av1:
+      break;
   }
-  return kSubtypeH264;
+  throw std::runtime_error("Packet encoder currently supports H.264 and H.265/HEVC only.");
 }
 
 class ComRuntime {
@@ -228,7 +236,93 @@ void releaseActivates(IMFActivate** activates, UINT32 count) {
   CoTaskMemFree(activates);
 }
 
-ComPtr<IMFTransform> createEncoderTransform(VideoCodec codec, bool hardwareRequested, bool& usingHardware) {
+std::string asciiFromWide(const WCHAR* value, UINT32 length) {
+  std::string output;
+  output.reserve(length);
+  for (UINT32 i = 0; i < length; ++i) {
+    const WCHAR ch = value[i];
+    output.push_back(ch >= 0 && ch <= 0x7f ? static_cast<char>(ch) : '?');
+  }
+  return output;
+}
+
+std::string lowerCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return value;
+}
+
+std::string logValue(std::string value) {
+  for (char& ch : value) {
+    if (ch == '"' || ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+  }
+  return value.empty() ? "unknown" : value;
+}
+
+std::string normalizeEncoderPreference(std::string value) {
+  value = lowerCopy(value);
+  if (value.empty() || value == "auto" || value == "best") return "auto";
+  if (value == "nvidia" || value == "nvenc") return "nvenc";
+  if (value == "amd" || value == "amf") return "amf";
+  if (value == "intel" || value == "qsv" || value == "quicksync" || value == "quick-sync") return "qsv";
+  if (value == "mf" || value == "mediafoundation" || value == "media-foundation") return "mf";
+  if (value == "software" || value == "sw") return "software";
+  throw std::runtime_error("Unsupported encoder preference: " + value);
+}
+
+struct EncoderCandidate {
+  ComPtr<IMFActivate> activate;
+  std::string name;
+  std::string backend;
+  UINT32 index = 0;
+  int score = 0;
+  bool hardware = false;
+};
+
+std::string friendlyName(IMFActivate* activate, UINT32 index) {
+  WCHAR* friendlyName = nullptr;
+  UINT32 friendlyNameLength = 0;
+  const HRESULT nameHr = activate->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute,
+                                                      &friendlyName,
+                                                      &friendlyNameLength);
+  if (SUCCEEDED(nameHr) && friendlyName) {
+    std::string result = asciiFromWide(friendlyName, friendlyNameLength);
+    CoTaskMemFree(friendlyName);
+    return result;
+  }
+  return "Media Foundation encoder " + std::to_string(index);
+}
+
+std::string detectBackend(const std::string& name, bool hardware) {
+  const std::string lowered = lowerCopy(name);
+  if (lowered.find("nvidia") != std::string::npos ||
+      lowered.find("nvenc") != std::string::npos) {
+    return "NVENC";
+  }
+  if (lowered.find("amd") != std::string::npos ||
+      lowered.find("advanced micro") != std::string::npos ||
+      lowered.find("amf") != std::string::npos) {
+    return "AMF";
+  }
+  if (lowered.find("intel") != std::string::npos ||
+      lowered.find("quick sync") != std::string::npos ||
+      lowered.find("quicksync") != std::string::npos ||
+      lowered.find("qsv") != std::string::npos) {
+    return "QuickSync";
+  }
+  return hardware ? "MediaFoundation-HW" : "MediaFoundation-SW";
+}
+
+int backendScore(const std::string& backend, bool hardware) {
+  if (backend == "NVENC") return 400;
+  if (backend == "AMF") return 300;
+  if (backend == "QuickSync") return 200;
+  if (hardware) return 100;
+  return 10;
+}
+
+std::vector<EncoderCandidate> enumerateEncoderCandidates(VideoCodec codec, UINT32 flags, bool hardware) {
   MFT_REGISTER_TYPE_INFO inputInfo{};
   inputInfo.guidMajorType = MFMediaType_Video;
   inputInfo.guidSubtype = MFVideoFormat_NV12;
@@ -237,39 +331,148 @@ ComPtr<IMFTransform> createEncoderTransform(VideoCodec codec, bool hardwareReque
   outputInfo.guidMajorType = MFMediaType_Video;
   outputInfo.guidSubtype = codecSubtype(codec);
 
-  auto tryCreate = [&](UINT32 flags, bool hardware) -> ComPtr<IMFTransform> {
-    IMFActivate** activates = nullptr;
-    UINT32 count = 0;
-    const HRESULT enumHr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
-                                     flags,
-                                     &inputInfo,
-                                     &outputInfo,
-                                     &activates,
-                                     &count);
-    if (FAILED(enumHr) || count == 0) {
-      releaseActivates(activates, count);
-      return {};
-    }
-
-    ComPtr<IMFTransform> transform;
-    const HRESULT activateHr = activates[0]->ActivateObject(IID_PPV_ARGS(transform.GetAddressOf()));
+  IMFActivate** activates = nullptr;
+  UINT32 count = 0;
+  const HRESULT enumHr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER,
+                                   flags,
+                                   &inputInfo,
+                                   &outputInfo,
+                                   &activates,
+                                   &count);
+  if (FAILED(enumHr) || count == 0) {
     releaseActivates(activates, count);
-    if (FAILED(activateHr)) return {};
-    usingHardware = hardware;
-    return transform;
-  };
-
-  if (hardwareRequested) {
-    auto transform = tryCreate(MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, true);
-    if (transform) return transform;
+    return {};
   }
 
-  auto transform = tryCreate(MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
-                             MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
-                             false);
-  if (transform) return transform;
+  std::vector<EncoderCandidate> candidates;
+  candidates.reserve(count);
+  for (UINT32 i = 0; i < count; ++i) {
+    EncoderCandidate candidate;
+    candidate.activate = activates[i];
+    candidate.name = friendlyName(activates[i], i);
+    candidate.backend = detectBackend(candidate.name, hardware);
+    candidate.index = i;
+    candidate.hardware = hardware;
+    candidate.score = backendScore(candidate.backend, hardware);
+    candidates.push_back(std::move(candidate));
+  }
+  releaseActivates(activates, count);
+  return candidates;
+}
 
-  throw std::runtime_error("No Media Foundation H.264 encoder MFT found.");
+bool preferenceMatches(const EncoderCandidate& candidate, const std::string& preference) {
+  if (preference == "auto") return true;
+  if (preference == "nvenc") return candidate.backend == "NVENC";
+  if (preference == "amf") return candidate.backend == "AMF";
+  if (preference == "qsv") return candidate.backend == "QuickSync";
+  if (preference == "mf") return candidate.backend.find("MediaFoundation") == 0;
+  if (preference == "software") return !candidate.hardware;
+  return true;
+}
+
+std::vector<EncoderCandidate> sortCandidates(std::vector<EncoderCandidate> candidates,
+                                             const std::string& preference) {
+  candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const EncoderCandidate& candidate) {
+    return !preferenceMatches(candidate, preference);
+  }), candidates.end());
+
+  std::stable_sort(candidates.begin(), candidates.end(), [&](const EncoderCandidate& a, const EncoderCandidate& b) {
+    if (preference == "mf") {
+      if (a.hardware != b.hardware) return a.hardware && !b.hardware;
+      const bool aGeneric = a.backend.find("MediaFoundation") == 0;
+      const bool bGeneric = b.backend.find("MediaFoundation") == 0;
+      if (aGeneric != bGeneric) return aGeneric && !bGeneric;
+    }
+    if (a.score != b.score) return a.score > b.score;
+    return a.index < b.index;
+  });
+  return candidates;
+}
+
+struct EncoderSelection {
+  std::string name = "unknown";
+  std::string backend = "unknown";
+  bool hardware = false;
+};
+
+ComPtr<IMFTransform> activateCandidate(const EncoderCandidate& candidate) {
+  ComPtr<IMFTransform> transform;
+  const HRESULT activateHr = candidate.activate->ActivateObject(IID_PPV_ARGS(transform.GetAddressOf()));
+  if (FAILED(activateHr)) {
+    std::cerr << "SNV1_ENCODER_CANDIDATE_FAILED backend=" << candidate.backend
+              << " hardware=" << (candidate.hardware ? "yes" : "no")
+              << " name=\"" << logValue(candidate.name) << "\""
+              << " error=" << hresultMessage(activateHr)
+              << "\n";
+    return {};
+  }
+  return transform;
+}
+
+ComPtr<IMFTransform> createEncoderTransform(VideoCodec codec,
+                                            const VideoPacketEncodeOptions& options,
+                                            EncoderSelection& selection) {
+  const bool wantsSoftware = !options.hardware ||
+                             normalizeEncoderPreference(options.encoderPreference) == "software";
+  const std::string preference = wantsSoftware
+    ? "software"
+    : normalizeEncoderPreference(options.encoderPreference);
+
+  std::vector<EncoderCandidate> candidates;
+  if (!wantsSoftware) {
+    auto hardwareCandidates = enumerateEncoderCandidates(codec,
+                                                        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                                                        true);
+    candidates.insert(candidates.end(),
+                      std::make_move_iterator(hardwareCandidates.begin()),
+                      std::make_move_iterator(hardwareCandidates.end()));
+  }
+
+  auto softwareCandidates = enumerateEncoderCandidates(codec,
+                                                       MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+                                                         MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+                                                       false);
+  candidates.insert(candidates.end(),
+                    std::make_move_iterator(softwareCandidates.begin()),
+                    std::make_move_iterator(softwareCandidates.end()));
+
+  std::vector<EncoderCandidate> preferred = sortCandidates(candidates, preference);
+  if (preferred.empty() && preference != "auto" && preference != "software") {
+    std::cerr << "SNV1_ENCODER_PREFERENCE_MISS preference=" << preference
+              << " fallback=auto\n";
+    preferred = sortCandidates(candidates, "auto");
+  }
+
+  auto tryCandidates = [&](const std::vector<EncoderCandidate>& list) -> ComPtr<IMFTransform> {
+    for (const EncoderCandidate& candidate : list) {
+      std::cerr << "SNV1_ENCODER_CANDIDATE backend=" << candidate.backend
+                << " hardware=" << (candidate.hardware ? "yes" : "no")
+                << " score=" << candidate.score
+                << " name=\"" << logValue(candidate.name) << "\"\n";
+      auto transform = activateCandidate(candidate);
+      if (transform) {
+        selection.name = candidate.name;
+        selection.backend = candidate.backend;
+        selection.hardware = candidate.hardware;
+        return transform;
+      }
+    }
+    return {};
+  };
+
+  if (auto transform = tryCandidates(preferred)) {
+    return transform;
+  }
+
+  if (preference != "auto" && preference != "software") {
+    std::cerr << "SNV1_ENCODER_ACTIVATION_FALLBACK preference=" << preference
+              << " fallback=auto\n";
+    if (auto transform = tryCandidates(sortCandidates(candidates, "auto"))) {
+      return transform;
+    }
+  }
+
+  throw std::runtime_error("No Media Foundation " + videoCodecName(codec) + " encoder MFT found.");
 }
 
 } // namespace
@@ -286,6 +489,8 @@ struct MfVideoPacketEncoder::Impl {
   std::uint32_t currentBitrate = 0;
   std::uint64_t frameIndex = 0;
   bool usingHardware = false;
+  std::string encoderName = "unknown";
+  std::string encoderBackend = "unknown";
   bool providesOutputSamples = false;
 };
 
@@ -297,10 +502,18 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   impl_->height = height;
   impl_->fps = std::max<std::uint32_t>(options.fps, 1);
   impl_->options = options;
-  impl_->options.codec = VideoCodec::H264;
   impl_->currentBitrate = impl_->options.bitrate;
 
-  impl_->transform = createEncoderTransform(impl_->options.codec, options.hardware, impl_->usingHardware);
+  EncoderSelection encoderSelection;
+  impl_->transform = createEncoderTransform(impl_->options.codec, impl_->options, encoderSelection);
+  impl_->usingHardware = encoderSelection.hardware;
+  impl_->encoderName = encoderSelection.name;
+  impl_->encoderBackend = encoderSelection.backend;
+  std::cerr << "SNV1_ENCODER_SELECTED preference="
+            << normalizeEncoderPreference(impl_->options.encoderPreference)
+            << " backend=" << impl_->encoderBackend
+            << " hardware=" << (impl_->usingHardware ? "yes" : "no")
+            << " name=\"" << logValue(impl_->encoderName) << "\"\n";
 
   ComPtr<IMFAttributes> transformAttributes;
   if (SUCCEEDED(impl_->transform->GetAttributes(transformAttributes.GetAddressOf())) && transformAttributes) {
@@ -337,6 +550,18 @@ MfVideoPacketEncoder::~MfVideoPacketEncoder() = default;
 
 bool MfVideoPacketEncoder::usingHardware() const {
   return impl_->usingHardware;
+}
+
+VideoCodec MfVideoPacketEncoder::codec() const {
+  return impl_->options.codec;
+}
+
+std::string MfVideoPacketEncoder::encoderName() const {
+  return impl_->encoderName;
+}
+
+std::string MfVideoPacketEncoder::encoderBackend() const {
+  return impl_->encoderBackend;
 }
 
 std::uint32_t MfVideoPacketEncoder::bitrate() const {

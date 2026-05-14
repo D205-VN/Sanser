@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld("sanserNative", {
   networkInfo() {
     return ipcRenderer.invoke("sanser:native-network-info");
   },
+  discovery() {
+    return ipcRenderer.invoke("sanser:native-discovery");
+  },
+  refreshDiscovery() {
+    return ipcRenderer.invoke("sanser:native-discovery-refresh");
+  },
   startClient(options) {
     return ipcRenderer.invoke("sanser:native-start-client", options || {});
   },
@@ -34,5 +40,10 @@ contextBridge.exposeInMainWorld("sanserNative", {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("sanser:native-exit", listener);
     return () => ipcRenderer.removeListener("sanser:native-exit", listener);
+  },
+  onDiscovery(callback) {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("sanser:native-discovery", listener);
+    return () => ipcRenderer.removeListener("sanser:native-discovery", listener);
   }
 });

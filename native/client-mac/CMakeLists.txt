@@ -17,6 +17,7 @@ add_executable(sanser-native-client
 
 find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
 find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
+find_library(COREAUDIO_FRAMEWORK CoreAudio REQUIRED)
 find_library(COREHAPTICS_FRAMEWORK CoreHaptics REQUIRED)
 find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
 find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
@@ -30,6 +31,7 @@ find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
 target_link_libraries(sanser-native-client PRIVATE
   ${AUDIOTOOLBOX_FRAMEWORK}
   ${COCOA_FRAMEWORK}
+  ${COREAUDIO_FRAMEWORK}
   ${COREHAPTICS_FRAMEWORK}
   ${COREGRAPHICS_FRAMEWORK}
   ${COREMEDIA_FRAMEWORK}

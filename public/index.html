@@ -243,6 +243,22 @@
                 <span>Input</span>
                 <strong id="nativeInputState">--</strong>
               </div>
+              <div class="native-diag-cell">
+                <span>Video</span>
+                <strong id="nativeVideoState">--</strong>
+              </div>
+              <div class="native-diag-cell">
+                <span>Host Load</span>
+                <strong id="nativeHostLoadState">--</strong>
+              </div>
+              <div class="native-diag-cell">
+                <span>Network</span>
+                <strong id="nativeNetworkState">--</strong>
+              </div>
+              <div class="native-diag-cell">
+                <span>Render</span>
+                <strong id="nativeRenderState">--</strong>
+              </div>
             </div>
             <div class="native-log" id="nativeLogList"></div>
           </section>
@@ -318,6 +334,24 @@
                 <input id="hostBitrate" type="number" min="4" max="120" step="1" value="28">
               </label>
               <label class="setting-row">
+                <span><strong>Windows Encoder</strong><small>Ưu tiên encoder phần cứng cho native host.</small></span>
+                <select id="encoderPreference">
+                  <option value="auto" selected>Auto best</option>
+                  <option value="nvenc">NVIDIA NVENC</option>
+                  <option value="amf">AMD AMF</option>
+                  <option value="qsv">Intel QuickSync</option>
+                  <option value="mf">Media Foundation</option>
+                  <option value="software">Software</option>
+                </select>
+              </label>
+              <label class="setting-row">
+                <span><strong>Native Video Codec</strong><small>HEVC giảm bitrate nếu Windows và Mac hỗ trợ.</small></span>
+                <select id="nativeVideoCodec">
+                  <option value="h264" selected>H.264</option>
+                  <option value="hevc">H.265 / HEVC</option>
+                </select>
+              </label>
+              <label class="setting-row">
                 <span><strong>Video Codec</strong><small>Bộ mã hóa WebRTC ưu tiên.</small></span>
                 <select id="codecPreference">
                   <option value="H264">H.264</option>
@@ -344,12 +378,41 @@
                 </select>
               </label>
               <label class="setting-row">
+                <span><strong>Connection Profile</strong><small>Tự chọn FPS và bitrate theo LAN, Wi-Fi hoặc Tailscale.</small></span>
+                <select id="nativeQualityProfile">
+                  <option value="auto" selected>Auto low-latency</option>
+                  <option value="lan">LAN 1080p60</option>
+                  <option value="wifi">Wi-Fi 900p60</option>
+                  <option value="tailscale">Tailscale 720p30</option>
+                  <option value="manual">Manual</option>
+                </select>
+              </label>
+              <label class="setting-row">
                 <span><strong>Native Listen Port</strong><small>Mac client mở renderer native trên cổng này.</small></span>
                 <input id="nativeListenPort" type="number" min="1024" max="65535" step="1" value="7777">
               </label>
               <label class="setting-row">
                 <span><strong>Native Client IP</strong><small>IP Windows sẽ connect về Mac.</small></span>
                 <input id="nativeClientIp" placeholder="Auto" value="100.100.83.44">
+              </label>
+              <label class="setting-row">
+                <span><strong>Audio Jitter</strong><small>Buffer audio native trên Mac.</small></span>
+                <input id="nativeAudioJitterMs" type="number" min="0" max="120" step="1" value="24">
+              </label>
+              <label class="setting-row">
+                <span><strong>Audio Device UID</strong><small>Để trống để dùng output mặc định của macOS.</small></span>
+                <input id="nativeAudioDevice" placeholder="Default output">
+              </label>
+              <label class="setting-row">
+                <span><strong>Audio Volume</strong><small>Âm lượng playback native trên Mac.</small></span>
+                <input id="nativeAudioVolume" type="number" min="0" max="100" step="1" value="100">
+              </label>
+              <label class="setting-row">
+                <span><strong>Audio Mute</strong><small>Tắt tiếng playback native phía Mac.</small></span>
+                <select id="nativeAudioMute">
+                  <option value="off" selected>Tắt</option>
+                  <option value="on">Bật</option>
+                </select>
               </label>
               <label class="setting-row">
                 <span><strong>Mouse Sample Rate</strong><small>Tốc độ cập nhật input từ xa.</small></span>
