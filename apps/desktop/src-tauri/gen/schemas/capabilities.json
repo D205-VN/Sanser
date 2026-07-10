@@ -1,0 +1,1 @@
+{"main-desktop":{"identifier":"main-desktop","description":"Minimal capability set for the local Sanser desktop window","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-close","core:window:allow-minimize","core:window:allow-toggle-maximize"]}}

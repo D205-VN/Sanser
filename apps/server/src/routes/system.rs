@@ -15,7 +15,7 @@ struct HealthResponse {
     protocol_version: u8,
 }
 
-pub async fn health() -> Json<HealthResponse> {
+pub async fn health() -> impl IntoResponse {
     Json(HealthResponse {
         status: "ok",
         version: SANSER_VERSION,

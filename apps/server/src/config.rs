@@ -253,9 +253,7 @@ fn database_config(
                 ));
             }
             Ok((
-                format!(
-                    "sqlite://{path_string}?mode=rwc&busy_timeout=5000&journal_mode=WAL&synchronous=NORMAL"
-                ),
+                format!("sqlite://{path_string}?mode=rwc"),
                 Some(path),
             ))
         }
