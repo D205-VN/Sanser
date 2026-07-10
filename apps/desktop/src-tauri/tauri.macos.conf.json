@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/sanser-client-macos",
+      "binaries/sanser-server"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": "entitlements/Sanser.entitlements",
+      "hardenedRuntime": true
+    }
+  }
+}

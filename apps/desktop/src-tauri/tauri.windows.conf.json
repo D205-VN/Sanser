@@ -1,0 +1,16 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "externalBin": [
+      "binaries/sanser-host-windows",
+      "binaries/sanser-server"
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": true,
+        "installMode": "currentUser",
+        "languages": ["English"]
+      }
+    }
+  }
+}

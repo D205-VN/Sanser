@@ -1,0 +1,17 @@
+[package]
+name = "sanser-webrtc"
+description = "Validated ICE policy and bounded native WebRTC signaling primitives"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sanser-core = { path = "../sanser-core" }
+serde.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

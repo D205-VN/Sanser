@@ -1,7 +1,52 @@
-node_modules/
+# Secrets and local overrides
 .env
-data/store.json
-.DS_Store
-*.log
-dist/
+.env.*
+!.env.example
+
+# Rust / Tauri
+target/
+**/target/
+
+# Frontend development dependencies and output
+node_modules/
+**/node_modules/
+apps/desktop/dist/
+apps/desktop/.svelte-kit/
+coverage/
+
+# Native build trees and generated captures
 native/**/build/
+native/**/out/
+native-captures/
+captures/
+*.snv
+*.bmp
+*.dmp
+*.pdb
+
+# Packaged artifacts
+dist/
+artifacts/
+release/
+
+# Local databases, logs and diagnostics
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+logs/
+diagnostics/
+
+# IDE / operating system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# CMake generated files outside the standard build folders
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake

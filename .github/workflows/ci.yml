@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  repository-policy:
+    name: Repository policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version, branding, secrets, and retired runtimes
+        shell: bash
+        run: ./scripts/check-repository.sh
+
+  rust:
+    name: Rust format, lint, and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  server:
+    name: Server integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p sanser-server --all-features
+
+  frontend:
+    name: Frontend check, lint, test, and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run desktop:check
+      - run: npm run desktop:lint
+      - run: npm run desktop:test
+      - run: npm run desktop:build
+
+  native-protocol:
+    name: SNV2 C++ (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S native/protocol -B build/snv2 -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build/snv2 --config Release
+      - name: Test
+        run: ctest --test-dir build/snv2 -C Release --output-on-failure
+
+  windows-engine:
+    name: Windows native host
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S native/host-windows -B build/host-windows -A x64
+      - run: cmake --build build/host-windows --config Release --parallel
+
+  macos-engine:
+    name: macOS native client
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S native/client-macos -B build/client-macos -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build/client-macos --config Release --parallel
+      - run: ./build/client-macos/sanser-client-macos --capabilities-json

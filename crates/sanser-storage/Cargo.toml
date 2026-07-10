@@ -1,0 +1,24 @@
+[package]
+name = "sanser-storage"
+description = "SQLite local storage, PostgreSQL shared storage and safe legacy migration"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20.0"
+tokio.workspace = true
+
+[lints]
+workspace = true

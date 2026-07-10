@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(sanser_snv2_protocol LANGUAGES CXX)
+
+add_library(sanser-snv2 STATIC snv2.cpp snv2_auth.cpp)
+target_include_directories(sanser-snv2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(sanser-snv2 PUBLIC cxx_std_20)
+if(WIN32)
+  target_link_libraries(sanser-snv2 PUBLIC bcrypt)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(sanser-snv2-test snv2_test.cpp)
+  target_link_libraries(sanser-snv2-test PRIVATE sanser-snv2)
+  add_test(NAME sanser-snv2-test COMMAND sanser-snv2-test)
+endif()

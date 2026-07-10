@@ -1,0 +1,17 @@
+[package]
+name = "sanser-config"
+description = "Centralized validated environment configuration for Sanser"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sanser-core = { path = "../sanser-core" }
+serde.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

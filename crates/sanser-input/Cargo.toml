@@ -1,0 +1,15 @@
+[package]
+name = "sanser-input"
+description = "Native input events, bounded buffering and latest-state coalescing"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

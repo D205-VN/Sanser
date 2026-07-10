@@ -1,0 +1,15 @@
+[package]
+name = "sanser-audio"
+description = "Bounded low-latency audio buffering and PCM processing for Sanser"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sanser-core = { path = "../sanser-core" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

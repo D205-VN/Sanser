@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Sanser",
+  "version": "2.0.0",
+  "identifier": "com.sanser.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* https:; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; font-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'",
+      "freezePrototype": true
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Sanser 2.0.0",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false,
+        "maximized": false,
+        "visible": true,
+        "center": true,
+        "dragDropEnabled": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "category": "Utility",
+    "copyright": "Copyright © 2026 Sanser",
+    "shortDescription": "Low-latency remote desktop and game streaming",
+    "longDescription": "Sanser 2.0.0 is a secure, low-latency remote desktop and remote game streaming application.",
+    "targets": "all",
+    "externalBin": [],
+    "resources": [],
+    "createUpdaterArtifacts": false
+  }
+}

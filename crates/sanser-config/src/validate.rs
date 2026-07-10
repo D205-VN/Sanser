@@ -1,0 +1,357 @@
+use crate::SecretString;
+use sanser_core::{NetworkMode, PROTOCOL_VERSION, VERSION};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
+};
+use thiserror::Error;
+use url::Url;
+
+const MAX_LIST_ENTRIES: usize = 32;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppConfig {
+    pub version: String,
+    pub protocol_version: u8,
+    pub server: ServerConfig,
+    pub database: DatabaseConfig,
+    pub network: NetworkConfig,
+    pub auth: AuthConfig,
+    pub rust_log: String,
+}
+
+impl AppConfig {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_iter(std::env::vars())
+    }
+
+    pub fn from_iter<I, K, V>(values: I) -> Result<Self, ConfigError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let values: BTreeMap<String, String> = values
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+
+        let version = value_or(&values, "SANSER_VERSION", VERSION).to_owned();
+        if version != VERSION {
+            return Err(ConfigError::Version {
+                expected: VERSION,
+                actual: version,
+            });
+        }
+        let protocol_version = parse_or(&values, "SANSER_PROTOCOL_VERSION", PROTOCOL_VERSION)?;
+        if protocol_version != PROTOCOL_VERSION {
+            return Err(ConfigError::ProtocolVersion {
+                expected: PROTOCOL_VERSION,
+                actual: protocol_version,
+            });
+        }
+
+        let host = parse_or(&values, "SERVER_HOST", IpAddr::V4(Ipv4Addr::LOCALHOST))?;
+        let port = parse_or(&values, "SERVER_PORT", 5_174_u16)?;
+        if port == 0 {
+            return Err(ConfigError::InvalidValue("SERVER_PORT"));
+        }
+        let public_base_url = parse_http_url(
+            "PUBLIC_BASE_URL",
+            value_or(&values, "PUBLIC_BASE_URL", "http://127.0.0.1:5174"),
+        )?;
+        let allowed_origins = parse_http_url_list(
+            "ALLOWED_ORIGINS",
+            value_or(&values, "ALLOWED_ORIGINS", "http://127.0.0.1:5174"),
+        )?;
+
+        let postgres_url = values
+            .get("DATABASE_URL")
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| validate_database_url(value))
+            .transpose()?
+            .map(SecretString::new);
+        let sqlite_path = PathBuf::from(value_or(&values, "SQLITE_PATH", "./data/sanser.db"));
+        if sqlite_path.as_os_str().is_empty() {
+            return Err(ConfigError::InvalidValue("SQLITE_PATH"));
+        }
+
+        let mode = parse_network_mode(value_or(&values, "NETWORK_MODE", "auto"))?;
+        let stun_urls = parse_ice_urls(
+            "STUN_URLS",
+            value_or(&values, "STUN_URLS", "stun:stun.l.google.com:19302"),
+            &["stun", "stuns"],
+        )?;
+        let turn_urls = parse_ice_urls(
+            "TURN_URLS",
+            value_or(&values, "TURN_URLS", ""),
+            &["turn", "turns"],
+        )?;
+        let turn_username = values
+            .get("TURN_USERNAME")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let turn_credential = values
+            .get("TURN_CREDENTIAL")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        if turn_username.is_some() != turn_credential.is_some() {
+            return Err(ConfigError::IncompleteTurnCredentials);
+        }
+        if mode == NetworkMode::Relay && turn_urls.is_empty() {
+            return Err(ConfigError::RelayRequiresTurn);
+        }
+        let turn = if turn_urls.is_empty() {
+            None
+        } else {
+            Some(TurnConfig {
+                urls: turn_urls,
+                username: turn_username.unwrap_or_default(),
+                credential: SecretString::new(turn_credential.unwrap_or_default()),
+            })
+        };
+
+        let access_token_ttl_seconds = parse_or(&values, "ACCESS_TOKEN_TTL_SECONDS", 900_u64)?;
+        let refresh_token_ttl_seconds =
+            parse_or(&values, "REFRESH_TOKEN_TTL_SECONDS", 2_592_000_u64)?;
+        if !(60..=86_400).contains(&access_token_ttl_seconds) {
+            return Err(ConfigError::InvalidValue("ACCESS_TOKEN_TTL_SECONDS"));
+        }
+        if refresh_token_ttl_seconds <= access_token_ttl_seconds
+            || refresh_token_ttl_seconds > 31_536_000
+        {
+            return Err(ConfigError::InvalidValue("REFRESH_TOKEN_TTL_SECONDS"));
+        }
+
+        let rust_log = value_or(&values, "RUST_LOG", "info").trim().to_owned();
+        if rust_log.is_empty() || rust_log.len() > 256 || rust_log.chars().any(char::is_control) {
+            return Err(ConfigError::InvalidValue("RUST_LOG"));
+        }
+
+        Ok(Self {
+            version: VERSION.to_owned(),
+            protocol_version,
+            server: ServerConfig {
+                host,
+                port,
+                public_base_url,
+                allowed_origins,
+            },
+            database: DatabaseConfig {
+                postgres_url,
+                sqlite_path,
+            },
+            network: NetworkConfig {
+                mode,
+                stun_urls,
+                turn,
+            },
+            auth: AuthConfig {
+                access_token_ttl_seconds,
+                refresh_token_ttl_seconds,
+            },
+            rust_log,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerConfig {
+    pub host: IpAddr,
+    pub port: u16,
+    pub public_base_url: Url,
+    pub allowed_origins: Vec<Url>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseConfig {
+    pub postgres_url: Option<SecretString>,
+    pub sqlite_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NetworkConfig {
+    pub mode: NetworkMode,
+    pub stun_urls: Vec<Url>,
+    pub turn: Option<TurnConfig>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TurnConfig {
+    pub urls: Vec<Url>,
+    pub username: String,
+    pub credential: SecretString,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthConfig {
+    pub access_token_ttl_seconds: u64,
+    pub refresh_token_ttl_seconds: u64,
+}
+
+fn value_or<'a>(values: &'a BTreeMap<String, String>, key: &str, default: &'a str) -> &'a str {
+    values.get(key).map_or(default, String::as_str)
+}
+
+fn parse_or<T>(
+    values: &BTreeMap<String, String>,
+    key: &'static str,
+    default: T,
+) -> Result<T, ConfigError>
+where
+    T: std::str::FromStr,
+{
+    values.get(key).map_or(Ok(default), |value| {
+        value
+            .trim()
+            .parse()
+            .map_err(|_| ConfigError::InvalidValue(key))
+    })
+}
+
+fn parse_network_mode(value: &str) -> Result<NetworkMode, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(NetworkMode::Auto),
+        "direct" => Ok(NetworkMode::Direct),
+        "relay" => Ok(NetworkMode::Relay),
+        _ => Err(ConfigError::InvalidValue("NETWORK_MODE")),
+    }
+}
+
+fn parse_http_url(name: &'static str, value: &str) -> Result<Url, ConfigError> {
+    let parsed = Url::parse(value.trim()).map_err(|_| ConfigError::InvalidValue(name))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidValue(name));
+    }
+    Ok(parsed)
+}
+
+fn parse_http_url_list(name: &'static str, value: &str) -> Result<Vec<Url>, ConfigError> {
+    let entries = split_list(name, value)?;
+    if entries.is_empty() {
+        return Err(ConfigError::Missing(name));
+    }
+    entries
+        .into_iter()
+        .map(|entry| parse_http_url(name, entry))
+        .collect()
+}
+
+fn parse_ice_urls(
+    name: &'static str,
+    value: &str,
+    schemes: &[&str],
+) -> Result<Vec<Url>, ConfigError> {
+    split_list(name, value)?
+        .into_iter()
+        .map(|entry| {
+            let parsed = Url::parse(entry).map_err(|_| ConfigError::InvalidValue(name))?;
+            if !schemes.contains(&parsed.scheme()) || parsed.path().trim().is_empty() {
+                return Err(ConfigError::InvalidValue(name));
+            }
+            Ok(parsed)
+        })
+        .collect()
+}
+
+fn split_list<'a>(name: &'static str, value: &'a str) -> Result<Vec<&'a str>, ConfigError> {
+    let entries: Vec<_> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if entries.len() > MAX_LIST_ENTRIES {
+        return Err(ConfigError::TooManyEntries(name));
+    }
+    Ok(entries)
+}
+
+fn validate_database_url(value: &str) -> Result<String, ConfigError> {
+    let parsed = Url::parse(value.trim()).map_err(|_| ConfigError::InvalidValue("DATABASE_URL"))?;
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") || parsed.host_str().is_none() {
+        return Err(ConfigError::InvalidValue("DATABASE_URL"));
+    }
+    Ok(value.trim().to_owned())
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum ConfigError {
+    #[error("{0} is required")]
+    Missing(&'static str),
+    #[error("{0} has an invalid value")]
+    InvalidValue(&'static str),
+    #[error("{0} contains too many entries")]
+    TooManyEntries(&'static str),
+    #[error("Sanser version must be {expected}, got {actual}")]
+    Version {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("protocol version must be {expected}, got {actual}")]
+    ProtocolVersion { expected: u8, actual: u8 },
+    #[error("TURN_USERNAME and TURN_CREDENTIAL must either both be set or both be empty")]
+    IncompleteTurnCredentials,
+    #[error("relay network mode requires at least one TURN URL")]
+    RelayRequiresTurn,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("SANSER_VERSION", "2.0.0"),
+            ("SANSER_PROTOCOL_VERSION", "2"),
+            ("DATABASE_URL", "postgresql://user:secret@db/sanser"),
+        ]
+    }
+
+    #[test]
+    fn parses_defaults_without_logging_database_password() {
+        let config = AppConfig::from_iter(base())
+            .unwrap_or_else(|error| panic!("config parse failed: {error}"));
+        assert_eq!(config.network.mode, NetworkMode::Auto);
+        assert_eq!(config.server.port, 5_174);
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("secret"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn relay_requires_turn_and_complete_credentials() {
+        let mut values = base();
+        values.push(("NETWORK_MODE", "relay"));
+        assert_eq!(
+            AppConfig::from_iter(values),
+            Err(ConfigError::RelayRequiresTurn)
+        );
+
+        let mut values = base();
+        values.extend([
+            ("NETWORK_MODE", "relay"),
+            ("TURN_URLS", "turn:relay.example.com:3478"),
+            ("TURN_USERNAME", "temporary"),
+        ]);
+        assert_eq!(
+            AppConfig::from_iter(values),
+            Err(ConfigError::IncompleteTurnCredentials)
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_network_values() {
+        let mut values = base();
+        values.push(("NETWORK_MODE", "tailscale"));
+        assert_eq!(
+            AppConfig::from_iter(values),
+            Err(ConfigError::InvalidValue("NETWORK_MODE"))
+        );
+    }
+}

@@ -1,94 +1,33 @@
 {
-  "name": "gameremote-parsec-like",
-  "version": "0.1.0",
+  "name": "sanser",
+  "version": "2.0.0",
   "private": true,
-  "description": "Single-app Parsec-like remote game streaming prototype with WebRTC.",
-  "main": "desktop/main.js",
-  "scripts": {
-    "dev": "node server.js",
-    "desktop": "electron .",
-    "start": "electron .",
-    "check": "node --check server.js && node --check public/app.js && node --check desktop/main.js && node --check desktop/preload.js && node --check scripts/install-tailscale.js && node --check scripts/inspect-snv.js && node --check scripts/run-cmake.js",
-    "test": "node --test",
-    "tailscale:install": "node scripts/install-tailscale.js",
-    "native:host-win:configure": "node scripts/run-cmake.js -S native/host-win -B native/host-win/build -G \"Visual Studio 17 2022\" -A x64",
-    "native:host-win:build": "node scripts/run-cmake.js --build native/host-win/build --config Release",
-    "native:host-win:inspect-snv": "node scripts/inspect-snv.js",
-    "native:client-mac:configure": "node scripts/run-cmake.js -S native/client-mac -B native/client-mac/build -DCMAKE_BUILD_TYPE=Release",
-    "native:client-mac:build": "node scripts/run-cmake.js --build native/client-mac/build --config Release",
-    "native:client-mac:probe": "./native/client-mac/build/sanser-native-client --probe",
-    "native:client-mac:decode-snv": "./native/client-mac/build/sanser-native-client --decode-snv",
-    "native:client-mac:listen-snv": "./native/client-mac/build/sanser-native-client --listen-snv",
-    "native:client-mac:listen-render-snv": "./native/client-mac/build/sanser-native-client --listen-render-snv",
-    "dist:win": "electron-builder --win portable --x64",
-    "dist:win:installer": "electron-builder --win nsis --x64",
-    "dist:mac": "electron-builder --mac zip --arm64",
-    "dist:both": "npm run dist:mac && npm run dist:win"
-  },
-  "keywords": [
-    "webrtc",
-    "game-streaming",
-    "remote-desktop"
-  ],
-  "author": "",
+  "description": "Sanser 2.0.0 low-latency remote desktop and game streaming platform.",
   "license": "UNLICENSED",
-  "build": {
-    "appId": "com.gameremote.desktop",
-    "productName": "GameRemote",
-    "artifactName": "${productName}-${version}-${arch}.${ext}",
-    "directories": {
-      "output": "dist"
-    },
-    "asarUnpack": [
-      "desktop/input-worker-win.ps1",
-      "native/host-win/build/Release/sanser-native-host.exe",
-      "native/client-mac/build/sanser-native-client"
-    ],
-    "files": [
-      "desktop/**/*",
-      "native/host-win/build/Release/sanser-native-host.exe",
-      "native/client-mac/build/sanser-native-client",
-      "public/**/*",
-      "scripts/**/*",
-      "server.js",
-      "package.json",
-      "README.md"
-    ],
-    "asar": true,
-    "win": {
-      "target": [
-        "portable"
-      ],
-      "requestedExecutionLevel": "asInvoker",
-      "artifactName": "${productName}-Windows-${version}-${arch}.${ext}"
-    },
-    "mac": {
-      "target": [
-        "zip"
-      ],
-      "category": "public.app-category.utilities",
-      "identity": null,
-      "hardenedRuntime": false,
-      "gatekeeperAssess": false,
-      "artifactName": "${productName}-macOS-${version}-${arch}.${ext}"
-    },
-    "portable": {
-      "artifactName": "${productName}-Windows-${version}-portable-${arch}.${ext}"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    }
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
   },
-  "devDependencies": {
-    "electron": "^42.0.1",
-    "electron-builder": "^26.8.1",
-    "prisma": "^7.8.0"
-  },
-  "dependencies": {
-    "dotenv": "^17.4.2",
-    "pg": "^8.20.0"
+  "scripts": {
+    "dev": "npm --workspace @sanser/desktop run dev",
+    "desktop:dev": "npm --workspace @sanser/desktop run tauri dev",
+    "desktop:build": "npm --workspace @sanser/desktop run build",
+    "desktop:bundle": "npm --workspace @sanser/desktop run tauri build",
+    "desktop:check": "npm --workspace @sanser/desktop run check",
+    "desktop:lint": "npm --workspace @sanser/desktop run lint",
+    "desktop:test": "npm --workspace @sanser/desktop run test",
+    "server:dev": "cargo run -p sanser-server",
+    "server:test": "cargo test -p sanser-server",
+    "check": "cargo fmt --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && npm run desktop:check && npm run desktop:lint",
+    "test": "cargo test --workspace && npm run desktop:test",
+    "build": "cargo build --workspace --release && npm run desktop:build",
+    "native:protocol:test": "cmake -S native/protocol -B native/protocol/build -DBUILD_TESTING=ON && cmake --build native/protocol/build --config Release && ctest --test-dir native/protocol/build --output-on-failure",
+    "native:client-macos:configure": "cmake -S native/client-macos -B native/client-macos/build -DCMAKE_BUILD_TYPE=Release",
+    "native:client-macos:build": "cmake --build native/client-macos/build --config Release",
+    "native:client-macos:probe": "./native/client-macos/build/sanser-client-macos --probe",
+    "native:host-windows:configure": "cmake -S native/host-windows -B native/host-windows/build -G \"Visual Studio 17 2022\" -A x64",
+    "native:host-windows:build": "cmake --build native/host-windows/build --config Release"
   }
 }

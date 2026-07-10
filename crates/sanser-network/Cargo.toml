@@ -1,0 +1,20 @@
+[package]
+name = "sanser-network"
+description = "Bounded transport scheduling and route selection for Sanser"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hmac.workspace = true
+sanser-core = { path = "../sanser-core" }
+sanser-protocol = { path = "../sanser-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true
