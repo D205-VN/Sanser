@@ -11,11 +11,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -32,6 +36,27 @@ struct FrameNv12 {
   std::uint32_t strideY = 0;
   std::uint32_t strideUv = 0;
   std::vector<std::uint8_t> pixels;
+};
+
+struct LinearScaleCoordinate {
+  std::uint32_t first = 0;
+  std::uint32_t second = 0;
+  std::uint16_t secondWeight = 0; // Fixed point in [0, 256].
+};
+
+struct BgraScalePlan {
+  std::uint32_t sourceWidth = 0;
+  std::uint32_t sourceHeight = 0;
+  std::uint32_t targetWidth = 0;
+  std::uint32_t targetHeight = 0;
+  std::vector<LinearScaleCoordinate> xCoordinates;
+  std::vector<LinearScaleCoordinate> yCoordinates;
+};
+
+struct RgbSample {
+  int r = 0;
+  int g = 0;
+  int b = 0;
 };
 
 void checkHr(HRESULT hr, const char* label) {
@@ -106,22 +131,61 @@ std::uint8_t rgbToV(int r, int g, int b) {
   return clampByte(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
 }
 
-FrameNv12 convertBgraToNv12(const FrameBgra& frame) {
-  if ((frame.width % 2) != 0 || (frame.height % 2) != 0) {
-    throw std::runtime_error("NV12 encoder input requires even frame dimensions.");
+void validateBgraFrame(const FrameBgra& frame) {
+  if (frame.width == 0 || frame.height == 0) {
+    throw std::runtime_error("BGRA source frame dimensions must be non-zero.");
   }
-  if (frame.stride < frame.width * 4) {
+  if (frame.width > std::numeric_limits<std::size_t>::max() / 4) {
+    throw std::runtime_error("BGRA source frame row size overflows addressable memory.");
+  }
+  const std::size_t minimumRowBytes = static_cast<std::size_t>(frame.width) * 4;
+  if (static_cast<std::size_t>(frame.stride) < minimumRowBytes) {
     throw std::runtime_error("BGRA frame stride is smaller than expected.");
+  }
+  const std::size_t rowsBeforeLast = static_cast<std::size_t>(frame.height - 1);
+  if (rowsBeforeLast > 0 &&
+      static_cast<std::size_t>(frame.stride) >
+        (std::numeric_limits<std::size_t>::max() - minimumRowBytes) / rowsBeforeLast) {
+    throw std::runtime_error("BGRA source frame size overflows addressable memory.");
+  }
+  const std::size_t requiredBytes = rowsBeforeLast * static_cast<std::size_t>(frame.stride) +
+                                    minimumRowBytes;
+  if (frame.pixels.size() < requiredBytes) {
+    throw std::runtime_error("BGRA source frame pixel buffer is truncated.");
+  }
+}
+
+FrameNv12 allocateNv12Frame(std::uint32_t width, std::uint32_t height) {
+  if (width == 0 || height == 0 || (width % 2) != 0 || (height % 2) != 0) {
+    throw std::runtime_error("NV12 encoder input requires non-zero even frame dimensions.");
+  }
+  if (static_cast<std::size_t>(width) >
+      std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(height)) {
+    throw std::runtime_error("NV12 luma plane size overflows addressable memory.");
   }
 
   FrameNv12 result;
-  result.width = frame.width;
-  result.height = frame.height;
-  result.strideY = frame.width;
-  result.strideUv = frame.width;
+  result.width = width;
+  result.height = height;
+  result.strideY = width;
+  result.strideUv = width;
   const std::size_t yBytes = static_cast<std::size_t>(result.strideY) * result.height;
   const std::size_t uvBytes = static_cast<std::size_t>(result.strideUv) * (result.height / 2);
-  result.pixels.resize(yBytes + uvBytes);
+  if (uvBytes > std::numeric_limits<std::size_t>::max() - yBytes) {
+    throw std::runtime_error("NV12 frame size overflows addressable memory.");
+  }
+  const std::size_t totalBytes = yBytes + uvBytes;
+  if (totalBytes > std::numeric_limits<DWORD>::max()) {
+    throw std::runtime_error("NV12 encoder input exceeds Media Foundation buffer limits.");
+  }
+  result.pixels.resize(totalBytes);
+  return result;
+}
+
+FrameNv12 convertBgraToNv12SameSize(const FrameBgra& frame) {
+  validateBgraFrame(frame);
+  FrameNv12 result = allocateNv12Frame(frame.width, frame.height);
+  const std::size_t yBytes = static_cast<std::size_t>(result.strideY) * result.height;
 
   auto* yPlane = result.pixels.data();
   auto* uvPlane = result.pixels.data() + yBytes;
@@ -155,6 +219,153 @@ FrameNv12 convertBgraToNv12(const FrameBgra& frame) {
       b /= 4;
       uvRow[x] = rgbToU(r, g, b);
       uvRow[x + 1] = rgbToV(r, g, b);
+    }
+  }
+
+  return result;
+}
+
+std::vector<LinearScaleCoordinate> makeLinearScaleCoordinates(std::uint32_t sourceSize,
+                                                              std::uint32_t targetSize) {
+  if (sourceSize == 0 || targetSize == 0) {
+    throw std::runtime_error("Scale dimensions must be non-zero.");
+  }
+
+  std::vector<LinearScaleCoordinate> coordinates(targetSize);
+  if (sourceSize == 1) return coordinates;
+
+  const double scale = static_cast<double>(sourceSize) / static_cast<double>(targetSize);
+  for (std::uint32_t target = 0; target < targetSize; ++target) {
+    const double sourcePosition = (static_cast<double>(target) + 0.5) * scale - 0.5;
+    if (sourcePosition <= 0.0) {
+      coordinates[target] = {0, 0, 0};
+      continue;
+    }
+    if (sourcePosition >= static_cast<double>(sourceSize - 1)) {
+      const std::uint32_t last = sourceSize - 1;
+      coordinates[target] = {last, last, 0};
+      continue;
+    }
+
+    const auto first = static_cast<std::uint32_t>(std::floor(sourcePosition));
+    const double fraction = sourcePosition - static_cast<double>(first);
+    const auto secondWeight = static_cast<std::uint16_t>(std::clamp<long>(
+      std::lround(fraction * 256.0),
+      0,
+      256));
+    coordinates[target] = {first, first + 1, secondWeight};
+  }
+  return coordinates;
+}
+
+void ensureBgraScalePlan(BgraScalePlan& plan,
+                         std::uint32_t sourceWidth,
+                         std::uint32_t sourceHeight,
+                         std::uint32_t targetWidth,
+                         std::uint32_t targetHeight) {
+  if (plan.sourceWidth == sourceWidth &&
+      plan.sourceHeight == sourceHeight &&
+      plan.targetWidth == targetWidth &&
+      plan.targetHeight == targetHeight) {
+    return;
+  }
+
+  BgraScalePlan next;
+  next.sourceWidth = sourceWidth;
+  next.sourceHeight = sourceHeight;
+  next.targetWidth = targetWidth;
+  next.targetHeight = targetHeight;
+  next.xCoordinates = makeLinearScaleCoordinates(sourceWidth, targetWidth);
+  next.yCoordinates = makeLinearScaleCoordinates(sourceHeight, targetHeight);
+  plan = std::move(next);
+
+  std::cerr << "SNV1_ENCODER_SCALE source=" << sourceWidth << "x" << sourceHeight
+            << " target=" << targetWidth << "x" << targetHeight
+            << " filter=bilinear-direct-nv12\n";
+}
+
+int bilinearChannel(std::uint8_t topLeft,
+                    std::uint8_t topRight,
+                    std::uint8_t bottomLeft,
+                    std::uint8_t bottomRight,
+                    std::uint16_t xWeight,
+                    std::uint16_t yWeight) {
+  constexpr std::uint32_t one = 256;
+  const std::uint32_t inverseX = one - xWeight;
+  const std::uint32_t inverseY = one - yWeight;
+  const std::uint32_t top = static_cast<std::uint32_t>(topLeft) * inverseX +
+                            static_cast<std::uint32_t>(topRight) * xWeight;
+  const std::uint32_t bottom = static_cast<std::uint32_t>(bottomLeft) * inverseX +
+                               static_cast<std::uint32_t>(bottomRight) * xWeight;
+  return static_cast<int>((top * inverseY + bottom * yWeight + (one * one / 2)) /
+                          (one * one));
+}
+
+RgbSample sampleBgraBilinear(const FrameBgra& frame,
+                             const LinearScaleCoordinate& x,
+                             const LinearScaleCoordinate& y) {
+  const auto* topRow = frame.pixels.data() + static_cast<std::size_t>(frame.stride) * y.first;
+  const auto* bottomRow = frame.pixels.data() + static_cast<std::size_t>(frame.stride) * y.second;
+  const auto* topLeft = topRow + static_cast<std::size_t>(x.first) * 4;
+  const auto* topRight = topRow + static_cast<std::size_t>(x.second) * 4;
+  const auto* bottomLeft = bottomRow + static_cast<std::size_t>(x.first) * 4;
+  const auto* bottomRight = bottomRow + static_cast<std::size_t>(x.second) * 4;
+
+  RgbSample sample;
+  sample.b = bilinearChannel(topLeft[0], topRight[0], bottomLeft[0], bottomRight[0],
+                             x.secondWeight, y.secondWeight);
+  sample.g = bilinearChannel(topLeft[1], topRight[1], bottomLeft[1], bottomRight[1],
+                             x.secondWeight, y.secondWeight);
+  sample.r = bilinearChannel(topLeft[2], topRight[2], bottomLeft[2], bottomRight[2],
+                             x.secondWeight, y.secondWeight);
+  return sample;
+}
+
+FrameNv12 convertBgraToNv12Scaled(const FrameBgra& frame,
+                                  std::uint32_t targetWidth,
+                                  std::uint32_t targetHeight,
+                                  BgraScalePlan& scalePlan) {
+  if (frame.width == targetWidth && frame.height == targetHeight) {
+    return convertBgraToNv12SameSize(frame);
+  }
+
+  validateBgraFrame(frame);
+  FrameNv12 result = allocateNv12Frame(targetWidth, targetHeight);
+  ensureBgraScalePlan(scalePlan,
+                      frame.width,
+                      frame.height,
+                      targetWidth,
+                      targetHeight);
+
+  const std::size_t yBytes = static_cast<std::size_t>(result.strideY) * result.height;
+  auto* yPlane = result.pixels.data();
+  auto* uvPlane = result.pixels.data() + yBytes;
+
+  for (std::uint32_t y = 0; y < targetHeight; y += 2) {
+    auto* yRow0 = yPlane + static_cast<std::size_t>(result.strideY) * y;
+    auto* yRow1 = yPlane + static_cast<std::size_t>(result.strideY) * (y + 1);
+    auto* uvRow = uvPlane + static_cast<std::size_t>(result.strideUv) * (y / 2);
+    const auto& sourceY0 = scalePlan.yCoordinates[y];
+    const auto& sourceY1 = scalePlan.yCoordinates[y + 1];
+
+    for (std::uint32_t x = 0; x < targetWidth; x += 2) {
+      const auto& sourceX0 = scalePlan.xCoordinates[x];
+      const auto& sourceX1 = scalePlan.xCoordinates[x + 1];
+      const RgbSample topLeft = sampleBgraBilinear(frame, sourceX0, sourceY0);
+      const RgbSample topRight = sampleBgraBilinear(frame, sourceX1, sourceY0);
+      const RgbSample bottomLeft = sampleBgraBilinear(frame, sourceX0, sourceY1);
+      const RgbSample bottomRight = sampleBgraBilinear(frame, sourceX1, sourceY1);
+
+      yRow0[x] = rgbToY(topLeft.r, topLeft.g, topLeft.b);
+      yRow0[x + 1] = rgbToY(topRight.r, topRight.g, topRight.b);
+      yRow1[x] = rgbToY(bottomLeft.r, bottomLeft.g, bottomLeft.b);
+      yRow1[x + 1] = rgbToY(bottomRight.r, bottomRight.g, bottomRight.b);
+
+      const int averageR = (topLeft.r + topRight.r + bottomLeft.r + bottomRight.r + 2) / 4;
+      const int averageG = (topLeft.g + topRight.g + bottomLeft.g + bottomRight.g + 2) / 4;
+      const int averageB = (topLeft.b + topRight.b + bottomLeft.b + bottomRight.b + 2) / 4;
+      uvRow[x] = rgbToU(averageR, averageG, averageB);
+      uvRow[x + 1] = rgbToV(averageR, averageG, averageB);
     }
   }
 
@@ -278,6 +489,7 @@ struct EncoderCandidate {
   UINT32 index = 0;
   int score = 0;
   bool hardware = false;
+  bool asynchronous = false;
 };
 
 std::string friendlyName(IMFActivate* activate, UINT32 index) {
@@ -322,7 +534,10 @@ int backendScore(const std::string& backend, bool hardware) {
   return 10;
 }
 
-std::vector<EncoderCandidate> enumerateEncoderCandidates(VideoCodec codec, UINT32 flags, bool hardware) {
+std::vector<EncoderCandidate> enumerateEncoderCandidates(VideoCodec codec,
+                                                         UINT32 flags,
+                                                         bool hardware,
+                                                         bool asynchronous) {
   MFT_REGISTER_TYPE_INFO inputInfo{};
   inputInfo.guidMajorType = MFMediaType_Video;
   inputInfo.guidSubtype = MFVideoFormat_NV12;
@@ -353,6 +568,7 @@ std::vector<EncoderCandidate> enumerateEncoderCandidates(VideoCodec codec, UINT3
     candidate.backend = detectBackend(candidate.name, hardware);
     candidate.index = i;
     candidate.hardware = hardware;
+    candidate.asynchronous = asynchronous;
     candidate.score = backendScore(candidate.backend, hardware);
     candidates.push_back(std::move(candidate));
   }
@@ -393,11 +609,23 @@ struct EncoderSelection {
   std::string name = "unknown";
   std::string backend = "unknown";
   bool hardware = false;
+  bool asynchronous = false;
 };
 
-ComPtr<IMFTransform> activateCandidate(const EncoderCandidate& candidate) {
+struct EncoderActivation {
   ComPtr<IMFTransform> transform;
-  const HRESULT activateHr = candidate.activate->ActivateObject(IID_PPV_ARGS(transform.GetAddressOf()));
+  ComPtr<IMFMediaEventGenerator> eventGenerator;
+  bool asynchronous = false;
+
+  explicit operator bool() const {
+    return transform.Get() != nullptr;
+  }
+};
+
+EncoderActivation activateCandidate(const EncoderCandidate& candidate) {
+  EncoderActivation activation;
+  const HRESULT activateHr = candidate.activate->ActivateObject(
+    IID_PPV_ARGS(activation.transform.GetAddressOf()));
   if (FAILED(activateHr)) {
     std::cerr << "SNV1_ENCODER_CANDIDATE_FAILED backend=" << candidate.backend
               << " hardware=" << (candidate.hardware ? "yes" : "no")
@@ -406,12 +634,53 @@ ComPtr<IMFTransform> activateCandidate(const EncoderCandidate& candidate) {
               << "\n";
     return {};
   }
-  return transform;
+
+  ComPtr<IMFAttributes> attributes;
+  UINT32 asyncAttribute = FALSE;
+  const HRESULT attributesHr = activation.transform->GetAttributes(attributes.GetAddressOf());
+  if (SUCCEEDED(attributesHr) && attributes) {
+    attributes->GetUINT32(MF_TRANSFORM_ASYNC, &asyncAttribute);
+  }
+  activation.asynchronous = candidate.asynchronous || asyncAttribute != FALSE;
+
+  if (activation.asynchronous) {
+    if (!attributes) {
+      std::cerr << "SNV1_ENCODER_CANDIDATE_FAILED backend=" << candidate.backend
+                << " hardware=" << (candidate.hardware ? "yes" : "no")
+                << " name=\"" << logValue(candidate.name) << "\""
+                << " reason=async-attributes-unavailable"
+                << " error=" << hresultMessage(attributesHr)
+                << "\n";
+      return {};
+    }
+    const HRESULT unlockHr = attributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+    if (FAILED(unlockHr)) {
+      std::cerr << "SNV1_ENCODER_CANDIDATE_FAILED backend=" << candidate.backend
+                << " hardware=" << (candidate.hardware ? "yes" : "no")
+                << " name=\"" << logValue(candidate.name) << "\""
+                << " reason=async-unlock-failed"
+                << " error=" << hresultMessage(unlockHr)
+                << "\n";
+      return {};
+    }
+    const HRESULT eventsHr = activation.transform->QueryInterface(
+      IID_PPV_ARGS(activation.eventGenerator.GetAddressOf()));
+    if (FAILED(eventsHr) || !activation.eventGenerator) {
+      std::cerr << "SNV1_ENCODER_CANDIDATE_FAILED backend=" << candidate.backend
+                << " hardware=" << (candidate.hardware ? "yes" : "no")
+                << " name=\"" << logValue(candidate.name) << "\""
+                << " reason=async-events-unavailable"
+                << " error=" << hresultMessage(eventsHr)
+                << "\n";
+      return {};
+    }
+  }
+  return activation;
 }
 
-ComPtr<IMFTransform> createEncoderTransform(VideoCodec codec,
-                                            const VideoPacketEncodeOptions& options,
-                                            EncoderSelection& selection) {
+EncoderActivation createEncoderTransform(VideoCodec codec,
+                                         const VideoPacketEncodeOptions& options,
+                                         EncoderSelection& selection) {
   const bool wantsSoftware = !options.hardware ||
                              normalizeEncoderPreference(options.encoderPreference) == "software";
   const std::string preference = wantsSoftware
@@ -421,16 +690,19 @@ ComPtr<IMFTransform> createEncoderTransform(VideoCodec codec,
   std::vector<EncoderCandidate> candidates;
   if (!wantsSoftware) {
     auto hardwareCandidates = enumerateEncoderCandidates(codec,
-                                                        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-                                                        true);
+                                                         MFT_ENUM_FLAG_HARDWARE |
+                                                           MFT_ENUM_FLAG_SORTANDFILTER,
+                                                         true,
+                                                         true);
     candidates.insert(candidates.end(),
                       std::make_move_iterator(hardwareCandidates.begin()),
                       std::make_move_iterator(hardwareCandidates.end()));
   }
 
   auto softwareCandidates = enumerateEncoderCandidates(codec,
-                                                       MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT |
+                                                       MFT_ENUM_FLAG_SYNCMFT |
                                                          MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+                                                       false,
                                                        false);
   candidates.insert(candidates.end(),
                     std::make_move_iterator(softwareCandidates.begin()),
@@ -443,37 +715,46 @@ ComPtr<IMFTransform> createEncoderTransform(VideoCodec codec,
     preferred = sortCandidates(candidates, "auto");
   }
 
-  auto tryCandidates = [&](const std::vector<EncoderCandidate>& list) -> ComPtr<IMFTransform> {
+  auto tryCandidates = [&](const std::vector<EncoderCandidate>& list) -> EncoderActivation {
     for (const EncoderCandidate& candidate : list) {
       std::cerr << "SNV1_ENCODER_CANDIDATE backend=" << candidate.backend
                 << " hardware=" << (candidate.hardware ? "yes" : "no")
                 << " score=" << candidate.score
                 << " name=\"" << logValue(candidate.name) << "\"\n";
-      auto transform = activateCandidate(candidate);
-      if (transform) {
+      auto activation = activateCandidate(candidate);
+      if (activation) {
         selection.name = candidate.name;
         selection.backend = candidate.backend;
         selection.hardware = candidate.hardware;
-        return transform;
+        selection.asynchronous = activation.asynchronous;
+        return activation;
       }
     }
     return {};
   };
 
-  if (auto transform = tryCandidates(preferred)) {
-    return transform;
+  if (auto activation = tryCandidates(preferred)) {
+    return activation;
   }
 
   if (preference != "auto" && preference != "software") {
     std::cerr << "SNV1_ENCODER_ACTIVATION_FALLBACK preference=" << preference
               << " fallback=auto\n";
-    if (auto transform = tryCandidates(sortCandidates(candidates, "auto"))) {
-      return transform;
+    if (auto activation = tryCandidates(sortCandidates(candidates, "auto"))) {
+      return activation;
     }
   }
 
   throw std::runtime_error("No Media Foundation " + videoCodecName(codec) + " encoder MFT found.");
 }
+
+struct OutputPullResult {
+  EncodedVideoPacket packet;
+  bool producedPacket = false;
+  bool needMoreInput = false;
+  bool streamChanged = false;
+  bool incomplete = false;
+};
 
 } // namespace
 
@@ -492,12 +773,72 @@ struct MfVideoPacketEncoder::Impl {
   std::string encoderName = "unknown";
   std::string encoderBackend = "unknown";
   bool providesOutputSamples = false;
+  std::uint32_t consecutiveStreamChanges = 0;
+  BgraScalePlan scalePlan;
+
+  void refreshOutputStreamInfo() {
+    MFT_OUTPUT_STREAM_INFO nextInfo{};
+    checkHr(transform->GetOutputStreamInfo(0, &nextInfo), "GetOutputStreamInfo");
+    outputInfo = nextInfo;
+    providesOutputSamples = (outputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
+  }
+
+  void renegotiateOutputType() {
+    HRESULT lastHr = MF_E_NO_MORE_TYPES;
+    for (DWORD typeIndex = 0; typeIndex < 64; ++typeIndex) {
+      ComPtr<IMFMediaType> candidateType;
+      const HRESULT availableHr = transform->GetOutputAvailableType(0,
+                                                                    typeIndex,
+                                                                    candidateType.GetAddressOf());
+      if (availableHr == MF_E_NO_MORE_TYPES) break;
+      if (FAILED(availableHr)) {
+        lastHr = availableHr;
+        break;
+      }
+
+      GUID majorType{};
+      GUID subtype{};
+      if (FAILED(candidateType->GetGUID(MF_MT_MAJOR_TYPE, &majorType)) ||
+          FAILED(candidateType->GetGUID(MF_MT_SUBTYPE, &subtype)) ||
+          !IsEqualGUID(majorType, MFMediaType_Video) ||
+          !IsEqualGUID(subtype, codecSubtype(options.codec))) {
+        continue;
+      }
+      UINT32 candidateWidth = 0;
+      UINT32 candidateHeight = 0;
+      const HRESULT sizeHr = MFGetAttributeSize(candidateType.Get(),
+                                                MF_MT_FRAME_SIZE,
+                                                &candidateWidth,
+                                                &candidateHeight);
+      if (SUCCEEDED(sizeHr) && (candidateWidth != width || candidateHeight != height)) {
+        continue;
+      }
+
+      const HRESULT setHr = transform->SetOutputType(0, candidateType.Get(), 0);
+      if (SUCCEEDED(setHr)) {
+        refreshOutputStreamInfo();
+        std::cerr << "SNV1_ENCODER_STREAM_CHANGE renegotiated=yes"
+                  << " typeIndex=" << typeIndex
+                  << " codec=" << videoCodecName(options.codec)
+                  << " providesSamples=" << (providesOutputSamples ? "yes" : "no")
+                  << "\n";
+        return;
+      }
+      lastHr = setHr;
+    }
+
+    throw std::runtime_error("Could not renegotiate encoder output type after stream change: " +
+                             hresultMessage(lastHr));
+  }
 };
 
 MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
                                            std::uint32_t height,
                                            const VideoPacketEncodeOptions& options)
   : impl_(std::make_unique<Impl>()) {
+  if (width == 0 || height == 0 || (width % 2) != 0 || (height % 2) != 0) {
+    throw std::runtime_error("Packet encoder dimensions must be non-zero and even for NV12 input.");
+  }
   impl_->width = width;
   impl_->height = height;
   impl_->fps = std::max<std::uint32_t>(options.fps, 1);
@@ -514,11 +855,6 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
             << " backend=" << impl_->encoderBackend
             << " hardware=" << (impl_->usingHardware ? "yes" : "no")
             << " name=\"" << logValue(impl_->encoderName) << "\"\n";
-
-  ComPtr<IMFAttributes> transformAttributes;
-  if (SUCCEEDED(impl_->transform->GetAttributes(transformAttributes.GetAddressOf())) && transformAttributes) {
-    transformAttributes->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
-  }
 
   ComPtr<IMFMediaType> outputType;
   checkHr(MFCreateMediaType(outputType.GetAddressOf()), "MFCreateMediaType output");
@@ -538,8 +874,7 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
 
   configureLowLatencyEncoder(impl_->transform.Get(), impl_->options);
 
-  checkHr(impl_->transform->GetOutputStreamInfo(0, &impl_->outputInfo), "GetOutputStreamInfo");
-  impl_->providesOutputSamples = (impl_->outputInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
+  impl_->refreshOutputStreamInfo();
 
   notifyTransform(impl_->transform.Get(), MFT_MESSAGE_COMMAND_FLUSH, "Encoder flush");
   notifyTransform(impl_->transform.Get(), MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, "Encoder begin streaming");
@@ -622,11 +957,13 @@ bool MfVideoPacketEncoder::requestKeyframe() {
 }
 
 std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(const FrameBgra& frame) {
-  if (frame.width != impl_->width || frame.height != impl_->height) {
-    throw std::runtime_error("Frame dimensions do not match packet encoder dimensions.");
+  const FrameNv12 nv12 = convertBgraToNv12Scaled(frame,
+                                                 impl_->width,
+                                                 impl_->height,
+                                                 impl_->scalePlan);
+  if (nv12.pixels.size() > std::numeric_limits<DWORD>::max()) {
+    throw std::runtime_error("NV12 encoder input exceeds Media Foundation buffer limits.");
   }
-
-  const FrameNv12 nv12 = convertBgraToNv12(frame);
   const DWORD bufferSize = static_cast<DWORD>(nv12.pixels.size());
 
   ComPtr<IMFMediaBuffer> buffer;
@@ -668,10 +1005,12 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(const FrameBgr
 
 std::vector<EncodedVideoPacket> MfVideoPacketEncoder::drain() {
   std::vector<EncodedVideoPacket> packets;
+  constexpr std::uint32_t maxConsecutiveStreamChanges = 4;
 
   while (true) {
     ComPtr<IMFSample> sample;
-    if (!impl_->providesOutputSamples) {
+    const bool transformProvidesOutputSamples = impl_->providesOutputSamples;
+    if (!transformProvidesOutputSamples) {
       const DWORD outputBufferSize = std::max<DWORD>(
         impl_->outputInfo.cbSize,
         static_cast<DWORD>(std::max<std::uint32_t>(impl_->width * impl_->height, 1024 * 1024)));
@@ -693,15 +1032,33 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::drain() {
     }
 
     if (outputHr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+      if (transformProvidesOutputSamples && output.pSample) {
+        output.pSample->Release();
+        output.pSample = nullptr;
+      }
       break;
     }
     if (outputHr == MF_E_TRANSFORM_STREAM_CHANGE) {
+      if (transformProvidesOutputSamples && output.pSample) {
+        output.pSample->Release();
+        output.pSample = nullptr;
+      }
+      ++impl_->consecutiveStreamChanges;
+      if (impl_->consecutiveStreamChanges > maxConsecutiveStreamChanges) {
+        throw std::runtime_error("Encoder reported too many consecutive output stream changes.");
+      }
+      impl_->renegotiateOutputType();
       continue;
     }
+    if (FAILED(outputHr) && transformProvidesOutputSamples && output.pSample) {
+      output.pSample->Release();
+      output.pSample = nullptr;
+    }
     checkHr(outputHr, "ProcessOutput");
+    impl_->consecutiveStreamChanges = 0;
 
     ComPtr<IMFSample> outputSample;
-    if (impl_->providesOutputSamples) {
+    if (transformProvidesOutputSamples) {
       outputSample.Attach(output.pSample);
       output.pSample = nullptr;
     } else {
@@ -718,8 +1075,13 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::drain() {
     checkHr(contiguous->Lock(&data, &maxLength, &currentLength), "Lock output sample");
 
     EncodedVideoPacket packet;
-    packet.payload.resize(currentLength);
-    std::memcpy(packet.payload.data(), data, currentLength);
+    try {
+      packet.payload.resize(currentLength);
+      std::memcpy(packet.payload.data(), data, currentLength);
+    } catch (...) {
+      contiguous->Unlock();
+      throw;
+    }
 
     checkHr(contiguous->Unlock(), "Unlock output sample");
 

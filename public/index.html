@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -43,11 +43,11 @@
           </label>
           <label class="field">
             <span>Email</span>
-            <input id="emailInput" type="email" autocomplete="email" placeholder="you@example.com">
+            <input id="emailInput" type="email" autocomplete="email" placeholder="you@example.com" required>
           </label>
           <label class="field">
             <span>Mật khẩu</span>
-            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="6+ ký tự">
+            <input id="passwordInput" type="password" autocomplete="current-password" placeholder="6+ ký tự" minlength="6" required>
           </label>
           <label class="field">
             <span>Server URL</span>
@@ -334,7 +334,7 @@
                 <input id="hostBitrate" type="number" min="4" max="120" step="1" value="28">
               </label>
               <label class="setting-row">
-                <span><strong>Windows Encoder</strong><small>Ưu tiên encoder phần cứng cho native host.</small></span>
+                <span><strong>Windows Encoder</strong><small>Ưu tiên backend; packet path sẽ fallback MFT đồng bộ an toàn nếu driver chỉ có MFT bất đồng bộ.</small></span>
                 <select id="encoderPreference">
                   <option value="auto" selected>Auto best</option>
                   <option value="nvenc">NVIDIA NVENC</option>
@@ -345,9 +345,10 @@
                 </select>
               </label>
               <label class="setting-row">
-                <span><strong>Native Video Codec</strong><small>HEVC giảm bitrate nếu Windows và Mac hỗ trợ.</small></span>
+                <span><strong>Native Video Codec</strong><small>Auto: LAN dùng H.264; Wi-Fi/Internet ưu tiên HEVC và fallback H.264.</small></span>
                 <select id="nativeVideoCodec">
-                  <option value="h264" selected>H.264</option>
+                  <option value="auto" selected>Auto (theo network profile)</option>
+                  <option value="h264">H.264</option>
                   <option value="hevc">H.265 / HEVC</option>
                 </select>
               </label>
@@ -370,7 +371,7 @@
                 <input id="serverUrlInput" placeholder="Local server">
               </label>
               <label class="setting-row">
-                <span><strong>Transport</strong><small>Native SNV dùng UDP video, Metal, audio và input backchannel.</small></span>
+                <span><strong>Transport</strong><small>Native SNV cần IP trực tiếp; NETWORK_MODE=relay tự dùng WebRTC Adaptive qua TURN.</small></span>
                 <select id="transportMode">
                   <option value="native-snv" selected>Native SNV</option>
                   <option value="webrtc-adaptive">WebRTC Adaptive</option>
@@ -378,12 +379,12 @@
                 </select>
               </label>
               <label class="setting-row">
-                <span><strong>Connection Profile</strong><small>Tự chọn FPS và bitrate theo LAN, Wi-Fi hoặc Tailscale.</small></span>
+                <span><strong>Connection Profile</strong><small>Tự chọn FPS, bitrate và codec theo LAN, Wi-Fi hoặc Internet/Relay.</small></span>
                 <select id="nativeQualityProfile">
                   <option value="auto" selected>Auto low-latency</option>
-                  <option value="lan">LAN 1080p60</option>
-                  <option value="wifi">Wi-Fi 900p60</option>
-                  <option value="tailscale">Tailscale 720p30</option>
+                  <option value="lan">LAN 1080p60 28Mbps</option>
+                  <option value="wifi">Wi-Fi 900p45 12Mbps</option>
+                  <option value="internet">Internet / Relay 720p30 6Mbps</option>
                   <option value="manual">Manual</option>
                 </select>
               </label>
@@ -393,7 +394,7 @@
               </label>
               <label class="setting-row">
                 <span><strong>Native Client IP</strong><small>IP Windows sẽ connect về Mac.</small></span>
-                <input id="nativeClientIp" placeholder="Auto" value="100.100.83.44">
+                <input id="nativeClientIp" placeholder="Auto (LAN/direct route)">
               </label>
               <label class="setting-row">
                 <span><strong>Audio Jitter</strong><small>Buffer audio native trên Mac.</small></span>

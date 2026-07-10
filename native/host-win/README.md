@@ -1,23 +1,26 @@
 # Sanser Native Windows Host
 
-This is the first native-capture prototype for the long-term Sunshine/Parsec-style engine.
+This is the native Windows capture/encode host for the low-latency SNV transport.
 
 Current scope:
 
 - Windows Desktop Duplication API
 - D3D11 capture from a selected adapter/output
+- Recovery after Desktop Duplication access loss, including display rotation
 - BMP frame dump for validation
 - BGRA frame pipe mode for Node/Electron integration
-- Media Foundation H.264 file encode prototype with hardware transforms requested
-- SNV1 H.264 packet pipe prototype for native streaming integration
+- Media Foundation H.264/HEVC file and realtime packet encoding
+- TCP and fragmented UDP SNV1 video transport with pacing, NACK retransmit, and adaptive feedback
+- WASAPI loopback audio transport
+- Authenticated keyboard, mouse, and gamepad control backchannel
+- Electron launcher integration
 
-Not included yet:
+Known limitations:
 
 - Direct NVIDIA NVENC SDK backend with low-level GPU encoder controls
 - Intel QuickSync / AMD AMF backend-specific controls
-- Audio capture
-- Network transport for SNV1 packets
-- Native client decode/render integration
+- Fully asynchronous Media Foundation transform pumping across every GPU driver; the
+  realtime packet path currently chooses a synchronous MFT for correctness
 
 ## Build
 
@@ -42,6 +45,8 @@ Options:
 --output-dir DIR BMP output directory
 --adapter N      DXGI adapter index
 --output N       DXGI output/monitor index
+--stream-width N Maximum realtime SNV width while preserving aspect ratio
+--stream-height N Maximum realtime SNV height while preserving aspect ratio
 ```
 
 If the desktop is idle, the duplicator may wait until the screen changes. Move the mouse or open a window to produce frames.
@@ -54,7 +59,7 @@ List Windows Media Foundation hardware encoders:
 .\native\host-win\build\Release\sanser-native-host.exe --list-encoders
 ```
 
-This reports hardware MFT encoders exposed by the GPU driver/Windows stack for H.264, H.265/HEVC, and AV1. On NVIDIA systems this may be backed by NVENC, but this prototype does not use the NVIDIA Video Codec SDK directly yet.
+This reports hardware MFT encoders exposed by the GPU driver/Windows stack for H.264, H.265/HEVC, and AV1. On NVIDIA systems this may be backed by NVENC. The file encoder can use those transforms, while the realtime packet encoder currently falls back to a synchronous Media Foundation encoder until its asynchronous event pump is implemented; this avoids driver-dependent stalls and corrupted output.
 
 ## H.264 Encode Test
 
@@ -80,6 +85,8 @@ Write realtime-style H.264 packets with `SNV1` headers:
 .\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --packet-file native-captures\capture_h264.snv
 ```
 
+For a 720p-bounded stream from a larger desktop, add `--stream-width 1280 --stream-height 720`. The host converts BGRA directly into scaled NV12 without allocating an intermediate BGRA frame, and the SNV header reports the fitted output dimensions.
+
 Omit `--packet-file` only when another process is reading stdout:
 
 ```powershell
@@ -91,7 +98,7 @@ Do not run the stdout form directly in a normal terminal unless you are redirect
 Stream packets to the macOS native client over TCP:
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect <MAC_IP>:7777
 ```
 
 Start the Mac receiver first:

@@ -50,6 +50,14 @@ namespace {
 
 constexpr std::uint32_t kSnvCodecH264 = 1;
 constexpr std::uint32_t kSnvCodecHevc = 2;
+constexpr std::size_t kMaxControlHeaderBytes = 64 * 1024;
+constexpr std::size_t kMaxControlPayloadBytes = 4 * 1024 * 1024;
+constexpr std::size_t kMaxSnvHeaderBytes = 64 * 1024;
+constexpr std::size_t kMaxSnvPayloadBytes = 64 * 1024 * 1024;
+constexpr std::size_t kMaxUdpVideoDatagramBytes = 1500;
+constexpr std::size_t kMaxUdpVideoPacketBytes = 32 * 1024 * 1024;
+constexpr std::size_t kMaxUdpVideoFragments = 32 * 1024;
+constexpr std::size_t kMaxUdpVideoAssemblyBytes = 128 * 1024 * 1024;
 
 CMVideoCodecType fourcc(char a, char b, char c, char d) {
   return (static_cast<CMVideoCodecType>(a) << 24)
@@ -133,7 +141,7 @@ void printHelp() {
     << "  --udp-video      Listen for SNU1/SNU2 UDP video instead of TCP video\n"
     << "  --session-token T Require host control proof and HMAC-authenticated control packets\n"
     << "  --control-port P  Dedicated native input/stats TCP port; defaults to render port + 1, 0 disables\n"
-    << "  --audio-port P   Listen for SNA1/SNA2 UDP float PCM audio; defaults to render port + 2, 0 disables\n"
+    << "  --audio-port P   Listen for SNA1/SNA2 float32 or negotiated SNA3/SNA4 PCM16 audio; defaults to render port + 2, 0 disables\n"
     << "  --audio-jitter-ms N Target SNA1 audio jitter buffer, default 24 ms\n"
     << "  --audio-device UID Output audio device UID; default uses the current macOS output\n"
     << "  --audio-volume N Client playback volume 0.0-1.0, default 1.0\n"
@@ -1919,6 +1927,25 @@ std::uint32_t modifierFamilyBitsForMacKeyCode(unsigned short keyCode) {
   }
 }
 
+NSEventModifierFlags modifierFamilyFlagForMacKeyCode(unsigned short keyCode) {
+  switch (keyCode) {
+    case 56:
+    case 60:
+      return NSEventModifierFlagShift;
+    case 59:
+    case 62:
+      return NSEventModifierFlagControl;
+    case 58:
+    case 61:
+      return NSEventModifierFlagOption;
+    case 55:
+    case 54:
+      return NSEventModifierFlagCommand;
+    default:
+      return 0;
+  }
+}
+
 std::uint32_t normalizeModifierSnapshot(NSEventModifierFlags flags, std::uint32_t mask) {
   auto syncFamily = [&](NSEventModifierFlags familyFlag,
                         std::uint32_t familyBits,
@@ -1943,8 +1970,12 @@ std::uint32_t modifierSnapshotForEvent(NSEvent* event, bool flagsChanged) {
   if (flagsChanged) {
     const std::uint32_t bit = modifierKeyBitForMacKeyCode([event keyCode]);
     const std::uint32_t familyBits = modifierFamilyBitsForMacKeyCode([event keyCode]);
-    if (bit != 0 && familyBits != 0) {
-      const bool down = (normalizeModifierSnapshot(flags, bit) & bit) != 0;
+    const NSEventModifierFlags familyFlag = modifierFamilyFlagForMacKeyCode([event keyCode]);
+    if (bit != 0 && familyBits != 0 && familyFlag != 0) {
+      const bool familyActive = (flags & familyFlag) != 0;
+      const bool wasDown = (mask & bit) != 0;
+      const bool anotherSideDown = (mask & (familyBits & ~bit)) != 0;
+      const bool down = familyActive && (!wasDown || !anotherSideDown);
       mask &= ~bit;
       if (down) mask |= bit;
     }
@@ -2538,6 +2569,7 @@ void sendControlHello() {
       << ",\"inputBatch\":true"
       << ",\"inputAck\":true"
       << ",\"audioUdp\":true"
+      << ",\"audioPcm16\":true"
       << ",\"videoUdp\":true"
       << ",\"keyframeRequest\":true"
       << ",\"videoNack\":true"
@@ -2587,6 +2619,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
   if (payload.find("\"type\":\"control-hello-ack\"") != std::string::npos) {
     const bool inputBatch = jsonBoolValue(payload, "inputBatch");
     const bool inputAck = jsonBoolValue(payload, "inputAck");
+    const bool audioPcm16 = jsonBoolValue(payload, "audioPcm16");
     const bool keyframeRequest = jsonBoolValue(payload, "keyframeRequest");
     const bool videoNack = jsonBoolValue(payload, "videoNack");
     const bool udpRepairStats = jsonBoolValue(payload, "udpRepairStats");
@@ -2623,6 +2656,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
     std::cout << "SNCONTROL_HELLO_ACK protocol=" << jsonUint64Value(payload, "protocolVersion")
               << " inputBatch=" << boolText(inputBatch)
               << " inputAck=" << boolText(inputAck)
+              << " audioPcm16=" << boolText(audioPcm16)
               << " keyframeRequest=" << boolText(keyframeRequest)
               << " videoNack=" << boolText(videoNack)
               << " udpRepairStats=" << boolText(udpRepairStats)
@@ -2911,7 +2945,7 @@ struct UdpVideoAuthenticatedFragmentHeader {
 };
 
 struct AudioPacketHeader {
-  char magic[4] = {'S', 'N', 'A', '1'};
+  char magic[4] = {'S', 'N', 'A', '1'}; // SNA1=float32, SNA3=PCM16
   std::uint16_t headerSize = sizeof(AudioPacketHeader);
   std::uint16_t channels = 2;
   std::uint32_t sampleRate = 0;
@@ -2922,7 +2956,7 @@ struct AudioPacketHeader {
 };
 
 struct AudioAuthenticatedPacketHeader {
-  char magic[4] = {'S', 'N', 'A', '2'};
+  char magic[4] = {'S', 'N', 'A', '2'}; // SNA2=float32+auth, SNA4=PCM16+auth
   std::uint16_t headerSize = sizeof(AudioAuthenticatedPacketHeader);
   std::uint16_t channels = 2;
   std::uint32_t sampleRate = 0;
@@ -3208,7 +3242,7 @@ public:
                                                          0,
                                                          &blockBuffer);
     if (status != noErr) {
-      ++decodeErrors_;
+      decodeErrors_.fetch_add(1, std::memory_order_relaxed);
       std::cerr << "CMBlockBufferCreate failed: " << osStatusString(status) << "\n";
       return false;
     }
@@ -3216,7 +3250,7 @@ public:
     status = CMBlockBufferReplaceDataBytes(avccSample.data(), blockBuffer, 0, avccSample.size());
     if (status != noErr) {
       CFRelease(blockBuffer);
-      ++decodeErrors_;
+      decodeErrors_.fetch_add(1, std::memory_order_relaxed);
       std::cerr << "CMBlockBufferReplaceDataBytes failed: " << osStatusString(status) << "\n";
       return false;
     }
@@ -3238,7 +3272,7 @@ public:
                                        &sampleBuffer);
     CFRelease(blockBuffer);
     if (status != noErr) {
-      ++decodeErrors_;
+      decodeErrors_.fetch_add(1, std::memory_order_relaxed);
       std::cerr << "CMSampleBufferCreateReady failed: " << osStatusString(status) << "\n";
       return false;
     }
@@ -3258,7 +3292,7 @@ public:
     CFRelease(sampleBuffer);
     if (status != noErr) {
       delete frameMetadata;
-      ++decodeErrors_;
+      decodeErrors_.fetch_add(1, std::memory_order_relaxed);
       std::cerr << "VTDecompressionSessionDecodeFrame failed at packet "
                 << packet.sequence << ": " << osStatusString(status) << "\n";
       return false;
@@ -3273,9 +3307,9 @@ public:
     }
   }
 
-  std::uint64_t decodedFrames() const { return decodedFrames_; }
+  std::uint64_t decodedFrames() const { return decodedFrames_.load(std::memory_order_relaxed); }
   std::uint64_t submittedFrames() const { return submittedFrames_; }
-  std::uint64_t decodeErrors() const { return decodeErrors_; }
+  std::uint64_t decodeErrors() const { return decodeErrors_.load(std::memory_order_relaxed); }
 
 private:
   void resetSession() {
@@ -3370,16 +3404,17 @@ private:
     const DecodedVideoFrameMetadata& frameMetadata = metadata ? *metadata : fallbackMetadata;
     auto* self = static_cast<VtH264Decoder*>(decompressionOutputRefCon);
     if (status == noErr && imageBuffer) {
-      self->decodedFrames_ += 1;
+      const std::uint64_t decodedFrame =
+        self->decodedFrames_.fetch_add(1, std::memory_order_relaxed) + 1;
       if (self->frameCallback_) {
         self->frameCallback_(self->frameCallbackContext_, imageBuffer, frameMetadata);
       }
-      if (self->decodedFrames_ == 1) {
+      if (decodedFrame == 1) {
         self->decodedWidth_ = static_cast<std::uint32_t>(CVPixelBufferGetWidth(imageBuffer));
         self->decodedHeight_ = static_cast<std::uint32_t>(CVPixelBufferGetHeight(imageBuffer));
       }
     } else {
-      self->decodeErrors_ += 1;
+      self->decodeErrors_.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -3390,8 +3425,8 @@ private:
   CMVideoFormatDescriptionRef format_ = nullptr;
   VTDecompressionSessionRef session_ = nullptr;
   std::uint64_t submittedFrames_ = 0;
-  std::uint64_t decodedFrames_ = 0;
-  std::uint64_t decodeErrors_ = 0;
+  std::atomic<std::uint64_t> decodedFrames_{0};
+  std::atomic<std::uint64_t> decodeErrors_{0};
   std::uint32_t decodedWidth_ = 0;
   std::uint32_t decodedHeight_ = 0;
   FrameCallback frameCallback_ = nullptr;
@@ -3455,7 +3490,8 @@ struct ClientStreamStats {
     lastArrivalMicros = arrival;
 
     if (packet.hostUnixMicros > 0) {
-      const double ageMs = static_cast<double>(unixMicros() - packet.hostUnixMicros) / 1000.0;
+      const double ageMs = (static_cast<double>(unixMicros()) -
+                            static_cast<double>(packet.hostUnixMicros)) / 1000.0;
       if (ageMs > -5000.0 && ageMs < 600000.0) {
         ageSumMs += ageMs;
         ageMaxMs = std::max(ageMaxMs, ageMs);
@@ -3636,6 +3672,41 @@ void printDecodeSummary(const std::string& label,
             << "}\n";
 }
 
+void maybeRequestDecoderBootstrapKeyframe(const char* transport,
+                                          const DecodeSummary& summary,
+                                          const VtH264Decoder& decoder,
+                                          std::uint64_t& lastNoParameterSkipped,
+                                          std::uint64_t& lastEmptySampleSkipped) {
+  if (decoder.decodedFrames() > 0) return;
+  const std::uint64_t noParameterDelta = summary.skippedNoParameters >= lastNoParameterSkipped
+    ? summary.skippedNoParameters - lastNoParameterSkipped
+    : summary.skippedNoParameters;
+  const std::uint64_t emptySampleDelta = summary.skippedEmptySamples >= lastEmptySampleSkipped
+    ? summary.skippedEmptySamples - lastEmptySampleSkipped
+    : summary.skippedEmptySamples;
+  if (noParameterDelta == 0 && emptySampleDelta == 0) return;
+
+  const bool missingParameters = noParameterDelta > 0;
+  const char* reason = missingParameters ? "await-parameter-sets" : "empty-video-sample";
+  const std::uint64_t dropped = missingParameters ? noParameterDelta : emptySampleDelta;
+  const bool sent = sendKeyframeRequest(reason,
+                                        summary.lastSequence,
+                                        dropped,
+                                        decoder.decodeErrors(),
+                                        std::chrono::milliseconds(250));
+  std::cout << "SNV1_DECODER_BOOTSTRAP transport=" << (transport ? transport : "unknown")
+            << " reason=" << reason
+            << " sent=" << boolText(sent)
+            << " skippedNoParameters=" << summary.skippedNoParameters
+            << " skippedEmptySamples=" << summary.skippedEmptySamples
+            << " decoded=" << decoder.decodedFrames()
+            << "\n";
+  if (sent) {
+    lastNoParameterSkipped = summary.skippedNoParameters;
+    lastEmptySampleSkipped = summary.skippedEmptySamples;
+  }
+}
+
 int decodeSnvFile(const std::string& file, std::uint64_t maxPackets) {
   @autoreleasepool {
     const auto packets = readSnvPackets(file, maxPackets);
@@ -3682,10 +3753,10 @@ bool readControlPayloadFromFd(int fd, std::string& payload) {
 
   const std::uint32_t headerSize = readLe32Raw(header.data() + 4);
   const std::uint32_t payloadSize = readLe32Raw(header.data() + 8);
-  if (headerSize < header.size()) {
+  if (headerSize < header.size() || headerSize > kMaxControlHeaderBytes) {
     throw std::runtime_error("Invalid SNI1 control header size from host.");
   }
-  if (payloadSize > 4 * 1024 * 1024) {
+  if (payloadSize > kMaxControlPayloadBytes) {
     throw std::runtime_error("SNI1 control payload too large from host.");
   }
   if (headerSize > header.size()) {
@@ -3708,7 +3779,7 @@ bool readSnvPacketFromFd(int fd, SnvPacket& packet) {
   }
 
   const std::uint32_t headerSize = readLe32Raw(header.data() + 4);
-  if (headerSize < header.size()) {
+  if (headerSize < header.size() || headerSize > kMaxSnvHeaderBytes) {
     throw std::runtime_error("Invalid SNV1 header size from TCP stream.");
   }
   packet = parseSnvHeader(header.data(), header.size());
@@ -3724,6 +3795,9 @@ bool readSnvPacketFromFd(int fd, SnvPacket& packet) {
   }
 
   const std::uint32_t payloadSize = readLe32Raw(header.data() + 48);
+  if (payloadSize > kMaxSnvPayloadBytes) {
+    throw std::runtime_error("SNV1 payload too large from TCP stream.");
+  }
   packet.payload.resize(payloadSize);
   if (payloadSize > 0 && !readExactFd(fd, packet.payload.data(), packet.payload.size())) {
     throw std::runtime_error("TCP stream ended inside SNV1 payload.");
@@ -3849,12 +3923,22 @@ public:
       return false;
     }
 
+    const std::size_t minimumHeaderBytes = authenticatedVideo
+      ? sizeof(UdpVideoAuthenticatedFragmentHeader)
+      : sizeof(UdpVideoFragmentHeader);
+    const std::uint64_t maxBytesForFragmentCount =
+      static_cast<std::uint64_t>(header.fragmentCount) *
+      static_cast<std::uint64_t>(kMaxUdpVideoDatagramBytes - minimumHeaderBytes);
     if (std::memcmp(header.magic, "SNU1", 4) != 0 ||
-        header.headerSize < (authenticatedVideo ? sizeof(UdpVideoAuthenticatedFragmentHeader) : sizeof(UdpVideoFragmentHeader)) ||
+        header.headerSize < minimumHeaderBytes ||
         header.headerSize > datagram.size() ||
         header.fragmentCount == 0 ||
+        header.fragmentCount > kMaxUdpVideoFragments ||
         header.fragmentIndex >= header.fragmentCount ||
         header.packetSize == 0 ||
+        header.packetSize > kMaxUdpVideoPacketBytes ||
+        header.packetSize < header.fragmentCount ||
+        header.packetSize > maxBytesForFragmentCount ||
         header.payloadSize == 0 ||
         static_cast<std::size_t>(header.headerSize) + header.payloadSize > datagram.size() ||
         static_cast<std::uint64_t>(header.fragmentOffset) + header.payloadSize > header.packetSize) {
@@ -3899,6 +3983,23 @@ public:
       stats.retransmitFragments += 1;
     }
     const UdpAssemblyKey assemblyKey{fragmentMediaEpoch, header.packetId};
+    const auto existingAssembly = assemblies_.find(assemblyKey);
+    const bool needsAllocation = existingAssembly == assemblies_.end() ||
+      existingAssembly->second.data.size() != header.packetSize ||
+      existingAssembly->second.fragmentCount != header.fragmentCount;
+    if (needsAllocation) {
+      std::uint64_t allocatedBytes = header.packetSize;
+      for (const auto& entry : assemblies_) {
+        if (!(entry.first.mediaEpoch == assemblyKey.mediaEpoch &&
+              entry.first.packetId == assemblyKey.packetId)) {
+          allocatedBytes += entry.second.data.size();
+        }
+      }
+      if (allocatedBytes > kMaxUdpVideoAssemblyBytes) {
+        stats.malformedDatagrams += 1;
+        return false;
+      }
+    }
     auto& assembly = assemblies_[assemblyKey];
     if (assembly.data.empty() ||
         assembly.data.size() != header.packetSize ||
@@ -4353,6 +4454,7 @@ struct UdpAudioStats {
   std::uint64_t peerRejected = 0;
   std::uint64_t rekeyGrace = 0;
   std::uint64_t rekeyGraceAccepted = 0;
+  std::uint64_t pcm16Datagrams = 0;
 };
 
 class AvSyncClock {
@@ -5052,11 +5154,18 @@ private:
       AudioPayloadPacket packet;
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait_for(lock, std::chrono::milliseconds(3), [&] {
-          return stopped_ || !buffer_.empty();
-        });
+        if (buffer_.empty()) {
+          (void)popNextLocked(packet);
+          condition_.wait(lock, [&] {
+            return stopped_ || !buffer_.empty();
+          });
+        }
         if (stopped_) return;
-        if (!popNextLocked(packet)) continue;
+        if (!popNextLocked(packet)) {
+          condition_.wait_for(lock, std::chrono::milliseconds(3));
+          if (stopped_) return;
+          continue;
+        }
       }
 
       bool submitted = false;
@@ -5083,10 +5192,13 @@ private:
         }
         recordDriftCorrectionLocked(driftCorrection);
         if (packet.hostUnixMicros > 0) {
-          const double ageMs = static_cast<double>(unixMicros() - packet.hostUnixMicros) / 1000.0;
-          stats_.ageSumMs += ageMs;
-          stats_.ageMaxMs = std::max(stats_.ageMaxMs, ageMs);
-          stats_.ageSamples += 1;
+          const double ageMs = (static_cast<double>(unixMicros()) -
+                                static_cast<double>(packet.hostUnixMicros)) / 1000.0;
+          if (ageMs > -5000.0 && ageMs < 600000.0) {
+            stats_.ageSumMs += ageMs;
+            stats_.ageMaxMs = std::max(stats_.ageMaxMs, ageMs);
+            stats_.ageSamples += 1;
+          }
         }
       } else {
         stats_.queueDrops += 1;
@@ -5295,7 +5407,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
     ScopedFd server = createTcpListener(port, "SNV1");
 
     std::cout << "SNV1 TCP listener ready on 0.0.0.0:" << port << "\n";
-    std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port << "\n";
+    std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect <MAC_IP>:" << port << "\n";
 
     sockaddr_in peerAddress{};
     socklen_t peerLength = sizeof(peerAddress);
@@ -6259,7 +6371,10 @@ void listenUdpAudio(std::uint16_t audioPort,
           continue;
         }
         std::vector<std::uint8_t> authenticatedDatagram;
-        const bool authenticatedAudio = std::memcmp(data, "SNA2", 4) == 0;
+        const bool pcm16Audio = std::memcmp(data, "SNA3", 4) == 0 ||
+          std::memcmp(data, "SNA4", 4) == 0;
+        const bool authenticatedAudio = std::memcmp(data, "SNA2", 4) == 0 ||
+          std::memcmp(data, "SNA4", 4) == 0;
         ResolvedMediaCrypto audioCrypto;
         std::uint64_t audioAuthSeq = 0;
         std::uint64_t audioAuthEpoch = 0;
@@ -6290,7 +6405,8 @@ void listenUdpAudio(std::uint16_t audioPort,
           }
           packetMediaEpoch = audioAuthEpoch;
           packetRekeyGrace = audioCrypto.rekeyGrace;
-        } else if (std::memcmp(data, "SNA1", 4) == 0) {
+        } else if (std::memcmp(data, "SNA1", 4) == 0 ||
+                   std::memcmp(data, "SNA3", 4) == 0) {
           if (!gExpectedSessionToken.empty()) {
             stats.authRejected += 1;
             continue;
@@ -6307,9 +6423,10 @@ void listenUdpAudio(std::uint16_t audioPort,
         const std::uint64_t sequence = readLe64Raw(data + 16);
         const std::uint64_t hostUnixMicros = readLe64Raw(data + 24);
         const std::uint32_t payloadSize = readLe32Raw(data + 32);
-        const std::size_t expectedPayloadBytes = static_cast<std::size_t>(frameCount)
-          * static_cast<std::size_t>(channels)
-          * sizeof(float);
+        const std::size_t sampleCount = static_cast<std::size_t>(frameCount)
+          * static_cast<std::size_t>(channels);
+        const std::size_t wireBytesPerSample = pcm16Audio ? sizeof(std::int16_t) : sizeof(float);
+        const std::size_t expectedWirePayloadBytes = sampleCount * wireBytesPerSample;
 
         if (headerSize < (authenticatedAudio ? sizeof(AudioAuthenticatedPacketHeader) : sizeof(AudioPacketHeader)) ||
             headerSize > size ||
@@ -6318,8 +6435,8 @@ void listenUdpAudio(std::uint16_t audioPort,
             channels == 0 ||
             channels > 8 ||
             frameCount == 0 ||
-            expectedPayloadBytes == 0 ||
-            static_cast<std::size_t>(payloadSize) < expectedPayloadBytes) {
+            expectedWirePayloadBytes == 0 ||
+            static_cast<std::size_t>(payloadSize) < expectedWirePayloadBytes) {
           stats.malformed += 1;
           continue;
         }
@@ -6340,7 +6457,7 @@ void listenUdpAudio(std::uint16_t audioPort,
             continue;
           }
           chacha20Xor(authenticatedDatagram.data() + headerSize,
-                      expectedPayloadBytes,
+                      expectedWirePayloadBytes,
                       audioCrypto.cryptoKey,
                       "audio",
                       audioAuthSeq);
@@ -6359,7 +6476,22 @@ void listenUdpAudio(std::uint16_t audioPort,
         packet.channels = channels;
         packet.frameCount = frameCount;
         packet.rekeyGrace = packetRekeyGrace;
-        packet.payload.assign(payload, payload + expectedPayloadBytes);
+        if (pcm16Audio) {
+          packet.payload.resize(sampleCount * sizeof(float));
+          for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
+            const std::uint16_t rawSample = readLe16Raw(payload + sampleIndex * sizeof(std::int16_t));
+            const std::int32_t signedSample = rawSample >= 0x8000u
+              ? static_cast<std::int32_t>(rawSample) - 0x10000
+              : static_cast<std::int32_t>(rawSample);
+            const float floatSample = static_cast<float>(signedSample) / 32768.0f;
+            std::memcpy(packet.payload.data() + sampleIndex * sizeof(float),
+                        &floatSample,
+                        sizeof(floatSample));
+          }
+          stats.pcm16Datagrams += 1;
+        } else {
+          packet.payload.assign(payload, payload + expectedWirePayloadBytes);
+        }
         packet.receivedAt = std::chrono::steady_clock::now();
         jitter.push(std::move(packet));
 
@@ -6396,6 +6528,7 @@ void listenUdpAudio(std::uint16_t audioPort,
                << " avClockMiss=" << jitterStats.avClockMisses
                << " malformed=" << stats.malformed
                << " auth=" << stats.authDatagrams
+               << " pcm16=" << stats.pcm16Datagrams
                << " authRejected=" << stats.authRejected
                << " replayRejected=" << stats.replayRejected
                << " peerRejected=" << stats.peerRejected
@@ -6452,13 +6585,13 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
       ScopedFd server = createTcpListener(port, "SNV1 render");
 
       std::cout << "SNV1 Metal render listener ready on 0.0.0.0:" << port << "\n";
-      std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect 100.100.83.44:" << port;
+      std::cout << "Start Windows host with: --encode-pipe h264 --tcp-connect <MAC_IP>:" << port;
       if (controlPort > 0) {
-        std::cout << " --control-connect 100.100.83.44:" << controlPort;
+        std::cout << " --control-connect <MAC_IP>:" << controlPort;
         startDedicatedControlListener(controlPort, inputSender);
       }
       if (audioPort > 0) {
-        std::cout << " --audio-udp-connect 100.100.83.44:" << audioPort;
+        std::cout << " --audio-udp-connect <MAC_IP>:" << audioPort;
       }
       std::cout << "\n";
 
@@ -6486,7 +6619,10 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
         DecodeSummary summary;
         ClientStreamStats stats;
         std::uint64_t lastFeedbackDecodeErrors = 0;
-        while (maxPackets == 0 || totalPackets < maxPackets) {
+        std::uint64_t lastNoParameterSkipped = 0;
+        std::uint64_t lastEmptySampleSkipped = 0;
+        try {
+          while (maxPackets == 0 || totalPackets < maxPackets) {
           SnvPacket packet;
           if (!readSnvPacketFromFd(client.get(), packet)) {
             break;
@@ -6510,6 +6646,13 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
 	            stats.observeDecodeWork(packet.durationMicros, steadyMicros() - decodeWorkStartedAt);
 	          }
 	          totalPackets += 1;
+          if (summary.packets == 1 || summary.packets % 30 == 0) {
+            maybeRequestDecoderBootstrapKeyframe("tcp-render",
+                                                 summary,
+                                                 decoder,
+                                                 lastNoParameterSkipped,
+                                                 lastEmptySampleSkipped);
+          }
           if (summary.packets % 60 == 0) {
             std::cout << "SNV1 render packets=" << summary.packets
                       << " total=" << totalPackets
@@ -6615,6 +6758,9 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
             lastFeedbackDecodeErrors = currentDecodeErrors;
             stats.resetWindow();
           }
+          }
+        } catch (const std::exception& error) {
+          std::cerr << "SNV1 render client rejected: " << error.what() << "\n";
         }
 
         decoder.flush();
@@ -6649,13 +6795,13 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       std::cout << "SNU1 UDP render listener ready on 0.0.0.0:" << port
                 << " mediaCrypto=" << boolText(gMediaCryptoEnabled)
                 << "\n";
-      std::cout << "Start Windows host with: --encode-pipe h264 --udp-connect 100.100.83.44:" << port;
+      std::cout << "Start Windows host with: --encode-pipe h264 --udp-connect <MAC_IP>:" << port;
       if (controlPort > 0) {
-        std::cout << " --control-connect 100.100.83.44:" << controlPort;
+        std::cout << " --control-connect <MAC_IP>:" << controlPort;
         startDedicatedControlListener(controlPort, inputSender);
       }
       if (audioPort > 0) {
-        std::cout << " --audio-udp-connect 100.100.83.44:" << audioPort;
+        std::cout << " --audio-udp-connect <MAC_IP>:" << audioPort;
       }
       std::cout << "\n";
 
@@ -6668,9 +6814,12 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       UdpPeerLock videoPeerLock("SNU1");
       UdpVideoStats udpStats;
       auto udpStatsStartedAt = std::chrono::steady_clock::now();
-      std::array<std::uint8_t, 1500> datagramBuffer{};
+      std::array<std::uint8_t, kMaxUdpVideoDatagramBytes> datagramBuffer{};
       std::uint64_t lastFeedbackDecodeErrors = 0;
+      std::uint64_t lastNoParameterSkipped = 0;
+      std::uint64_t lastEmptySampleSkipped = 0;
       std::uint64_t repairFeedbackSequence = 0;
+      auto lastMalformedPacketLogAt = std::chrono::steady_clock::time_point{};
       while (maxPackets == 0 || summary.packets < maxPackets) {
         sockaddr_in peerAddress{};
         socklen_t peerLength = sizeof(peerAddress);
@@ -6716,7 +6865,17 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         nackController.maybeRequestKeyframe(summary.lastSequence, decoder.decodeErrors());
 
         if (completedPacket) {
-          jitterBuffer.push(parseSnvPacketBytes(packetBytes), completedMediaEpoch, completedRekeyGrace);
+          try {
+            jitterBuffer.push(parseSnvPacketBytes(packetBytes), completedMediaEpoch, completedRekeyGrace);
+          } catch (const std::exception& error) {
+            udpStats.malformedDatagrams += 1;
+            const auto now = std::chrono::steady_clock::now();
+            if (lastMalformedPacketLogAt.time_since_epoch().count() == 0 ||
+                now - lastMalformedPacketLogAt > std::chrono::seconds(1)) {
+              lastMalformedPacketLogAt = now;
+              std::cerr << "SNU1 packet rejected: " << error.what() << "\n";
+            }
+          }
         }
 
         SnvPacket packet;
@@ -6734,13 +6893,29 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
 	          std::string latencyDropReason;
 	          if (stats.shouldDropBeforeDecode(packet, latencyDropReason)) {
 	            recordSkippedSnvPacket(summary, packet);
-	          } else {
-	            const std::uint64_t decodeWorkStartedAt = steadyMicros();
-	            processSnvPacket(decoder, summary, packet);
-	            stats.observeDecodeWork(packet.durationMicros, steadyMicros() - decodeWorkStartedAt);
-	          }
+		          } else {
+		            const std::uint64_t decodeWorkStartedAt = steadyMicros();
+                try {
+		              processSnvPacket(decoder, summary, packet);
+		              stats.observeDecodeWork(packet.durationMicros, steadyMicros() - decodeWorkStartedAt);
+                } catch (const std::exception& error) {
+                  udpStats.malformedDatagrams += 1;
+                  const auto now = std::chrono::steady_clock::now();
+                  if (lastMalformedPacketLogAt.time_since_epoch().count() == 0 ||
+                      now - lastMalformedPacketLogAt > std::chrono::seconds(1)) {
+                    lastMalformedPacketLogAt = now;
+                    std::cerr << "SNU1 decode packet rejected: " << error.what() << "\n";
+                  }
+                  continue;
+                }
+		          }
 
           if (summary.packets == 1 || summary.packets % 60 == 0) {
+            maybeRequestDecoderBootstrapKeyframe("udp-render",
+                                                 summary,
+                                                 decoder,
+                                                 lastNoParameterSkipped,
+                                                 lastEmptySampleSkipped);
             std::cout << "SNU1 render packets=" << summary.packets
                       << " decoded=" << decoder.decodedFrames()
                       << " errors=" << decoder.decodeErrors()
@@ -7358,6 +7533,9 @@ int main(int argc, char** argv) {
       }
       if (audioPort > 0 && controlPort > 0 && audioPort == controlPort) {
         throw std::runtime_error("--audio-port must differ from --control-port, or use 0 to disable.");
+      }
+      if (!options.sessionToken.empty() && controlPort == 0) {
+        throw std::runtime_error("Authenticated native streaming requires a dedicated --control-port.");
       }
       return runVideoRenderTcp(options.listenRenderPort,
                                controlPort,

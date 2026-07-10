@@ -302,8 +302,12 @@ struct VideoNackSnapshot {
   std::vector<std::uint64_t> packetIds;
 };
 
-VideoNackSnapshot gVideoNack;
+std::deque<VideoNackSnapshot> gVideoNackQueue;
 std::mutex gVideoNackMutex;
+std::uint64_t gNextVideoNackSequence = 0;
+constexpr std::size_t kMaxQueuedVideoNacks = 64;
+constexpr std::size_t kMaxCoalescedVideoNackPackets = 256;
+std::atomic<bool> gClientAudioPcm16{false};
 
 std::uint64_t unixMicros();
 
@@ -356,9 +360,12 @@ void requestKeyframe(const std::string& reason,
             << "\n";
 }
 
-VideoNackSnapshot latestVideoNack() {
+bool takeNextVideoNack(VideoNackSnapshot& snapshot) {
   std::lock_guard<std::mutex> lock(gVideoNackMutex);
-  return gVideoNack;
+  if (gVideoNackQueue.empty()) return false;
+  snapshot = std::move(gVideoNackQueue.front());
+  gVideoNackQueue.pop_front();
+  return true;
 }
 
 void requestVideoRetransmit(const std::string& reason,
@@ -368,14 +375,35 @@ void requestVideoRetransmit(const std::string& reason,
   if (packetIds.size() > 128) packetIds.resize(128);
 
   VideoNackSnapshot snapshot;
+  std::size_t queueDepth = 0;
+  std::size_t coalescedPackets = 0;
+  std::size_t droppedPackets = 0;
+  std::uint64_t coalescedIntoSequence = 0;
   {
     std::lock_guard<std::mutex> lock(gVideoNackMutex);
-    snapshot.sequence = gVideoNack.sequence + 1;
+    snapshot.sequence = ++gNextVideoNackSequence;
     snapshot.clientSequence = clientSequence;
     snapshot.requestedAtMicros = unixMicros();
     snapshot.reason = reason.empty() ? "client" : reason;
     snapshot.packetIds = std::move(packetIds);
-    gVideoNack = snapshot;
+    if (gVideoNackQueue.size() < kMaxQueuedVideoNacks) {
+      gVideoNackQueue.push_back(snapshot);
+    } else {
+      VideoNackSnapshot& pending = gVideoNackQueue.back();
+      coalescedIntoSequence = pending.sequence;
+      for (const std::uint64_t packetId : snapshot.packetIds) {
+        if (std::find(pending.packetIds.begin(), pending.packetIds.end(), packetId) != pending.packetIds.end()) {
+          continue;
+        }
+        if (pending.packetIds.size() >= kMaxCoalescedVideoNackPackets) {
+          droppedPackets += 1;
+          continue;
+        }
+        pending.packetIds.push_back(packetId);
+        coalescedPackets += 1;
+      }
+    }
+    queueDepth = gVideoNackQueue.size();
   }
 
   std::cerr << "SNU1_NACK_RX sequence=" << snapshot.sequence
@@ -383,6 +411,10 @@ void requestVideoRetransmit(const std::string& reason,
             << " reason=" << snapshot.reason
             << " packetIds=" << snapshot.packetIds.size()
             << " first=" << snapshot.packetIds.front()
+            << " queueDepth=" << queueDepth
+            << " coalescedInto=" << coalescedIntoSequence
+            << " coalescedPackets=" << coalescedPackets
+            << " droppedPackets=" << droppedPackets
             << "\n";
 }
 
@@ -407,6 +439,8 @@ struct Options {
   std::uint32_t outputIndex = 0;
   std::uint32_t fps = 30;
   std::uint32_t bitrate = 28000000;
+  std::uint32_t streamWidth = 0;
+  std::uint32_t streamHeight = 0;
   std::uint32_t keyframeIntervalSeconds = 1;
   std::string encoderPreference = "auto";
   VideoCodec codec = VideoCodec::H264;
@@ -419,6 +453,44 @@ struct Options {
   bool udpPacing = true;
   bool listEncoders = false;
 };
+
+struct StreamDimensions {
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+};
+
+StreamDimensions fitStreamDimensions(std::uint32_t sourceWidth,
+                                     std::uint32_t sourceHeight,
+                                     std::uint32_t requestedWidth,
+                                     std::uint32_t requestedHeight) {
+  if (sourceWidth == 0 || sourceHeight == 0) {
+    throw std::runtime_error("Cannot fit an empty desktop capture.");
+  }
+  const auto validateLimit = [](std::uint32_t value, const char* name) {
+    if (value != 0 && (value < 64 || value > 8192)) {
+      throw std::runtime_error(std::string(name) + " must be 64-8192, or 0 for source size.");
+    }
+  };
+  validateLimit(requestedWidth, "--stream-width");
+  validateLimit(requestedHeight, "--stream-height");
+
+  double scale = 1.0;
+  if (requestedWidth > 0) {
+    scale = std::min(scale,
+                     static_cast<double>(requestedWidth) / static_cast<double>(sourceWidth));
+  }
+  if (requestedHeight > 0) {
+    scale = std::min(scale,
+                     static_cast<double>(requestedHeight) / static_cast<double>(sourceHeight));
+  }
+
+  const auto evenFloor = [scale](std::uint32_t source) {
+    const auto scaled = static_cast<std::uint32_t>(
+      std::max(2.0, std::floor(static_cast<double>(source) * scale)));
+    return std::max<std::uint32_t>(2, scaled & ~std::uint32_t{1});
+  };
+  return {evenFloor(sourceWidth), evenFloor(sourceHeight)};
+}
 
 struct PipeFrameHeader {
   char magic[4] = {'S', 'N', 'F', '1'};
@@ -498,7 +570,7 @@ struct UdpVideoAuthenticatedFragmentHeader {
 };
 
 struct AudioPacketHeader {
-  char magic[4] = {'S', 'N', 'A', '1'};
+  char magic[4] = {'S', 'N', 'A', '1'}; // SNA1=float32, SNA3=PCM16
   std::uint16_t headerSize = sizeof(AudioPacketHeader);
   std::uint16_t channels = 2;
   std::uint32_t sampleRate = 0;
@@ -509,7 +581,7 @@ struct AudioPacketHeader {
 };
 
 struct AudioAuthenticatedPacketHeader {
-  char magic[4] = {'S', 'N', 'A', '2'};
+  char magic[4] = {'S', 'N', 'A', '2'}; // SNA2=float32+auth, SNA4=PCM16+auth
   std::uint16_t headerSize = sizeof(AudioAuthenticatedPacketHeader);
   std::uint16_t channels = 2;
   std::uint32_t sampleRate = 0;
@@ -572,6 +644,10 @@ Options parseOptions(int argc, char** argv) {
       options.fps = readUintArg(argc, argv, i, "--fps");
     } else if (arg == "--bitrate") {
       options.bitrate = readUintArg(argc, argv, i, "--bitrate");
+    } else if (arg == "--stream-width") {
+      options.streamWidth = readUintArg(argc, argv, i, "--stream-width");
+    } else if (arg == "--stream-height") {
+      options.streamHeight = readUintArg(argc, argv, i, "--stream-height");
     } else if (arg == "--keyframe-interval") {
       options.keyframeIntervalSeconds = std::max<std::uint32_t>(1, readUintArg(argc, argv, i, "--keyframe-interval"));
     } else if (arg == "--encoder") {
@@ -614,6 +690,8 @@ Options parseOptions(int argc, char** argv) {
         << "  --encode CODEC   Encode captured frames with Media Foundation: h264, hevc, av1\n"
         << "  --encode-pipe CODEC Encode H.264/H.265 packets to stdout or --packet-file with SNV1 headers\n"
         << "  --bitrate N      Target encode bitrate, default 28000000\n"
+        << "  --stream-width N Maximum SNV1 width, preserving aspect ratio; 0 uses source\n"
+        << "  --stream-height N Maximum SNV1 height, preserving aspect ratio; 0 uses source\n"
         << "  --keyframe-interval N Seconds between keyframes in SNV1 mode, default 1\n"
         << "  --encoder NAME   Encoder preference: auto, nvenc, amf, qsv, mf, software\n"
         << "  SNV1 network mode adapts bitrate and frame pacing from client feedback\n"
@@ -626,7 +704,7 @@ Options parseOptions(int argc, char** argv) {
         << "  --udp-pacing     Pace UDP video fragments by bitrate, default on\n"
         << "  --no-udp-pacing  Disable UDP video fragment pacing\n"
         << "  --control-connect H:P Connect a dedicated TCP native input/stats backchannel\n"
-        << "  --audio-udp-connect H:P Send loopback system audio as SNA1/SNA2 UDP float PCM\n"
+        << "  --audio-udp-connect H:P Send loopback audio as SNA1/SNA2 float32 or negotiated SNA3/SNA4 PCM16\n"
         << "  --session-token T Enable native session proof and HMAC-authenticated control packets\n"
         << "  --list-encoders  List Media Foundation hardware encoders\n"
         << "  --software-encoder Disable hardware transform request\n";
@@ -3497,7 +3575,9 @@ private:
       }
       if (headerStatus != RecvStatus::Complete) return false;
       lastControlRxAt = std::chrono::steady_clock::now();
-      if (std::memcmp(header.magic, "SNI1", 4) != 0 || header.headerSize < sizeof(ControlMessageHeader)) {
+      if (std::memcmp(header.magic, "SNI1", 4) != 0 ||
+          header.headerSize < sizeof(ControlMessageHeader) ||
+          header.headerSize > 64 * 1024) {
         std::cerr << "SNINPUT invalid control header.\n";
         return false;
       }
@@ -3555,6 +3635,8 @@ private:
           observeInputSession(inputSessionId);
           const bool clientPacketAuth = jsonBoolValue(payload, "packetAuth");
           const bool clientMediaCrypto = jsonBoolValue(payload, "mediaCrypto");
+          const bool clientAudioPcm16 = jsonBoolValue(payload, "audioPcm16");
+          gClientAudioPcm16.store(clientAudioPcm16, std::memory_order_release);
           clientGamepadRumble_ = jsonBoolValue(payload, "gamepadRumble");
           const std::string sessionNonce = jsonStringValue(payload, "sessionNonce");
           const bool canPacketAuth = !sessionToken_.empty() && clientPacketAuth && !sessionNonce.empty();
@@ -3570,6 +3652,7 @@ private:
                 << ",\"inputAck\":true"
                 << ",\"videoUdpPacing\":true"
                 << ",\"audioUdp\":true"
+                << ",\"audioPcm16\":" << (clientAudioPcm16 ? "true" : "false")
                 << ",\"keyframeRequest\":true"
                 << ",\"videoNack\":true"
                 << ",\"udpRepairStats\":true"
@@ -3590,9 +3673,15 @@ private:
           std::cerr << "SNCONTROL_HELLO_ACK protocol=2 inputBatch=yes inputAck=yes keyframeRequest=yes videoNack=yes udpRepairStats=yes sessionAuth="
                     << (sessionToken_.empty() ? "disabled" : "enabled")
                     << " packetAuth=" << (packetAuthEnabled_ ? "enabled" : "disabled")
+                    << " audioPcm16=" << (clientAudioPcm16 ? "enabled" : "fallback-float32")
                     << " gamepadRumble=" << (clientGamepadRumble_ ? "enabled" : "disabled")
                     << " mediaEpoch=" << mediaEpoch
                     << "\n";
+          const bool reconnectHello = hasCompletedControlHello_;
+          hasCompletedControlHello_ = true;
+          if (reconnectHello && sessionVerified_ && !mediaCryptoEnabled) {
+            requestKeyframe("control-hello", 0, 0, 0, 0);
+          }
           flushGamepadRumbleEvents("control-hello");
           continue;
         }
@@ -3718,6 +3807,7 @@ private:
   bool sessionVerified_ = true;
   bool packetAuthEnabled_ = false;
   bool clientGamepadRumble_ = false;
+  bool hasCompletedControlHello_ = false;
   std::uint64_t hostSecureSequence_ = 0;
   std::uint64_t lastClientSecureSequence_ = 0;
   std::chrono::steady_clock::time_point lastInputWatchdogResetAt_{};
@@ -3741,6 +3831,13 @@ public:
     double clampedMs = 0.0;
     std::uint64_t clampEvents = 0;
     std::uint64_t clampPackets = 0;
+  };
+
+  struct RetransmitChunkResult {
+    bool cacheHit = false;
+    bool complete = false;
+    std::uint32_t fragmentsSent = 0;
+    std::uint32_t nextFragment = 0;
   };
 
   explicit UdpVideoClient(const std::string& endpoint,
@@ -3858,15 +3955,51 @@ public:
     return sendPacketWithId(packetId, packetBytes, false, crypto, pacingBudgetMicros);
   }
 
-  std::uint32_t resendPacket(std::uint64_t packetId) {
+  RetransmitChunkResult resendPacketChunk(std::uint64_t packetId,
+                                          std::uint32_t firstFragment,
+                                          std::uint32_t maxFragments,
+                                          std::chrono::microseconds pacingBudget) {
+    RetransmitChunkResult result;
     const MediaCryptoSnapshot crypto = mediaCrypto_ ? mediaCrypto_->snapshot() : MediaCryptoSnapshot{};
     syncRetransmitCacheGeneration(crypto);
     const std::uint64_t currentGeneration = crypto.enabled ? crypto.generation : 0;
     const auto found = packetCache_.find(packetId);
-    if (found == packetCache_.end()) return 0;
-    if (found->second.mediaGeneration != currentGeneration) return 0;
-    retransmittedPackets_ += 1;
-    return sendPacketWithId(packetId, found->second.bytes, true, crypto, 0);
+    if (found == packetCache_.end() || found->second.mediaGeneration != currentGeneration) {
+      return result;
+    }
+
+    constexpr std::size_t maxPayloadBytes = 1152;
+    const std::size_t fragmentCountSize =
+      (found->second.bytes.size() + maxPayloadBytes - 1) / maxPayloadBytes;
+    if (fragmentCountSize == 0 || fragmentCountSize > std::numeric_limits<std::uint16_t>::max()) {
+      return result;
+    }
+
+    result.cacheHit = true;
+    const std::uint32_t fragmentCount = static_cast<std::uint32_t>(fragmentCountSize);
+    if (firstFragment >= fragmentCount) {
+      result.complete = true;
+      result.nextFragment = fragmentCount;
+      return result;
+    }
+    if (maxFragments == 0) {
+      result.nextFragment = firstFragment;
+      return result;
+    }
+
+    result.fragmentsSent = sendPacketWithId(packetId,
+                                            found->second.bytes,
+                                            true,
+                                            crypto,
+                                            static_cast<std::uint64_t>(std::max<std::int64_t>(0, pacingBudget.count())),
+                                            firstFragment,
+                                            maxFragments);
+    result.nextFragment = firstFragment + result.fragmentsSent;
+    result.complete = result.nextFragment >= fragmentCount;
+    if (firstFragment == 0 && result.fragmentsSent > 0) {
+      retransmittedPackets_ += 1;
+    }
+    return result;
   }
 
 private:
@@ -3879,7 +4012,9 @@ private:
                                  const std::vector<std::uint8_t>& packetBytes,
                                  bool retransmit,
                                  const MediaCryptoSnapshot& crypto,
-                                 std::uint64_t pacingBudgetMicros) {
+                                 std::uint64_t pacingBudgetMicros,
+                                 std::uint32_t firstFragment = 0,
+                                 std::uint32_t maxFragments = std::numeric_limits<std::uint32_t>::max()) {
     if (packetBytes.empty()) return 0;
     constexpr std::size_t maxPayloadBytes = 1152;
     const std::size_t fragmentCountSize = (packetBytes.size() + maxPayloadBytes - 1) / maxPayloadBytes;
@@ -3897,7 +4032,11 @@ private:
       ? std::chrono::microseconds(pacingBudgetMicros)
       : std::chrono::microseconds(0);
     const std::uint64_t clampEventsBeforePacket = pacedClampEvents_;
-	    for (std::uint16_t fragmentIndex = 0; fragmentIndex < fragmentCount; ++fragmentIndex) {
+    const std::uint32_t fragmentBegin = std::min<std::uint32_t>(firstFragment, fragmentCount);
+    const std::uint64_t requestedEnd = static_cast<std::uint64_t>(fragmentBegin) + maxFragments;
+    const std::uint32_t fragmentEnd = static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(fragmentCount, requestedEnd));
+	    for (std::uint32_t fragmentIndex = fragmentBegin; fragmentIndex < fragmentEnd; ++fragmentIndex) {
       const std::size_t offset = static_cast<std::size_t>(fragmentIndex) * maxPayloadBytes;
       const std::size_t chunkSize = std::min(maxPayloadBytes, packetBytes.size() - offset);
 
@@ -3905,7 +4044,7 @@ private:
       if (crypto.enabled) {
         UdpVideoAuthenticatedFragmentHeader header{};
         header.fragmentCount = fragmentCount;
-        header.fragmentIndex = fragmentIndex;
+        header.fragmentIndex = static_cast<std::uint16_t>(fragmentIndex);
         header.flags = (fragmentIndex == 0 ? 1u : 0u) |
                        (fragmentIndex + 1 == fragmentCount ? 2u : 0u) |
                        (retransmit ? 4u : 0u);
@@ -3924,7 +4063,7 @@ private:
       } else {
         UdpVideoFragmentHeader header{};
         header.fragmentCount = fragmentCount;
-        header.fragmentIndex = fragmentIndex;
+        header.fragmentIndex = static_cast<std::uint16_t>(fragmentIndex);
         header.flags = (fragmentIndex == 0 ? 1u : 0u) |
                        (fragmentIndex + 1 == fragmentCount ? 2u : 0u) |
                        (retransmit ? 4u : 0u);
@@ -4025,12 +4164,18 @@ private:
         }
       }
       pacedSleepMs_ += std::chrono::duration<double, std::milli>(sleepFor).count();
-      if (sleepFor > std::chrono::milliseconds(2)) {
-        std::this_thread::sleep_until(nextSendAt_ - std::chrono::microseconds(500));
-      }
-      while (sleepFor > std::chrono::steady_clock::duration::zero() &&
-             std::chrono::steady_clock::now() < nextSendAt_) {
-        std::this_thread::yield();
+      constexpr auto coarseSleepThreshold = std::chrono::microseconds(300);
+      constexpr auto spinTail = std::chrono::microseconds(75);
+      constexpr auto yieldThreshold = std::chrono::microseconds(20);
+      while (sleepFor > std::chrono::steady_clock::duration::zero()) {
+        const auto waitNow = std::chrono::steady_clock::now();
+        if (waitNow >= nextSendAt_) break;
+        const auto remaining = nextSendAt_ - waitNow;
+        if (remaining > coarseSleepThreshold) {
+          std::this_thread::sleep_until(nextSendAt_ - spinTail);
+        } else if (remaining > yieldThreshold) {
+          std::this_thread::yield();
+        }
       }
     }
 
@@ -4140,18 +4285,30 @@ public:
 
   std::uint32_t sendStereoFloat(std::uint32_t sampleRate,
                                 const float* samples,
-                                std::uint32_t frameCount) {
+                                std::uint32_t frameCount,
+                                bool usePcm16) {
     if (socket_ == INVALID_SOCKET || !samples || frameCount == 0) return 0;
 
     constexpr std::uint16_t channels = 2;
     constexpr std::size_t maxPayloadBytes = 1152;
-    constexpr std::size_t bytesPerFrame = channels * sizeof(float);
-    constexpr std::uint32_t maxFramesPerPacket = static_cast<std::uint32_t>(maxPayloadBytes / bytesPerFrame);
+    const std::size_t bytesPerSample = usePcm16 ? sizeof(std::int16_t) : sizeof(float);
+    const std::size_t bytesPerFrame = channels * bytesPerSample;
+    const std::uint32_t maxFramesPerPacket = static_cast<std::uint32_t>(maxPayloadBytes / bytesPerFrame);
+    if (!hasWireFormat_ || usePcm16 != pcm16WireFormat_) {
+      hasWireFormat_ = true;
+      pcm16WireFormat_ = usePcm16;
+      std::cerr << "SNA1_AUDIO_WIRE_FORMAT format=" << (usePcm16 ? "pcm16" : "float32")
+                << " unauthMagic=" << (usePcm16 ? "SNA3" : "SNA1")
+                << " authMagic=" << (usePcm16 ? "SNA4" : "SNA2")
+                << " bytesPerFrame=" << bytesPerFrame
+                << "\n";
+    }
     std::uint32_t sentPackets = 0;
     std::uint32_t offsetFrames = 0;
     while (offsetFrames < frameCount) {
       const std::uint32_t chunkFrames = std::min<std::uint32_t>(frameCount - offsetFrames, maxFramesPerPacket);
       const std::uint32_t payloadSize = chunkFrames * static_cast<std::uint32_t>(bytesPerFrame);
+      const float* chunkSamples = samples + static_cast<std::size_t>(offsetFrames) * channels;
 
       std::array<std::uint8_t, sizeof(AudioAuthenticatedPacketHeader) + maxPayloadBytes> datagram{};
       int datagramSize = 0;
@@ -4159,6 +4316,7 @@ public:
       syncMediaAuthEpoch(crypto, "audio");
       if (crypto.enabled) {
         AudioAuthenticatedPacketHeader header{};
+        if (usePcm16) std::memcpy(header.magic, "SNA4", 4);
         header.channels = channels;
         header.sampleRate = sampleRate;
         header.frameCount = chunkFrames;
@@ -4169,9 +4327,10 @@ public:
         header.authEpoch = crypto.epoch;
 
         std::memcpy(datagram.data(), &header, sizeof(header));
-        std::memcpy(datagram.data() + sizeof(header),
-                    samples + static_cast<std::size_t>(offsetFrames) * channels,
-                    payloadSize);
+        writeAudioPayload(datagram.data() + sizeof(header),
+                          chunkSamples,
+                          static_cast<std::size_t>(chunkFrames) * channels,
+                          usePcm16);
         datagramSize = static_cast<int>(sizeof(header) + payloadSize);
         chacha20Xor(datagram.data() + sizeof(header), payloadSize, crypto.audioCryptoKey, "audio", header.authSeq);
         writeUdpAuthTag(crypto.audioAuthKey,
@@ -4181,6 +4340,7 @@ public:
                         offsetof(AudioAuthenticatedPacketHeader, authTag));
       } else {
         AudioPacketHeader header{};
+        if (usePcm16) std::memcpy(header.magic, "SNA3", 4);
         header.channels = channels;
         header.sampleRate = sampleRate;
         header.frameCount = chunkFrames;
@@ -4189,9 +4349,10 @@ public:
         header.payloadSize = payloadSize;
 
         std::memcpy(datagram.data(), &header, sizeof(header));
-        std::memcpy(datagram.data() + sizeof(header),
-                    samples + static_cast<std::size_t>(offsetFrames) * channels,
-                    payloadSize);
+        writeAudioPayload(datagram.data() + sizeof(header),
+                          chunkSamples,
+                          static_cast<std::size_t>(chunkFrames) * channels,
+                          usePcm16);
         datagramSize = static_cast<int>(sizeof(header) + payloadSize);
       }
       const int sent = send(socket_,
@@ -4208,6 +4369,27 @@ public:
   }
 
 private:
+  static std::int16_t floatToPcm16(float value) {
+    const float clamped = std::clamp(value, -1.0f, 1.0f);
+    const float scale = clamped < 0.0f ? 32768.0f : 32767.0f;
+    const auto quantized = static_cast<std::int32_t>(std::lround(clamped * scale));
+    return static_cast<std::int16_t>(std::clamp<std::int32_t>(quantized, -32768, 32767));
+  }
+
+  static void writeAudioPayload(std::uint8_t* target,
+                                const float* samples,
+                                std::size_t sampleCount,
+                                bool usePcm16) {
+    if (!usePcm16) {
+      std::memcpy(target, samples, sampleCount * sizeof(float));
+      return;
+    }
+    for (std::size_t i = 0; i < sampleCount; ++i) {
+      const std::int16_t sample = floatToPcm16(samples[i]);
+      std::memcpy(target + i * sizeof(sample), &sample, sizeof(sample));
+    }
+  }
+
   void syncMediaAuthEpoch(const MediaCryptoSnapshot& crypto, const char* media) {
     if (!crypto.enabled) {
       mediaAuthSequence_ = 0;
@@ -4238,6 +4420,8 @@ private:
   std::uint64_t mediaAuthSequence_ = 0;
   std::uint64_t mediaAuthEpoch_ = 0;
   bool hasMediaAuthEpoch_ = false;
+  bool hasWireFormat_ = false;
+  bool pcm16WireFormat_ = false;
 };
 
 class WasapiLoopbackAudioSender {
@@ -4525,6 +4709,8 @@ private:
       std::uint64_t statsPackets = 0;
       std::uint64_t statsFrames = 0;
       std::uint64_t statsBytes = 0;
+      std::uint64_t statsPcm16Frames = 0;
+      std::uint64_t statsFloat32Frames = 0;
       std::uint64_t statsSilentFrames = 0;
       std::uint64_t statsDiscontinuityFrames = 0;
       std::uint64_t statsDiscontinuityPackets = 0;
@@ -4551,9 +4737,19 @@ private:
           const bool discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
           convertToStereoFloat(data, frameCount, format, silent, stereoSamples);
           requireHr(captureClient->ReleaseBuffer(frameCount), "IAudioCaptureClient::ReleaseBuffer");
-          statsPackets += audioClient.sendStereoFloat(format.sampleRate, stereoSamples.data(), frameCount);
+          const bool usePcm16 = gClientAudioPcm16.load(std::memory_order_acquire);
+          statsPackets += audioClient.sendStereoFloat(format.sampleRate,
+                                                      stereoSamples.data(),
+                                                      frameCount,
+                                                      usePcm16);
           statsFrames += frameCount;
-          statsBytes += static_cast<std::uint64_t>(frameCount) * 2 * sizeof(float);
+          statsBytes += static_cast<std::uint64_t>(frameCount) * 2 *
+            (usePcm16 ? sizeof(std::int16_t) : sizeof(float));
+          if (usePcm16) {
+            statsPcm16Frames += frameCount;
+          } else {
+            statsFloat32Frames += frameCount;
+          }
           if (silent) statsSilentFrames += frameCount;
           if (discontinuity) {
             statsDiscontinuityFrames += frameCount;
@@ -4569,6 +4765,8 @@ private:
           std::cerr << "SNA1_AUDIO_STATS packets=" << statsPackets
                     << " frames=" << statsFrames
                     << " kbps=" << std::fixed << std::setprecision(1) << kbps
+                    << " pcm16Frames=" << statsPcm16Frames
+                    << " float32Frames=" << statsFloat32Frames
                     << " silentFrames=" << statsSilentFrames
                     << " discontinuityPackets=" << statsDiscontinuityPackets
                     << " discontinuityFrames=" << statsDiscontinuityFrames
@@ -4578,6 +4776,8 @@ private:
           statsPackets = 0;
           statsFrames = 0;
           statsBytes = 0;
+          statsPcm16Frames = 0;
+          statsFloat32Frames = 0;
           statsSilentFrames = 0;
           statsDiscontinuityFrames = 0;
           statsDiscontinuityPackets = 0;
@@ -4910,6 +5110,12 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   }
 #endif
 
+  const StreamDimensions streamDimensions = fitStreamDimensions(
+    duplicator.width(),
+    duplicator.height(),
+    options.streamWidth,
+    options.streamHeight);
+
   VideoPacketEncodeOptions encodeOptions;
   encodeOptions.codec = options.codec;
   encodeOptions.encoderPreference = options.encoderPreference;
@@ -4922,14 +5128,18 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   auto makePacketEncoder = [&](VideoPacketEncodeOptions& requestedOptions,
                                const char* reason) {
     try {
-      return std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), requestedOptions);
+      return std::make_unique<MfVideoPacketEncoder>(streamDimensions.width,
+                                                    streamDimensions.height,
+                                                    requestedOptions);
     } catch (const std::exception& error) {
       if (requestedOptions.codec == VideoCodec::Hevc) {
         std::cerr << "SNV1_CODEC_FALLBACK requested=hevc fallback=h264 reason="
                   << (reason ? reason : "encoder-create")
                   << " error=\"" << error.what() << "\"\n";
         requestedOptions.codec = VideoCodec::H264;
-        return std::make_unique<MfVideoPacketEncoder>(duplicator.width(), duplicator.height(), requestedOptions);
+        return std::make_unique<MfVideoPacketEncoder>(streamDimensions.width,
+                                                      streamDimensions.height,
+                                                      requestedOptions);
       }
       throw;
     }
@@ -4960,7 +5170,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   };
 
   std::cerr << "SNV1 " << videoCodecName(encoder->codec()) << " packet stream: "
-            << duplicator.width() << "x" << duplicator.height()
+            << streamDimensions.width << "x" << streamDimensions.height
+            << " (source " << duplicator.width() << "x" << duplicator.height() << ")"
             << " @ " << options.fps << " FPS, " << options.bitrate << " bps, "
             << (encoder->usingHardware() ? "hardware encoder" : "software encoder")
             << " codec=" << videoCodecName(encoder->codec())
@@ -5074,7 +5285,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint64_t statsPacketizeMaxMicros = 0;
   std::uint64_t statsSendMicros = 0;
   std::uint64_t statsSendMaxMicros = 0;
-  std::uint64_t statsUdpFragments = 0;
+  [[maybe_unused]] std::uint64_t statsUdpFragments = 0;
   double statsUdpPacedMs = 0.0;
   std::uint64_t statsKeyframes = 0;
   std::uint32_t currentAdaptiveBitrate = initialAdaptiveBitrate;
@@ -5088,7 +5299,6 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint32_t awaitingKeyframeFrames = 0;
   std::uint32_t awaitingKeyframeAttempts = 0;
   auto lastKeyframeRecoveryApplyAt = std::chrono::steady_clock::time_point{};
-  std::uint64_t seenVideoNackSequence = 0;
   std::uint32_t clearFeedbackWindows = 0;
   std::uint32_t clearUdpRepairWindows = 0;
   std::uint32_t renderRecoveryHoldWindows = 0;
@@ -5138,13 +5348,35 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint64_t statsUdpNackMisses = 0;
 	  std::uint64_t statsUdpRetransmits = 0;
 	  std::uint64_t statsUdpRetransmitFragments = 0;
+	  std::uint64_t statsUdpNackDuplicates = 0;
+	  std::uint64_t statsUdpNackQueueDrops = 0;
+	  std::uint64_t statsUdpNackExpired = 0;
+	  std::uint64_t statsUdpNackDeferredFrames = 0;
 	  std::uint64_t statsUdpCacheResets = 0;
 	  std::uint64_t statsUdpCacheDropped = 0;
   double statsUdpPacingClampMs = 0.0;
   std::uint64_t statsUdpPacingClampEvents = 0;
   std::uint64_t statsUdpPacingClampPackets = 0;
 	  std::uint64_t seenMediaCryptoGeneration = mediaCrypto ? mediaCrypto->snapshot().generation : 0;
-	#endif
+	  struct PendingUdpRetransmit {
+	    std::uint64_t packetId = 0;
+	    std::uint64_t nackSequence = 0;
+	    std::uint32_t nextFragment = 0;
+	    std::chrono::steady_clock::time_point queuedAt;
+	  };
+	  std::deque<PendingUdpRetransmit> pendingUdpRetransmits;
+	  auto lastUdpNackApplyLogAt = std::chrono::steady_clock::time_point{};
+	  constexpr std::size_t maxPendingUdpRetransmits = 512;
+	  constexpr std::size_t maxNackRequestsDrainedPerFrame = 8;
+	  constexpr std::uint32_t maxRetransmitFragmentsPerFrame = 6;
+	  constexpr std::uint32_t maxRetransmitFragmentsPerChunk = 3;
+	  constexpr auto retransmitFrameBudget = std::chrono::microseconds(1800);
+	  constexpr auto retransmitMaxAge = std::chrono::milliseconds(750);
+		#endif
+
+  if (hasNetworkVideo && latestKeyframeRequest().sequence == 0) {
+    requestKeyframe("initial-connect", 0, 0, 0, 0);
+  }
 
   while (capturedFrames < targetFrames) {
     const auto frameStartedAt = std::chrono::steady_clock::now();
@@ -5162,43 +5394,133 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
         pendingMediaGeneration = mediaSnapshot.generation;
       }
     }
-    const auto pendingVideoNack = latestVideoNack();
-    if (pendingVideoNack.sequence != 0 && pendingVideoNack.sequence != seenVideoNackSequence) {
-      seenVideoNackSequence = pendingVideoNack.sequence;
-      std::uint64_t retransmittedPackets = 0;
-      std::uint64_t retransmittedFragments = 0;
-      std::uint64_t cacheMisses = 0;
-      if (udpClient) {
-        for (const std::uint64_t packetId : pendingVideoNack.packetIds) {
-          const std::uint32_t fragments = udpClient->resendPacket(packetId);
-          if (fragments > 0) {
-            retransmittedPackets += 1;
-            retransmittedFragments += fragments;
-          } else {
-            cacheMisses += 1;
-          }
-        }
-        statsUdpNackRequests += pendingVideoNack.packetIds.size();
-        statsUdpNackMisses += cacheMisses;
-        statsUdpRetransmits += retransmittedPackets;
-        statsUdpRetransmitFragments += retransmittedFragments;
-      } else {
-        cacheMisses = pendingVideoNack.packetIds.size();
-      }
-      std::cerr << "SNU1_NACK_APPLY sequence=" << pendingVideoNack.sequence
-                << " reason=" << pendingVideoNack.reason
-                << " requested=" << pendingVideoNack.packetIds.size()
-                << " resent=" << retransmittedPackets
-                << " missed=" << cacheMisses
-                << " fragments=" << retransmittedFragments
-                << "\n";
-    }
-#endif
-		    const auto pendingKeyframeRequest = latestKeyframeRequest();
-		    const bool hasPendingKeyframeRequest = pendingKeyframeRequest.sequence != 0 &&
-		                                           pendingKeyframeRequest.sequence != seenKeyframeRequestSequence;
+	    std::size_t drainedNackRequests = 0;
+	    std::size_t queuedNackPackets = 0;
+	    std::size_t duplicateNackPackets = 0;
+	    std::size_t droppedNackPackets = 0;
+	    VideoNackSnapshot receivedNack;
+	    while (drainedNackRequests < maxNackRequestsDrainedPerFrame &&
+	           takeNextVideoNack(receivedNack)) {
+	      drainedNackRequests += 1;
+	      statsUdpNackRequests += receivedNack.packetIds.size();
+	      for (const std::uint64_t packetId : receivedNack.packetIds) {
+	        const auto duplicate = std::find_if(
+	          pendingUdpRetransmits.begin(),
+	          pendingUdpRetransmits.end(),
+	          [&](const PendingUdpRetransmit& pending) { return pending.packetId == packetId; });
+	        if (duplicate != pendingUdpRetransmits.end()) {
+	          duplicateNackPackets += 1;
+	          statsUdpNackDuplicates += 1;
+	          continue;
+	        }
+	        if (pendingUdpRetransmits.size() >= maxPendingUdpRetransmits) {
+	          pendingUdpRetransmits.pop_front();
+	          droppedNackPackets += 1;
+	          statsUdpNackQueueDrops += 1;
+	        }
+	        pendingUdpRetransmits.push_back(PendingUdpRetransmit{
+	          packetId,
+	          receivedNack.sequence,
+	          0,
+	          std::chrono::steady_clock::now()
+	        });
+	        queuedNackPackets += 1;
+	      }
+	    }
+
+	    const auto retransmitStartedAt = std::chrono::steady_clock::now();
+	    std::uint32_t retransmitFragmentBudget = maxRetransmitFragmentsPerFrame;
+	    std::uint64_t retransmittedPackets = 0;
+	    std::uint64_t retransmittedFragments = 0;
+	    std::uint64_t cacheMisses = 0;
+	    std::uint64_t expiredNackPackets = 0;
+	    while (!pendingUdpRetransmits.empty() && retransmitFragmentBudget > 0) {
+	      const auto workNow = std::chrono::steady_clock::now();
+	      if (workNow - retransmitStartedAt >= retransmitFrameBudget) break;
+
+	      PendingUdpRetransmit pending = pendingUdpRetransmits.front();
+	      pendingUdpRetransmits.pop_front();
+	      if (workNow - pending.queuedAt > retransmitMaxAge) {
+	        expiredNackPackets += 1;
+	        statsUdpNackExpired += 1;
+	        continue;
+	      }
+	      if (!udpClient) {
+	        cacheMisses += 1;
+	        continue;
+	      }
+
+	      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(workNow - retransmitStartedAt);
+	      const auto remainingBudget = elapsed < retransmitFrameBudget
+	        ? retransmitFrameBudget - elapsed
+	        : std::chrono::microseconds(0);
+	      const std::uint32_t chunkFragments = std::min<std::uint32_t>(
+	        retransmitFragmentBudget,
+	        maxRetransmitFragmentsPerChunk);
+	      const auto result = udpClient->resendPacketChunk(pending.packetId,
+	                                                       pending.nextFragment,
+	                                                       chunkFragments,
+	                                                       remainingBudget);
+	      if (!result.cacheHit) {
+	        cacheMisses += 1;
+	        continue;
+	      }
+	      retransmittedFragments += result.fragmentsSent;
+	      retransmitFragmentBudget -= std::min(retransmitFragmentBudget, result.fragmentsSent);
+	      pending.nextFragment = result.nextFragment;
+	      if (result.complete) {
+	        retransmittedPackets += 1;
+	      } else if (result.fragmentsSent > 0) {
+	        pendingUdpRetransmits.push_back(std::move(pending));
+	      } else {
+	        pendingUdpRetransmits.push_front(std::move(pending));
+	        break;
+	      }
+	    }
+	    statsUdpNackMisses += cacheMisses;
+	    statsUdpRetransmits += retransmittedPackets;
+	    statsUdpRetransmitFragments += retransmittedFragments;
+	    if (!pendingUdpRetransmits.empty()) {
+	      statsUdpNackDeferredFrames += 1;
+	    }
+
+	    const auto nackLogNow = std::chrono::steady_clock::now();
+	    const bool nackWorkObserved = drainedNackRequests > 0 || retransmittedPackets > 0 ||
+	      cacheMisses > 0 || expiredNackPackets > 0 || droppedNackPackets > 0;
+	    if (nackWorkObserved &&
+	        (drainedNackRequests > 0 ||
+	         lastUdpNackApplyLogAt.time_since_epoch().count() == 0 ||
+	         nackLogNow - lastUdpNackApplyLogAt >= std::chrono::milliseconds(250))) {
+	      lastUdpNackApplyLogAt = nackLogNow;
+	      std::cerr << "SNU1_NACK_APPLY drained=" << drainedNackRequests
+	                << " queued=" << queuedNackPackets
+	                << " duplicate=" << duplicateNackPackets
+	                << " queueDrop=" << droppedNackPackets
+	                << " resent=" << retransmittedPackets
+	                << " fragments=" << retransmittedFragments
+	                << " missed=" << cacheMisses
+	                << " expired=" << expiredNackPackets
+	                << " pending=" << pendingUdpRetransmits.size()
+	                << " budgetFragments=" << maxRetransmitFragmentsPerFrame
+	                << " budgetMicros=" << retransmitFrameBudget.count()
+	                << "\n";
+	    }
+	#endif
+			    auto pendingKeyframeRequest = latestKeyframeRequest();
+			    bool hasPendingKeyframeRequest = pendingKeyframeRequest.sequence != 0 &&
+			                                     pendingKeyframeRequest.sequence != seenKeyframeRequestSequence;
     const bool hasPendingKeyframeRetry = awaitingKeyframeRequestSequence != 0 &&
                                          awaitingKeyframeFrames >= 3;
+#ifdef _WIN32
+    if (hasPendingMediaEpochKeyframe &&
+        !hasPendingKeyframeRequest &&
+        !hasPendingKeyframeRetry) {
+      requestKeyframe("media-epoch", 0, 0, 0, 0);
+      pendingKeyframeRequest = latestKeyframeRequest();
+      hasPendingKeyframeRequest = pendingKeyframeRequest.sequence != 0 &&
+                                  pendingKeyframeRequest.sequence != seenKeyframeRequestSequence;
+    }
+#endif
     const bool mustSendRecoveryFrame = hasPendingKeyframeRequest
       || hasPendingKeyframeRetry
 	#ifdef _WIN32
@@ -5290,30 +5612,6 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    const auto prepFinishedAt = std::chrono::steady_clock::now();
 	    observeMicros(statsPrepMicros, statsPrepMaxMicros, microsBetween(prepStartedAt, prepFinishedAt));
 
-#ifdef _WIN32
-    if (hasPendingMediaEpochKeyframe) {
-      bool forced = encoder->requestKeyframe();
-      bool restarted = false;
-      if (!forced) {
-        const auto now = std::chrono::steady_clock::now();
-        const bool enoughCooldown = lastEncoderRestartAt.time_since_epoch().count() == 0
-          || now - lastEncoderRestartAt > std::chrono::seconds(2);
-        if (enoughCooldown && restartEncoder(currentAdaptiveBitrate, "media-epoch")) {
-          lastEncoderRestartAt = now;
-          restarted = true;
-          forced = true;
-        }
-      }
-      seenMediaCryptoGeneration = pendingMediaGeneration;
-      std::cerr << "SNV1_KEYFRAME_APPLY reason=media-epoch"
-                << " mediaEpoch=" << pendingMediaEpoch
-                << " mediaGeneration=" << pendingMediaGeneration
-                << " forced=" << (forced ? "yes" : "no")
-                << " restarted=" << (restarted ? "yes" : "no")
-                << "\n";
-    }
-#endif
-
     if (hasPendingKeyframeRequest || hasPendingKeyframeRetry) {
       const bool retry = !hasPendingKeyframeRequest && hasPendingKeyframeRetry;
       const std::uint64_t requestSequence = hasPendingKeyframeRequest
@@ -5335,8 +5633,15 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       if (!forced || retryNeedsRestart) {
         const bool enoughCooldown = lastEncoderRestartAt.time_since_epoch().count() == 0
           || now - lastEncoderRestartAt > std::chrono::milliseconds(1200);
+        const char* restartReason = retryNeedsRestart
+          ? "keyframe-idr-miss"
+#ifdef _WIN32
+          : (hasPendingMediaEpochKeyframe ? "media-epoch" : "keyframe-request");
+#else
+          : "keyframe-request";
+#endif
         if (enoughCooldown && restartEncoder(currentAdaptiveBitrate,
-                                             retryNeedsRestart ? "keyframe-idr-miss" : "keyframe-request")) {
+                                             restartReason)) {
           lastEncoderRestartAt = now;
           restarted = true;
           forced = true;
@@ -5345,6 +5650,11 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       if (hasPendingKeyframeRequest) {
         seenKeyframeRequestSequence = pendingKeyframeRequest.sequence;
       }
+#ifdef _WIN32
+      if (hasPendingMediaEpochKeyframe) {
+        seenMediaCryptoGeneration = pendingMediaGeneration;
+      }
+#endif
       awaitingKeyframeRequestSequence = requestSequence;
       awaitingKeyframeClientSequence = clientSequence;
       awaitingKeyframeVideoSequence = videoSequence;
@@ -5360,6 +5670,10 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                 << " attempt=" << awaitingKeyframeAttempts
                 << " forced=" << (forced ? "yes" : "no")
                 << " restarted=" << (restarted ? "yes" : "no")
+#ifdef _WIN32
+                << " mediaEpoch=" << (hasPendingMediaEpochKeyframe ? pendingMediaEpoch : 0)
+                << " mediaGeneration=" << (hasPendingMediaEpochKeyframe ? pendingMediaGeneration : 0)
+#endif
                 << " awaitIdr=yes"
                 << "\n";
     }
@@ -5379,8 +5693,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	        currentStreamDurationMicros());
       const std::uint64_t streamSequence = sequence++;
       const auto bytes = makeEncodedPacketBytes(streamPacket,
-                                                duplicator.width(),
-                                                duplicator.height(),
+                                                streamDimensions.width,
+                                                streamDimensions.height,
 	                                                streamSequence,
                                                 encoder->codec(),
 	                                                encoder->usingHardware());
@@ -5697,6 +6011,11 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                 << " udpNackMiss=" << statsUdpNackMisses
                 << " udpRetransmits=" << statsUdpRetransmits
                 << " udpRetransmitFragments=" << statsUdpRetransmitFragments
+                << " udpNackDuplicate=" << statsUdpNackDuplicates
+                << " udpNackQueueDrop=" << statsUdpNackQueueDrops
+                << " udpNackExpired=" << statsUdpNackExpired
+                << " udpNackDeferredFrames=" << statsUdpNackDeferredFrames
+                << " udpNackPending=" << pendingUdpRetransmits.size()
                 << " udpCacheReset=" << statsUdpCacheResets
                 << " udpCacheDropped=" << statsUdpCacheDropped
 	#endif
@@ -6303,6 +6622,10 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       statsUdpNackMisses = 0;
 	      statsUdpRetransmits = 0;
 	      statsUdpRetransmitFragments = 0;
+	      statsUdpNackDuplicates = 0;
+	      statsUdpNackQueueDrops = 0;
+	      statsUdpNackExpired = 0;
+	      statsUdpNackDeferredFrames = 0;
 	      statsUdpCacheResets = 0;
 	      statsUdpCacheDropped = 0;
       statsUdpPacingClampMs = 0.0;
@@ -6324,8 +6647,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       packet,
       currentStreamDurationMicros());
     const auto bytes = makeEncodedPacketBytes(streamPacket,
-                                              duplicator.width(),
-                                              duplicator.height(),
+                                              streamDimensions.width,
+                                              streamDimensions.height,
                                               sequence++,
                                               encoder->codec(),
                                               encoder->usingHardware());

@@ -10,6 +10,7 @@ const appState = {
   localStream: null,
   localStreamQuality: null,
   hostPeers: new Map(),
+  hostStartingRoomId: null,
   clientPeer: null,
   clientRoom: null,
   inputChannel: null,
@@ -41,18 +42,27 @@ const appState = {
   pendingRequests: new Map(),
   heartbeatTimer: null,
   mouseTimer: 0,
+  clientCleanupPromise: null,
+  clientConnectPromise: null,
+  activePointerId: null,
+  pressedKeys: new Map(),
+  pressedButtons: new Map(),
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" }
   ],
   iceTransportPolicy: "all",
-  hasTurn: false
+  hasTurn: false,
+  networkMode: "default",
+  relayReady: true,
+  networkNoticeKey: ""
 };
 
 const TRANSPORT_FEEDBACK_TYPE = "__sanser_transport_feedback";
 const TRANSPORT_ADJUST_INTERVAL_MS = 1800;
 const NATIVE_TRANSPORT = "native-snv";
 const NATIVE_DEFAULT_PORT = 7777;
-const NATIVE_DEFAULT_CLIENT_IP = "100.100.83.44";
+const NATIVE_DEFAULT_CLIENT_IP = "";
+const LEGACY_NATIVE_CLIENT_IP = "100.100.83.44";
 const NATIVE_RESTART_LIMIT = 20;
 const NATIVE_QUALITY_PROFILES = {
   lan: {
@@ -68,19 +78,19 @@ const NATIVE_QUALITY_PROFILES = {
     preset: "low-latency",
     width: 1600,
     height: 900,
-    fps: 60,
-    bitrateMbps: 18,
+    fps: 45,
+    bitrateMbps: 12,
     mouseRate: 90,
-    label: "Wi-Fi 900p60 18Mbps"
+    label: "Wi-Fi 900p45 12Mbps"
   },
-  tailscale: {
+  internet: {
     preset: "720p",
     width: 1280,
     height: 720,
     fps: 30,
-    bitrateMbps: 12,
+    bitrateMbps: 6,
     mouseRate: 60,
-    label: "Tailscale 720p30 12Mbps"
+    label: "Internet / Relay 720p30 6Mbps"
   }
 };
 
@@ -166,6 +176,18 @@ function init() {
 }
 
 function applyPerformanceDefaults() {
+  const nativeClientIpKey = "gr_setting_nativeClientIp";
+  const codecAutoMigrationKey = "gr_codec_auto_v8";
+  if (localStorage.getItem(nativeClientIpKey) === LEGACY_NATIVE_CLIENT_IP) {
+    localStorage.removeItem(nativeClientIpKey);
+  }
+  if (localStorage.getItem(codecAutoMigrationKey) !== "1") {
+    const savedCodec = localStorage.getItem("gr_setting_nativeVideoCodec");
+    if (savedCodec === null) {
+      localStorage.setItem("gr_setting_nativeVideoCodec", "auto");
+    }
+    localStorage.setItem(codecAutoMigrationKey, "1");
+  }
   if (localStorage.getItem("gr_perf_defaults_v7") === "1") return;
   const looksLikeOldDefault = (
     (localStorage.getItem("gr_setting_clientResolution") || "1080p") === "1080p" &&
@@ -183,11 +205,13 @@ function applyPerformanceDefaults() {
   }
   localStorage.setItem("gr_setting_nativeQualityProfile", "auto");
   localStorage.setItem("gr_setting_encoderPreference", "auto");
-  localStorage.setItem("gr_setting_nativeVideoCodec", "h264");
+  localStorage.setItem("gr_setting_nativeVideoCodec", "auto");
   localStorage.setItem("gr_setting_codecPreference", "H264");
   localStorage.setItem("gr_setting_transportMode", NATIVE_TRANSPORT);
   localStorage.setItem("gr_setting_nativeListenPort", String(NATIVE_DEFAULT_PORT));
-  localStorage.setItem("gr_setting_nativeClientIp", NATIVE_DEFAULT_CLIENT_IP);
+  if (localStorage.getItem(nativeClientIpKey) === null) {
+    localStorage.setItem(nativeClientIpKey, NATIVE_DEFAULT_CLIENT_IP);
+  }
   localStorage.setItem("gr_setting_nativeAudioJitterMs", "24");
   localStorage.setItem("gr_setting_nativeAudioVolume", "100");
   localStorage.setItem("gr_setting_nativeAudioMute", "off");
@@ -267,16 +291,11 @@ function bindUi() {
     });
   });
 
-  videoShell.addEventListener("mousemove", sendPointerMove);
-  videoShell.addEventListener("mousedown", (event) => {
-    videoShell.focus();
-    sendInputEvent(pointerPayload("pointer-down", event));
-    event.preventDefault();
-  });
-  videoShell.addEventListener("mouseup", (event) => {
-    sendInputEvent(pointerPayload("pointer-up", event));
-    event.preventDefault();
-  });
+  videoShell.addEventListener("pointermove", sendPointerMove);
+  videoShell.addEventListener("pointerdown", handlePointerDown);
+  window.addEventListener("pointerup", handlePointerRelease, true);
+  window.addEventListener("pointercancel", handlePointerCancel, true);
+  window.addEventListener("blur", () => releaseAllClientInput("window-blur"));
   videoShell.addEventListener("wheel", (event) => {
     sendInputEvent({ type: "wheel", dx: event.deltaX, dy: event.deltaY });
     event.preventDefault();
@@ -533,6 +552,12 @@ function handleNativeLog(entry = {}) {
     if (/SNA1_AUDIO_CAPTURE/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNA1_AUDIO_CAPTURE\s*/, "Audio ");
     }
+    if (/SNA1_AUDIO_WIRE_FORMAT/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNA1_AUDIO_WIRE_FORMAT\s*/, "Audio wire ");
+    }
+    if (/SNV1_ENCODER_SCALE/i.test(line)) {
+      hostStats.textContent = line.replace(/^.*SNV1_ENCODER_SCALE\s*/, "Native scale ");
+    }
     if (/SNV1_STATS/i.test(line)) {
       hostStats.textContent = line.replace(/^.*SNV1_STATS\s*/, "Native ");
     }
@@ -636,12 +661,31 @@ function handleNativeExit(payload = {}) {
     return;
   }
   if (payload.role === "client" && appState.clientRoom && isNativeRoom(appState.clientRoom)) {
+    const failedRoomId = appState.clientRoom.id;
+    appState.nativeClientDesired = false;
+    appState.nativeClientOptions = null;
+    clearNativeRestart("client", true);
     streamStatus.textContent = "Native renderer đã dừng";
+    api("/api/connect/close", {
+      method: "POST",
+      body: { roomId: failedRoomId, sessionId: appState.sessionId }
+    }).catch(() => {});
+    cleanupClientPeer(failedRoomId).catch(() => {});
   }
   if (payload.role === "host") {
+    const failedRoomIds = Array.from(appState.nativeHostRooms);
+    appState.nativeHostDesired = false;
+    appState.nativeHostOptions = null;
+    clearNativeRestart("host", true);
     appState.nativeHostRooms.clear();
     $("#captureStatus").textContent = "Native host đã dừng";
     hostStats.textContent = "Native SNV inactive";
+    for (const roomId of failedRoomIds) {
+      api("/api/connect/close", {
+        method: "POST",
+        body: { roomId, sessionId: appState.sessionId }
+      }).catch(() => {});
+    }
   }
   updateNativeDiagnostics();
 }
@@ -857,7 +901,7 @@ function updateNativeHealthFromLog(role, line) {
     const retransmits = nativeMetric(line, "retransmitCompleted") || 0;
     health.network = `drop ${droppedAssemblies} skip ${jitterSkipped} late ${jitterLate}`;
     if (droppedAssemblies > 0 || jitterSkipped > 0 || jitterLate > 0 || retransmits > 0) {
-      noteNativeIssue("bad", "UDP/Tailscale đang mất hoặc trễ packet.");
+      noteNativeIssue("bad", "Đường truyền UDP/Internet đang mất hoặc trễ packet.");
     }
     return;
   }
@@ -918,11 +962,49 @@ function updateNativeDiagnostics(message = "") {
 }
 
 function handleDocumentKey(event) {
+  if (event.type === "keydown" && !event.repeat && !isEditableTarget(event.target)) {
+    if (matchesHotkey(event, $("#disconnectHotkey")?.value)) {
+      event.preventDefault();
+      event.stopPropagation();
+      disconnectClient().catch(() => {});
+      return;
+    }
+    if (matchesHotkey(event, $("#overlayHotkey")?.value)) {
+      event.preventDefault();
+      event.stopPropagation();
+      const hidden = !clientStats.classList.contains("is-hidden");
+      clientStats.classList.toggle("is-hidden", hidden);
+      showToast(hidden ? "Đã ẩn performance overlay." : "Đã hiện performance overlay.", "success", 1800);
+      return;
+    }
+  }
   if (!appState.inputChannel || appState.inputChannel.readyState !== "open") return;
   if (isEditableTarget(event.target)) return;
   sendInputEvent(keyPayload(event));
   event.preventDefault();
   event.stopPropagation();
+}
+
+function matchesHotkey(event, configured) {
+  const parts = String(configured || "")
+    .split("+")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  if (!parts.length) return false;
+  const expected = {
+    ctrl: parts.includes("ctrl") || parts.includes("control"),
+    alt: parts.includes("alt") || parts.includes("option"),
+    shift: parts.includes("shift"),
+    meta: parts.includes("meta") || parts.includes("cmd") || parts.includes("command")
+  };
+  if (event.ctrlKey !== expected.ctrl ||
+      event.altKey !== expected.alt ||
+      event.shiftKey !== expected.shift ||
+      event.metaKey !== expected.meta) {
+    return false;
+  }
+  const key = parts.find((part) => !["ctrl", "control", "alt", "option", "shift", "meta", "cmd", "command"].includes(part));
+  return Boolean(key) && (event.key.toLowerCase() === key || event.code.toLowerCase() === key);
 }
 
 function keyPayload(event) {
@@ -953,6 +1035,9 @@ function hydrateDefaults() {
 }
 
 function hydrateSettings() {
+  if (localStorage.getItem("gr_setting_nativeQualityProfile") === "tailscale") {
+    localStorage.setItem("gr_setting_nativeQualityProfile", "internet");
+  }
   $$("[id]").forEach((node) => {
     if (!["INPUT", "SELECT"].includes(node.tagName)) return;
     const saved = localStorage.getItem(`gr_setting_${node.id}`);
@@ -960,7 +1045,6 @@ function hydrateSettings() {
   });
   if ($("#nativeClientIp") && !localStorage.getItem("gr_setting_nativeClientIp")) {
     $("#nativeClientIp").value = NATIVE_DEFAULT_CLIENT_IP;
-    localStorage.setItem("gr_setting_nativeClientIp", NATIVE_DEFAULT_CLIENT_IP);
   }
   if ($("#nativeQualityProfile") && !localStorage.getItem("gr_setting_nativeQualityProfile")) {
     $("#nativeQualityProfile").value = "auto";
@@ -1000,6 +1084,8 @@ function setAuthMode(mode) {
   registerTab.classList.toggle("is-active", mode === "register");
   $$(".register-only").forEach((node) => node.classList.toggle("is-hidden", mode !== "register"));
   authSubmit.textContent = mode === "login" ? "Đăng nhập" : "Tạo tài khoản";
+  $("#nameInput").required = mode === "register";
+  $("#passwordInput").autocomplete = mode === "login" ? "current-password" : "new-password";
   authError.textContent = "";
 }
 
@@ -1058,23 +1144,65 @@ function enterApp(user) {
 
 async function loadNetworkConfig() {
   const config = await api("/api/config");
-  if (Array.isArray(config.iceServers) && config.iceServers.length) {
+  if (Array.isArray(config.iceServers)) {
     appState.iceServers = config.iceServers;
   }
   appState.hasTurn = Boolean(config.hasTurn);
+  appState.networkMode = normalizeServerNetworkMode(config.networkMode);
+  appState.relayReady = config.relayReady !== false;
   appState.iceTransportPolicy = config.iceTransportPolicy === "relay" ? "relay" : "all";
+  const switchedTransport = enforceRelayTransportMode();
+  if (appState.networkMode === "relay" && !appState.relayReady) {
+    showNetworkNotice(
+      "relay-missing-turn",
+      "NETWORK_MODE=relay cần TURN_URLS và thông tin xác thực TURN trên server.",
+      "error"
+    );
+  } else if (switchedTransport) {
+    showNetworkNotice(
+      "relay-webrtc",
+      "Relay dùng WebRTC Adaptive vì Native SNV không đi qua TURN.",
+      "warning"
+    );
+  } else if (appState.networkMode !== "relay") {
+    appState.networkNoticeKey = "";
+  }
+}
+
+function normalizeServerNetworkMode(value) {
+  const mode = String(value || "default").trim().toLowerCase();
+  return ["default", "direct", "relay", "tailscale"].includes(mode) ? mode : "default";
+}
+
+function enforceRelayTransportMode() {
+  const select = $("#transportMode");
+  if (appState.networkMode !== "relay" || !select || select.value !== NATIVE_TRANSPORT) return false;
+  select.value = "webrtc-adaptive";
+  localStorage.setItem("gr_setting_transportMode", "webrtc-adaptive");
+  return true;
+}
+
+function showNetworkNotice(key, message, type) {
+  if (appState.networkNoticeKey === key) return;
+  appState.networkNoticeKey = key;
+  showToast(message, type, 6500);
 }
 
 async function logout() {
+  await disconnectClient().catch(() => {});
+  await stopHost().catch(() => {});
   try {
     await api("/api/logout", { method: "POST" });
   } catch {
     // Token may already be invalid.
   }
-  await stopHost();
+  if (appState.events) appState.events.close();
+  appState.events = null;
+  appState.pendingRequests.clear();
+  renderRequests();
   localStorage.removeItem("gr_token");
   appState.token = "";
-  if (appState.events) appState.events.close();
+  appState.user = null;
   showAuth();
 }
 
@@ -1109,11 +1237,26 @@ function connectEvents() {
   events.addEventListener("connect-accepted", async (event) => {
     const data = JSON.parse(event.data);
     if (data.targetSessionId !== appState.sessionId) return;
+    appState.pendingRequests.delete(data.room.id);
+    renderRequests();
     if (isNativeRoom(data.room)) {
       if (data.room.hostSessionId === appState.sessionId) {
         await startNativeHostForRoom(data.room).catch((error) => {
+          const failedStartingRoom = appState.hostStartingRoomId === data.room.id ||
+            appState.nativeHostRooms.has(data.room.id);
+          if (appState.hostStartingRoomId === data.room.id) appState.hostStartingRoomId = null;
+          appState.nativeHostRooms.delete(data.room.id);
+          if (failedStartingRoom && appState.nativeHostRooms.size === 0) {
+            appState.nativeHostDesired = false;
+            appState.nativeHostOptions = null;
+            clearNativeRestart("host", true);
+            window.sanserNative?.stopHost?.().catch(() => {});
+          }
           $("#captureStatus").textContent = error.message || "Could not start native host";
-          api("/api/connect/close", { method: "POST", body: { roomId: data.room.id } }).catch(() => {});
+          api("/api/connect/close", {
+            method: "POST",
+            body: { roomId: data.room.id, sessionId: appState.sessionId }
+          }).catch(() => {});
         });
         return;
       }
@@ -1122,33 +1265,53 @@ function connectEvents() {
     }
     if (data.room.hostSessionId === appState.sessionId) {
       await startHostPeer(data.room).catch((error) => {
+        if (appState.hostStartingRoomId === data.room.id) appState.hostStartingRoomId = null;
+        closeHostPeer(data.room.id, "host-start-failed");
         $("#captureStatus").textContent = error.message || "Could not start stream";
-        api("/api/connect/close", { method: "POST", body: { roomId: data.room.id } }).catch(() => {});
+        api("/api/connect/close", {
+          method: "POST",
+          body: { roomId: data.room.id, sessionId: appState.sessionId }
+        }).catch(() => {});
       });
       return;
     }
     await startClientPeer(data.room);
     streamStatus.textContent = "Waiting for host offer";
   });
-  events.addEventListener("connect-rejected", (event) => {
+  events.addEventListener("connect-rejected", async (event) => {
     const data = JSON.parse(event.data);
     if (data.targetSessionId !== appState.sessionId) return;
-    streamStatus.textContent = "Connection rejected";
+    appState.pendingRequests.delete(data.room.id);
+    renderRequests();
+    if (data.room.hostSessionId === appState.sessionId) {
+      if (data.reason === "expired") showToast("Yêu cầu kết nối đã hết hạn.", "warning", 3000);
+      return;
+    }
+    if (appState.clientRoom?.id === data.room.id) {
+      await cleanupClientPeer(data.room.id);
+    }
+    hideConnecting();
+    const expired = data.reason === "expired";
+    streamStatus.textContent = expired ? "Yêu cầu kết nối đã hết hạn" : "Kết nối bị từ chối";
+    showToast(expired ? "Yêu cầu kết nối đã hết hạn." : "Máy chủ đã từ chối kết nối.", "warning", 3500);
   });
-  events.addEventListener("connect-closed", (event) => {
+  events.addEventListener("connect-closed", async (event) => {
     const data = JSON.parse(event.data);
     if (data.targetSessionId !== appState.sessionId) return;
+    appState.pendingRequests.delete(data.room.id);
+    renderRequests();
     if (isNativeRoom(data.room)) {
-      handleNativeClosed(data.room);
+      await handleNativeClosed(data.room);
       return;
     }
     if (appState.hostPeers.has(data.room.id)) {
-      appState.hostPeers.get(data.room.id).close();
-      appState.hostPeers.delete(data.room.id);
+      closeHostPeer(data.room.id, "room-closed");
       $("#captureStatus").textContent = "Client disconnected";
       return;
     }
-    cleanupClientPeer();
+    if (appState.clientRoom?.id === data.room.id) {
+      await cleanupClientPeer(data.room.id);
+    }
   });
   events.addEventListener("signal", (event) => {
     const data = JSON.parse(event.data);
@@ -1255,7 +1418,11 @@ function startHeartbeat() {
     if (!appState.hostDevice) return;
     api("/api/host/heartbeat", {
       method: "POST",
-      body: { deviceId: appState.hostDevice.id, status: appState.localStream ? "capturing" : "ready" }
+      body: {
+        deviceId: appState.hostDevice.id,
+        sessionId: appState.sessionId,
+        status: appState.localStream ? "capturing" : "ready"
+      }
     }).catch(() => {});
   }, 8000);
 }
@@ -1263,7 +1430,25 @@ function startHeartbeat() {
 async function stopHost() {
   if (appState.heartbeatTimer) clearInterval(appState.heartbeatTimer);
   appState.heartbeatTimer = null;
+  const activeRoomIds = new Set([
+    ...appState.nativeHostRooms,
+    ...appState.hostPeers.keys()
+  ]);
+  await Promise.all(Array.from(activeRoomIds, (roomId) => api("/api/connect/close", {
+    method: "POST",
+    body: { roomId, sessionId: appState.sessionId }
+  }).catch(() => {})));
+  const pendingRoomIds = Array.from(appState.pendingRequests.values())
+    .filter((room) => room.hostSessionId === appState.sessionId)
+    .map((room) => room.id);
+  await Promise.all(pendingRoomIds.map((roomId) => api("/api/connect/respond", {
+    method: "POST",
+    body: { roomId, sessionId: appState.sessionId, accepted: false }
+  }).catch(() => {})));
+  for (const roomId of pendingRoomIds) appState.pendingRequests.delete(roomId);
+  if (pendingRoomIds.length) renderRequests();
   appState.nativeHostDesired = false;
+  appState.hostStartingRoomId = null;
   appState.nativeHostOptions = null;
   clearNativeRestart("host", true);
   if (window.sanserNative?.stopHost) {
@@ -1273,10 +1458,12 @@ async function stopHost() {
   appState.nativeInput = "Host stopped";
   await refreshNativeStatus();
   if (appState.hostDevice) {
-    await api("/api/host/offline", { method: "POST", body: { deviceId: appState.hostDevice.id } }).catch(() => {});
+    await api("/api/host/offline", {
+      method: "POST",
+      body: { deviceId: appState.hostDevice.id, sessionId: appState.sessionId }
+    }).catch(() => {});
   }
-  for (const peer of appState.hostPeers.values()) peer.close();
-  appState.hostPeers.clear();
+  for (const roomId of Array.from(appState.hostPeers.keys())) closeHostPeer(roomId, "host-stopped");
   stopLocalStream();
   appState.hostDevice = null;
   $("#hostStatus").textContent = "Offline";
@@ -1316,10 +1503,24 @@ async function captureScreen(qualityOverride = null) {
   hostPreview.srcObject = appState.localStream;
   for (const track of appState.localStream.getVideoTracks()) {
     track.contentHint = "motion";
+    track.addEventListener("ended", () => handleLocalCaptureEnded(track), { once: true });
   }
   appState.localStreamQuality = quality;
   $("#captureStatus").textContent = `${quality.width}x${quality.height} @ ${quality.fps} FPS`;
   return appState.localStream;
+}
+
+async function handleLocalCaptureEnded(track) {
+  if (!appState.localStream || !appState.localStream.getTracks().includes(track)) return;
+  const roomIds = Array.from(appState.hostPeers.keys());
+  await Promise.all(roomIds.map((roomId) => api("/api/connect/close", {
+    method: "POST",
+    body: { roomId, sessionId: appState.sessionId }
+  }).catch(() => {})));
+  for (const roomId of roomIds) closeHostPeer(roomId, "capture-ended");
+  stopLocalStream();
+  $("#captureStatus").textContent = "Chia sẻ màn hình đã dừng";
+  hostStats.textContent = "Outbound inactive";
 }
 
 function stopLocalStream() {
@@ -1339,32 +1540,99 @@ function renderRequests() {
   for (const room of appState.pendingRequests.values()) {
     const card = document.createElement("article");
     card.className = "request-card";
-    card.textContent = `${room.clientName} connected at ${room.quality.width}x${room.quality.height} ${room.quality.fps} FPS`;
+    card.dataset.roomId = room.id;
+
+    const summary = document.createElement("div");
+    summary.className = "request-summary";
+    const title = document.createElement("strong");
+    title.textContent = room.clientName || "Thiết bị khác";
+    const detail = document.createElement("small");
+    detail.textContent = `Yêu cầu ${room.quality.width}x${room.quality.height} @ ${room.quality.fps} FPS`;
+    summary.append(title, detail);
+
+    const actions = document.createElement("div");
+    actions.className = "button-row";
+    const acceptButton = document.createElement("button");
+    acceptButton.className = "primary-action";
+    acceptButton.type = "button";
+    acceptButton.textContent = "Chấp nhận";
+    const rejectButton = document.createElement("button");
+    rejectButton.className = "danger-action";
+    rejectButton.type = "button";
+    rejectButton.textContent = "Từ chối";
+    acceptButton.addEventListener("click", () => respondToRequest(room.id, true, [acceptButton, rejectButton]));
+    rejectButton.addEventListener("click", () => respondToRequest(room.id, false, [acceptButton, rejectButton]));
+    actions.append(acceptButton, rejectButton);
+    card.append(summary, actions);
     requestList.appendChild(card);
   }
 }
 
+async function respondToRequest(roomId, accepted, buttons = []) {
+  const room = appState.pendingRequests.get(roomId);
+  if (!room) return;
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    await api("/api/connect/respond", {
+      method: "POST",
+      body: {
+        roomId,
+        sessionId: appState.sessionId,
+        accepted
+      }
+    });
+    appState.pendingRequests.delete(roomId);
+    renderRequests();
+    if (!accepted) showToast("Đã từ chối yêu cầu kết nối.", "warning", 2500);
+  } catch (error) {
+    if (/already handled/i.test(error.message || "")) {
+      appState.pendingRequests.delete(roomId);
+      renderRequests();
+      showToast("Yêu cầu này đã được xử lý.", "warning", 2500);
+      return;
+    }
+    buttons.forEach((button) => { button.disabled = false; });
+    showToast(error.message || "Không thể phản hồi yêu cầu kết nối.", "error");
+  }
+}
+
 async function connectToDevice(deviceId) {
+  if (appState.clientConnectPromise) return appState.clientConnectPromise;
+  const attempt = connectToDeviceInternal(deviceId);
+  appState.clientConnectPromise = attempt;
+  try {
+    return await attempt;
+  } finally {
+    if (appState.clientConnectPromise === attempt) appState.clientConnectPromise = null;
+  }
+}
+
+async function connectToDeviceInternal(deviceId) {
   connectError.textContent = "";
   const device = appState.devices.find((item) => item.id === deviceId);
   if (!device || !device.online || device.sessionId === appState.sessionId) return;
-  if (isNativeTransport()) {
-    await connectNativeToDevice(device);
-    return;
-  }
 
   try {
+    await disconnectClient();
     await loadNetworkConfig().catch(() => {});
+    if (appState.networkMode === "relay" && !appState.relayReady) {
+      throw new Error("Relay chưa sẵn sàng: hãy cấu hình TURN_URLS trên server.");
+    }
+    if (isNativeTransport()) {
+      await connectNativeToDevice(device);
+      return;
+    }
+
     showConnecting(device.name || 'máy chủ');
     streamStatus.textContent = "Đang kết nối...";
     $("#selectedDeviceLabel").textContent = `${device.name} đã chọn`;
 
     // Connection timeout
-    appState._connectTimeout = setTimeout(() => {
+    appState._connectTimeout = setTimeout(async () => {
       if (!appState.clientPeer || appState.clientPeer.connectionState !== 'connected') {
         hideConnecting();
         showToast(`Không thể kết nối tới ${device.name}. Hết thời gian chờ!`, 'error');
-        cleanupClientPeer();
+        await disconnectClient();
       }
     }, 15000);
 
@@ -1376,13 +1644,15 @@ async function connectToDevice(deviceId) {
         quality: readClientQuality()
       }
     });
-    appState.clientRoom = data.room;
+    if (!appState.clientRoom || appState.clientRoom.id === data.room.id) {
+      appState.clientRoom = data.room;
+    }
   } catch (error) {
     hideConnecting();
+    await cleanupClientPeer();
     showToast(error.message || 'Kết nối thất bại!', 'error');
     connectError.textContent = error.message;
     streamStatus.textContent = "Chờ kết nối";
-    if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
   }
 }
 
@@ -1417,7 +1687,7 @@ async function connectNativeToDevice(device) {
       logInput: false,
       fullscreen: true,
       hideCursor: true,
-      relativeMouse: true,
+      relativeMouse: false,
       sessionToken
     };
     appState.nativeClientOptions = clientOptions;
@@ -1432,8 +1702,11 @@ async function connectNativeToDevice(device) {
       : `auto:${port} + auto:${controlPort} + audio auto:${audioPort}`;
     appState.nativeEndpoint = endpointLabel;
     appState.nativeInput = "Listener opened";
-    appState.nativeHealth.video = nativeQuality.label || `${nativeQuality.width}x${nativeQuality.height} ${nativeQuality.fps}fps`;
-    appState.nativeHealth.summary = `Profile ${nativeQuality.label || nativeQuality.resolvedNetworkProfile || "manual"} đang dùng cho phiên native.`;
+    const codecLabel = nativeQuality.nativeCodec === "auto"
+      ? `Auto→${String(nativeQuality.resolvedNativeCodec || "h264").toUpperCase()}`
+      : String(nativeQuality.resolvedNativeCodec || nativeQuality.nativeCodec || "h264").toUpperCase();
+    appState.nativeHealth.video = `${nativeQuality.label || `${nativeQuality.width}x${nativeQuality.height} ${nativeQuality.fps}fps`} | ${codecLabel}`;
+    appState.nativeHealth.summary = `Profile ${nativeQuality.label || nativeQuality.resolvedNetworkProfile || "manual"} đang dùng codec ${codecLabel}.`;
     appState.nativeHealth.issueAt = Date.now();
     await refreshNativeStatus();
 
@@ -1469,13 +1742,7 @@ async function connectNativeToDevice(device) {
     updateNativeDiagnostics();
   } catch (error) {
     hideConnecting();
-    if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
-    appState.nativeClientDesired = false;
-    appState.nativeClientOptions = null;
-    clearNativeRestart("client", true);
-    if (window.sanserNative?.stopClient) {
-      await window.sanserNative.stopClient().catch(() => {});
-    }
+    await cleanupClientPeer();
     showToast(error.message || "Không mở được native renderer.", "error");
     connectError.textContent = error.message || "Native connection failed";
     streamStatus.textContent = "Chờ kết nối";
@@ -1558,9 +1825,17 @@ async function startNativeHostForRoom(room) {
   if (!window.sanserNative?.startHost) {
     throw new Error("Native launcher chỉ chạy trong app desktop Electron.");
   }
+  if (appState.nativeHostRooms.has(room.id) || appState.hostStartingRoomId === room.id) return;
+  const hasAnotherNativeRoom = Array.from(appState.nativeHostRooms).some((roomId) => roomId !== room.id);
+  if ((appState.hostStartingRoomId && appState.hostStartingRoomId !== room.id) ||
+      hasAnotherNativeRoom || appState.hostPeers.size > 0) {
+    throw new Error("Máy chủ đang bận với một phiên điều khiển khác.");
+  }
+  appState.hostStartingRoomId = room.id;
   if (!appState.hostDevice) {
     await startHost({ capture: false });
   }
+  if (appState.hostStartingRoomId !== room.id) throw new Error("Đã hủy khởi động native host.");
 
   const endpoint = room.native?.clientEndpoint;
   if (!endpoint) throw new Error("Native room thiếu endpoint của Mac client.");
@@ -1579,28 +1854,47 @@ async function startNativeHostForRoom(room) {
   $("#captureStatus").textContent = `Native host đang connect ${appState.nativeEndpoint}`;
   $("#hostRoleBadge").classList.remove("is-hidden");
   hostStats.textContent = "Native SNV starting";
+  const qualityProfile = normalizeNativeQualityProfile(
+    room.quality?.resolvedNetworkProfile || room.native?.qualityProfile || "manual"
+  );
+  const requestedVideoCodec = normalizeNativeCodecPreference(
+    room.quality?.nativeCodec || selectedNativeVideoCodec()
+  );
+  const storedResolvedCodec = normalizeOptionalResolvedNativeCodec(room.quality?.resolvedNativeCodec);
+  const resolvedVideoCodec = requestedVideoCodec === "auto" && storedResolvedCodec
+    ? storedResolvedCodec
+    : resolveNativeVideoCodecPreference(requestedVideoCodec, qualityProfile);
   const hostOptions = {
     endpoint,
     controlEndpoint,
     audioEndpoint,
     videoTransport: room.native?.transport === "snv-udp" ? "udp" : "tcp",
     udpPacing: true,
+    width: room.quality?.width || 1920,
+    height: room.quality?.height || 1080,
     fps: room.quality?.fps || Number($("#hostFps").value || 60),
     bitrateMbps: room.quality?.bitrateMbps || Number($("#hostBitrate").value || 28),
-    qualityProfile: room.quality?.resolvedNetworkProfile || room.native?.qualityProfile || "manual",
-    videoCodec: room.quality?.nativeCodec || selectedNativeVideoCodec(),
+    qualityProfile,
+    requestedVideoCodec,
+    videoCodec: resolvedVideoCodec,
     encoderPreference: $("#encoderPreference")?.value || "auto",
     keyframeInterval: 1,
     lowLatencyEncoder: true,
     sessionToken
   };
-  hostStats.textContent = `Native SNV starting | ${String(hostOptions.videoCodec).toUpperCase()} | ${room.quality?.label || `${hostOptions.fps}fps ${hostOptions.bitrateMbps}Mbps`}`;
+  const codecLabel = requestedVideoCodec === "auto"
+    ? `AUTO→${resolvedVideoCodec.toUpperCase()}`
+    : resolvedVideoCodec.toUpperCase();
+  hostStats.textContent = `Native SNV starting | ${codecLabel} | ${room.quality?.label || `${hostOptions.fps}fps ${hostOptions.bitrateMbps}Mbps`}`;
   appState.nativeHostOptions = hostOptions;
   await window.sanserNative.startHost(hostOptions);
+  if (appState.hostStartingRoomId !== room.id) throw new Error("Đã hủy khởi động native host.");
   await refreshNativeStatus();
+  if (appState.hostStartingRoomId === room.id) appState.hostStartingRoomId = null;
 }
 
 function handleNativeClientAccepted(room) {
+  if (appState.clientRoom && appState.clientRoom.id !== room.id) return;
   appState.clientRoom = room;
   appState.nativeEndpoint = [room.native?.clientEndpoint, room.native?.controlEndpoint, room.native?.audioEndpoint ? `audio ${room.native.audioEndpoint}` : ""]
     .filter(Boolean)
@@ -1612,39 +1906,53 @@ function handleNativeClientAccepted(room) {
   updateNativeDiagnostics();
 }
 
-function handleNativeClosed(room) {
+async function handleNativeClosed(room) {
   if (room.hostSessionId === appState.sessionId) {
     appState.nativeHostRooms.delete(room.id);
     if (!appState.nativeHostRooms.size) {
       appState.nativeHostDesired = false;
       appState.nativeHostOptions = null;
       clearNativeRestart("host", true);
-      if (window.sanserNative?.stopHost) window.sanserNative.stopHost().catch(() => {});
+      if (window.sanserNative?.stopHost) await window.sanserNative.stopHost().catch(() => {});
       $("#captureStatus").textContent = "Native client disconnected";
       hostStats.textContent = "Native SNV inactive";
-      refreshNativeStatus();
+      await refreshNativeStatus();
     }
     return;
   }
-  cleanupClientPeer();
+  if (appState.clientRoom?.id === room.id) {
+    await cleanupClientPeer(room.id);
+  }
 }
 
 async function startHostPeer(room) {
   if (appState.hostPeers.has(room.id)) return;
+  if (appState.hostStartingRoomId === room.id) return;
+  if ((appState.hostStartingRoomId && appState.hostStartingRoomId !== room.id) ||
+      appState.hostPeers.size > 0 || appState.nativeHostRooms.size > 0) {
+    throw new Error("Máy chủ đang bận với một phiên điều khiển khác.");
+  }
+  appState.hostStartingRoomId = room.id;
   await loadNetworkConfig().catch(() => {});
+  if (appState.networkMode === "relay" && !appState.relayReady) {
+    throw new Error("Relay chưa sẵn sàng: server chưa có TURN.");
+  }
+  if (appState.hostStartingRoomId !== room.id) throw new Error("Đã hủy khởi động WebRTC host.");
   if (!appState.hostDevice) {
     await startHost({ capture: false });
   }
+  if (appState.hostStartingRoomId !== room.id) throw new Error("Đã hủy khởi động WebRTC host.");
   if (!appState.localStream || !streamMatchesQuality(appState.localStreamQuality, room.quality)) {
     await captureScreen(room.quality);
   }
+  if (appState.hostStartingRoomId !== room.id) throw new Error("Đã hủy khởi động WebRTC host.");
   const pc = createPeerConnection(room, "host");
   appState.hostPeers.set(room.id, pc);
   const inputChannel = pc.createDataChannel("input", {
-    ordered: true,
-    maxRetransmits: 3
+    ordered: true
   });
   inputChannel.onmessage = (event) => handleHostDataMessage(event.data, pc);
+  inputChannel.onclose = () => resetHostRemoteInput(pc, "input-channel-close");
   const realtimeChannel = pc.createDataChannel("realtime", {
     ordered: false,
     maxRetransmits: 0
@@ -1670,15 +1978,25 @@ async function startHostPeer(room) {
   await pc.setLocalDescription(offer);
   await sendSignal(room.id, { type: "offer", description: pc.localDescription });
   monitorHostStats(pc);
+  if (appState.hostStartingRoomId === room.id) appState.hostStartingRoomId = null;
 }
 
 async function startClientPeer(room) {
-  cleanupClientPeer();
+  if (appState.clientRoom && appState.clientRoom.id !== room.id) return;
+  if (appState.clientPeer && appState.clientRoom?.id === room.id && appState.clientPeer.connectionState !== "closed") {
+    return;
+  }
+  if (appState.clientPeer || appState.clientCleanupPromise) {
+    await cleanupClientPeer(appState.clientRoom?.id || "");
+  }
   appState.clientRoom = room;
-  appState.clientPeer = createPeerConnection(room, "client");
-  appState.clientPeer.ontrack = async (event) => {
+  const pc = createPeerConnection(room, "client");
+  appState.clientPeer = pc;
+  pc.ontrack = async (event) => {
+    if (pc !== appState.clientPeer) return;
     hideConnecting();
     if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
+    appState._connectTimeout = null;
     remoteVideo.srcObject = event.streams[0];
     emptyStream.classList.add("is-hidden");
     $(".stream-dock").classList.add("is-visible");
@@ -1693,9 +2011,9 @@ async function startClientPeer(room) {
       else if (vs.webkitRequestFullscreen) await vs.webkitRequestFullscreen();
     } catch (e) { console.warn("Fullscreen error:", e); }
 
-    monitorClientStats(appState.clientPeer);
+    monitorClientStats(pc);
   };
-  appState.clientPeer.ondatachannel = (event) => {
+  pc.ondatachannel = (event) => {
     bindClientDataChannel(event.channel);
   };
 }
@@ -1719,6 +2037,10 @@ function bindClientDataChannel(channel) {
     }
     if (channel === appState.inputChannel) appState.inputChannel = null;
     if (channel === appState.realtimeChannel) appState.realtimeChannel = null;
+    if (channel.label === "input") {
+      sendInputReset("input-channel-close");
+      clearLocalInputState();
+    }
   };
 }
 
@@ -1738,19 +2060,53 @@ function createPeerConnection(room, role) {
     const label = role === "host" ? $("#captureStatus") : streamStatus;
     label.textContent = `${role === "host" ? "Host" : "Client"} ${pc.connectionState}`;
   };
-  pc.oniceconnectionstatechange = () => {
-    if (role === "client" && ["failed", "disconnected"].includes(pc.iceConnectionState)) {
-      hideConnecting();
-      if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
-      streamStatus.textContent = `Kết nối ${pc.iceConnectionState}`;
-      const hint = appState.hasTurn
-        ? "Kiểm tra firewall Windows hoặc thử lại."
-        : "Nếu khác mạng LAN, cần cấu hình TURN server.";
-      showToast(`Không thể kết nối tới máy chủ! ${hint}`, 'error');
-      cleanupClientPeer();
+  pc.oniceconnectionstatechange = async () => {
+    if (["connected", "completed", "closed"].includes(pc.iceConnectionState) && pc._disconnectTimer) {
+      clearTimeout(pc._disconnectTimer);
+      pc._disconnectTimer = null;
+    }
+    if (pc.iceConnectionState === "disconnected") {
+      if (pc._disconnectTimer) return;
+      pc._disconnectTimer = setTimeout(() => {
+        pc._disconnectTimer = null;
+        if (pc.iceConnectionState !== "disconnected") return;
+        if (role === "client" && pc === appState.clientPeer) {
+          failClientPeer(pc, "disconnected").catch(() => {});
+        } else if (role === "host" && appState.hostPeers.get(room.id) === pc) {
+          failHostPeer(pc, room, "disconnected").catch(() => {});
+        }
+      }, 3000);
+      return;
+    }
+    if (pc.iceConnectionState === "failed") {
+      if (role === "client") await failClientPeer(pc, "failed");
+      else await failHostPeer(pc, room, "failed");
     }
   };
   return pc;
+}
+
+async function failClientPeer(pc, state) {
+  if (pc !== appState.clientPeer) return;
+  hideConnecting();
+  if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
+  appState._connectTimeout = null;
+  streamStatus.textContent = `Kết nối ${state}`;
+  const hint = appState.hasTurn
+    ? "Kiểm tra firewall Windows hoặc thử lại."
+    : "Nếu khác mạng LAN, cần cấu hình TURN server.";
+  showToast(`Không thể kết nối tới máy chủ! ${hint}`, "error");
+  await disconnectClient();
+}
+
+async function failHostPeer(pc, room, state) {
+  if (appState.hostPeers.get(room.id) !== pc) return;
+  closeHostPeer(room.id, `ice-${state}`);
+  $("#captureStatus").textContent = `Host connection ${state}`;
+  await api("/api/connect/close", {
+    method: "POST",
+    body: { roomId: room.id, sessionId: appState.sessionId }
+  }).catch(() => {});
 }
 
 async function handleSignal(data) {
@@ -1962,6 +2318,41 @@ function sendPointerMove(event) {
   sendInputEvent(pointerPayload("pointer-move", event));
 }
 
+function handlePointerDown(event) {
+  videoShell.focus();
+  appState.activePointerId = event.pointerId;
+  try {
+    videoShell.setPointerCapture(event.pointerId);
+  } catch {
+    // Pointer capture can fail if the pointer is no longer active.
+  }
+  sendInputEvent(pointerPayload("pointer-down", event));
+  event.preventDefault();
+}
+
+function handlePointerRelease(event) {
+  const ownsPointer = appState.activePointerId === event.pointerId;
+  const hasPressedButton = appState.pressedButtons.has(event.button);
+  if (!ownsPointer && !hasPressedButton) return;
+  sendInputEvent(pointerPayload("pointer-up", event));
+  appState.pressedButtons.delete(event.button);
+  if (event.buttons === 0 || appState.pressedButtons.size === 0) {
+    try {
+      if (videoShell.hasPointerCapture(event.pointerId)) videoShell.releasePointerCapture(event.pointerId);
+    } catch {
+      // The browser may have released capture already.
+    }
+    appState.activePointerId = null;
+  }
+  event.preventDefault();
+}
+
+function handlePointerCancel(event) {
+  if (appState.activePointerId !== event.pointerId) return;
+  releaseAllClientInput("pointer-cancel");
+  appState.activePointerId = null;
+}
+
 function pointerPayload(type, event) {
   const rect = videoContentRect();
   const x = clamp01((event.clientX - rect.left) / rect.width);
@@ -1999,15 +2390,54 @@ function videoContentRect() {
 
 function sendInputEvent(payload) {
   const prefersRealtime = payload.type === "pointer-move" || payload.type === "wheel";
-  sendDataPayload({ ...payload, at: performance.now() }, prefersRealtime);
+  const sent = sendDataPayload({ ...payload, at: performance.now() }, prefersRealtime);
+  if (sent) rememberLocalInput(payload);
 }
 
 function sendDataPayload(payload, prefersRealtime = false) {
   const first = prefersRealtime ? appState.realtimeChannel : appState.inputChannel;
   const second = prefersRealtime ? appState.inputChannel : appState.realtimeChannel;
   const channel = [first, second].find((item) => item && item.readyState === "open");
-  if (!channel) return;
-  channel.send(JSON.stringify(payload));
+  if (!channel) return false;
+  try {
+    channel.send(JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function rememberLocalInput(payload) {
+  if (payload.type === "key-down") {
+    appState.pressedKeys.set(payload.code || payload.key, payload);
+  } else if (payload.type === "key-up") {
+    appState.pressedKeys.delete(payload.code || payload.key);
+  } else if (payload.type === "pointer-down") {
+    appState.pressedButtons.set(payload.button, payload);
+  } else if (payload.type === "pointer-up") {
+    appState.pressedButtons.delete(payload.button);
+  }
+}
+
+function sendInputReset(reason) {
+  return sendDataPayload({ type: "input-reset", reason, at: performance.now() }, false);
+}
+
+function releaseAllClientInput(reason = "client-reset") {
+  for (const payload of appState.pressedKeys.values()) {
+    sendDataPayload({ ...payload, type: "key-up", at: performance.now() }, false);
+  }
+  for (const payload of appState.pressedButtons.values()) {
+    sendDataPayload({ ...payload, type: "pointer-up", buttons: 0, at: performance.now() }, false);
+  }
+  sendInputReset(reason);
+  clearLocalInputState();
+}
+
+function clearLocalInputState() {
+  appState.pressedKeys.clear();
+  appState.pressedButtons.clear();
+  appState.activePointerId = null;
 }
 
 function sendTransportFeedback(stats) {
@@ -2021,10 +2451,55 @@ function handleHostDataMessage(raw, pc) {
       updateHostTransportFromFeedback(pc, payload.stats || {});
       return;
     }
+    if (payload.type === "input-reset") {
+      resetHostRemoteInput(pc, payload.reason || "client-reset");
+      return;
+    }
+    rememberHostRemoteInput(pc, payload);
     handleRemoteInputPayload(payload);
   } catch {
     $("#captureStatus").textContent = "Input event";
   }
+}
+
+function rememberHostRemoteInput(pc, payload) {
+  pc._remoteInput = pc._remoteInput || { keys: new Map(), buttons: new Map(), resetting: false };
+  const state = pc._remoteInput;
+  if (payload.type === "key-down") {
+    state.keys.set(payload.code || payload.key, payload);
+  } else if (payload.type === "key-up") {
+    state.keys.delete(payload.code || payload.key);
+  } else if (payload.type === "pointer-down") {
+    state.buttons.set(payload.button, payload);
+  } else if (payload.type === "pointer-up") {
+    state.buttons.delete(payload.button);
+  }
+}
+
+function resetHostRemoteInput(pc, reason = "host-reset") {
+  pc._remoteInput = pc._remoteInput || { keys: new Map(), buttons: new Map(), resetting: false };
+  const state = pc._remoteInput;
+  if (state.resetting) return;
+  state.resetting = true;
+  for (const payload of state.keys.values()) {
+    handleRemoteInputPayload({ ...payload, type: "key-up" });
+  }
+  for (const payload of state.buttons.values()) {
+    handleRemoteInputPayload({ ...payload, type: "pointer-up", buttons: 0 });
+  }
+  state.keys.clear();
+  state.buttons.clear();
+  handleRemoteInputPayload({ type: "input-reset", reason });
+  state.resetting = false;
+}
+
+function closeHostPeer(roomId, reason = "peer-closed") {
+  const pc = appState.hostPeers.get(roomId);
+  if (!pc) return;
+  appState.hostPeers.delete(roomId);
+  if (pc._disconnectTimer) clearTimeout(pc._disconnectTimer);
+  resetHostRemoteInput(pc, reason);
+  if (pc.connectionState !== "closed") pc.close();
 }
 
 function handleRemoteInputPayload(payload) {
@@ -2038,7 +2513,13 @@ function monitorClientStats(pc) {
   pc._stats = pc._stats || {};
   const tick = async () => {
     if (pc !== appState.clientPeer || pc.connectionState === "closed") return;
-    const stats = await pc.getStats();
+    let stats;
+    try {
+      stats = await pc.getStats();
+    } catch {
+      if (pc === appState.clientPeer && pc.connectionState !== "closed") setTimeout(tick, 1000);
+      return;
+    }
     let fps = "--";
     let bitrate = "--";
     let rtt = "--";
@@ -2085,18 +2566,31 @@ function monitorHostStats(pc) {
   pc._stats = pc._stats || {};
   const tick = async () => {
     if (pc.connectionState === "closed") return;
-    const stats = await pc.getStats();
+    let stats;
+    try {
+      stats = await pc.getStats();
+    } catch {
+      if (pc.connectionState !== "closed") setTimeout(tick, 1000);
+      return;
+    }
     let fps = "--";
     let bitrate = "--";
     stats.forEach((report) => {
       if (report.type === "outbound-rtp" && report.kind === "video") {
-        fps = Math.round(report.framesPerSecond || report.framesEncoded || 0);
+        if (Number.isFinite(report.framesPerSecond)) {
+          fps = Math.round(report.framesPerSecond);
+        } else if (pc._stats.hostFrames !== undefined && pc._stats.hostAt !== undefined) {
+          const frameDelta = Number(report.framesEncoded || 0) - pc._stats.hostFrames;
+          const frameSeconds = (report.timestamp - pc._stats.hostAt) / 1000;
+          fps = frameSeconds > 0 ? Math.max(0, Math.round(frameDelta / frameSeconds)) : "--";
+        }
         if (pc._stats.hostBytes && pc._stats.hostAt) {
           const bytes = Number(report.bytesSent || 0) - pc._stats.hostBytes;
           const seconds = (report.timestamp - pc._stats.hostAt) / 1000;
           bitrate = seconds > 0 ? ((bytes * 8) / seconds / 1000000).toFixed(1) : "--";
         }
         pc._stats.hostBytes = Number(report.bytesSent || 0);
+        pc._stats.hostFrames = Number(report.framesEncoded || 0);
         pc._stats.hostAt = report.timestamp;
       }
     });
@@ -2111,29 +2605,56 @@ function monitorHostStats(pc) {
 }
 
 async function disconnectClient() {
-  if (appState.clientRoom) {
-    await api("/api/connect/close", { method: "POST", body: { roomId: appState.clientRoom.id } }).catch(() => {});
+  const room = appState.clientRoom;
+  if (room) {
+    await api("/api/connect/close", {
+      method: "POST",
+      body: { roomId: room.id, sessionId: appState.sessionId }
+    }).catch(() => {});
   }
-  cleanupClientPeer();
+  await cleanupClientPeer(room?.id || "");
 }
 
-async function cleanupClientPeer() {
+async function cleanupClientPeer(expectedRoomId = "") {
+  if (appState.clientCleanupPromise) return appState.clientCleanupPromise;
+  if (expectedRoomId && appState.clientRoom && appState.clientRoom.id !== expectedRoomId) return false;
+
+  const cleanup = performClientCleanup(expectedRoomId);
+  appState.clientCleanupPromise = cleanup;
+  try {
+    await cleanup;
+    return true;
+  } finally {
+    if (appState.clientCleanupPromise === cleanup) appState.clientCleanupPromise = null;
+  }
+}
+
+async function performClientCleanup(expectedRoomId) {
+  const room = appState.clientRoom;
+  if (expectedRoomId && room && room.id !== expectedRoomId) return;
+
+  const peer = appState.clientPeer;
+  const shouldStopNative = appState.nativeClientDesired || (room && isNativeRoom(room));
+  releaseAllClientInput("client-cleanup");
   hideConnecting();
   if (appState._connectTimeout) clearTimeout(appState._connectTimeout);
+  appState._connectTimeout = null;
   appState.nativeClientDesired = false;
   appState.nativeClientOptions = null;
   clearNativeRestart("client", true);
-  if (appState.clientRoom && isNativeRoom(appState.clientRoom) && window.sanserNative?.stopClient) {
-    await window.sanserNative.stopClient().catch(() => {});
-  }
   appState.nativeClientConnected = false;
   appState.nativeInput = "Client idle";
-  await refreshNativeStatus();
-  if (appState.clientPeer) appState.clientPeer.close();
   appState.clientPeer = null;
   appState.clientRoom = null;
   appState.inputChannel = null;
   appState.realtimeChannel = null;
+  if (peer?._disconnectTimer) clearTimeout(peer._disconnectTimer);
+  if (peer && peer.connectionState !== "closed") peer.close();
+
+  if (shouldStopNative && window.sanserNative?.stopClient) {
+    await window.sanserNative.stopClient().catch(() => {});
+  }
+  await refreshNativeStatus();
   remoteVideo.srcObject = null;
   emptyStream.classList.remove("is-hidden");
   $("#clientRoleBadge").classList.add("is-hidden");
@@ -2163,8 +2684,10 @@ function readQuality() {
 }
 
 function qualityForProfile(profileName, source = profileName) {
-  const profile = NATIVE_QUALITY_PROFILES[profileName];
+  const resolvedProfile = normalizeNativeQualityProfile(profileName);
+  const profile = NATIVE_QUALITY_PROFILES[resolvedProfile];
   if (!profile) return null;
+  const nativeCodec = selectedNativeVideoCodec();
   return {
     preset: profile.preset,
     width: profile.width,
@@ -2172,14 +2695,15 @@ function qualityForProfile(profileName, source = profileName) {
     fps: profile.fps,
     bitrateMbps: profile.bitrateMbps,
     preferCodec: $("#codecPreference").value,
-    nativeCodec: selectedNativeVideoCodec(),
-    networkProfile: source,
-    resolvedNetworkProfile: profileName,
+    nativeCodec,
+    resolvedNativeCodec: resolveNativeVideoCodecPreference(nativeCodec, resolvedProfile),
+    networkProfile: normalizeNativeQualityProfile(source),
+    resolvedNetworkProfile: resolvedProfile,
     label: profile.label
   };
 }
 
-function readManualClientQuality() {
+function readManualClientQuality(context = {}) {
   const preset = $("#clientResolution").value;
   const presets = {
     "720p": [1280, 720],
@@ -2188,6 +2712,8 @@ function readManualClientQuality() {
     "low-latency": [1600, 900]
   };
   const [width, height] = presets[preset] || presets["1080p"];
+  const nativeCodec = selectedNativeVideoCodec();
+  const resolvedNetworkProfile = inferNativeQualityProfile(context.device, context.addresses, context.clientIp);
   return {
     preset,
     width,
@@ -2195,20 +2721,47 @@ function readManualClientQuality() {
     fps: Number($("#clientFps").value || 60),
     bitrateMbps: Number($("#clientBitrate").value || 28),
     preferCodec: $("#codecPreference").value,
-    nativeCodec: selectedNativeVideoCodec(),
+    nativeCodec,
+    resolvedNativeCodec: resolveNativeVideoCodecPreference(nativeCodec, resolvedNetworkProfile),
     networkProfile: "manual",
-    resolvedNetworkProfile: "manual",
+    resolvedNetworkProfile,
     label: `${preset} ${Number($("#clientFps").value || 60)}fps ${Number($("#clientBitrate").value || 28)}Mbps`
   };
 }
 
 function selectedNativeQualityProfile() {
-  return $("#nativeQualityProfile")?.value || "auto";
+  return normalizeNativeQualityProfile($("#nativeQualityProfile")?.value || "auto");
 }
 
 function selectedNativeVideoCodec() {
-  const value = String($("#nativeVideoCodec")?.value || "h264").toLowerCase();
-  return value === "hevc" || value === "h265" ? "hevc" : "h264";
+  return normalizeNativeCodecPreference($("#nativeVideoCodec")?.value || "auto");
+}
+
+function normalizeNativeQualityProfile(value) {
+  const profile = String(value || "manual").trim().toLowerCase();
+  if (profile === "tailscale" || profile === "relay") return "internet";
+  return ["auto", "lan", "wifi", "internet", "manual"].includes(profile) ? profile : "manual";
+}
+
+function normalizeNativeCodecPreference(value) {
+  const codec = String(value || "h264").trim().toLowerCase();
+  if (codec === "auto") return "auto";
+  if (codec === "hevc" || codec === "h265" || codec === "h.265") return "hevc";
+  return "h264";
+}
+
+function normalizeOptionalResolvedNativeCodec(value) {
+  const codec = String(value || "").trim().toLowerCase();
+  if (codec === "hevc" || codec === "h265" || codec === "h.265") return "hevc";
+  if (codec === "h264" || codec === "h.264") return "h264";
+  return "";
+}
+
+function resolveNativeVideoCodecPreference(preference, profileName) {
+  const codec = normalizeNativeCodecPreference(preference);
+  if (codec !== "auto") return codec;
+  const profile = normalizeNativeQualityProfile(profileName);
+  return profile === "wifi" || profile === "internet" ? "hevc" : "h264";
 }
 
 function isPrivateIpv4(address) {
@@ -2224,20 +2777,21 @@ function inferNativeQualityProfile(device, addresses = [], clientIp = "") {
   const hostIp = String(device?.ip || "");
   const selectedEntry = (addresses || []).find((entry) => entry?.address === selectedIp) || null;
 
-  if (/^100\./.test(selectedIp) || /^100\./.test(hostIp)) return "tailscale";
+  if (appState.networkMode === "relay" || appState.networkMode === "tailscale") return "internet";
+  if (/^100\./.test(selectedIp) || /^100\./.test(hostIp)) return "internet";
   if (selectedEntry && isWifiInterfaceName(selectedEntry.name)) return "wifi";
   if (selectedEntry && isPrivateIpv4(selectedEntry.address) && !isWifiInterfaceName(selectedEntry.name)) return "lan";
   if (isPrivateIpv4(selectedIp) || isPrivateIpv4(hostIp)) return "wifi";
-  return "tailscale";
+  return "internet";
 }
 
 function readClientQuality(context = {}) {
   const requestedProfile = selectedNativeQualityProfile();
-  if (requestedProfile === "manual") return readManualClientQuality();
+  if (requestedProfile === "manual") return readManualClientQuality(context);
   const resolvedProfile = requestedProfile === "auto"
     ? inferNativeQualityProfile(context.device, context.addresses, context.clientIp)
     : requestedProfile;
-  return qualityForProfile(resolvedProfile, requestedProfile) || readManualClientQuality();
+  return qualityForProfile(resolvedProfile, requestedProfile) || readManualClientQuality(context);
 }
 
 function syncNativeQualityProfileFields(save = true) {
@@ -2285,6 +2839,17 @@ function applyLiveSetting(id) {
       updateNativeDiagnostics();
     }
   }
+  if (id === "nativeVideoCodec") {
+    const codec = selectedNativeVideoCodec();
+    appState.nativeHealth.video = codec === "auto"
+      ? "Auto codec: LAN H.264, Wi-Fi/Internet HEVC"
+      : codec.toUpperCase();
+    appState.nativeHealth.summary = codec === "auto"
+      ? "Auto sẽ ưu tiên H.264 trên LAN và HEVC trên Wi-Fi/Internet; host có thể fallback H.264."
+      : `Native codec đã đặt thành ${codec.toUpperCase()}.`;
+    appState.nativeHealth.issueAt = Date.now();
+    updateNativeDiagnostics();
+  }
   if (id === "hostEnabled") {
     if ($("#hostEnabled").value === "on" && appState.user) {
       startHost({ capture: false }).catch(() => {});
@@ -2292,7 +2857,19 @@ function applyLiveSetting(id) {
       stopHost();
     }
   }
+  if (id === "autoAccept" && appState.hostDevice) {
+    startHost({ capture: false }).catch((error) => {
+      showToast(error.message || "Không thể cập nhật chế độ chấp nhận.", "error");
+    });
+  }
   if (id === "transportMode") {
+    if (enforceRelayTransportMode()) {
+      showNetworkNotice(
+        "relay-webrtc",
+        "Relay dùng WebRTC Adaptive vì Native SNV không đi qua TURN.",
+        "warning"
+      );
+    }
     const mode = readTransportMode();
     for (const pc of appState.hostPeers.values()) {
       if (!pc._transport) continue;
@@ -2307,13 +2884,25 @@ function applyLiveSetting(id) {
   }
 }
 
-function applyServerUrl() {
+async function applyServerUrl() {
   const nextBase = normalizeServerUrl($("#serverUrlInput").value);
-  setServerUrl(nextBase);
-  updateServerUrlLabel();
+  await disconnectClient().catch(() => {});
+  await stopHost().catch(() => {});
+  try {
+    await api("/api/logout", { method: "POST" });
+  } catch {
+    // The old server may already be unavailable.
+  }
+  if (appState.events) appState.events.close();
+  appState.events = null;
+  appState.pendingRequests.clear();
+  renderRequests();
   localStorage.removeItem("gr_token");
   appState.token = "";
-  if (appState.events) appState.events.close();
+  appState.user = null;
+  setServerUrl(nextBase);
+  $("#authServerUrlInput").value = nextBase;
+  updateServerUrlLabel();
   setServerState(false);
   showAuth();
 }

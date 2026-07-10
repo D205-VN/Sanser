@@ -33,6 +33,11 @@ private:
   std::unique_ptr<Impl> impl_;
   std::uint32_t width_ = 0;
   std::uint32_t height_ = 0;
+  std::uint32_t surfaceWidth_ = 0;
+  std::uint32_t surfaceHeight_ = 0;
+  std::uint32_t adapterIndex_ = 0;
+  std::uint32_t outputIndex_ = 0;
+  unsigned int rotation_ = 0;
   long left_ = 0;
   long top_ = 0;
 };

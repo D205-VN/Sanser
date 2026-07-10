@@ -1,23 +1,26 @@
 # Sanser Native macOS Client
 
-This is the first Phase 5 prototype for the long-term Sunshine/Parsec-style client path.
+This is the native macOS client for the low-latency SNV transport.
 
 Current scope:
 
 - VideoToolbox hardware decode capability probe
-- SNV1 H.264 packet file parser
+- SNV1 H.264/HEVC packet file parser
 - VideoToolbox decode test from Windows native host `.snv` captures
-- TCP SNV1 receiver with VideoToolbox decode and Metal render
+- TCP and fragmented UDP SNV1 receivers with VideoToolbox decode and Metal render
+- UDP reassembly, jitter buffering, NACK/retransmit feedback, and keyframe recovery
+- Negotiated float32/PCM16 audio playback with jitter buffering and A/V drift correction
+- Authenticated control/media channel, keyboard, mouse, gamepad, and rumble backchannel
+- Electron launcher integration with automatic LAN/direct-route discovery and legacy Tailscale compatibility
 - Metal render test window
 - Native mouse, keyboard, scroll event logging from the Metal view
 - Native clipboard read/write probe
 
-Not included yet:
+Known limitations:
 
-- Realtime H.264/H.265/AV1 network packet decode
-- Jitter buffer
-- Audio decode/playback
-- Integration with the Electron client stream view
+- Realtime AV1 decode is not wired into SNV streaming.
+- The native renderer is a separate Metal window rather than an embedded Electron view.
+- Display aspect-ratio/color-metadata handling and graceful cancellation of every listener thread still need broader platform testing.
 
 ## Build
 
@@ -60,13 +63,13 @@ Start the macOS native client as a TCP receiver:
 npm run native:client-mac:listen-snv -- 7777 --max-packets 180
 ```
 
-Then start the Windows native host with the Mac Tailscale IP:
+Then start the Windows native host with any directly reachable Mac IP:
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect <MAC_IP>:7777
 ```
 
-The Mac command decodes packets as they arrive and prints the same decode summary. This is Phase 6C's first network transport: TCP over Tailscale, before RTP/UDP/QUIC.
+The Mac command decodes packets as they arrive and prints the same decode summary. The address can be LAN, a routed public/VPN address, or the optional legacy Tailscale route; TCP native streaming itself does not require Tailscale.
 
 ## TCP SNV1 Metal Render
 
@@ -79,7 +82,7 @@ npm run native:client-mac:listen-render-snv -- 7777 --max-packets 180
 Then start the Windows native host:
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect <MAC_IP>:7777
 ```
 
 Decoded `CVPixelBuffer` frames are submitted to a Metal renderer and displayed as NV12 textures.

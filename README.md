@@ -14,8 +14,16 @@ A single-app Parsec-like prototype for low-latency remote game streaming.
 - Reliable input channel plus realtime mouse/transport feedback channel
 - Live FPS, bitrate, jitter, packet loss, and RTT stats
 - WebRTC adaptive bitrate prototype
+- Native Windows capture with H.264, HEVC, or Auto codec selection and macOS VideoToolbox/Metal render
+- Native UDP video, audio, input, gamepad, retransmit, and adaptive feedback path
 
 ## Run
+
+Create a local environment file first and set a PostgreSQL connection string:
+
+```bash
+cp .env.example .env
+```
 
 ```bash
 npm run dev
@@ -62,9 +70,9 @@ The macOS output is written to `dist/GameRemote-macOS-0.1.0-arm64.zip`.
 
 ## Same-account computers
 
-For automatic computer discovery across macOS and Windows, both apps must use the same server URL in `Settings > Network`. The embedded local server works for single-machine testing; use a shared LAN or cloud relay server when connecting two different computers.
+For automatic computer discovery across macOS and Windows, both apps must use the same server URL in `Settings > Network`. The embedded local server works for single-machine testing; use a shared LAN or cloud signaling server when connecting two different computers, plus TURN only when WebRTC relay mode is required.
 
-The desktop app starts an embedded relay on port `5174` when the port is free. On a LAN, open the Windows app, then set the Mac app's server URL to:
+The desktop app starts an embedded signaling/API server on port `5174` when the port is free. On a LAN, open the Windows app, then set the Mac app's server URL to:
 
 ```text
 http://WINDOWS_LAN_IP:5174
@@ -72,34 +80,43 @@ http://WINDOWS_LAN_IP:5174
 
 After both apps login with the same account on that server, the Windows computer appears automatically in `Computers`.
 
-## Tailscale mode
+## Network modes without Tailscale
 
-For free cross-network testing without router port forwarding, install Tailscale on both computers and sign in to the same tailnet:
-
-```bash
-npm run tailscale:install
-```
-
-The desktop app also checks this automatically at startup when `NETWORK_MODE=tailscale`; if Tailscale is missing, it offers to install it using Homebrew on macOS or winget on Windows. After install, Sanser starts Tailscale and opens the login flow if the machine is not signed in yet.
-
-Then set this in `.env` on both computers:
+`NETWORK_MODE=direct` uses direct WebRTC candidates and STUN. It is the simplest mode for LAN use and for networks where NAT/firewall allows a peer-to-peer route:
 
 ```text
-NETWORK_MODE=tailscale
-ICE_TRANSPORT_POLICY=all
+NETWORK_MODE=direct
+STUN_URLS=stun:stun.l.google.com:19302
 ```
 
-Restart Sanser on both machines. Tailscale must stay connected while streaming. If Windows uses a packaged `.exe`, rebuild and copy the latest app after code changes.
+Direct mode forces WebRTC `iceTransportPolicy=all` and does not add configured TURN servers. Native SNV also works on a LAN or over an explicitly routable address, but its UDP video/audio and TCP control ports do not traverse STUN or TURN; cross-NAT native use requires routing or port forwarding.
+
+`NETWORK_MODE=relay` routes WebRTC media through a TURN server and does not require Tailscale. Configure at least one TURN URL and credentials on the shared app server:
+
+```text
+NETWORK_MODE=relay
+TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp
+TURN_USERNAME=replace-me
+TURN_CREDENTIAL=replace-me
+```
+
+Relay mode forces `iceTransportPolicy=relay`. The desktop UI automatically switches Native SNV to WebRTC Adaptive in this mode because the native UDP protocol does not use TURN. Prefer both UDP and TLS/TCP TURN listeners so restrictive networks still have a route. Do not put long-lived production TURN secrets in a committed `.env` file.
+
+`NETWORK_MODE=default` remains available for backward compatibility and honors an explicit `ICE_TRANSPORT_POLICY`; otherwise it defaults to `all`, trying direct candidates first and keeping TURN as fallback. `NETWORK_MODE=tailscale` is also retained as an optional legacy mode. Only that legacy mode starts or offers to install Tailscale, and `TAILSCALE_USE_STUN=0` keeps its WebRTC ICE list empty.
 
 ## Smoothness notes
 
-This version uses Electron/WebRTC screen capture. Default quality is tuned for a sharper low-latency Tailscale session at `1080p`, `60 FPS`, and about `28 Mbps` with VP8. The WebRTC Adaptive transport mode uses client feedback to reduce bitrate when RTT, jitter, packet loss, or FPS pressure rises, then slowly recovers toward the requested bitrate. If it still stutters, lower bitrate to `16-20 Mbps` or FPS to `30`; if text is still blurry and the network is stable, raise bitrate to `35-45 Mbps`.
+Native SNV is the desktop default outside relay mode. Auto quality selects `1080p60 / 28 Mbps` on wired LAN, `900p45 / 12 Mbps` on Wi-Fi, or `720p30 / 6 Mbps` on Internet/Relay routes. These are real encoder bounds: larger and ultrawide desktops are aspect-fitted and converted directly to the target NV12 size instead of encoding every source pixel at a low bitrate. The old stored `tailscale` profile is migrated to `internet` by the UI and remains accepted by the server for compatibility.
 
-Parsec is smoother because it uses native low-level capture, dedicated GPU encoder control, a custom low-latency transport, adaptive congestion control, and a native input driver. Sanser is a WebRTC/Electron prototype, so true Parsec-grade game feel still needs native capture, GPU encode control, deeper input injection, and more mature network adaptation.
+Native codec `Auto` preserves the requested `auto` metadata while resolving the codec for execution: LAN prefers H.264, while Wi-Fi and Internet profiles prefer HEVC. If the Windows encoder cannot start HEVC, the native host falls back to H.264. Choose explicit H.264 for maximum compatibility or explicit HEVC when you have already validated both machines.
 
-## Native Engine Roadmap
+Leave Native Client IP blank so direct/LAN discovery can select the appropriate interface. Use Manual only when you need to override the automatic resolution, FPS, or bitrate.
 
-The first native Windows host prototype lives in `native/host-win`. It uses Windows Desktop Duplication API to capture frames without `getDisplayMedia`.
+Native audio negotiates PCM16 with the current Mac client, cutting audio payload by about half compared with the legacy float32 wire format while retaining float32 compatibility for older clients. WebRTC Adaptive remains the cross-platform fallback and reduces bitrate under RTT, jitter, packet-loss, or FPS pressure. Hardware/driver behavior varies, so validate H.264 and HEVC on the actual Windows machine; use H.264 first when compatibility matters.
+
+## Native Engine
+
+The native Windows host lives in `native/host-win`. It uses Windows Desktop Duplication API to capture frames without `getDisplayMedia`, recovers after display access loss, and handles rotated outputs.
 
 On Windows with Visual Studio Build Tools and CMake:
 
@@ -109,28 +126,28 @@ npm run native:host-win:build
 .\native\host-win\build\Release\sanser-native-host.exe --frames 5 --interval-ms 100 --output-dir native-captures
 ```
 
-The prototype writes BMP frames for validation, supports `--pipe --fps 60` to stream BGRA frames to stdout, has a Media Foundation H.264 file-encode prototype, and can now write realtime-style H.264 `SNV1` packets:
+The host writes BMP frames for validation, supports `--pipe --fps 60` to stream BGRA frames to stdout, and writes realtime-style H.264/HEVC `SNV1` packets:
 
 ```powershell
 .\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --packet-file native-captures\capture_h264.snv
 npm run native:host-win:inspect-snv -- native-captures\capture_h264.snv
 ```
 
-The native host can also stream SNV1 over TCP to the Mac native client:
+The native host can stream SNV1 over TCP for manual diagnostics; the desktop flow uses UDP video plus dedicated control and audio ports:
 
 ```bash
 npm run native:client-mac:listen-snv -- 7777 --max-packets 180
 ```
 
 ```powershell
-.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect 100.100.83.44:7777
+.\native\host-win\build\Release\sanser-native-host.exe --encode-pipe h264 --frames 180 --fps 60 --interval-ms 0 --bitrate 28000000 --tcp-connect <MAC_IP>:7777
 ```
 
-WebRTC remains available as a fallback transport, but the app can now launch the native TCP SNV1 path for Mac client + Windows host sessions.
+WebRTC remains available as a fallback transport.
 
-## Native macOS Client Prototype
+## Native macOS Client
 
-The native macOS client prototype lives in `native/client-mac`. It probes VideoToolbox hardware decode support, can decode-test Windows `SNV1` H.264 packet files, opens a Metal render test window, logs native input events, and validates native clipboard read/write.
+The native macOS client lives in `native/client-mac`. It supports VideoToolbox H.264/HEVC decode, Metal render, UDP reassembly/jitter/NACK recovery, negotiated float32/PCM16 audio playback, and the native input/gamepad backchannel.
 
 On macOS:
 
@@ -144,7 +161,19 @@ npm run native:client-mac:listen-render-snv -- 7777 --max-packets 180
 ./native/client-mac/build/sanser-native-client --metal-test --seconds 5
 ```
 
-The desktop app can now launch this native path when Settings -> Network -> Transport is set to `Native SNV`. The Mac client opens the Metal render listener fullscreen, sends its listener endpoint through the app server, and the Windows host spawns `sanser-native-host --tcp-connect` automatically. Electron remains the account/device/control shell; native code owns capture, H.264 encode, Metal render, and the SNINPUT backchannel. When Windows applies input, the Host view reports `SNINPUT_APPLIED ...` status lines.
+The desktop app launches this path when Settings -> Network -> Transport is set to `Native SNV`. The Mac client opens its Metal renderer and listeners, sends the selected endpoint through the app server, and the Windows host starts the native capture/encode process. Electron remains the account/device/control shell; native code owns capture, encode, render, audio, and the SNINPUT backchannel.
+
+## Checks
+
+```bash
+npm run check
+npm test
+npm run native:client-mac:build
+```
+
+The PostgreSQL integration test is skipped unless `TEST_DATABASE_URL` is set. Use a disposable test database for CI.
+
+### Manual native diagnostics
 
 For manual testing, keep using:
 
