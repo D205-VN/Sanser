@@ -35,10 +35,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run release:validate
-      - name: Build native Windows host binary
-        run: |
-          cmake -S native/host-windows -B build/host-windows -A x64
-          cmake --build build/host-windows --config Release --parallel
       - run: npm run desktop:stage-sidecar
         env:
           SANSER_TARGET_TRIPLE: x86_64-pc-windows-msvc
