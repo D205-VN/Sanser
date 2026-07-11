@@ -30,27 +30,25 @@ serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = [
-  "any",
   "migrate",
   "postgres",
   "runtime-tokio-rustls",
-  "sqlite",
   "macros"
 ] }
 thiserror = "2"
 sanser-core = { path = "../../crates/sanser-core" }
 sanser-auth = { path = "../../crates/sanser-auth" }
-tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+url = "2"
 zeroize = "1"
 
 [dev-dependencies]
 http-body-util = "0.1"
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
 [lints.rust]

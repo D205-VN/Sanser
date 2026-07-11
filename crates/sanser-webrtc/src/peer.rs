@@ -16,6 +16,12 @@ pub struct SessionDescription {
 }
 
 impl SessionDescription {
+    /// Validates an SDP offer or answer before passing it to a native backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerError::InvalidDescription`] when the SDP is empty, exceeds
+    /// 256 KiB, contains a NUL byte, or does not begin with the SDP `v=0` line.
     pub fn validate(self) -> Result<Self, PeerError> {
         if self.sdp.is_empty()
             || self.sdp.len() > MAX_SDP_BYTES
@@ -31,8 +37,31 @@ impl SessionDescription {
 /// Minimal boundary implemented by the platform libdatachannel adapter.
 /// Implementations must invoke callbacks on their own bounded executor.
 pub trait PeerBackend: Send {
+    /// Applies a previously validated remote offer or answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerError::InvalidDescription`] if the adapter rejects invalid
+    /// SDP, [`PeerError::Closed`] after peer shutdown, or [`PeerError::Backend`]
+    /// when the native WebRTC implementation rejects the operation.
     fn set_remote_description(&mut self, description: SessionDescription) -> Result<(), PeerError>;
+
+    /// Adds a validated trickle ICE candidate to the remote peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerError::Closed`] after peer shutdown or
+    /// [`PeerError::Backend`] when the native WebRTC implementation cannot add
+    /// the candidate.
     fn add_remote_candidate(&mut self, candidate: IceCandidate) -> Result<(), PeerError>;
+
+    /// Creates a data channel using the supplied reliability policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerError::InvalidChannelLabel`] for a label the adapter cannot
+    /// accept, [`PeerError::Closed`] after peer shutdown, or
+    /// [`PeerError::Backend`] when native channel creation fails.
     fn create_data_channel(
         &mut self,
         label: &str,

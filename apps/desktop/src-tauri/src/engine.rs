@@ -16,7 +16,6 @@ use crate::{
 
 const HOST_SIDECAR: &str = "sanser-host-windows";
 const CLIENT_SIDECAR: &str = "sanser-client-macos";
-const SERVER_SIDECAR: &str = "sanser-server";
 const INHERITED_ENVIRONMENT: [&str; 7] = [
     "SystemRoot",
     "WINDIR",
@@ -53,7 +52,9 @@ fn sidecar_name(kind: EngineKind) -> &'static str {
     match kind {
         EngineKind::Host => HOST_SIDECAR,
         EngineKind::Client => CLIENT_SIDECAR,
-        EngineKind::LocalServer => SERVER_SIDECAR,
+        // Kept for backward-compatible command serialization only. Local
+        // server/database mode is deliberately not bundled in Sanser 2.
+        EngineKind::LocalServer => "sanser-server-disabled",
     }
 }
 
@@ -61,7 +62,7 @@ fn supported_on_platform(kind: EngineKind) -> bool {
     match kind {
         EngineKind::Host => cfg!(target_os = "windows"),
         EngineKind::Client => cfg!(target_os = "macos"),
-        EngineKind::LocalServer => true,
+        EngineKind::LocalServer => false,
     }
 }
 
@@ -71,6 +72,18 @@ fn executable_filename(base: &str) -> String {
     } else {
         base.to_owned()
     }
+}
+
+#[cfg(debug_assertions)]
+fn staged_sidecar_filename(base: &str) -> Option<String> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return Some(format!("{base}-aarch64-apple-darwin"));
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return Some(format!("{base}-x86_64-apple-darwin"));
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return Some(format!("{base}-x86_64-pc-windows-msvc.exe"));
+    #[allow(unreachable_code)]
+    None
 }
 
 fn candidate_paths(app: &AppHandle, kind: EngineKind) -> Vec<PathBuf> {
@@ -85,6 +98,16 @@ fn candidate_paths(app: &AppHandle, kind: EngineKind) -> Vec<PathBuf> {
     {
         candidates.push(directory.join(&filename));
         candidates.push(directory.join("binaries").join(&filename));
+    }
+    #[cfg(debug_assertions)]
+    if let Some(staged) = staged_sidecar_filename(sidecar_name(kind)) {
+        // Tauri strips the target triple when bundling. During `tauri dev`,
+        // however, the CLI leaves the staged binary beside this manifest.
+        candidates.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join(staged),
+        );
     }
     candidates
 }
@@ -168,24 +191,32 @@ fn native_codec(codec: VideoCodec) -> &'static str {
 fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError> {
     validate_common(request)?;
     if request.kind == EngineKind::LocalServer {
-        return Ok(Vec::new());
+        return Err(DesktopError::Unavailable(
+            "local server mode is disabled; use the deployed PostgreSQL/Neon API".into(),
+        ));
     }
 
     let _session = validated_session(request)?;
     let _token = validated_session_token(request)?;
     let port = request
         .port
-        .filter(|value| *value <= 65_533)
-        .ok_or_else(|| DesktopError::InvalidRequest("base port must be between 1 and 65533".into()))?;
+        .filter(|value| (1..=65_533).contains(value))
+        .ok_or_else(|| {
+            DesktopError::InvalidRequest("base port must be between 1 and 65533".into())
+        })?;
 
     match request.kind {
         EngineKind::Host => {
             let address = request
                 .address
                 .as_deref()
-                .ok_or_else(|| DesktopError::InvalidRequest("host target address is required".into()))?
+                .ok_or_else(|| {
+                    DesktopError::InvalidRequest("host target address is required".into())
+                })?
                 .parse::<IpAddr>()
-                .map_err(|_| DesktopError::InvalidRequest("host target address must be an IP".into()))?;
+                .map_err(|_| {
+                    DesktopError::InvalidRequest("host target address must be an IP".into())
+                })?;
             let mut args = vec![
                 "--encode-pipe".into(),
                 native_codec(request.codec).into(),
@@ -233,7 +264,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             }
             Ok(args)
         }
-        EngineKind::LocalServer => Ok(Vec::new()),
+        EngineKind::LocalServer => unreachable!("local server requests are rejected above"),
     }
 }
 
@@ -245,15 +276,14 @@ fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    if request.kind == EngineKind::LocalServer {
-        command.env("SERVER_HOST", "127.0.0.1");
-        if let Some(port) = request.port {
-            command.env("SERVER_PORT", port.to_string());
-        }
-    } else {
+    if request.kind != EngineKind::LocalServer {
         let inherited: Vec<(String, String)> = INHERITED_ENVIRONMENT
             .iter()
-            .filter_map(|key| std::env::var(key).ok().map(|value| ((*key).to_owned(), value)))
+            .filter_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .map(|value| ((*key).to_owned(), value))
+            })
             .collect();
         command.env_clear();
         command.envs(inherited);
@@ -270,6 +300,11 @@ impl EngineManager {
         app: &AppHandle,
         request: &LaunchEngineRequest,
     ) -> Result<(), DesktopError> {
+        if request.kind == EngineKind::LocalServer {
+            return Err(DesktopError::Unavailable(
+                "local server mode is disabled; use the deployed PostgreSQL/Neon API".into(),
+            ));
+        }
         let path = find_sidecar(app, request.kind).ok_or_else(|| {
             DesktopError::Unavailable(format!("{} is not bundled", sidecar_name(request.kind)))
         })?;
@@ -354,5 +389,73 @@ impl EngineManager {
             process_id,
             last_error: state.last_errors.get(&kind).cloned(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv6Addr;
+
+    use super::*;
+
+    fn request(kind: EngineKind) -> LaunchEngineRequest {
+        LaunchEngineRequest {
+            kind,
+            session_id: Some("018f4d89-5e8b-7a80-bd1e-cb7cb9f43189".into()),
+            address: Some("2001:db8::1".into()),
+            port: Some(50_000),
+            codec: VideoCodec::Auto,
+            fps: 60,
+            bitrate_kbps: 25_000,
+            width: 1920,
+            height: 1080,
+            network_mode: NetworkMode::Direct,
+            audio_enabled: true,
+            input_enabled: true,
+            relative_mouse: false,
+            session_token: Some("a".repeat(32)),
+        }
+    }
+
+    #[test]
+    fn formats_ipv6_endpoints_without_ambiguity() {
+        let address = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        assert_eq!(endpoint(address, 5000), "[2001:db8::1]:5000");
+    }
+
+    #[test]
+    fn host_auto_codec_uses_compatible_h264_and_bounded_ports() -> Result<(), DesktopError> {
+        let args = build_args(&request(EngineKind::Host))?;
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--encode-pipe", "h264"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--control-connect", "[2001:db8::1]:50001"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--audio-udp-connect", "[2001:db8::1]:50002"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_zero_base_port() {
+        let mut invalid = request(EngineKind::Client);
+        invalid.port = Some(0);
+        assert!(matches!(
+            build_args(&invalid),
+            Err(DesktopError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_removed_local_server_mode() {
+        assert!(matches!(
+            build_args(&request(EngineKind::LocalServer)),
+            Err(DesktopError::Unavailable(_))
+        ));
     }
 }

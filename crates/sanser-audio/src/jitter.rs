@@ -10,6 +10,13 @@ pub struct JitterConfig {
 }
 
 impl JitterConfig {
+    /// Validates the adaptive jitter target configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JitterConfigError::TargetRange`] when the target bounds are
+    /// empty, reversed, or too large, and [`JitterConfigError::SafetyMargin`]
+    /// when the safety margin exceeds the maximum target.
     pub fn validate(self) -> Result<Self, JitterConfigError> {
         if self.minimum_target_us == 0
             || self.minimum_target_us > self.maximum_target_us
@@ -38,7 +45,7 @@ impl Default for JitterConfig {
 }
 
 /// RFC3550-style integer jitter estimate with a clamped playback target.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AdaptiveJitter {
     config: JitterConfig,
     previous_transit_us: Option<i128>,
@@ -46,6 +53,12 @@ pub struct AdaptiveJitter {
 }
 
 impl AdaptiveJitter {
+    /// Creates a jitter estimator with validated playback targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JitterConfigError`] when `config` contains an invalid target
+    /// range or safety margin.
     pub fn new(config: JitterConfig) -> Result<Self, JitterConfigError> {
         Ok(Self {
             config: config.validate()?,
@@ -74,19 +87,11 @@ impl AdaptiveJitter {
     #[must_use]
     pub fn target_delay_us(&self) -> u64 {
         self.estimated_jitter_us()
-            .saturating_mul(2)
+            // Four times the RFC3550 deviation covers burst variation without
+            // allowing the playout queue to grow beyond its configured cap.
+            .saturating_mul(4)
             .saturating_add(self.config.safety_margin_us)
             .clamp(self.config.minimum_target_us, self.config.maximum_target_us)
-    }
-}
-
-impl Default for AdaptiveJitter {
-    fn default() -> Self {
-        Self {
-            config: JitterConfig::default(),
-            previous_transit_us: None,
-            estimate_us_x16: 0,
-        }
     }
 }
 

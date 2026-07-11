@@ -11,6 +11,12 @@ const MAX_URLS_PER_SERVER: usize = 8;
 pub struct IceCredential(String);
 
 impl IceCredential {
+    /// Wraps an ICE credential so it is redacted in debug output and zeroized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IceServerError::InvalidCredential`] when the credential is
+    /// empty, longer than 512 bytes, or contains control characters.
     pub fn new(value: String) -> Result<Self, IceServerError> {
         if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
             return Err(IceServerError::InvalidCredential);
@@ -38,6 +44,13 @@ pub struct IceServer {
 }
 
 impl IceServer {
+    /// Validates an ICE server before it crosses the native WebRTC boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`IceServerError`] when the URL count is out of bounds, a URL
+    /// has an unsupported scheme or empty target, username and credential are
+    /// incomplete or malformed, or a TURN URL has no credential.
     pub fn validate(self) -> Result<Self, IceServerError> {
         if self.urls.is_empty() || self.urls.len() > MAX_URLS_PER_SERVER {
             return Err(IceServerError::UrlCount(self.urls.len()));
@@ -92,6 +105,13 @@ pub struct ConnectionPolicy {
 }
 
 impl ConnectionPolicy {
+    /// Builds a validated connection policy for the requested network mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IceServerError::ServerCount`] for more than 16 servers,
+    /// propagates validation errors from any [`IceServer`], and returns
+    /// [`IceServerError::RelayRequiresTurn`] when relay mode has no TURN URL.
     pub fn build(mode: NetworkMode, servers: Vec<IceServer>) -> Result<Self, IceServerError> {
         if servers.len() > MAX_ICE_SERVERS {
             return Err(IceServerError::ServerCount(servers.len()));

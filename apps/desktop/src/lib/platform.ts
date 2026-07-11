@@ -19,8 +19,6 @@ export async function runtimeStatus(): Promise<RuntimeStatus> {
       secureStorage: unavailable,
       hostEngine: unavailable,
       clientEngine: unavailable,
-      localServer: unavailable,
-      localDiscovery: unavailableCapability('Local discovery backend is not installed', 'planned'),
       webRtc: unavailableCapability('Native WebRTC backend is not installed', 'planned'),
       nativeSnv2: unavailableCapability('SNV2 engine is not installed'),
       gamepad: unavailableCapability('Native gamepad input is not installed', 'planned'),
@@ -28,8 +26,7 @@ export async function runtimeStatus(): Promise<RuntimeStatus> {
     },
     engines: [
       { kind: 'host', installed: false, running: false, processId: null, lastError: null },
-      { kind: 'client', installed: false, running: false, processId: null, lastError: null },
-      { kind: 'localServer', installed: false, running: false, processId: null, lastError: null }
+      { kind: 'client', installed: false, running: false, processId: null, lastError: null }
     ]
   };
 }

@@ -22,6 +22,13 @@ pub struct IceCandidate {
 }
 
 impl IceCandidate {
+    /// Parses and validates one untrusted SDP ICE candidate line.
+    ///
+    /// # Errors
+    ///
+    /// Returns a specific [`CandidateError`] when the line is empty, oversized,
+    /// contains forbidden control bytes, has malformed candidate fields, or
+    /// declares an unsupported component, transport, address, port, or type.
     pub fn parse(raw: String) -> Result<Self, CandidateError> {
         if raw.is_empty()
             || raw.len() > MAX_CANDIDATE_LEN
@@ -104,6 +111,12 @@ pub struct CandidateBuffer {
 }
 
 impl CandidateBuffer {
+    /// Creates a bounded candidate buffer with duplicate suppression.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CandidateError::InvalidCapacity`] when `capacity` is zero or
+    /// exceeds the crate-wide maximum of 512 candidates.
     pub fn new(config: CandidateBufferConfig) -> Result<Self, CandidateError> {
         if config.capacity == 0 || config.capacity > MAX_CANDIDATES {
             return Err(CandidateError::InvalidCapacity(config.capacity));
@@ -115,6 +128,13 @@ impl CandidateBuffer {
         })
     }
 
+    /// Enqueues a candidate unless the same raw candidate is already buffered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CandidateError::BufferFull`] when a distinct candidate is
+    /// pushed after the configured capacity has been reached. A duplicate is
+    /// reported as [`CandidatePush::Duplicate`] and is not an error.
     pub fn push(&mut self, candidate: IceCandidate) -> Result<CandidatePush, CandidateError> {
         if self.fingerprints.contains(candidate.as_str()) {
             return Ok(CandidatePush::Duplicate);

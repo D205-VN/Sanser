@@ -7,7 +7,7 @@ export interface DiagnosticEvent {
   id: string;
   timestamp: string;
   level: DiagnosticLevel;
-  category: 'app' | 'auth' | 'network' | 'engine' | 'session';
+  category: 'app' | 'auth' | 'device' | 'network' | 'engine' | 'session';
   message: string;
   details?: Record<string, DiagnosticValue>;
 }

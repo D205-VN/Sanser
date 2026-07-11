@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Page, RuntimeStatus } from '../lib/types';
+  import BrandMark from './BrandMark.svelte';
   import Icon from './Icon.svelte';
   import StatusPill from './StatusPill.svelte';
 
@@ -19,15 +20,16 @@
 
 <aside class="sidebar">
   <div class="brand">
-    <img src="/sanser-mark.svg" alt="" />
+    <BrandMark size={38} label="Sanser" />
     <div><strong>Sanser</strong><span>Remote, refined</span></div>
+    <em>2.0</em>
   </div>
 
   <nav aria-label="Main navigation">
     <div class="nav-group">
       <div class="nav-label">Workspace</div>
       {#each primary as item}
-        <button class:active={active === item.page} class="nav-button" onclick={() => navigate(item.page)}>
+        <button class:active={active === item.page} class="nav-button" aria-current={active === item.page ? 'page' : undefined} onclick={() => navigate(item.page)}>
           <span class="nav-icon"><Icon name={item.page} /></span>{item.label}
         </button>
       {/each}
@@ -35,7 +37,7 @@
     <div class="nav-group">
       <div class="nav-label">System</div>
       {#each secondary as item}
-        <button class:active={active === item.page} class="nav-button" onclick={() => navigate(item.page)}>
+        <button class:active={active === item.page} class="nav-button" aria-current={active === item.page ? 'page' : undefined} onclick={() => navigate(item.page)}>
           <span class="nav-icon"><Icon name={item.page} /></span>{item.label}
         </button>
       {/each}
@@ -43,6 +45,7 @@
   </nav>
 
   <div class="sidebar-footer">
+    <span class="footer-label">Runtime</span>
     <div class="runtime-line"><StatusPill state={runtime.capabilities.desktopShell.state} label={runtime.platform} /></div>
     <div class="runtime-line">Protocol v{runtime.protocolVersion} · SNV2</div>
   </div>

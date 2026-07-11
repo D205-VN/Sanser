@@ -168,6 +168,7 @@ pub struct StreamPreferences {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct HostPreferences {
     pub auto_online: bool,
     pub auto_accept_own_devices: bool,

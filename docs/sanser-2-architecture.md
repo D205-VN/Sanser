@@ -17,7 +17,7 @@ The frontend never receives native video frames and is not the primary realtime 
 
 ## Control and media planes
 
-The control plane owns authentication, device presence, consent, session negotiation, SDP/ICE exchange, TURN credentials, and state notifications. PostgreSQL/SQLite never carry realtime input, video, or audio.
+The control plane owns authentication, device presence, consent, session negotiation, SDP/ICE exchange, TURN credentials, and state notifications. PostgreSQL never carries realtime input, video, or audio.
 
 The media plane selects one route:
 
@@ -27,10 +27,10 @@ The media plane selects one route:
 
 Input uses separate bounded lanes: reliable ordered keys/buttons, latest-state-wins mouse/gamepad, audio, video control, video payload, and diagnostics. Media backpressure can drop expired video but cannot block reliable input.
 
-## Storage modes
+## Storage
 
-- Local mode uses SQLite and does not require an account or PostgreSQL.
-- Shared mode uses PostgreSQL for account/device/session data.
+- PostgreSQL hosted by Neon is the only server database for account/device/session data.
+- The desktop stores bounded non-secret preferences in an atomic local JSON file; this is not an application database.
 - Secrets belong in Keychain/Credential Manager or process memory. Databases contain token digests, never raw access/refresh tokens.
 
 ## Current verification status

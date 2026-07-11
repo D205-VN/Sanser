@@ -10,6 +10,12 @@ pub enum SignalingState {
 }
 
 impl SignalingState {
+    /// Moves the SDP signaling state through a legal offer/answer transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateTransitionError`] with the attempted `from` and `to`
+    /// states when the transition is not allowed by the signaling state model.
     pub fn transition(self, next: Self) -> Result<Self, StateTransitionError<Self>> {
         let allowed = matches!(
             (self, next),
@@ -40,6 +46,12 @@ pub enum ConnectionState {
 }
 
 impl ConnectionState {
+    /// Moves the peer connection through a legal lifecycle transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateTransitionError`] with the attempted `from` and `to`
+    /// states when the connection lifecycle does not permit the transition.
     pub fn transition(self, next: Self) -> Result<Self, StateTransitionError<Self>> {
         let allowed = match self {
             Self::New => matches!(next, Self::Connecting | Self::Closed),

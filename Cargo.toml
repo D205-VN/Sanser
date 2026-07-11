@@ -28,7 +28,6 @@ sha2 = "0.10.9"
 sqlx = { version = "0.8.6", default-features = false, features = [
   "runtime-tokio-rustls",
   "postgres",
-  "sqlite",
   "uuid",
 ] }
 subtle = "2.6.1"

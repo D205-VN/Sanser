@@ -16,6 +16,12 @@ const MAX_TOKEN_TTL_SECONDS: u64 = 31_536_000;
 pub struct SecretToken(String);
 
 impl SecretToken {
+    /// Parses a URL-safe, unpadded opaque token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenError::Malformed`] when `encoded` is not valid URL-safe
+    /// Base64 or does not decode to the required token length.
     pub fn parse(encoded: String) -> Result<Self, TokenError> {
         let decoded = URL_SAFE_NO_PAD
             .decode(encoded.as_bytes())
@@ -124,6 +130,13 @@ impl TokenService {
         Self { key }
     }
 
+    /// Issues a random opaque token and its persistable digest record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenError::InvalidTtl`] when `ttl_seconds` is outside the
+    /// supported range or its expiry would overflow, and propagates digest
+    /// initialization failures.
     pub fn issue(
         &self,
         subject: Uuid,
@@ -156,6 +169,12 @@ impl TokenService {
         })
     }
 
+    /// Computes the keyed digest used to persist and compare a token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TokenError::DigestInitialization`] if the HMAC state cannot be
+    /// initialized from the service key.
     pub fn digest(&self, token: &SecretToken) -> Result<TokenDigest, TokenError> {
         let mut mac = HmacSha256::new_from_slice(&self.key.0)
             .map_err(|_| TokenError::DigestInitialization)?;
@@ -163,6 +182,8 @@ impl TokenService {
         Ok(TokenDigest(mac.finalize().into_bytes().into()))
     }
 
+    /// Returns whether the token is active and matches the stored digest.
+    #[must_use]
     pub fn verify(&self, token: &SecretToken, record: &TokenRecord, now: u64) -> bool {
         if !record.is_active_at(now) {
             return false;
@@ -203,9 +224,9 @@ mod tests {
     fn another_server_key_cannot_validate_digest() {
         let issuer = TokenService::new(TokenKey::new([1; 32]));
         let verifier = TokenService::new(TokenKey::new([2; 32]));
-        let issued = issuer
+        let issued_token = issuer
             .issue(Uuid::new_v4(), TokenKind::Access, 1, 10)
             .unwrap_or_else(|error| panic!("token issue failed: {error}"));
-        assert!(!verifier.verify(&issued.secret, &issued.record, 2));
+        assert!(!verifier.verify(&issued_token.secret, &issued_token.record, 2));
     }
 }

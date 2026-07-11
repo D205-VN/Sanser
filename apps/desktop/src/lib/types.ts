@@ -20,7 +20,7 @@ export type NetworkMode = 'auto' | 'direct' | 'relay';
 export type QualityProfile = 'auto' | 'competitive' | 'balanced' | 'quality' | 'custom';
 export type VideoCodec = 'auto' | 'h264' | 'hevc';
 export type CapabilityState = 'available' | 'unavailable' | 'planned';
-export type EngineKind = 'host' | 'client' | 'localServer';
+export type EngineKind = 'host' | 'client';
 
 export interface Capability {
   state: CapabilityState;
@@ -32,8 +32,6 @@ export interface RuntimeCapabilities {
   secureStorage: Capability;
   hostEngine: Capability;
   clientEngine: Capability;
-  localServer: Capability;
-  localDiscovery: Capability;
   webRtc: Capability;
   nativeSnv2: Capability;
   gamepad: Capability;
@@ -153,7 +151,7 @@ export interface DeviceRegistration {
 export interface ConnectionSession {
   id: string;
   hostDeviceId: string;
-  status: 'pending' | 'accepted' | 'connecting' | 'connected' | 'rejected' | 'closed' | 'failed';
+  status: 'pending' | 'accepted' | 'connecting' | 'connected' | 'rejected' | 'disconnected' | 'expired' | 'closed' | 'failed';
   transport: 'snv2' | 'webrtc' | null;
   networkMode: NetworkMode;
   qualityProfile: QualityProfile;
@@ -161,6 +159,20 @@ export interface ConnectionSession {
   updatedAt?: string;
   address?: string;
   port?: number;
+  /** Ephemeral, memory-only credential returned after media negotiation. */
+  sessionToken?: string;
+  credentialExpiresAt?: number;
+}
+
+export interface NativeSessionCredentials {
+  sessionId: string;
+  deviceId: string;
+  peerDeviceId: string;
+  peerRouteAddress: string;
+  basePort: number;
+  expiresAt: number;
+  /** Ephemeral and memory-only. Never persist or include in diagnostics. */
+  sessionToken: string;
 }
 
 export interface LoginSession {

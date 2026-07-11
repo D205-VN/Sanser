@@ -1,11 +1,14 @@
 use axum::{
     Json,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
 use sanser_core::NetworkMode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -31,6 +34,24 @@ pub struct CreateSessionRequest {
     quality_profile: String,
     #[serde(default = "default_codec")]
     requested_codec: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeCredentialsQuery {
+    device_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeSessionCredentials {
+    session_id: String,
+    device_id: String,
+    peer_device_id: String,
+    peer_route_address: String,
+    base_port: u16,
+    expires_at: i64,
+    session_token: String,
 }
 
 pub async fn create(
@@ -154,6 +175,97 @@ pub async fn get(
     Ok(Json(fetch_owned(&state, &auth.user_id, &id).await?))
 }
 
+pub async fn credentials(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    Query(query): Query<NativeCredentialsQuery>,
+) -> Result<Response, AppError> {
+    let id = validate_uuid(&id, "id")?;
+    let device_id = validate_uuid(&query.device_id, "deviceId")?;
+    let session = fetch_owned(&state, &auth.user_id, &id).await?;
+    if session.state != "accepted" {
+        return Err(AppError::Conflict(
+            "native credentials require an accepted session".into(),
+        ));
+    }
+    if session.selected_transport.as_deref() != Some("snv2") {
+        return Err(AppError::Conflict(
+            "native credentials require the SNV2 transport".into(),
+        ));
+    }
+
+    let peer_device_id = if device_id == session.requester_device_id {
+        session.host_device_id.clone()
+    } else if device_id == session.host_device_id {
+        session.requester_device_id.clone()
+    } else {
+        return Err(AppError::Forbidden);
+    };
+    let device = devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
+    let peer = devices::fetch_owned(&state, &auth.user_id, &peer_device_id).await?;
+    if !device.native_transport || !peer.native_transport {
+        return Err(AppError::Conflict(
+            "both session devices must support the native transport".into(),
+        ));
+    }
+    ensure_device_online(&state, &device)?;
+    ensure_device_online(&state, &peer)?;
+    let peer_route_address = peer
+        .route_address
+        .ok_or_else(|| AppError::Conflict("peer device has no direct route address".into()))?;
+    let accepted_at = session.accepted_at.ok_or(AppError::Internal)?;
+    let expires_at = accepted_at
+        .checked_add(
+            i64::try_from(state.config.session_credential_ttl.as_secs())
+                .map_err(|_| AppError::Internal)?,
+        )
+        .ok_or(AppError::Internal)?;
+    if expires_at <= now_unix() {
+        return Err(AppError::Conflict(
+            "native session credential has expired; create a new session".into(),
+        ));
+    }
+    let session_token = derive_session_token(
+        state.config.session_credential_key.as_slice(),
+        &session.id,
+        &session.requester_device_id,
+        &session.host_device_id,
+        accepted_at,
+        expires_at,
+    )?;
+    audit(
+        &state.pool,
+        Some(&auth.user_id),
+        "session.native_credentials.issue",
+        Some("connection_session"),
+        Some(&session.id),
+        serde_json::json!({
+            "deviceId": device_id,
+            "peerDeviceId": peer_device_id,
+            "expiresAt": expires_at
+        }),
+    )
+    .await;
+
+    Ok((
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Json(NativeSessionCredentials {
+            session_id: session.id,
+            device_id,
+            peer_device_id,
+            peer_route_address,
+            base_port: state.config.native_base_port,
+            expires_at,
+            session_token,
+        }),
+    )
+        .into_response())
+}
+
 pub async fn accept(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -190,13 +302,15 @@ pub async fn accept(
             "session state changed concurrently".into(),
         ));
     }
-    sqlx::query("UPDATE devices SET streaming = 1, updated_at = $1 WHERE id = $2 AND user_id = $3")
-        .bind(now)
-        .bind(&current.host_device_id)
-        .bind(&auth.user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(AppError::from_db)?;
+    sqlx::query(
+        "UPDATE devices SET streaming = TRUE, updated_at = $1 WHERE id = $2 AND user_id = $3",
+    )
+    .bind(now)
+    .bind(&current.host_device_id)
+    .bind(&auth.user_id)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::from_db)?;
     events::publish(
         &state,
         &auth.user_id,
@@ -282,13 +396,15 @@ async fn transition_to_ended(
             "session state changed concurrently".into(),
         ));
     }
-    sqlx::query("UPDATE devices SET streaming = 0, updated_at = $1 WHERE id = $2 AND user_id = $3")
-        .bind(now)
-        .bind(&current.host_device_id)
-        .bind(&auth.user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(AppError::from_db)?;
+    sqlx::query(
+        "UPDATE devices SET streaming = FALSE, updated_at = $1 WHERE id = $2 AND user_id = $3",
+    )
+    .bind(now)
+    .bind(&current.host_device_id)
+    .bind(&auth.user_id)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::from_db)?;
     events::publish(
         state,
         &auth.user_id,
@@ -324,7 +440,7 @@ pub(crate) async fn fetch_owned(
     row_to_session(row)
 }
 
-fn row_to_session(row: sqlx::any::AnyRow) -> Result<ConnectionSession, AppError> {
+fn row_to_session(row: sqlx::postgres::PgRow) -> Result<ConnectionSession, AppError> {
     let network_mode: String = row.try_get("network_mode").map_err(AppError::from_db)?;
     Ok(ConnectionSession {
         id: row.try_get("id").map_err(AppError::from_db)?,
@@ -355,7 +471,7 @@ async fn most_recent_requester(
     host_id: &str,
 ) -> Result<String, AppError> {
     sqlx::query_scalar::<_, String>(
-        "SELECT id FROM devices WHERE user_id = $1 AND id != $2 AND online = 1 \
+        "SELECT id FROM devices WHERE user_id = $1 AND id != $2 AND online = TRUE \
          ORDER BY last_seen_at DESC, id DESC LIMIT 1",
     )
     .bind(user_id)
@@ -477,10 +593,64 @@ fn validate_uuid(value: &str, field: &str) -> Result<String, AppError> {
         .map_err(|_| AppError::Validation(format!("{field} must be a UUID")))
 }
 
+fn derive_session_token(
+    key: &[u8],
+    session_id: &str,
+    requester_device_id: &str,
+    host_device_id: &str,
+    accepted_at: i64,
+    expires_at: i64,
+) -> Result<String, AppError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| AppError::Internal)?;
+    mac.update(b"sanser-snv2-session-credential-v1\0");
+    for field in [session_id, requester_device_id, host_device_id] {
+        let length = u32::try_from(field.len()).map_err(|_| AppError::Internal)?;
+        mac.update(&length.to_be_bytes());
+        mac.update(field.as_bytes());
+    }
+    mac.update(&accepted_at.to_be_bytes());
+    mac.update(&expires_at.to_be_bytes());
+    Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
 fn default_quality() -> String {
     "auto".into()
 }
 
 fn default_codec() -> String {
     "auto".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_session_token_is_stable_bound_and_opaque() {
+        let key = [0xA5; 32];
+        let session = "018f4d89-5e8b-7a80-bd1e-cb7cb9f43189";
+        let requester = "018f4d89-5e8b-7a80-bd1e-cb7cb9f43190";
+        let host = "018f4d89-5e8b-7a80-bd1e-cb7cb9f43191";
+        let token = derive_session_token(&key, session, requester, host, 1_000, 1_060)
+            .expect("session token");
+        assert_eq!(token.len(), 43);
+        assert_eq!(
+            token,
+            derive_session_token(&key, session, requester, host, 1_000, 1_060)
+                .expect("same session token")
+        );
+        assert_ne!(
+            token,
+            derive_session_token(&key, session, requester, host, 1_000, 1_061)
+                .expect("expiry-bound token")
+        );
+        assert_ne!(
+            token,
+            derive_session_token(&key, session, host, requester, 1_000, 1_060)
+                .expect("device-bound token")
+        );
+        assert!(!token.contains(session));
+        assert!(!token.contains(requester));
+        assert!(!token.contains(host));
+    }
 }

@@ -29,8 +29,15 @@ if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '(^|/)\.env\.example$' >
   fail "an environment secret file is tracked"
 fi
 
-if git ls-files -z | xargs -0 grep -IEn 'GameRemote|gameremote-parsec-like|TAILSCALE_USE_STUN|tailscale[.]com' -- 2>/dev/null; then
+if git grep -IEn 'GameRemote|gameremote-parsec-like|TAILSCALE_USE_STUN|tailscale[.]com' -- \
+  ':!work.txt' ':!scripts/check-repository.sh' 2>/dev/null; then
   fail "retired branding or Tailscale-specific configuration remains"
+fi
+
+if git grep -IEn 'postgres(ql)?://[^[:space:]]+@[^[:space:]]*neon[.]tech' -- \
+  ':!work.txt' ':!scripts/check-repository.sh' \
+  | grep -Ev 'postgres(ql)?://(USER:PASSWORD|user(:((pass)|(secret)))?)@' >/dev/null; then
+  fail "a non-placeholder Neon connection string is tracked"
 fi
 
 printf 'repository policy: ok (%s, protocol v2)\n' "$expected_version"

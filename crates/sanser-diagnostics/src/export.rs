@@ -18,9 +18,15 @@ pub struct DiagnosticsExport {
 }
 
 impl DiagnosticsExport {
+    /// Creates a sanitized diagnostics export from metadata and metric samples.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExportError::TooManySamples`] when `samples` exceeds the
+    /// maximum supported export size.
     pub fn new(
         generated_at_us: u64,
-        metadata: Value,
+        metadata: &Value,
         samples: Vec<SessionMetrics>,
     ) -> Result<Self, ExportError> {
         if samples.len() > MAX_EXPORT_SAMPLES {
@@ -32,18 +38,30 @@ impl DiagnosticsExport {
             protocol_version: PROTOCOL_VERSION,
             native_protocol: NATIVE_PROTOCOL_NAME,
             generated_at_us,
-            metadata: sanitize_value(&metadata),
+            metadata: sanitize_value(metadata),
             samples,
         })
     }
 }
 
+/// Serializes a diagnostics export as sanitized, pretty-printed JSON.
+///
+/// # Errors
+///
+/// Returns [`ExportError::Serialization`] when the export cannot be converted
+/// to or encoded from a JSON value.
 pub fn export_json(export: &DiagnosticsExport) -> Result<String, ExportError> {
     let serialized = serde_json::to_value(export).map_err(|_| ExportError::Serialization)?;
     serde_json::to_string_pretty(&sanitize_value(&serialized))
         .map_err(|_| ExportError::Serialization)
 }
 
+/// Serializes a diagnostics export as sanitized, human-readable text.
+///
+/// # Errors
+///
+/// Returns [`ExportError::Serialization`] when the metadata cannot be encoded
+/// as JSON.
 pub fn export_text(export: &DiagnosticsExport) -> Result<String, ExportError> {
     let mut output = format!(
         "{} {}\nProtocol v{} {}\nGenerated: {}us\nSamples: {}\n",
@@ -79,7 +97,7 @@ mod tests {
     fn export_contains_identity_but_no_secret() {
         let export = DiagnosticsExport::new(
             12,
-            json!({"token": "never-export", "route": "direct"}),
+            &json!({"token": "never-export", "route": "direct"}),
             vec![SessionMetrics::default()],
         )
         .unwrap_or_else(|error| panic!("export setup failed: {error}"));

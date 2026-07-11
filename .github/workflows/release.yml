@@ -1,0 +1,153 @@
+name: Release Sanser 2.0.0
+
+on:
+  push:
+    tags: ["v2.0.0"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  SANSER_VERSION: 2.0.0
+  VITE_SANSER_SERVER_URL: ${{ vars.SANSER_API_URL }}
+
+jobs:
+  source-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-repository.sh
+
+  windows-x64:
+    needs: source-policy
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run release:validate
+      - run: npm run desktop:stage-sidecar
+        env:
+          SANSER_TARGET_TRIPLE: x86_64-pc-windows-msvc
+      - name: Reject incomplete native protocol on a production tag
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $capabilities = (& build/host-windows-x64/Release/sanser-host-windows.exe --capabilities-json) | ConvertFrom-Json
+          if ($capabilities.nativeSnv2 -ne $true) { throw 'nativeSnv2 is not release-ready' }
+      - run: npm --workspace @sanser/desktop run tauri -- build --target x86_64-pc-windows-msvc
+      - name: Name artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $setup = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw 'NSIS installer was not produced' }
+          Copy-Item $setup.FullName artifacts/Sanser-Windows-2.0.0-x64-setup.exe
+          New-Item -ItemType Directory -Force build/portable | Out-Null
+          Copy-Item target/x86_64-pc-windows-msvc/release/sanser.exe build/portable/sanser.exe
+          Copy-Item build/host-windows-x64/Release/sanser-host-windows.exe build/portable/sanser-host-windows.exe
+          7z a -t7z -mx=9 build/sanser-portable.7z ./build/portable/*
+          @'
+          ;!@Install@!UTF-8!
+          Title="Sanser 2.0.0 Portable"
+          RunProgram="sanser.exe"
+          GUIMode="2"
+          ;!@InstallEnd@!
+          '@ | Set-Content -NoNewline -Encoding utf8 build/sfx-config.txt
+          $sfx = Join-Path $env:ProgramFiles '7-Zip/7z.sfx'
+          cmd /c copy /b `"$sfx`"+build\sfx-config.txt+build\sanser-portable.7z `"artifacts\Sanser-Windows-2.0.0-x64-portable.exe`"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sanser-windows-2.0.0-x64
+          path: artifacts/*
+          if-no-files-found: error
+
+  macos-arm64:
+    needs: source-policy
+    runs-on: macos-14
+    env:
+      SANSER_TARGET_TRIPLE: aarch64-apple-darwin
+      CARGO_TARGET_DIR: /tmp/sanser-target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run release:validate
+      - run: npm run desktop:stage-sidecar
+      - name: Prepare Apple notarization credentials
+        shell: bash
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_API_KEY"
+          test -n "$APPLE_API_ISSUER"
+          test -n "$APPLE_API_PRIVATE_KEY"
+          umask 077
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
+      - name: Reject incomplete native protocol on a production tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: build/client-macos-arm64/sanser-client-macos --capabilities-json | jq -e '.nativeSnv2 == true'
+      - name: Build application and DMG
+        run: npm --workspace @sanser/desktop run tauri -- build --target aarch64-apple-darwin
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+      - name: Name artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          app="$(find /tmp/sanser-target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          dmg="$(find /tmp/sanser-target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$app" && test -n "$dmg"
+          cp "$dmg" artifacts/Sanser-macOS-2.0.0-arm64.dmg
+          ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/Sanser-macOS-2.0.0-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sanser-macos-2.0.0-arm64
+          path: artifacts/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [windows-x64, macos-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sanser-*
+          path: artifacts
+          merge-multiple: true
+      - working-directory: artifacts
+        run: sha256sum Sanser-* > SHA256SUMS.txt
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Sanser 2.0.0" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber

@@ -15,6 +15,13 @@ pub struct PasswordPolicy {
 }
 
 impl PasswordPolicy {
+    /// Validates a candidate password against this policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PasswordPolicyError::InvalidMinimum`] when the configured
+    /// minimum is outside the supported range, or the corresponding length or
+    /// whitespace error when `password` does not satisfy the policy.
     pub fn validate(self, password: &str) -> Result<(), PasswordPolicyError> {
         if self.minimum_characters < 8 || self.minimum_characters > 128 {
             return Err(PasswordPolicyError::InvalidMinimum(self.minimum_characters));
@@ -46,6 +53,13 @@ impl Default for PasswordPolicy {
 pub struct PasswordHashString(String);
 
 impl PasswordHashString {
+    /// Parses and validates an encoded Argon2id password hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PasswordError::InvalidHash`] when `encoded` is not a valid
+    /// password-hash string, or [`PasswordError::UnsupportedHash`] when it uses
+    /// an algorithm other than Argon2id.
     pub fn parse(encoded: String) -> Result<Self, PasswordError> {
         let parsed = PasswordHash::new(&encoded).map_err(|_| PasswordError::InvalidHash)?;
         if parsed.algorithm.as_str() != "argon2id" {
@@ -75,6 +89,12 @@ pub struct PasswordHasherService {
 }
 
 impl PasswordHasherService {
+    /// Creates a password hasher with explicit Argon2id parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PasswordError::InvalidParameters`] when the memory, iteration,
+    /// or lane configuration is not accepted by Argon2id.
     pub fn new(
         policy: PasswordPolicy,
         memory_kib: u32,
@@ -90,6 +110,14 @@ impl PasswordHasherService {
         })
     }
 
+    /// Hashes a password after enforcing the configured policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PasswordError::Policy`] when the password violates the policy,
+    /// [`PasswordError::InvalidParameters`] for an invalid Argon2id
+    /// configuration, or a hashing/hash-encoding error when Argon2id cannot
+    /// produce a valid stored hash.
     pub fn hash(&self, password: &str) -> Result<PasswordHashString, PasswordError> {
         self.policy.validate(password)?;
         let salt = SaltString::generate(&mut OsRng);
@@ -103,6 +131,7 @@ impl PasswordHasherService {
 
     /// Returns a generic false result for any malformed/incorrect credential.
     /// Callers should not expose parsing details to a login endpoint.
+    #[must_use]
     pub fn verify(&self, password: &str, stored: &PasswordHashString) -> bool {
         let Ok(parsed) = PasswordHash::new(stored.as_str()) else {
             return false;

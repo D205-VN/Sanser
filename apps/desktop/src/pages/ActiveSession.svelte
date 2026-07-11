@@ -6,6 +6,7 @@
   import { connection } from '../stores/connection';
   import { diagnostics } from '../stores/diagnostics';
   import { preferences } from '../stores/preferences';
+  import { presence } from '../stores/presence';
   import { session } from '../stores/session';
 
   let { runtime }: { runtime: RuntimeStatus } = $props();
@@ -19,6 +20,7 @@
       runtime.capabilities.nativeSnv2.state === 'available' &&
       sessionState.address !== undefined &&
       sessionState.port !== undefined &&
+      sessionState.sessionToken !== undefined &&
       sessionState.networkMode !== 'relay'
   );
 
@@ -51,7 +53,7 @@
         audioEnabled: $preferences.host.audioEnabled,
         inputEnabled: $preferences.host.inputEnabled,
         relativeMouse: $preferences.input.mouseMode === 'relative',
-        sessionToken: undefined
+        sessionToken: sessionState.sessionToken
       });
       connection.setEngineRunning(true);
       diagnostics.add({ level: 'info', category: 'engine', message: 'Native macOS client started' });
@@ -90,11 +92,30 @@
     }
   }
 
+  async function refreshSession(): Promise<void> {
+    const client = session.client();
+    const current = $connection.session;
+    const localDeviceId = $presence.deviceId;
+    if (!client || !current) return;
+    const refreshed = await connection.refresh(client);
+    if (
+      refreshed?.status === 'accepted' &&
+      refreshed.transport === 'snv2' &&
+      localDeviceId &&
+      !refreshed.sessionToken
+    ) {
+      try {
+        connection.authorizeNative(await client.sessionCredentials(refreshed.id, localDeviceId));
+      } catch (error) {
+        connection.setError(error instanceof Error ? error.message : 'Unable to authorize the native session');
+      }
+    }
+  }
+
   onMount(() => {
     const timer = window.setInterval(() => {
-      const client = session.client();
       const current = $connection.session;
-      if (client && current && ['pending', 'accepted', 'connecting'].includes(current.status)) void connection.refresh(client);
+      if (current && ['pending', 'accepted', 'connecting'].includes(current.status)) void refreshSession();
     }, 2_000);
     return () => window.clearInterval(timer);
   });

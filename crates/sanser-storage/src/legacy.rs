@@ -1,6 +1,5 @@
 use crate::{Storage, StorageError};
 use serde_json::{Map, Value, json};
-use sqlx::Acquire;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -42,6 +41,11 @@ impl LegacyMigrator {
         Self { data_directory }
     }
 
+    /// Detects a supported legacy settings file directly inside the data directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LegacyMigrationError`] when the directory cannot be inspected.
     pub fn detect(&self) -> Result<Option<PathBuf>, LegacyMigrationError> {
         for name in LEGACY_FILES {
             let candidate = self.data_directory.join(name);
@@ -52,6 +56,11 @@ impl LegacyMigrator {
         Ok(None)
     }
 
+    /// Migrates the detected legacy file into Neon after creating a protected backup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LegacyMigrationError`] for unsafe input, I/O, or database failures.
     pub async fn migrate_detected(
         &self,
         storage: &Storage,
@@ -65,6 +74,11 @@ impl LegacyMigrator {
             .map(Some)
     }
 
+    /// Validates, backs up, sanitizes, and transactionally imports a legacy file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LegacyMigrationError`] for unsafe input, I/O, or database failures.
     pub async fn migrate_file(
         &self,
         storage: &Storage,
@@ -83,7 +97,7 @@ impl LegacyMigrator {
 
         // A byte-for-byte backup is durable before the first database write.
         let backup_path = write_backup(&source, &raw)?;
-        let pool = storage.sqlite_pool()?;
+        let pool = storage.pool();
         storage.initialize().await?;
         let mut transaction = pool.begin().await?;
         for (key, value) in &sanitized.preferences {
@@ -92,9 +106,9 @@ impl LegacyMigrator {
             let migrated_at =
                 i64::try_from(migrated_at).map_err(|_| LegacyMigrationError::TimestampOverflow)?;
             sqlx::query(
-                "INSERT INTO app_preferences(key, value_json, updated_at) VALUES(?1, ?2, ?3) \
-                 ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, \
-                 updated_at=excluded.updated_at",
+                "INSERT INTO app_preferences(key, value_json, updated_at) VALUES($1, $2, $3) \
+                 ON CONFLICT(key) DO UPDATE SET value_json=EXCLUDED.value_json, \
+                 updated_at=EXCLUDED.updated_at",
             )
             .bind(key)
             .bind(serialized)
@@ -104,8 +118,8 @@ impl LegacyMigrator {
         }
         if let Some(server_url) = &sanitized.server_url {
             sqlx::query(
-                "INSERT INTO app_metadata(key, value) VALUES('server_url', ?1) \
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                "INSERT INTO app_metadata(key, value) VALUES('server_url', $1) \
+                 ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
             )
             .bind(server_url.as_str())
             .execute(&mut *transaction)
@@ -113,8 +127,8 @@ impl LegacyMigrator {
         }
         if let Some(device_id) = sanitized.device_id {
             sqlx::query(
-                "INSERT INTO app_metadata(key, value) VALUES('device_id', ?1) \
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                "INSERT INTO app_metadata(key, value) VALUES('device_id', $1) \
+                 ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
             )
             .bind(device_id.to_string())
             .execute(&mut *transaction)
@@ -122,7 +136,7 @@ impl LegacyMigrator {
         }
         sqlx::query(
             "INSERT INTO app_metadata(key, value) VALUES('migration_version', '2') \
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+             ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
         )
         .execute(&mut *transaction)
         .await?;
@@ -283,7 +297,7 @@ fn is_sensitive_key(key: &str) -> bool {
 
 fn normalize_key(key: &str) -> String {
     key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .flat_map(char::to_lowercase)
         .collect()
 }
@@ -364,16 +378,13 @@ pub enum LegacyMigrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DatabaseTarget, PreferenceStore, StorageOptions};
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn imports_safe_values_transactionally_and_skips_secrets() {
+    #[test]
+    fn extracts_safe_values_and_skips_secrets() {
         let directory = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let source = directory.path().join("store.json");
-        fs::write(
-            &source,
-            br#"{
+        let raw = br#"{
                 "serverUrl":"https://signal.example.com",
                 "deviceId":"550e8400-e29b-41d4-a716-446655440000",
                 "accessToken":"must-not-import",
@@ -383,70 +394,38 @@ mod tests {
                     "theme":"dark",
                     "password":"must-not-import"
                 }
-            }"#,
-        )
-        .unwrap_or_else(|error| panic!("fixture write failed: {error}"));
-        let storage = Storage::connect(DatabaseTarget::SqliteMemory, StorageOptions::default())
-            .await
-            .unwrap_or_else(|error| panic!("connect failed: {error}"));
-        let report = LegacyMigrator::new(directory.path().to_path_buf())
-            .migrate_file(&storage, &source, 10)
-            .await
-            .unwrap_or_else(|error| panic!("migration failed: {error}"));
+            }"#;
+        fs::write(&source, raw).unwrap_or_else(|error| panic!("fixture write failed: {error}"));
+        let value: Value = serde_json::from_slice(raw)
+            .unwrap_or_else(|error| panic!("fixture parse failed: {error}"));
+        let extracted =
+            extract_safe_values(&value).unwrap_or_else(|error| panic!("extract failed: {error}"));
+        let backup =
+            write_backup(&source, raw).unwrap_or_else(|error| panic!("backup failed: {error}"));
 
-        assert!(report.backup_path.exists());
-        assert!(report.skipped_sensitive_fields >= 2);
+        assert!(backup.exists());
+        assert!(extracted.skipped_sensitive_fields >= 2);
         assert_eq!(
-            storage
-                .preference("network_mode")
-                .await
-                .unwrap_or_else(|error| panic!("read failed: {error}")),
-            Some(json!("auto"))
+            extracted.preferences.get("network_mode"),
+            Some(&json!("auto"))
         );
         assert_eq!(
-            storage
-                .preference("quality_profile")
-                .await
-                .unwrap_or_else(|error| panic!("read failed: {error}")),
-            Some(json!("balanced"))
+            extracted.preferences.get("quality_profile"),
+            Some(&json!("balanced"))
         );
-        assert_eq!(
-            storage
-                .preference("access_token")
-                .await
-                .unwrap_or_else(|error| panic!("read failed: {error}")),
-            None
-        );
-
-        let pool = storage
-            .sqlite_pool()
-            .unwrap_or_else(|error| panic!("{error}"));
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT key, value FROM app_metadata ORDER BY key")
-                .fetch_all(pool)
-                .await
-                .unwrap_or_else(|error| panic!("metadata read failed: {error}"));
-        let rendered = format!("{rows:?}");
-        assert!(!rendered.contains("must-not-import"));
-        assert!(rendered.contains("migration_version"));
+        assert!(!extracted.preferences.contains_key("access_token"));
+        assert!(!format!("{extracted:?}").contains("must-not-import"));
     }
 
-    #[tokio::test]
-    async fn rejects_path_traversal_and_symlinks_outside_data_directory() {
+    #[test]
+    fn rejects_path_traversal_and_symlinks_outside_data_directory() {
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let data = root.path().join("data");
         fs::create_dir(&data).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
         let outside = root.path().join("store.json");
         fs::write(&outside, "{}").unwrap_or_else(|error| panic!("fixture write failed: {error}"));
-        let storage = Storage::connect(DatabaseTarget::SqliteMemory, StorageOptions::default())
-            .await
-            .unwrap_or_else(|error| panic!("connect failed: {error}"));
-        let error = match LegacyMigrator::new(data)
-            .migrate_file(&storage, &outside, 1)
-            .await
-        {
-            Ok(_) => panic!("outside path must be rejected"),
-            Err(error) => error,
+        let Err(error) = LegacyMigrator::new(data).validate_source(&outside) else {
+            panic!("outside path must be rejected");
         };
         assert!(matches!(
             error,

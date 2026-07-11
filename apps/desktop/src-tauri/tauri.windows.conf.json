@@ -2,8 +2,7 @@
   "bundle": {
     "targets": ["nsis"],
     "externalBin": [
-      "binaries/sanser-host-windows",
-      "binaries/sanser-server"
+      "binaries/sanser-host-windows"
     ],
     "windows": {
       "nsis": {

@@ -38,6 +38,12 @@ pub struct InputBuffer {
 }
 
 impl InputBuffer {
+    /// Creates separate bounded lanes for reliable and latest-state input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidInputBufferConfig`] when `reliable_capacity` is zero or
+    /// greater than the maximum of 16,384 queued reliable events.
     pub fn new(config: InputBufferConfig) -> Result<Self, InvalidInputBufferConfig> {
         if config.reliable_capacity == 0 || config.reliable_capacity > MAX_RELIABLE_EVENTS {
             return Err(InvalidInputBufferConfig(config.reliable_capacity));
@@ -50,6 +56,13 @@ impl InputBuffer {
         })
     }
 
+    /// Adds an input event using reliable queuing or latest-state replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InputQueueFull`] with ownership of the rejected event when the
+    /// reliable lane is at capacity. Mouse movement and gamepad state use their
+    /// own single-value lanes and therefore do not produce this error.
     pub fn push(&mut self, event: InputEvent) -> Result<PushOutcome, InputQueueFull> {
         match event {
             InputEvent::MouseMove(movement) => {
@@ -131,13 +144,13 @@ mod tests {
     use super::*;
     use crate::{KeyAction, KeyEvent, Modifiers, MouseButton, MouseButtonEvent, MousePosition};
 
-    fn mouse(sequence: u64) -> InputEvent {
+    fn mouse(sequence: u16) -> InputEvent {
         InputEvent::MouseMove(MouseMove {
             position: MousePosition::Relative {
-                delta_x: sequence as f64,
+                delta_x: f64::from(sequence),
                 delta_y: 0.0,
             },
-            captured_at_us: sequence,
+            captured_at_us: u64::from(sequence),
         })
     }
 

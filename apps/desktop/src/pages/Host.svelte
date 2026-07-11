@@ -34,12 +34,10 @@
   </header>
 
   {#if actionError ?? $host.error}<div class="notice error" role="alert">{actionError ?? $host.error}</div>{/if}
-  {#if $session.mode !== 'cloud'}<div class="notice warning">Local host registration is unavailable until the bundled local server and discovery backend are installed.</div>{/if}
-
   <div class="host-hero card">
     <div class="host-state-orb" class:online={$host.online}><span></span></div>
     <div><h2>{$host.online ? 'This computer is visible' : 'This computer is private'}</h2><p>{$host.online ? 'Authenticated devices on this account may request a session.' : 'No remote connection request can be accepted.'}</p></div>
-    <button class:danger={$host.online} class:primary={!$host.online} class="button" disabled={$host.busy || (!canHost && !$host.online)} onclick={toggleHost}>{$host.busy ? 'Working…' : $host.online ? 'Go offline' : 'Go online'}</button>
+    <button class:danger={$host.online} class:primary={!$host.online} class="button" disabled={$host.busy || (!canHost && !$host.online)} title={!canHost && !$host.online ? runtime.capabilities.hostEngine.reason ?? 'The Windows host engine is unavailable' : undefined} onclick={toggleHost}>{$host.busy ? 'Working…' : $host.online ? 'Go offline' : 'Go online'}</button>
   </div>
 
   <div class="grid two host-grid">
@@ -65,7 +63,7 @@
 
     <article class="card card-body stack">
       <div><h2 class="card-title">Current client</h2><p class="card-subtitle">Live host events are shown here after signaling integration.</p></div>
-      <div class="empty compact-empty"><div><h3>No active client</h3><p>Capture does not run while idle, keeping CPU and GPU use low.</p><button class="button danger" disabled>Stop session</button></div></div>
+      <div class="empty compact-empty"><div><h3>No active client</h3><p>Capture does not run while idle, keeping CPU and GPU use low.</p><button class="button danger" disabled title="No active native session">Stop session · Unavailable</button></div></div>
     </article>
   </div>
 </section>

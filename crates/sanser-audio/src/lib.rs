@@ -18,6 +18,10 @@ pub use queue::{
 ///
 /// `volume_percent` accepts `0..=200`; values above 100% are saturated instead
 /// of wrapping. A muted buffer is cleared directly.
+///
+/// # Errors
+///
+/// Returns [`InvalidVolume`] when `volume_percent` is greater than 200.
 pub fn apply_pcm16_gain(
     samples: &mut [i16],
     volume_percent: u16,

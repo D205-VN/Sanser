@@ -1,26 +1,22 @@
-use std::{env, net::IpAddr, path::PathBuf, str::FromStr, time::Duration};
+use std::{env, net::IpAddr, str::FromStr, sync::Arc, time::Duration};
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use http::HeaderValue;
 pub use sanser_core::NetworkMode;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 pub const SANSER_VERSION: &str = sanser_core::VERSION;
 pub const PROTOCOL_VERSION: u8 = sanser_core::PROTOCOL_VERSION;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StorageMode {
-    Local,
-    Shared,
-}
 
 #[derive(Clone)]
 pub struct Config {
     pub host: IpAddr,
     pub port: u16,
-    pub public_base_url: String,
-    pub storage_mode: StorageMode,
     pub database_url: String,
-    pub sqlite_path: Option<PathBuf>,
+    pub database_max_connections: u32,
+    pub database_min_connections: u32,
+    pub database_acquire_timeout: Duration,
     pub allowed_origins: Vec<HeaderValue>,
     pub network_mode: NetworkMode,
     pub stun_urls: Vec<String>,
@@ -37,6 +33,9 @@ pub struct Config {
     pub login_rate_limit_per_ten_minutes: u32,
     pub device_offline_after: Duration,
     pub pending_session_ttl: Duration,
+    pub native_base_port: u16,
+    pub session_credential_ttl: Duration,
+    pub(crate) session_credential_key: Arc<Zeroizing<Vec<u8>>>,
 }
 
 #[derive(Debug, Error)]
@@ -63,19 +62,19 @@ impl Config {
         }
 
         let host = parse_env("SERVER_HOST", "127.0.0.1")?;
-        let port = parse_env("SERVER_PORT", "5174")?;
-        let public_base_url = env_or("PUBLIC_BASE_URL", "http://127.0.0.1:5174");
-        validate_public_url(&public_base_url)?;
-
-        let storage_mode = parse_storage_mode(&env_or("STORAGE_MODE", "local"))?;
-        let (database_url, sqlite_path) = database_config(
-            storage_mode,
-            optional_env("DATABASE_URL"),
-            optional_env("SQLITE_PATH"),
-        )?;
+        // Cloud platforms (Render, Railway, etc.) inject PORT. Prefer
+        // SERVER_PORT for explicitness, fall back to PORT, then default.
+        let port: u16 = optional_env("SERVER_PORT")
+            .or_else(|| optional_env("PORT"))
+            .unwrap_or_else(|| "5174".to_owned())
+            .parse()
+            .map_err(|_| ConfigError::Invalid("SERVER_PORT / PORT has an invalid value".into()))?;
+        let database_url = required_env("DATABASE_URL")?;
+        validate_neon_database_url(&database_url, false)?;
+        let session_credential_key = session_credential_key_from_env()?;
         let allowed_origins = parse_origins(&env_or(
             "ALLOWED_ORIGINS",
-            "http://127.0.0.1:5174,http://localhost:5174,tauri://localhost",
+            "http://127.0.0.1:5174,http://localhost:5174,tauri://localhost,http://tauri.localhost",
         ))?;
         let network_mode = parse_network_mode(&env_or("NETWORK_MODE", "auto"))?;
         let stun_urls = parse_urls(
@@ -110,10 +109,13 @@ impl Config {
         let config = Self {
             host,
             port,
-            public_base_url,
-            storage_mode,
             database_url,
-            sqlite_path,
+            database_max_connections: parse_env("DATABASE_MAX_CONNECTIONS", "10")?,
+            database_min_connections: parse_env("DATABASE_MIN_CONNECTIONS", "1")?,
+            database_acquire_timeout: Duration::from_secs(parse_env(
+                "DATABASE_ACQUIRE_TIMEOUT_SECONDS",
+                "10",
+            )?),
             allowed_origins,
             network_mode,
             stun_urls,
@@ -142,19 +144,26 @@ impl Config {
                 "PENDING_SESSION_TTL_SECONDS",
                 "30",
             )?),
+            native_base_port: parse_env("NATIVE_BASE_PORT", "50000")?,
+            session_credential_ttl: Duration::from_secs(parse_env(
+                "SESSION_CREDENTIAL_TTL_SECONDS",
+                "60",
+            )?),
+            session_credential_key,
         };
         config.validate()?;
         Ok(config)
     }
 
-    pub fn test(database_url: String) -> Self {
-        Self {
+    pub fn test(database_url: String) -> Result<Self, ConfigError> {
+        validate_neon_database_url(&database_url, true)?;
+        let config = Self {
             host: "127.0.0.1".parse().expect("valid loopback address"),
             port: 0,
-            public_base_url: "http://127.0.0.1:5174".into(),
-            storage_mode: StorageMode::Local,
             database_url,
-            sqlite_path: None,
+            database_max_connections: 4,
+            database_min_connections: 0,
+            database_acquire_timeout: Duration::from_secs(10),
             allowed_origins: vec![HeaderValue::from_static("http://127.0.0.1:5174")],
             network_mode: NetworkMode::Auto,
             stun_urls: vec!["stun:stun.example.test:3478".into()],
@@ -171,10 +180,28 @@ impl Config {
             login_rate_limit_per_ten_minutes: 8,
             device_offline_after: Duration::from_secs(20),
             pending_session_ttl: Duration::from_secs(30),
-        }
+            native_base_port: 50_000,
+            session_credential_ttl: Duration::from_secs(60),
+            session_credential_key: Arc::new(Zeroizing::new(vec![0xA5; 32])),
+        };
+        config.validate()?;
+        Ok(config)
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if !(1..=100).contains(&self.database_max_connections)
+            || self.database_min_connections > self.database_max_connections
+        {
+            return Err(ConfigError::Invalid(
+                "DATABASE_MAX_CONNECTIONS must be 1–100 and DATABASE_MIN_CONNECTIONS may not exceed it"
+                    .into(),
+            ));
+        }
+        if !(1..=60).contains(&self.database_acquire_timeout.as_secs()) {
+            return Err(ConfigError::Invalid(
+                "DATABASE_ACQUIRE_TIMEOUT_SECONDS must be between 1 and 60".into(),
+            ));
+        }
         if !(60..=86_400).contains(&self.access_token_ttl.as_secs()) {
             return Err(ConfigError::Invalid(
                 "ACCESS_TOKEN_TTL_SECONDS must be between 60 and 86400".into(),
@@ -208,6 +235,16 @@ impl Config {
                 "TURN_CREDENTIAL_TTL_SECONDS must be between 60 and 86400".into(),
             ));
         }
+        if !(1_024..=65_533).contains(&self.native_base_port) {
+            return Err(ConfigError::Invalid(
+                "NATIVE_BASE_PORT must be between 1024 and 65533".into(),
+            ));
+        }
+        if !(15..=300).contains(&self.session_credential_ttl.as_secs()) {
+            return Err(ConfigError::Invalid(
+                "SESSION_CREDENTIAL_TTL_SECONDS must be between 15 and 300".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -223,62 +260,81 @@ fn parse_network_mode(value: &str) -> Result<NetworkMode, ConfigError> {
     }
 }
 
-fn parse_storage_mode(value: &str) -> Result<StorageMode, ConfigError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "local" => Ok(StorageMode::Local),
-        "shared" => Ok(StorageMode::Shared),
-        _ => Err(ConfigError::Invalid(
-            "STORAGE_MODE must be one of: local, shared".into(),
-        )),
+fn validate_neon_database_url(
+    database_url: &str,
+    allow_test_schema_option: bool,
+) -> Result<(), ConfigError> {
+    let parsed = url::Url::parse(database_url)
+        .map_err(|_| ConfigError::Invalid("DATABASE_URL is not a valid URL".into()))?;
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") {
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL must use postgresql:// or postgres://".into(),
+        ));
     }
-}
 
-fn database_config(
-    mode: StorageMode,
-    database_url: Option<String>,
-    sqlite_path: Option<String>,
-) -> Result<(String, Option<PathBuf>), ConfigError> {
-    match mode {
-        StorageMode::Local => {
-            // DATABASE_URL is deliberately ignored in local mode. This makes a
-            // copied .env.example safe even while it contains a cloud placeholder.
-            let path = PathBuf::from(sqlite_path.unwrap_or_else(|| "./data/sanser.db".into()));
-            let path_string = path.to_string_lossy().replace('\\', "/");
-            if path_string
-                .chars()
-                .any(|character| matches!(character, '?' | '#' | '\n' | '\r'))
-            {
-                return Err(ConfigError::Invalid(
-                    "SQLITE_PATH may not contain ?, #, or line breaks".into(),
-                ));
-            }
-            Ok((
-                format!("sqlite://{path_string}?mode=rwc"),
-                Some(path),
-            ))
-        }
-        StorageMode::Shared => {
-            let database_url = database_url.ok_or_else(|| {
-                ConfigError::Invalid(
-                    "STORAGE_MODE=shared requires a PostgreSQL DATABASE_URL".into(),
-                )
-            })?;
-            if !(database_url.starts_with("postgres://")
-                || database_url.starts_with("postgresql://"))
-            {
-                return Err(ConfigError::Invalid(
-                    "STORAGE_MODE=shared requires DATABASE_URL to use postgresql:// or postgres://"
-                        .into(),
-                ));
-            }
-            database_url
-                .parse::<sqlx::postgres::PgConnectOptions>()
-                .map_err(|_| {
-                    ConfigError::Invalid("DATABASE_URL is not a valid PostgreSQL URL".into())
-                })?;
-            Ok((database_url, None))
-        }
+    let host = parsed
+        .host_str()
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| ConfigError::Invalid("DATABASE_URL must include a Neon host".into()))?;
+    if !host.ends_with(".neon.tech") {
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL host must be a Neon endpoint ending in .neon.tech".into(),
+        ));
     }
+    if parsed.username().is_empty() {
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL must include a PostgreSQL user".into(),
+        ));
+    }
+    if parsed.password().is_none_or(str::is_empty) {
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL must include a PostgreSQL password".into(),
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL may not contain a fragment".into(),
+        ));
+    }
+    if parsed.path().trim_matches('/').is_empty() || parsed.path().trim_matches('/').contains('/') {
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL must include exactly one database name".into(),
+        ));
+    }
+
+    let query_pairs = parsed.query_pairs().collect::<Vec<_>>();
+    let ssl_modes = query_pairs
+        .iter()
+        .filter(|(key, _)| key == "sslmode")
+        .map(|(_, value)| value.as_ref())
+        .collect::<Vec<_>>();
+    if ssl_modes.len() != 1 || ssl_modes[0] != "require" {
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL must contain sslmode=require for Neon TLS".into(),
+        ));
+    }
+    for (key, value) in query_pairs {
+        if key == "sslmode" {
+            continue;
+        }
+        if key == "channel_binding" && value == "require" {
+            continue;
+        }
+        if allow_test_schema_option
+            && key == "options"
+            && value
+                .strip_prefix("-csearch_path=sanser_test_")
+                .is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+        {
+            continue;
+        }
+        return Err(ConfigError::Invalid(
+            "DATABASE_URL contains an unsupported connection parameter".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_origins(value: &str) -> Result<Vec<HeaderValue>, ConfigError> {
@@ -291,6 +347,28 @@ fn parse_origins(value: &str) -> Result<Vec<HeaderValue>, ConfigError> {
                 return Err(ConfigError::Invalid(
                     "ALLOWED_ORIGINS may not contain a wildcard".into(),
                 ));
+            }
+            let parsed = url::Url::parse(origin).map_err(|_| {
+                ConfigError::Invalid(format!(
+                    "ALLOWED_ORIGINS contains an invalid origin: {origin}"
+                ))
+            })?;
+            let host = parsed.host_str().unwrap_or_default();
+            let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+            let tauri_origin = (parsed.scheme() == "tauri" && host == "localhost")
+                || (parsed.scheme() == "http" && host == "tauri.localhost");
+            if parsed.username() != ""
+                || parsed.password().is_some()
+                || !matches!(parsed.path(), "" | "/")
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+                || !(parsed.scheme() == "https"
+                    || (parsed.scheme() == "http" && loopback)
+                    || tauri_origin)
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "ALLOWED_ORIGINS must contain only HTTPS, loopback development, or Tauri origins: {origin}"
+                )));
             }
             origin.parse::<HeaderValue>().map_err(|_| {
                 ConfigError::Invalid(format!(
@@ -318,16 +396,6 @@ fn parse_urls(name: &str, value: &str, schemes: &[&str]) -> Result<Vec<String>, 
         .collect()
 }
 
-fn validate_public_url(value: &str) -> Result<(), ConfigError> {
-    if value.starts_with("http://") || value.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(ConfigError::Invalid(
-            "PUBLIC_BASE_URL must start with http:// or https://".into(),
-        ))
-    }
-}
-
 fn env_or(name: &str, default: &str) -> String {
     optional_env(name).unwrap_or_else(|| default.to_owned())
 }
@@ -337,6 +405,29 @@ fn optional_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn required_env(name: &str) -> Result<String, ConfigError> {
+    optional_env(name).ok_or_else(|| ConfigError::Invalid(format!("{name} is required")))
+}
+
+fn session_credential_key_from_env() -> Result<Arc<Zeroizing<Vec<u8>>>, ConfigError> {
+    let encoded = env::var("SESSION_CREDENTIAL_KEY")
+        .map(Zeroizing::new)
+        .map_err(|_| ConfigError::Invalid("SESSION_CREDENTIAL_KEY is required".into()))?;
+    decode_session_credential_key(encoded.trim())
+}
+
+fn decode_session_credential_key(encoded: &str) -> Result<Arc<Zeroizing<Vec<u8>>>, ConfigError> {
+    let decoded = STANDARD
+        .decode(encoded)
+        .map_err(|_| ConfigError::Invalid("SESSION_CREDENTIAL_KEY must be valid base64".into()))?;
+    if !(32..=128).contains(&decoded.len()) {
+        return Err(ConfigError::Invalid(
+            "SESSION_CREDENTIAL_KEY must decode to 32–128 bytes".into(),
+        ));
+    }
+    Ok(Arc::new(Zeroizing::new(decoded)))
 }
 
 fn parse_env<T>(name: &str, default: &str) -> Result<T, ConfigError>
@@ -353,47 +444,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_mode_uses_sqlite_and_ignores_database_url_placeholder() {
-        let (url, path) = database_config(
-            StorageMode::Local,
-            Some("postgresql://USER:PASSWORD@HOST:5432/sanser".into()),
-            Some("./data/local.db".into()),
-        )
-        .expect("local storage configuration");
-
-        assert!(url.starts_with("sqlite://./data/local.db?"));
-        assert_eq!(path, Some(PathBuf::from("./data/local.db")));
-        assert!(!url.contains("PASSWORD"));
-    }
-
-    #[test]
-    fn shared_mode_requires_a_valid_postgresql_url() {
-        assert!(database_config(StorageMode::Shared, None, None).is_err());
+    fn database_is_neon_postgres_with_required_tls() {
+        assert!(validate_neon_database_url("sqlite://./data/sanser.db", false).is_err());
         assert!(
-            database_config(
-                StorageMode::Shared,
-                Some("sqlite://./data/sanser.db".into()),
-                None,
+            validate_neon_database_url(
+                "postgresql://user:pass@localhost:5432/sanser?sslmode=require",
+                false,
             )
             .is_err()
         );
-        assert!(database_config(StorageMode::Shared, Some("postgresql://".into()), None,).is_err());
-
-        let (url, path) = database_config(
-            StorageMode::Shared,
-            Some("postgresql://user:password@localhost:5432/sanser".into()),
-            Some("./ignored.db".into()),
-        )
-        .expect("shared storage configuration");
-        assert_eq!(url, "postgresql://user:password@localhost:5432/sanser");
-        assert_eq!(path, None);
+        assert!(
+            validate_neon_database_url(
+                "postgresql://user@ep-test.ap-southeast-1.aws.neon.tech/sanser?sslmode=require",
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_neon_database_url(
+                "postgresql://user:pass@ep-test.ap-southeast-1.aws.neon.tech/sanser?SSLMODE=require",
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_neon_database_url(
+                "postgresql://user:pass@ep-test.ap-southeast-1.aws.neon.tech/sanser?sslmode=require&sslmode=require",
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_neon_database_url(
+                "postgresql://user:pass@ep-test.ap-southeast-1.aws.neon.tech/sanser",
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_neon_database_url(
+                "postgresql://user:pass@ep-test.ap-southeast-1.aws.neon.tech/sanser?sslmode=disable",
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_neon_database_url(
+                "postgresql://user:pass@ep-test-pooler.ap-southeast-1.aws.neon.tech/sanser?sslmode=require&channel_binding=require",
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_neon_database_url(
+                "postgresql://user:pass@ep-test-pooler.ap-southeast-1.aws.neon.tech/sanser?sslmode=require&unknown=value",
+                false,
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn storage_mode_is_strict() {
-        assert_eq!(parse_storage_mode("local").ok(), Some(StorageMode::Local));
-        assert_eq!(parse_storage_mode("SHARED").ok(), Some(StorageMode::Shared));
-        assert!(parse_storage_mode("auto").is_err());
-        assert!(parse_storage_mode("sqlite").is_err());
+    fn native_session_key_is_base64_and_at_least_256_bits() {
+        assert!(decode_session_credential_key("not base64").is_err());
+        assert!(decode_session_credential_key(&STANDARD.encode([7_u8; 31])).is_err());
+        let key = decode_session_credential_key(&STANDARD.encode([7_u8; 32]))
+            .expect("valid 256-bit session credential key");
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn cors_origins_are_exact_and_secure() {
+        assert!(
+            parse_origins(
+                "https://app.example.com,tauri://localhost,http://tauri.localhost,http://127.0.0.1:1420"
+            )
+            .is_ok()
+        );
+        assert!(parse_origins("*").is_err());
+        assert!(parse_origins("http://app.example.com").is_err());
+        assert!(parse_origins("https://app.example.com/path").is_err());
+        assert!(parse_origins("https://user:secret@app.example.com").is_err());
     }
 }

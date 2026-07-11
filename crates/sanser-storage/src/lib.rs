@@ -1,4 +1,4 @@
-//! Persistent storage shared by local and cloud deployments.
+//! Neon `PostgreSQL` storage and safe legacy preference migration.
 
 mod backend;
 mod legacy;

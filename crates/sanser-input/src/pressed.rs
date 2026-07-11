@@ -13,6 +13,15 @@ pub struct PressedState {
 }
 
 impl PressedState {
+    /// Applies a reliable key or mouse-button event to the pressed-state set.
+    ///
+    /// Movement, wheel, gamepad, and key-repeat events do not change the set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PressedStateFull::Keys`] before inserting a 513th distinct
+    /// key, or [`PressedStateFull::MouseButtons`] before inserting a 33rd
+    /// distinct mouse button. Releases and duplicate presses remain accepted.
     pub fn observe(&mut self, event: &InputEvent) -> Result<(), PressedStateFull> {
         match event {
             InputEvent::Keyboard(key) => match key.action {

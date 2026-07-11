@@ -23,4 +23,4 @@ npm run desktop:build
 npm run native:protocol:test
 ```
 
-Run the local Rust server with `npm run server:dev`. Run the WebView frontend with `npm run dev`, or the complete Tauri shell with `npm run desktop:dev`.
+Set a TLS-enabled Neon `DATABASE_URL`, then run the Rust API server with `npm run server:dev`. Run the WebView frontend with `npm run dev`, or the complete Tauri shell with `npm run desktop:dev`. The desktop does not bundle a database or local API sidecar.

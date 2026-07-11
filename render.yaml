@@ -1,0 +1,24 @@
+# Render Blueprint — https://docs.render.com/infrastructure-as-code
+services:
+  - type: web
+    name: sanser-server
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: singapore  # gần Việt Nam nhất
+    plan: free         # đổi thành "starter" nếu cần uptime 24/7
+    healthCheckPath: /api/v2/health
+    envVars:
+      - key: SERVER_HOST
+        value: "0.0.0.0"
+      - key: DATABASE_URL
+        sync: false  # set manually in Render dashboard
+      - key: SESSION_CREDENTIAL_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: NETWORK_MODE
+        value: auto
+      - key: STUN_URLS
+        value: "stun:stun.l.google.com:19302"
+      - key: RUST_LOG
+        value: "sanser_server=info,tower_http=info"

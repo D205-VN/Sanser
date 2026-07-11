@@ -14,6 +14,13 @@ pub struct AudioPacket {
 }
 
 impl AudioPacket {
+    /// Validates the packet's duration and encoded payload size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioPacketError::Duration`] when the duration is outside the
+    /// supported frame range, or [`AudioPacketError::PayloadLength`] when the
+    /// payload is empty or too large.
     pub fn validate(&self) -> Result<(), AudioPacketError> {
         if self.duration_us == 0 || self.duration_us > 120_000 {
             return Err(AudioPacketError::Duration(self.duration_us));
@@ -32,6 +39,13 @@ pub struct AudioQueueConfig {
 }
 
 impl AudioQueueConfig {
+    /// Validates the queue's packet-count and buffered-duration bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioQueueConfigError::Packets`] or
+    /// [`AudioQueueConfigError::Duration`] when the corresponding limit is zero
+    /// or exceeds the supported maximum.
     pub fn validate(self) -> Result<Self, AudioQueueConfigError> {
         if self.max_packets == 0 || self.max_packets > MAX_QUEUE_PACKETS {
             return Err(AudioQueueConfigError::Packets(self.max_packets));
@@ -68,6 +82,12 @@ pub struct AudioQueue {
 }
 
 impl AudioQueue {
+    /// Creates a bounded audio queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioQueueConfigError`] when the packet-count or duration
+    /// capacity is outside the supported range.
     pub fn new(config: AudioQueueConfig) -> Result<Self, AudioQueueConfigError> {
         Ok(Self {
             packets: VecDeque::with_capacity(config.max_packets.min(64)),
@@ -76,6 +96,13 @@ impl AudioQueue {
         })
     }
 
+    /// Validates and enqueues a packet, evicting the oldest audio as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a packet validation error for an invalid duration or payload, or
+    /// [`AudioPacketError::ExceedsQueueDuration`] when one packet is longer than
+    /// the queue's complete duration budget.
     pub fn push(&mut self, packet: AudioPacket) -> Result<AudioQueuePush, AudioPacketError> {
         packet.validate()?;
         if self

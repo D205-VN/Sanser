@@ -3,10 +3,12 @@ import { loadNativePreferences, saveNativePreferences } from '../lib/platform';
 import type { NetworkMode, Preferences, QualityProfile, VideoCodec } from '../lib/types';
 
 const STORAGE_KEY = 'sanser.preferences.v2';
+export const CONFIGURED_SERVER_URL = (import.meta.env.VITE_SANSER_SERVER_URL as string | undefined)?.trim() ?? '';
+export const SERVER_ENDPOINT_LOCKED = CONFIGURED_SERVER_URL.length > 0;
 
 export const DEFAULT_PREFERENCES: Preferences = {
   schemaVersion: 2,
-  serverUrl: 'http://127.0.0.1:5174',
+  serverUrl: CONFIGURED_SERVER_URL,
   networkMode: 'auto',
   stream: {
     profile: 'auto',
@@ -71,8 +73,14 @@ function stringArray(value: unknown): string[] {
   return [...new Set(value.filter((item): item is string => typeof item === 'string' && item.length > 0))].slice(0, 200);
 }
 
-export function migratePreferences(value: unknown): Preferences {
-  if (!isRecord(value)) return structuredClone(DEFAULT_PREFERENCES);
+export function migratePreferences(
+  value: unknown,
+  configuredServerUrl = CONFIGURED_SERVER_URL
+): Preferences {
+  const lockedServerUrl = configuredServerUrl.trim();
+  const defaults = structuredClone(DEFAULT_PREFERENCES);
+  defaults.serverUrl = lockedServerUrl;
+  if (!isRecord(value)) return defaults;
 
   const stream = isRecord(value.stream) ? value.stream : value;
   const host = isRecord(value.host) ? value.host : {};
@@ -84,7 +92,10 @@ export function migratePreferences(value: unknown): Preferences {
 
   return {
     schemaVersion: 2,
-    serverUrl: pickString(value.serverUrl ?? value.server_url, DEFAULT_PREFERENCES.serverUrl),
+    // A release endpoint is part of the signed application configuration. Never
+    // let a stale local preference override it. An editable endpoint only exists
+    // in developer builds where VITE_SANSER_SERVER_URL is intentionally absent.
+    serverUrl: lockedServerUrl || pickString(value.serverUrl ?? value.server_url, defaults.serverUrl),
     networkMode: networkMode(oldNetwork),
     stream: {
       profile: qualityProfile(oldQuality),

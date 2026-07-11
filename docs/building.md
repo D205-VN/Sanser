@@ -20,6 +20,6 @@ npm run native:host-windows:build
 npm run desktop:bundle
 ```
 
-The Windows bundle must contain only the Tauri shell, `sanser-host-windows`, the Rust local/server sidecar when selected, WebView2 bootstrap policy, and production assets. It must not contain the macOS engine, source trees, tests, CMake cache, captures, Node modules, or debug symbols.
+The Windows bundle must contain only the Tauri shell, `sanser-host-windows`, WebView2 bootstrap policy, and production assets. It must not contain the API server, database drivers, macOS engine, source trees, tests, CMake cache, captures, Node modules, or debug symbols.
 
 See `docs/sanser-2-release.md` for artifact names and verification status.

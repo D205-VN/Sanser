@@ -10,6 +10,14 @@ pub struct Nack {
 }
 
 impl Nack {
+    /// Encodes a canonical, bounded NACK payload in network byte order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlPayloadError::NackCount`] when the sequence list is
+    /// empty or exceeds [`MAX_NACK_SEQUENCES`], and
+    /// [`ControlPayloadError::NonCanonicalSequences`] when the sequence
+    /// numbers are not strictly increasing.
     pub fn encode(&self) -> Result<Vec<u8>, ControlPayloadError> {
         if self.missing_sequences.is_empty() || self.missing_sequences.len() > MAX_NACK_SEQUENCES {
             return Err(ControlPayloadError::NackCount(self.missing_sequences.len()));
@@ -33,6 +41,13 @@ impl Nack {
         Ok(encoded)
     }
 
+    /// Decodes and validates a canonical NACK payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the payload is truncated, has a mismatched
+    /// length, uses reserved bits, declares an invalid sequence count, or
+    /// contains sequence numbers that are not strictly increasing.
     pub fn decode(encoded: &[u8]) -> Result<Self, ControlPayloadError> {
         if encoded.len() < NACK_PREFIX_LEN {
             return Err(ControlPayloadError::Truncated);
@@ -87,6 +102,12 @@ impl KeyframeRequest {
         self.last_decoded_frame_id.to_be_bytes()
     }
 
+    /// Decodes a keyframe request from its fixed-width wire representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlPayloadError::LengthMismatch`] unless `encoded`
+    /// contains exactly eight bytes.
     pub fn decode(encoded: &[u8]) -> Result<Self, ControlPayloadError> {
         Ok(Self {
             last_decoded_frame_id: u64::from_be_bytes(

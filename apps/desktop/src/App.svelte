@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import BrandMark from './components/BrandMark.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import { runtimeStatus } from './lib/platform';
   import type { Page, RuntimeStatus } from './lib/types';
@@ -13,19 +14,38 @@
   import { diagnostics } from './stores/diagnostics';
   import { host } from './stores/host';
   import { preferences } from './stores/preferences';
+  import { presence } from './stores/presence';
   import { session } from './stores/session';
 
   let page = $state<Page>('computers');
   let runtime = $state<RuntimeStatus | null>(null);
   let bootError = $state<string | null>(null);
 
+  const pageMeta: Record<Page, { section: string; label: string }> = {
+    computers: { section: 'Workspace', label: 'Computers' },
+    host: { section: 'Workspace', label: 'Host' },
+    session: { section: 'Workspace', label: 'Active session' },
+    settings: { section: 'System', label: 'Settings' },
+    diagnostics: { section: 'System', label: 'Diagnostics' },
+    about: { section: 'System', label: 'About Sanser' }
+  };
+
   function navigate(next: Page): void {
     page = next;
   }
 
+  $effect(() => {
+    if (runtime && $session.mode === 'cloud' && runtime.capabilities.clientEngine.state === 'available') {
+      void presence.start(runtime);
+    } else {
+      void presence.stop();
+    }
+  });
+
   async function signOut(): Promise<void> {
     try {
       if ($host.online) await host.offline();
+      await presence.stop();
       await session.logout();
     } catch (error) {
       diagnostics.add({ level: 'warn', category: 'auth', message: error instanceof Error ? error.message : 'Sign out failed' });
@@ -48,9 +68,9 @@
 </script>
 
 {#if bootError}
-  <main class="fatal-screen"><img src="/sanser-mark.svg" alt="" /><h1>Sanser could not start</h1><p>{bootError}</p><button class="button" onclick={() => window.location.reload()}>Retry</button></main>
+  <main class="fatal-screen"><BrandMark size={68} label="Sanser" /><h1>Sanser could not start</h1><p>{bootError}</p><button class="button" onclick={() => window.location.reload()}>Retry</button></main>
 {:else if !runtime || !$session.ready}
-  <main class="boot-screen"><img src="/sanser-mark.svg" alt="" /><span>Starting Sanser…</span></main>
+  <main class="boot-screen"><BrandMark size={68} label="Sanser" /><span>Starting Sanser…</span></main>
 {:else if $session.mode === 'signedOut'}
   <Welcome />
 {:else}
@@ -58,8 +78,15 @@
     <Sidebar active={page} {runtime} {navigate} />
     <div class="content-shell">
       <header class="titlebar">
-        <span class="title-account">{$session.mode === 'cloud' ? $session.account?.email : 'Local mode'}</span>
-        <button class="button small ghost" onclick={signOut}>{$session.mode === 'cloud' ? 'Sign out' : 'Exit local mode'}</button>
+        <div class="title-context">
+          <span>{pageMeta[page].section}</span>
+          <strong>{pageMeta[page].label}</strong>
+        </div>
+        <div class="title-actions">
+          <span class="mode-indicator"><i></i>Sanser connected</span>
+          <span class="title-account">{$session.account?.email}</span>
+          <button class="button small ghost" onclick={signOut}>Sign out</button>
+        </div>
       </header>
       <main class:session-scroll={page === 'session'} class="page-scroll">
         {#if page === 'computers'}<Computers {runtime} {navigate} />

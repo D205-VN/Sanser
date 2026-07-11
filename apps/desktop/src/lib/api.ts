@@ -5,6 +5,7 @@ import type {
   Device,
   DeviceRegistration,
   LoginSession,
+  NativeSessionCredentials,
   NetworkMode,
   QualityProfile
 } from './types';
@@ -54,14 +55,22 @@ interface PageEnvelope<T> {
   nextCursor?: string | null;
 }
 
+interface RawLoginSession extends Omit<LoginSession, 'createdAt' | 'lastSeenAt' | 'expiresAt'> {
+  createdAt: string | number;
+  lastSeenAt: string | number;
+  expiresAt: string | number;
+}
+
 interface RawDevice extends Partial<Device> {
   sanserVersion?: string;
   osVersion?: string;
   codecs?: string[];
   nativeTransport?: boolean;
   webRtc?: boolean;
+  webrtc?: boolean;
   audio?: boolean;
   gamepad?: boolean;
+  routeAddress?: string | null;
 }
 
 interface RawSession extends Omit<Partial<ConnectionSession>, 'createdAt' | 'updatedAt'> {
@@ -69,6 +78,7 @@ interface RawSession extends Omit<Partial<ConnectionSession>, 'createdAt' | 'upd
   selectedTransport?: string | null;
   createdAt?: string | number;
   updatedAt?: string | number;
+  mediaCredential?: string;
 }
 
 function dateString(value: string | number | null | undefined): string | null {
@@ -90,11 +100,11 @@ function normalizeDevice(raw: RawDevice): Device {
     version: raw.version ?? raw.sanserVersion ?? 'Unknown',
     latencyMs: typeof raw.latencyMs === 'number' ? raw.latencyMs : null,
     networkQuality: raw.networkQuality ?? 'unknown',
-    route: raw.route ?? null,
+    route: raw.route ?? raw.routeAddress ?? null,
     capabilities: {
       codecs: codecs.length > 0 ? codecs : ['auto'],
       nativeTransport: raw.capabilities?.nativeTransport ?? raw.nativeTransport === true,
-      webRtc: raw.capabilities?.webRtc ?? raw.webRtc === true,
+      webRtc: raw.capabilities?.webRtc ?? (raw.webRtc === true || raw.webrtc === true),
       audio: raw.capabilities?.audio ?? raw.audio === true,
       gamepad: raw.capabilities?.gamepad ?? raw.gamepad === true
     },
@@ -115,7 +125,8 @@ function normalizeConnectionSession(raw: RawSession): ConnectionSession {
     createdAt: dateString(raw.createdAt) ?? new Date().toISOString(),
     updatedAt: dateString(raw.updatedAt) ?? undefined,
     address: raw.address,
-    port: raw.port
+    port: raw.port,
+    sessionToken: raw.sessionToken ?? raw.mediaCredential
   };
 }
 
@@ -168,6 +179,13 @@ export class ApiClient {
     return this.request('/api/v2/account');
   }
 
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await this.request('/api/v2/account/password', {
+      method: 'POST',
+      body: { currentPassword, newPassword }
+    });
+  }
+
   async devices(cursor?: string): Promise<PageEnvelope<Device>> {
     const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
     const response = await this.request<PageEnvelope<RawDevice> | RawDevice[]>(`/api/v2/devices${query}`);
@@ -200,18 +218,28 @@ export class ApiClient {
     return normalizeDevice(await this.request<RawDevice>('/api/v2/devices/register', { method: 'POST', body: device }));
   }
 
-  async heartbeatDevice(id: string, online: boolean): Promise<void> {
-    await this.request('/api/v2/devices/heartbeat', { method: 'POST', body: { deviceId: id, online } });
+  async heartbeatDevice(id: string, streaming: boolean): Promise<void> {
+    await this.request('/api/v2/devices/heartbeat', { method: 'POST', body: { deviceId: id, streaming } });
+  }
+
+  async offlineDevice(id: string): Promise<Device> {
+    return normalizeDevice(
+      await this.request<RawDevice>('/api/v2/devices/offline', {
+        method: 'POST',
+        body: { deviceId: id }
+      })
+    );
   }
 
   async createSession(
     hostDeviceId: string,
+    requesterDeviceId: string,
     networkMode: NetworkMode,
     qualityProfile: QualityProfile
   ): Promise<ConnectionSession> {
     const response = await this.request<RawSession>('/api/v2/sessions', {
       method: 'POST',
-      body: { hostDeviceId, networkMode, qualityProfile }
+      body: { hostDeviceId, requesterDeviceId, networkMode, qualityProfile }
     });
     return normalizeConnectionSession(response);
   }
@@ -220,13 +248,25 @@ export class ApiClient {
     return normalizeConnectionSession(await this.request<RawSession>(`/api/v2/sessions/${encodeURIComponent(id)}`));
   }
 
+  async sessionCredentials(id: string, deviceId: string): Promise<NativeSessionCredentials> {
+    return this.request<NativeSessionCredentials>(
+      `/api/v2/sessions/${encodeURIComponent(id)}/credentials?deviceId=${encodeURIComponent(deviceId)}`
+    );
+  }
+
   async disconnectSession(id: string): Promise<void> {
     await this.request(`/api/v2/sessions/${encodeURIComponent(id)}/disconnect`, { method: 'POST' });
   }
 
   async loginSessions(): Promise<LoginSession[]> {
-    const response = await this.request<LoginSession[] | PageEnvelope<LoginSession>>('/api/v2/account/sessions');
-    return Array.isArray(response) ? response : response.items;
+    const response = await this.request<RawLoginSession[] | PageEnvelope<RawLoginSession>>('/api/v2/account/sessions');
+    const items = Array.isArray(response) ? response : response.items;
+    return items.map((item) => ({
+      ...item,
+      createdAt: dateString(item.createdAt) ?? '',
+      lastSeenAt: dateString(item.lastSeenAt) ?? '',
+      expiresAt: dateString(item.expiresAt) ?? ''
+    }));
   }
 
   async revokeLoginSession(id: string): Promise<void> {

@@ -15,4 +15,14 @@ describe('migratePreferences', () => {
     expect(migrated.stream.bitrateMbps).toBe(20);
     expect(migrated.stream.codec).toBe('auto');
   });
+
+  it('does not let a stale preference override a configured release endpoint', () => {
+    const configured = 'https://api.sanser.example';
+    const migrated = migratePreferences(
+      { serverUrl: 'https://stale-or-attacker.example', server_url: 'https://also-stale.example' },
+      configured
+    );
+
+    expect(migrated.serverUrl).toBe(configured);
+  });
 });

@@ -1,6 +1,6 @@
 import { get, writable } from 'svelte/store';
 import type { ApiClient } from '../lib/api';
-import type { ConnectionSession, SessionMetrics } from '../lib/types';
+import type { ConnectionSession, NativeSessionCredentials, SessionMetrics } from '../lib/types';
 import { diagnostics } from './diagnostics';
 
 export interface ConnectionState {
@@ -38,8 +38,19 @@ function createConnectionStore() {
       if (!current) return null;
       try {
         const refreshed = await client.getSession(current.id);
-        store.update((state) => ({ ...state, session: refreshed, error: null }));
-        return refreshed;
+        const credentialActive =
+          current.credentialExpiresAt !== undefined && current.credentialExpiresAt > Math.floor(Date.now() / 1_000);
+        const merged = credentialActive
+          ? {
+              ...refreshed,
+              address: current.address,
+              port: current.port,
+              sessionToken: current.sessionToken,
+              credentialExpiresAt: current.credentialExpiresAt
+            }
+          : refreshed;
+        store.update((state) => ({ ...state, session: merged, error: null }));
+        return merged;
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unable to refresh the session';
         store.update((state) => ({ ...state, error: message }));
@@ -48,6 +59,22 @@ function createConnectionStore() {
     },
     setEngineRunning(running: boolean): void {
       store.update((state) => ({ ...state, engineRunning: running, error: null }));
+    },
+    authorizeNative(credentials: NativeSessionCredentials): void {
+      store.update((state) => {
+        if (!state.session || state.session.id !== credentials.sessionId) return state;
+        return {
+          ...state,
+          session: {
+            ...state.session,
+            address: credentials.peerRouteAddress,
+            port: credentials.basePort,
+            sessionToken: credentials.sessionToken,
+            credentialExpiresAt: credentials.expiresAt
+          },
+          error: null
+        };
+      });
     },
     setError(message: string): void {
       store.update((state) => ({ ...state, busy: false, error: message }));

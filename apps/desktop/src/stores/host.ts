@@ -1,5 +1,5 @@
 import { get, writable } from 'svelte/store';
-import { secureGet, secureSet } from '../lib/platform';
+import { deviceIdentity } from '../lib/deviceIdentity';
 import { PROTOCOL_VERSION, SANSER_VERSION, type RuntimeStatus } from '../lib/types';
 import { diagnostics } from './diagnostics';
 import { session } from './session';
@@ -33,11 +33,9 @@ function createHostStore() {
 
       store.update((state) => ({ ...state, busy: true, error: null }));
       try {
-        let deviceId = await secureGet('device_identity');
-        if (!deviceId) {
-          deviceId = crypto.randomUUID();
-          await secureSet('device_identity', deviceId);
-        }
+        const accountId = get(session).account?.id;
+        if (!accountId) throw new Error('The signed-in account is unavailable');
+        let deviceId = deviceIdentity(accountId, 'host');
         const registered = await client.registerDevice({
           id: deviceId,
           name: 'Sanser Host',
@@ -58,7 +56,7 @@ function createHostStore() {
         heartbeatTimer = window.setInterval(() => {
           const current = get(store);
           if (!current.online || !current.deviceId) return;
-          void client.heartbeatDevice(current.deviceId, true).catch(() => {
+          void client.heartbeatDevice(current.deviceId, false).catch(() => {
             store.update((state) => ({ ...state, error: 'Host heartbeat failed; retrying' }));
           });
         }, 15_000);
@@ -70,16 +68,24 @@ function createHostStore() {
       }
     },
     async offline(): Promise<void> {
-      const state = get(store);
+      const current = get(store);
+      const client = session.client();
       stopTimer();
       store.update((current) => ({ ...current, busy: true }));
       try {
-        const client = session.client();
-        if (client && state.deviceId) await client.heartbeatDevice(state.deviceId, false);
+        if (client && current.deviceId && current.online) {
+          await client.offlineDevice(current.deviceId);
+        }
+      } catch (error) {
+        diagnostics.add({
+          level: 'warn',
+          category: 'engine',
+          message: error instanceof Error ? error.message : 'Unable to mark this host offline'
+        });
       } finally {
         store.set(initial);
-        diagnostics.add({ level: 'info', category: 'engine', message: 'Host is offline' });
       }
+      diagnostics.add({ level: 'info', category: 'engine', message: 'Host is offline' });
     }
   };
 }

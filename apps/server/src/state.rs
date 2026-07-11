@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use sqlx::AnyPool;
+use sqlx::PgPool;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::{config::Config, models::EventEnvelope, websocket::SignalHub};
@@ -12,7 +12,7 @@ use crate::{config::Config, models::EventEnvelope, websocket::SignalHub};
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
-    pub pool: AnyPool,
+    pub pool: PgPool,
     pub events: broadcast::Sender<EventEnvelope>,
     pub signaling: Arc<SignalHub>,
     pub general_limiter: RateLimiter,
@@ -20,7 +20,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: Config, pool: AnyPool) -> Self {
+    pub fn new(config: Config, pool: PgPool) -> Self {
         let general_limit = config.general_rate_limit_per_minute;
         let login_limit = config.login_rate_limit_per_ten_minutes;
         let (events, _) = broadcast::channel(256);

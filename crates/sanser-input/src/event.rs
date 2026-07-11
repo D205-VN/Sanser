@@ -99,6 +99,13 @@ pub enum InputEvent {
 }
 
 impl InputEvent {
+    /// Validates untrusted input values before native injection or buffering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`InputValidationError`] when mouse coordinates or wheel
+    /// deltas are non-finite or out of range, an extra mouse button is zero, a
+    /// keyboard HID usage is zero, or a gamepad identifier or axis is invalid.
     pub fn validate(&self) -> Result<(), InputValidationError> {
         match self {
             Self::MouseMove(movement) => match movement.position {

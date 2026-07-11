@@ -16,7 +16,7 @@ pub enum PacketPriority {
 impl TryFrom<u8> for PacketPriority {
     type Error = UnknownPriority;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self, UnknownPriority> {
         match value {
             1 => Ok(Self::ReliableInput),
             2 => Ok(Self::RealtimeInput),
@@ -76,10 +76,8 @@ impl PacketType {
         match self {
             Self::Video => 1_048_576,
             Self::Clipboard => 262_144,
-            Self::Audio => 65_536,
-            Self::Handshake | Self::Authentication => 16_384,
-            Self::MouseMove | Self::MouseButton | Self::Keyboard | Self::Gamepad => 4_096,
-            Self::NetworkFeedback
+            Self::Audio
+            | Self::NetworkFeedback
             | Self::EncoderFeedback
             | Self::DecoderFeedback
             | Self::Nack
@@ -87,6 +85,8 @@ impl PacketType {
             | Self::Keepalive
             | Self::Disconnect
             | Self::Error => 65_536,
+            Self::Handshake | Self::Authentication => 16_384,
+            Self::MouseMove | Self::MouseButton | Self::Keyboard | Self::Gamepad => 4_096,
         }
     }
 }
@@ -94,7 +94,7 @@ impl PacketType {
 impl TryFrom<u8> for PacketType {
     type Error = UnknownPacketType;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self, UnknownPacketType> {
         match value {
             1 => Ok(Self::Handshake),
             2 => Ok(Self::Authentication),

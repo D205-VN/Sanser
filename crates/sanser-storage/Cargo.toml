@@ -1,6 +1,6 @@
 [package]
 name = "sanser-storage"
-description = "SQLite local storage, PostgreSQL shared storage and safe legacy migration"
+description = "Neon PostgreSQL storage and safe legacy migration"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
@@ -18,7 +18,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tempfile = "3.20.0"
-tokio.workspace = true
 
 [lints]
 workspace = true

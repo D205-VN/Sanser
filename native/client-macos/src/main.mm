@@ -35,6 +35,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -374,23 +375,28 @@ std::string makeSecureControlEnvelope(const std::string& token,
 
 static constexpr std::size_t kUdpAuthTagHexSize = 32;
 
-std::string udpDatagramMacHex(const std::string& token,
-                              const char* media,
-                              const std::uint8_t* datagram,
-                              std::size_t datagramSize) {
-  std::string message = std::string("sanser-udp-v1|") + media + "|";
-  message.append(reinterpret_cast<const char*>(datagram), datagramSize);
-  return hmacSha256Hex(token, message).substr(0, kUdpAuthTagHexSize);
-}
-
 bool verifyUdpDatagramMac(const std::string& token,
                           const char* media,
-                          std::vector<std::uint8_t> datagram,
+                          std::span<const std::uint8_t> datagram,
                           std::size_t tagOffset) {
   if (token.empty() || tagOffset + kUdpAuthTagHexSize > datagram.size()) return false;
   const std::string received(reinterpret_cast<const char*>(datagram.data() + tagOffset), kUdpAuthTagHexSize);
-  std::memset(datagram.data() + tagOffset, 0, kUdpAuthTagHexSize);
-  const std::string expected = udpDatagramMacHex(token, media, datagram.data(), datagram.size());
+  const std::string prefix = std::string("sanser-udp-v1|") + media + "|";
+  const std::array<std::uint8_t, kUdpAuthTagHexSize> zeroTag{};
+  CCHmacContext context;
+  CCHmacInit(&context, kCCHmacAlgSHA256, token.data(), token.size());
+  CCHmacUpdate(&context, prefix.data(), prefix.size());
+  if (tagOffset > 0) {
+    CCHmacUpdate(&context, datagram.data(), tagOffset);
+  }
+  CCHmacUpdate(&context, zeroTag.data(), zeroTag.size());
+  const std::size_t suffixOffset = tagOffset + kUdpAuthTagHexSize;
+  if (suffixOffset < datagram.size()) {
+    CCHmacUpdate(&context, datagram.data() + suffixOffset, datagram.size() - suffixOffset);
+  }
+  std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest{};
+  CCHmacFinal(&context, digest.data());
+  const std::string expected = bytesToHex(digest.data(), kUdpAuthTagHexSize / 2);
   return constantTimeEqual(received, expected);
 }
 
@@ -3010,7 +3016,7 @@ SnvPacket parseSnvPacketBytes(const std::vector<std::uint8_t>& data) {
     throw std::runtime_error("Truncated SNV1 packet bytes.");
   }
   const std::uint32_t headerSize = readLe32Raw(data.data() + 4);
-  if (headerSize < 52 || headerSize > data.size()) {
+  if (headerSize < 52 || headerSize > kMaxSnvHeaderBytes || headerSize > data.size()) {
     throw std::runtime_error("Invalid SNV1 packet header size.");
   }
 
@@ -3019,9 +3025,12 @@ SnvPacket parseSnvPacketBytes(const std::vector<std::uint8_t>& data) {
     packet.hostUnixMicros = readLe64Raw(data.data() + 52);
   }
   const std::uint32_t payloadSize = readLe32Raw(data.data() + 48);
+  if (payloadSize > kMaxSnvPayloadBytes) {
+    throw std::runtime_error("SNV1 packet payload exceeds the decoder limit.");
+  }
   const std::size_t nextOffset = static_cast<std::size_t>(headerSize) + payloadSize;
-  if (nextOffset > data.size()) {
-    throw std::runtime_error("Truncated SNV1 packet payload.");
+  if (nextOffset != data.size()) {
+    throw std::runtime_error("SNV1 packet size does not match its header.");
   }
   packet.payload.assign(data.begin() + static_cast<std::ptrdiff_t>(headerSize),
                         data.begin() + static_cast<std::ptrdiff_t>(nextOffset));
@@ -3055,7 +3064,8 @@ std::vector<SnvPacket> readSnvPackets(const std::string& file, std::uint64_t max
     }
 
     const std::uint32_t headerSize = readLe32(data, offset + 4);
-    if (headerSize < 52 || offset + headerSize > data.size()) {
+    if (headerSize < 52 || headerSize > kMaxSnvHeaderBytes ||
+        offset + headerSize > data.size()) {
       throw std::runtime_error("Invalid SNV1 header size at byte " + std::to_string(offset));
     }
 
@@ -3072,6 +3082,9 @@ std::vector<SnvPacket> readSnvPackets(const std::string& file, std::uint64_t max
       packet.hostUnixMicros = readLe64(data, offset + 52);
     }
     const std::uint32_t payloadSize = readLe32(data, offset + 48);
+    if (payloadSize > kMaxSnvPayloadBytes) {
+      throw std::runtime_error("SNV1 packet payload exceeds the decoder limit.");
+    }
     const std::size_t payloadOffset = offset + headerSize;
     const std::size_t nextOffset = payloadOffset + payloadSize;
     if (nextOffset > data.size()) {
@@ -3632,6 +3645,22 @@ void processSnvPacket(VtH264Decoder& decoder, DecodeSummary& summary, const SnvP
   if (packet.codec != kSnvCodecH264 && packet.codec != kSnvCodecHevc) {
     throw std::runtime_error("Only H.264 and H.265/HEVC SNV1 codec packets are supported.");
   }
+  if (packet.packetFormat != 1) {
+    throw std::runtime_error("Unsupported SNV1 compressed packet format.");
+  }
+  if (packet.width == 0 || packet.height == 0 ||
+      packet.width > 7680 || packet.height > 4320) {
+    throw std::runtime_error("SNV1 frame dimensions are outside decoder limits.");
+  }
+  if (packet.durationMicros > 1000000) {
+    throw std::runtime_error("SNV1 frame duration is outside decoder limits.");
+  }
+  if ((packet.flags & ~3u) != 0) {
+    throw std::runtime_error("SNV1 packet contains unsupported flags.");
+  }
+  if (packet.payload.size() > kMaxSnvPayloadBytes) {
+    throw std::runtime_error("SNV1 packet payload exceeds the decoder limit.");
+  }
   if (!summary.hasFirstSequence) {
     summary.firstSequence = packet.sequence;
     summary.hasFirstSequence = true;
@@ -3849,7 +3878,7 @@ struct UdpPacketAssembly {
 
 class UdpVideoReassembler {
 public:
-  bool push(std::vector<std::uint8_t> datagram,
+  bool push(std::span<std::uint8_t> datagram,
             std::vector<std::uint8_t>& packetBytes,
             UdpVideoStats& stats,
             std::uint64_t& completedPacketId,
@@ -6392,13 +6421,12 @@ void listenUdpAudio(std::uint16_t audioPort,
           continue;
         }
         stats.datagrams += 1;
-        const std::uint8_t* data = datagramBuffer.data();
+        std::uint8_t* data = datagramBuffer.data();
         const std::size_t size = static_cast<std::size_t>(received);
         if (size < sizeof(AudioPacketHeader)) {
           stats.malformed += 1;
           continue;
         }
-        std::vector<std::uint8_t> authenticatedDatagram;
         const bool pcm16Audio = std::memcmp(data, "SNA3", 4) == 0 ||
           std::memcmp(data, "SNA4", 4) == 0;
         const bool authenticatedAudio = std::memcmp(data, "SNA2", 4) == 0 ||
@@ -6409,7 +6437,6 @@ void listenUdpAudio(std::uint16_t audioPort,
         std::uint64_t packetMediaEpoch = 0;
         bool packetRekeyGrace = false;
         if (authenticatedAudio) {
-          authenticatedDatagram.assign(data, data + size);
           audioAuthSeq = size >= sizeof(AudioAuthenticatedPacketHeader)
             ? readLe64Raw(data + offsetof(AudioAuthenticatedPacketHeader, authSeq))
             : 0;
@@ -6421,12 +6448,11 @@ void listenUdpAudio(std::uint16_t audioPort,
               !audioCrypto.enabled ||
               !verifyUdpDatagramMac(audioCrypto.authKey,
                                     "audio",
-                                    authenticatedDatagram,
+                                    std::span<const std::uint8_t>(data, size),
                                     offsetof(AudioAuthenticatedPacketHeader, authTag))) {
             stats.authRejected += 1;
             continue;
           }
-          data = authenticatedDatagram.data();
           stats.authDatagrams += 1;
           if (audioCrypto.rekeyGrace) {
             stats.rekeyGrace += 1;
@@ -6488,12 +6514,11 @@ void listenUdpAudio(std::uint16_t audioPort,
             stats.replayRejected += 1;
             continue;
           }
-          chacha20Xor(authenticatedDatagram.data() + headerSize,
+          chacha20Xor(data + headerSize,
                       expectedWirePayloadBytes,
                       audioCrypto.cryptoKey,
                       "audio",
                       audioAuthSeq);
-          data = authenticatedDatagram.data();
           if (audioCrypto.rekeyGrace) {
             stats.rekeyGraceAccepted += 1;
           }
@@ -6874,13 +6899,12 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           stats.resetSequencing();
         }
 
-        std::vector<std::uint8_t> datagram(datagramBuffer.begin(),
-                                           datagramBuffer.begin() + static_cast<std::ptrdiff_t>(received));
         std::vector<std::uint8_t> packetBytes;
         std::uint64_t completedPacketId = 0;
         std::uint64_t completedMediaEpoch = 0;
         bool completedRekeyGrace = false;
-        const bool completedPacket = reassembler.push(std::move(datagram),
+        const bool completedPacket = reassembler.push(
+                                                      std::span(datagramBuffer.data(), static_cast<std::size_t>(received)),
                                                       packetBytes,
                                                       udpStats,
                                                       completedPacketId,

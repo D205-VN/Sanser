@@ -4,7 +4,7 @@ import { secureDelete, secureGet, secureSet } from '../lib/platform';
 import type { Account, AuthResult } from '../lib/types';
 import { diagnostics } from './diagnostics';
 
-export type SessionMode = 'signedOut' | 'cloud' | 'local';
+export type SessionMode = 'signedOut' | 'cloud';
 
 export interface SessionState {
   ready: boolean;
@@ -24,7 +24,7 @@ const initial: SessionState = {
   busy: false,
   mode: 'signedOut',
   account: null,
-  serverUrl: 'http://127.0.0.1:5174',
+  serverUrl: '',
   error: null
 };
 
@@ -54,7 +54,23 @@ function createSessionStore() {
     },
     async initialize(serverUrl: string): Promise<void> {
       store.set({ ...initial, busy: true, serverUrl });
-      api = makeClient(serverUrl);
+      if (!serverUrl.trim()) {
+        api = null;
+        store.set({ ...initial, ready: true, serverUrl });
+        return;
+      }
+      try {
+        api = makeClient(serverUrl);
+      } catch (error) {
+        api = null;
+        store.set({
+          ...initial,
+          ready: true,
+          serverUrl,
+          error: error instanceof Error ? error.message : 'The configured server URL is invalid'
+        });
+        return;
+      }
       [accessToken, refreshToken] = await Promise.all([secureGet('access_token'), secureGet('refresh_token')]);
 
       if (!accessToken) {
@@ -108,16 +124,11 @@ function createSessionStore() {
         throw error;
       }
     },
-    useLocal(serverUrl: string): void {
-      api = null;
-      store.set({ ready: true, busy: false, mode: 'local', account: null, serverUrl, error: null });
-      diagnostics.add({ level: 'info', category: 'app', message: 'Local mode selected' });
-    },
     async logout(): Promise<void> {
       const currentApi = api;
       const currentRefresh = refreshToken;
       try {
-        if (get(store).mode === 'cloud' && currentApi) await currentApi.logout(currentRefresh);
+        if (currentApi) await currentApi.logout(currentRefresh);
       } catch {
         // Local credentials are still cleared when the server is unavailable.
       }

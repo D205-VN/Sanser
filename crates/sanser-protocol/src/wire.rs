@@ -52,6 +52,14 @@ pub struct Packet {
 }
 
 impl Packet {
+    /// Serializes and authenticates this packet using its direction-specific
+    /// session key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session identifier is empty, the payload
+    /// exceeds its packet-type limit, a fixed wire field cannot represent its
+    /// value, or HMAC initialization fails.
     pub fn encode(&self, key: &AuthKey) -> Result<Vec<u8>, ProtocolError> {
         if self.header.session_id.as_uuid().is_nil() {
             return Err(ProtocolError::EmptySessionId);
@@ -62,7 +70,8 @@ impl Packet {
         let mut encoded = vec![0_u8; FIXED_HEADER_LEN + self.payload.len()];
         encoded[0..4].copy_from_slice(&MAGIC);
         encoded[4] = PROTOCOL_VERSION;
-        encoded[5] = FIXED_HEADER_LEN as u8;
+        encoded[5] = u8::try_from(FIXED_HEADER_LEN)
+            .map_err(|_| ProtocolError::FixedHeaderLengthOutOfRange(FIXED_HEADER_LEN))?;
         encoded[6] = self.header.packet_type as u8;
         encoded[7] = self.header.packet_type.priority() as u8;
         encoded[8..10].copy_from_slice(&self.header.flags.bits().to_be_bytes());
@@ -85,6 +94,13 @@ impl Packet {
         Ok(encoded)
     }
 
+    /// Parses, validates and authenticates one complete SNV2 packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or non-canonical headers, unsupported
+    /// fields, invalid lengths, an empty or unexpected session identifier,
+    /// an oversized payload, or failed authentication.
     pub fn decode(
         encoded: &[u8],
         key: &AuthKey,
@@ -221,6 +237,8 @@ pub enum ProtocolError {
     UnsupportedVersion(u8),
     #[error("invalid fixed header length {0}")]
     InvalidHeaderLength(u8),
+    #[error("fixed header length {0} cannot be represented on the wire")]
+    FixedHeaderLengthOutOfRange(usize),
     #[error("reserved header bits are set")]
     ReservedBitsSet,
     #[error("unknown packet type {0}")]

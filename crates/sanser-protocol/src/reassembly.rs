@@ -17,6 +17,13 @@ pub struct FrameAssemblerConfig {
 }
 
 impl FrameAssemblerConfig {
+    /// Validates that every configured limit is non-zero and within the
+    /// protocol's hard safety bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameAssemblerError::InvalidConfig`] when any limit is zero
+    /// or exceeds its corresponding hard bound.
     pub fn validate(self) -> Result<Self, FrameAssemblerError> {
         if self.max_frames == 0
             || self.max_frames > MAX_REASSEMBLY_FRAMES
@@ -80,6 +87,13 @@ pub struct FrameAssembler {
 }
 
 impl FrameAssembler {
+    /// Creates a bounded frame assembler for one authenticated session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameAssemblerError::SessionMismatch`] for an empty session
+    /// identifier, or [`FrameAssemblerError::InvalidConfig`] when `config`
+    /// lies outside the hard safety bounds.
     pub fn new(
         session_id: SessionId,
         config: FrameAssemblerConfig,
@@ -96,6 +110,14 @@ impl FrameAssembler {
         })
     }
 
+    /// Adds one authenticated video fragment and returns the current frame
+    /// reassembly outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-video, wrong-session or stale packets; when a
+    /// byte or fragment bound would be exceeded; when a frame contains more
+    /// than one end marker; or if the internal frame state is inconsistent.
     pub fn push(&mut self, packet: Packet, now_us: u64) -> Result<FramePush, FrameAssemblerError> {
         if packet.header.packet_type != PacketType::Video {
             return Err(FrameAssemblerError::NotVideo);

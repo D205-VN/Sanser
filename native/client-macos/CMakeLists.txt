@@ -6,6 +6,16 @@ if (NOT APPLE)
   message(FATAL_ERROR "sanser-client-macos is macOS-only.")
 endif()
 
+# Keep the native sidecar compatible with the same minimum macOS release as
+# the Tauri bundle.  Without an explicit deployment target, a locally-built
+# sidecar inherits the current SDK version and can make an otherwise valid app
+# fail immediately on older supported Macs.
+if (NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum supported macOS version" FORCE)
+endif()
+
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OBJCXX_STANDARD 20)

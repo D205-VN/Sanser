@@ -16,6 +16,13 @@ pub struct AudioFormat {
 }
 
 impl AudioFormat {
+    /// Validates this negotiated audio format.
+    ///
+    /// # Errors
+    ///
+    /// Returns the corresponding [`AudioFormatError`] when the sample rate,
+    /// channel count, sample count, or resulting frame duration is outside its
+    /// supported range.
     pub fn validate(self) -> Result<Self, AudioFormatError> {
         if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&self.sample_rate_hz) {
             return Err(AudioFormatError::SampleRate(self.sample_rate_hz));

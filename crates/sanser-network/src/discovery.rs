@@ -38,6 +38,10 @@ impl fmt::Debug for DiscoveryKey {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+// These are independent, serialized feature flags rather than mutually
+// exclusive states, so replacing them with a state machine would be misleading
+// and would break the discovery wire schema.
+#[allow(clippy::struct_excessive_bools)]
 pub struct DiscoveryCapabilities {
     pub codecs: Vec<VideoCodec>,
     pub native_snv2: bool,
@@ -58,6 +62,13 @@ pub struct DiscoveryAnnouncement {
 }
 
 impl DiscoveryAnnouncement {
+    /// Validates announcement bounds, metadata, capabilities and freshness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid TTL, nonce, service port, metadata or
+    /// capability set, or when the timestamp is expired or too far in the
+    /// future.
     pub fn validate(&self, now_ms: u64, ttl_ms: u64) -> Result<(), DiscoveryError> {
         if ttl_ms == 0 || ttl_ms > MAX_TTL_MS {
             return Err(DiscoveryError::InvalidTtl(ttl_ms));
@@ -73,11 +84,7 @@ impl DiscoveryAnnouncement {
         if self.capabilities.codecs.is_empty() || self.capabilities.codecs.len() > 4 {
             return Err(DiscoveryError::InvalidCapabilities);
         }
-        if self
-            .capabilities
-            .codecs
-            .iter()
-            .any(|codec| *codec == VideoCodec::Auto)
+        if self.capabilities.codecs.contains(&VideoCodec::Auto)
             || self
                 .capabilities
                 .codecs
@@ -102,6 +109,13 @@ pub struct SignedDiscovery {
 }
 
 impl SignedDiscovery {
+    /// Serializes and signs a discovery announcement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when JSON serialization fails, the serialized payload
+    /// exceeds the discovery datagram bound, its size cannot be represented on
+    /// the wire, or HMAC initialization fails.
     pub fn encode(&self, key: &DiscoveryKey) -> Result<Vec<u8>, DiscoveryError> {
         let payload =
             serde_json::to_vec(&self.announcement).map_err(|_| DiscoveryError::Serialization)?;
@@ -122,6 +136,13 @@ impl SignedDiscovery {
         Ok(datagram)
     }
 
+    /// Verifies, decodes and validates one complete discovery datagram.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the datagram is malformed, has an unsupported or
+    /// non-canonical header, exceeds its size bound, fails authentication or
+    /// JSON decoding, or contains an invalid or stale announcement.
     pub fn decode(
         datagram: &[u8],
         key: &DiscoveryKey,
@@ -195,6 +216,12 @@ pub struct DiscoveryReplayWindow {
 }
 
 impl DiscoveryReplayWindow {
+    /// Creates a bounded nonce replay window.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError::ReplayCapacity`] when `capacity` is zero or
+    /// exceeds the hard replay-window bound.
     pub fn new(capacity: usize) -> Result<Self, DiscoveryError> {
         if capacity == 0 || capacity > MAX_REPLAY_NONCES {
             return Err(DiscoveryError::ReplayCapacity(capacity));
@@ -206,6 +233,12 @@ impl DiscoveryReplayWindow {
         })
     }
 
+    /// Records a fresh nonce after expiring stale entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError::Replay`] when `nonce` is already present in
+    /// the active replay window.
     pub fn observe(
         &mut self,
         nonce: [u8; 16],
@@ -255,6 +288,12 @@ pub struct PeerTable {
 }
 
 impl PeerTable {
+    /// Creates a bounded table of verified discovery peers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError::PeerCapacity`] when `capacity` is zero or
+    /// exceeds the hard peer-table bound.
     pub fn new(capacity: usize) -> Result<Self, DiscoveryError> {
         if capacity == 0 || capacity > MAX_PEERS {
             return Err(DiscoveryError::PeerCapacity(capacity));
@@ -323,6 +362,12 @@ pub struct DiscoveryRateLimiter {
 }
 
 impl DiscoveryRateLimiter {
+    /// Creates a rate limiter for outbound discovery announcements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError::RateInterval`] unless the minimum interval
+    /// lies within 1,000 through 60,000 milliseconds.
     pub fn new(minimum_interval_ms: u64) -> Result<Self, DiscoveryError> {
         if !(1_000..=60_000).contains(&minimum_interval_ms) {
             return Err(DiscoveryError::RateInterval(minimum_interval_ms));
@@ -356,6 +401,13 @@ pub struct UdpDiscovery {
 }
 
 impl UdpDiscovery {
+    /// Binds one nonblocking broadcast socket for each interface description.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError::InterfaceCount`] for an empty or oversized
+    /// interface list, or [`DiscoveryError::Io`] when a socket cannot be
+    /// bound or configured.
     pub fn bind(interfaces: &[InterfaceBinding]) -> Result<Self, DiscoveryError> {
         if interfaces.is_empty() || interfaces.len() > MAX_INTERFACES {
             return Err(DiscoveryError::InterfaceCount(interfaces.len()));
@@ -370,6 +422,12 @@ impl UdpDiscovery {
         Ok(Self { sockets })
     }
 
+    /// Sends a bounded discovery datagram through every configured interface.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DiscoveryError::PayloadTooLarge`] when the datagram exceeds
+    /// the wire bound, or [`DiscoveryError::Io`] when any UDP send fails.
     pub fn broadcast(&self, datagram: &[u8]) -> Result<usize, DiscoveryError> {
         if datagram.len() > DISCOVERY_PREFIX_LEN + MAX_DISCOVERY_PAYLOAD + DISCOVERY_TAG_LEN {
             return Err(DiscoveryError::PayloadTooLarge(datagram.len()));

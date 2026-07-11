@@ -6,6 +6,11 @@ mod storage;
 
 use engine::EngineManager;
 
+/// Starts the native Sanser desktop shell and blocks until its event loop exits.
+///
+/// # Errors
+///
+/// Returns an error when Tauri cannot initialize or run the application.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
         .manage(EngineManager::default())

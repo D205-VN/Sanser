@@ -108,7 +108,7 @@ fn is_sensitive_key(key: &str) -> bool {
 
 fn normalize_key(key: &str) -> String {
     key.chars()
-        .filter(|character| character.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .flat_map(char::to_lowercase)
         .collect()
 }

@@ -9,6 +9,7 @@ pub struct QueueCapacities {
 }
 
 impl QueueCapacities {
+    #[must_use]
     pub const fn new(
         reliable_input: usize,
         realtime_input: usize,
@@ -66,6 +67,11 @@ impl<T> BoundedPriorityQueue<T> {
     }
 
     /// Returns the evicted oldest item for latency-sensitive lanes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueueFull`] with ownership of `item` when the selected lane
+    /// has zero capacity or is a reliable lane that is already full.
     pub fn push(&mut self, priority: PacketPriority, item: T) -> Result<Option<T>, QueueFull<T>> {
         let index = lane(priority);
         let capacity = self.capacities.lanes[index];

@@ -6,6 +6,8 @@
 # Rust / Tauri
 target/
 **/target/
+/build/
+apps/desktop/src-tauri/binaries/
 
 # Frontend development dependencies and output
 node_modules/

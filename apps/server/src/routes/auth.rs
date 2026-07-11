@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     auth::{
-        AuthContext, audit, clean_label, create_login_session, hash_password, normalize_email,
-        revoke_auth_session, rotate_refresh_token, validate_password, verify_password,
+        AuthContext, audit, clean_label, create_account_session, create_login_session,
+        hash_password, normalize_email, revoke_auth_session, rotate_refresh_token,
+        validate_password, verify_password,
     },
     error::{ApiJson, AppError},
     models::Account,
@@ -58,17 +59,6 @@ pub async fn register(
     let device_name = clean_label(&request.device_name, "deviceName", 120)?;
     let platform = clean_label(&request.platform, "platform", 40)?;
 
-    let existing = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = $1")
-        .bind(&email)
-        .fetch_one(&state.pool)
-        .await
-        .map_err(AppError::from_db)?;
-    if existing > 0 {
-        return Err(AppError::Conflict(
-            "an account with this email already exists".into(),
-        ));
-    }
-
     let password_hash = hash_password(request.password).await?;
     let now = now_unix();
     let account = Account {
@@ -77,33 +67,14 @@ pub async fn register(
         display_name,
         created_at: now,
     };
-    let insert = sqlx::query(
-        "INSERT INTO users (id, email, display_name, password_hash, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+    let tokens = create_account_session(
+        &state,
+        account.clone(),
+        password_hash,
+        &device_name,
+        &platform,
     )
-    .bind(&account.id)
-    .bind(&account.email)
-    .bind(&account.display_name)
-    .bind(password_hash)
-    .bind(now)
-    .bind(now)
-    .execute(&state.pool)
-    .await;
-
-    if let Err(error) = insert {
-        if error
-            .as_database_error()
-            .and_then(|database_error| database_error.constraint())
-            .is_some()
-        {
-            return Err(AppError::Conflict(
-                "an account with this email already exists".into(),
-            ));
-        }
-        return Err(AppError::from_db(error));
-    }
-
-    let tokens = create_login_session(&state, account.clone(), &device_name, &platform).await?;
+    .await?;
     audit(
         &state.pool,
         Some(&account.id),

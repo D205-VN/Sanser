@@ -77,7 +77,7 @@ pub async fn recent(
     rows.into_iter().map(row_to_event).collect()
 }
 
-fn row_to_event(row: sqlx::any::AnyRow) -> Result<EventEnvelope, AppError> {
+fn row_to_event(row: sqlx::postgres::PgRow) -> Result<EventEnvelope, AppError> {
     let payload_json: String = row.try_get("payload_json").map_err(AppError::from_db)?;
     let payload = serde_json::from_str(&payload_json).map_err(|error| {
         tracing::error!(error = %error, "stored connection event contains invalid JSON");

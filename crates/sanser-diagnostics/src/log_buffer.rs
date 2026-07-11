@@ -49,6 +49,13 @@ pub struct BoundedLogBuffer {
 }
 
 impl BoundedLogBuffer {
+    /// Creates a log buffer with entry-count and encoded-size limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogBufferError::EntryCapacity`] or
+    /// [`LogBufferError::ByteCapacity`] when the corresponding limit is zero or
+    /// exceeds the supported maximum.
     pub fn new(config: LogBufferConfig) -> Result<Self, LogBufferError> {
         if config.max_entries == 0 || config.max_entries > MAX_LOG_ENTRIES {
             return Err(LogBufferError::EntryCapacity(config.max_entries));
@@ -63,6 +70,13 @@ impl BoundedLogBuffer {
         })
     }
 
+    /// Sanitizes and appends an event, returning the number of evicted entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogBufferError::Serialization`] when the sanitized event cannot
+    /// be encoded, or [`LogBufferError::EventTooLarge`] when one event exceeds
+    /// the configured byte capacity.
     pub fn push(&mut self, mut event: LogEvent) -> Result<usize, LogBufferError> {
         event.message = crate::sanitize_text(&event.message);
         event.fields = sanitize_value(&event.fields);
@@ -143,7 +157,7 @@ mod tests {
             .push(event(1))
             .unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(buffer.push(event(2)), Ok(1));
-        let rendered = serde_json::to_string(buffer.events().next())
+        let rendered = serde_json::to_string(&buffer.events().next())
             .unwrap_or_else(|error| panic!("serialization failed: {error}"));
         assert!(!rendered.contains("unsafe"));
     }

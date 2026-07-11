@@ -1,11 +1,16 @@
+// Tauri extracts owned command arguments and state guards through its command
+// macro. References here are not valid IPC command arguments even though the
+// implementation itself only borrows them.
+#![allow(clippy::needless_pass_by_value)]
+
 use tauri::{AppHandle, State};
 
 use crate::{
-    engine::{find_sidecar, EngineManager},
+    engine::EngineManager,
     error::DesktopError,
     models::{
-        Capability, DiagnosticsExport, EngineKind, LaunchEngineRequest, Preferences,
-        RuntimeCapabilities, RuntimeStatus, PROTOCOL_VERSION, SANSER_VERSION,
+        Capability, DiagnosticsExport, EngineKind, LaunchEngineRequest, PROTOCOL_VERSION,
+        Preferences, RuntimeCapabilities, RuntimeStatus, SANSER_VERSION,
     },
     storage,
 };
@@ -48,11 +53,9 @@ pub fn get_runtime_status(
             secure_storage: Capability::available(),
             host_engine: host_capability,
             client_engine: client_capability,
-            local_server: if local_server.installed {
-                Capability::available()
-            } else {
-                Capability::unavailable("sanser-server is not bundled")
-            },
+            local_server: Capability::unavailable(
+                "Local database/server mode is disabled; desktop uses the deployed PostgreSQL/Neon API",
+            ),
             local_discovery: Capability::planned(
                 "Signed mDNS/UDP discovery backend is not installed",
             ),
@@ -65,38 +68,50 @@ pub fn get_runtime_status(
                 Capability::unavailable("No platform native SNV2 sidecar is bundled")
             },
             gamepad: Capability::planned("Native controller state transport is not linked yet"),
-            clipboard: Capability::planned("Permission-gated clipboard transport is not linked yet"),
+            clipboard: Capability::planned(
+                "Permission-gated clipboard transport is not linked yet",
+            ),
         },
         engines: vec![host, client, local_server],
     })
 }
 
 #[tauri::command]
-pub fn load_preferences(app: AppHandle) -> Result<Option<Preferences>, DesktopError> {
-    storage::load_preferences(&app)
+pub async fn load_preferences(app: AppHandle) -> Result<Option<Preferences>, DesktopError> {
+    tauri::async_runtime::spawn_blocking(move || storage::load_preferences(&app))
+        .await
+        .map_err(|error| DesktopError::Storage(format!("preferences task failed: {error}")))?
 }
 
 #[tauri::command]
-pub fn save_preferences(
+pub async fn save_preferences(
     app: AppHandle,
     preferences: Preferences,
 ) -> Result<(), DesktopError> {
-    storage::save_preferences(&app, &preferences)
+    tauri::async_runtime::spawn_blocking(move || storage::save_preferences(&app, &preferences))
+        .await
+        .map_err(|error| DesktopError::Storage(format!("preferences task failed: {error}")))?
 }
 
 #[tauri::command]
-pub fn secure_get(key: String) -> Result<Option<String>, DesktopError> {
-    storage::secure_get(&key)
+pub async fn secure_get(key: String) -> Result<Option<String>, DesktopError> {
+    tauri::async_runtime::spawn_blocking(move || storage::secure_get(&key))
+        .await
+        .map_err(|_| DesktopError::SecureStorage)?
 }
 
 #[tauri::command]
-pub fn secure_set(key: String, value: String) -> Result<(), DesktopError> {
-    storage::secure_set(&key, value)
+pub async fn secure_set(key: String, value: String) -> Result<(), DesktopError> {
+    tauri::async_runtime::spawn_blocking(move || storage::secure_set(&key, value))
+        .await
+        .map_err(|_| DesktopError::SecureStorage)?
 }
 
 #[tauri::command]
-pub fn secure_delete(key: String) -> Result<(), DesktopError> {
-    storage::secure_delete(&key)
+pub async fn secure_delete(key: String) -> Result<(), DesktopError> {
+    tauri::async_runtime::spawn_blocking(move || storage::secure_delete(&key))
+        .await
+        .map_err(|_| DesktopError::SecureStorage)?
 }
 
 #[tauri::command]
@@ -117,16 +132,11 @@ pub fn stop_engine(
 }
 
 #[tauri::command]
-pub fn export_diagnostics(
+pub async fn export_diagnostics(
     app: AppHandle,
     contents: String,
 ) -> Result<DiagnosticsExport, DesktopError> {
-    storage::export_diagnostics(&app, &contents)
-}
-
-#[allow(dead_code)]
-fn whitelist_is_complete(app: &AppHandle) -> bool {
-    [EngineKind::Host, EngineKind::Client, EngineKind::LocalServer]
-        .into_iter()
-        .all(|kind| find_sidecar(app, kind).is_some())
+    tauri::async_runtime::spawn_blocking(move || storage::export_diagnostics(&app, &contents))
+        .await
+        .map_err(|error| DesktopError::Storage(format!("diagnostics task failed: {error}")))?
 }

@@ -6,6 +6,7 @@
   import { connection } from '../stores/connection';
   import { diagnostics } from '../stores/diagnostics';
   import { preferences } from '../stores/preferences';
+  import { presence } from '../stores/presence';
   import { session } from '../stores/session';
 
   let { runtime, navigate }: { runtime: RuntimeStatus; navigate: (page: Page) => void } = $props();
@@ -16,9 +17,11 @@
   let error = $state<string | null>(null);
   let editingId = $state<string | null>(null);
   let editingName = $state('');
+  let connectingId = $state<string | null>(null);
 
   const visibleDevices = $derived(
     devices
+      .filter((device) => device.id !== $presence.deviceId)
       .filter((device) => filter === 'all' || (filter === 'online' ? device.online : !device.online))
       .filter((device) => `${device.name} ${device.platform} ${device.gpu ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()))
       .sort((left, right) => Number(right.pinned) - Number(left.pinned) || Number(right.online) - Number(left.online) || left.name.localeCompare(right.name))
@@ -43,15 +46,35 @@
 
   async function connect(device: Device): Promise<void> {
     const client = session.client();
-    if (!client || !device.online) return;
+    const requesterDeviceId = $presence.deviceId;
+    if (!client || !requesterDeviceId || connectionBlockReason(device)) return;
     error = null;
+    connectingId = device.id;
     try {
-      const created = await client.createSession(device.id, $preferences.networkMode, $preferences.stream.profile);
+      const created = await client.createSession(device.id, requesterDeviceId, $preferences.networkMode, $preferences.stream.profile);
       connection.begin(created);
       navigate('session');
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Unable to request a connection';
+    } finally {
+      connectingId = null;
     }
+  }
+
+  function connectionBlockReason(device: Device): string | null {
+    if (!device.online) return 'This computer is offline';
+    if (device.streaming) return 'This computer is already streaming';
+    if (!$presence.online || !$presence.deviceId) return $presence.error ?? 'This Mac is not registered with the server yet';
+    if (runtime.capabilities.clientEngine.state !== 'available') {
+      return runtime.capabilities.clientEngine.reason ?? 'The native macOS client is unavailable';
+    }
+
+    const nativeCompatible =
+      runtime.capabilities.nativeSnv2.state === 'available' && device.capabilities.nativeTransport;
+    const relayCompatible = runtime.capabilities.webRtc.state === 'available' && device.capabilities.webRtc;
+    if ($preferences.networkMode === 'relay' && !relayCompatible) return 'Relay requires WebRTC on both computers';
+    if (!nativeCompatible && !relayCompatible) return 'No verified transport is available on both computers';
+    return null;
   }
 
   async function togglePin(device: Device): Promise<void> {
@@ -120,7 +143,7 @@
       <select class="select compact-select" aria-label="Default quality profile" value={$preferences.stream.profile} onchange={(event) => setProfile((event.currentTarget as HTMLSelectElement).value as QualityProfile)}>
         <option value="auto">Auto profile</option><option value="competitive">Competitive</option><option value="balanced">Balanced</option><option value="quality">Quality</option><option value="custom">Custom</option>
       </select>
-      <button class="button" onclick={loadDevices} disabled={loading || $session.mode !== 'cloud'}>Refresh</button>
+      <button class="button" onclick={loadDevices} disabled={loading}>Refresh</button>
     </div>
   </header>
 
@@ -136,10 +159,6 @@
   {#if error}<div class="notice error" role="alert">{error}</div>{/if}
   {#if loading}
     <div class="grid two computer-grid" aria-label="Loading computers"><div class="skeleton"></div><div class="skeleton"></div></div>
-  {:else if $session.mode === 'local'}
-    <div class="card empty">
-      <div><div class="empty-mark"><Icon name="computers" /></div><h2>Local discovery is not active</h2><p>{runtime.capabilities.localDiscovery.reason ?? 'No LAN hosts were discovered.'}</p><StatusPill state={runtime.capabilities.localDiscovery.state} label={runtime.capabilities.localDiscovery.state} /></div>
-    </div>
   {:else if visibleDevices.length === 0}
     <div class="card empty">
       <div><div class="empty-mark"><Icon name="computers" /></div><h2>{devices.length === 0 ? 'No computers yet' : 'No matching computers'}</h2><p>{devices.length === 0 ? 'Install Sanser on a Windows host and bring it online with this account.' : 'Try another search or status filter.'}</p></div>
@@ -172,7 +191,7 @@
             <span class:ok={device.capabilities.nativeTransport}>SNV2</span><span class:ok={device.capabilities.webRtc}>WebRTC</span><span class:ok={device.capabilities.audio}>Audio</span><span class:ok={device.capabilities.gamepad}>Gamepad</span>
           </div>
           <div class="computer-actions">
-            <button class="button primary" disabled={!device.online || device.streaming} onclick={() => connect(device)}>Connect</button>
+            <button class="button primary" disabled={connectionBlockReason(device) !== null || connectingId !== null} title={connectionBlockReason(device) ?? 'Request a secure session'} onclick={() => connect(device)}>{connectingId === device.id ? 'Requesting…' : 'Connect'}</button>
             <button class="button small" onclick={() => togglePin(device)}>{device.pinned ? 'Unpin' : 'Pin'}</button>
             <button class="button small" onclick={() => beginRename(device)}>Rename</button>
             <button class="button small" onclick={() => inspect(device)}>Diagnostics</button>

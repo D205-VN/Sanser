@@ -10,6 +10,13 @@ pub struct RetransmissionConfig {
 }
 
 impl RetransmissionConfig {
+    /// Validates packet-count and retention-age limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowConfigError::PacketCapacity`] when the packet bound is
+    /// zero or too large, or [`WindowConfigError::MaxAge`] when the retention
+    /// age is zero or exceeds ten seconds.
     pub fn validate(self) -> Result<Self, WindowConfigError> {
         if self.max_packets == 0 || self.max_packets > MAX_WINDOW_PACKETS {
             return Err(WindowConfigError::PacketCapacity(self.max_packets));
@@ -44,6 +51,12 @@ pub struct RetransmissionWindow<T> {
 }
 
 impl<T> RetransmissionWindow<T> {
+    /// Creates an empty bounded retransmission window.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`WindowConfigError`] when `config` contains an invalid
+    /// packet-count or retention-age limit.
     pub fn new(config: RetransmissionConfig) -> Result<Self, WindowConfigError> {
         Ok(Self {
             entries: BTreeMap::new(),

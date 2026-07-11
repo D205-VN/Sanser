@@ -1,5 +1,6 @@
 <script lang="ts">
   import StatusPill from '../components/StatusPill.svelte';
+  import BrandMark from '../components/BrandMark.svelte';
   import { NATIVE_PROTOCOL, PROTOCOL_VERSION, SANSER_VERSION, type RuntimeStatus } from '../lib/types';
 
   let { runtime }: { runtime: RuntimeStatus } = $props();
@@ -7,7 +8,7 @@
 
 <section class="page about-page">
   <div class="about-hero">
-    <img src="/sanser-mark.svg" alt="Sanser" />
+    <BrandMark size={92} label="Sanser" />
     <div class="eyebrow">Remote, refined</div>
     <h1>Sanser {SANSER_VERSION}</h1>
     <p>A lightweight Tauri desktop shell for low-latency remote desktop and game streaming.</p>

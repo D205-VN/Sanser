@@ -11,8 +11,8 @@ Native:   SNV2
 
 ## Capabilities
 
-- Local/LAN mode backed by SQLite, with no PostgreSQL installation required.
-- Shared/cloud mode backed by PostgreSQL.
+- Account, device and signaling data backed only by PostgreSQL on Neon.
+- Local preferences stored as a bounded JSON file; secrets stay in Keychain/Credential Manager.
 - Versioned `/api/v2` auth, devices, connection sessions, ICE and WebSocket signaling.
 - Auto, Direct and Relay network modes with STUN/TURN.
 - Short-lived access tokens, refresh-token rotation/revocation and Argon2id passwords.
@@ -50,22 +50,34 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-For a local installation, keep:
+The API server requires a pooled PostgreSQL connection hosted by Neon:
 
 ```text
-STORAGE_MODE=local
-SQLITE_PATH=./data/sanser.db
-NETWORK_MODE=auto
+DATABASE_URL=postgresql://USER:PASSWORD@ep-EXAMPLE-pooler.REGION.aws.neon.tech/sanser?sslmode=require
 ```
 
-Shared mode additionally requires a PostgreSQL connection:
+SQLite and a bundled local database server are not used. The server rejects non-Neon hosts and database URLs without required TLS, and never prints the connection string.
 
-```text
-STORAGE_MODE=shared
-DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/sanser
-```
+`VITE_SANSER_SERVER_URL` is the public HTTPS address of the Sanser API, not the
+Neon database address. Release builds bake this value into the app and remove
+the endpoint editor, so users only install and sign in. `127.0.0.1:5174` is a
+development default only. Neon hosts PostgreSQL; the Axum API must still be
+deployed behind HTTPS on a server reachable by every client.
 
-The server validates version, protocol, addresses, URLs, TTLs, origins, storage and relay configuration at startup without printing secret values.
+### Deploy once, install everywhere
+
+1. Deploy `sanser-server` on an always-on HTTPS/WSS host and set
+   `SERVER_HOST=0.0.0.0`, the Neon `DATABASE_URL`, strong application secrets,
+   exact `ALLOWED_ORIGINS`, and TURN settings when relay is required.
+2. Verify `/api/v2/health` and `/api/v2/readiness` through the public domain.
+3. Build the desktop with that domain in `VITE_SANSER_SERVER_URL`. For GitHub
+   releases, set the repository variable `SANSER_API_URL` once.
+4. Distribute the signed installer. Users do not need `.env`, Neon credentials,
+   Node.js, Rust, or a local API server.
+
+The GitHub macOS release also expects the signing secrets already referenced in
+the workflow plus `APPLE_API_KEY`, `APPLE_API_ISSUER`, and
+`APPLE_API_PRIVATE_KEY` (the `.p8` contents) for notarization.
 
 ## Development
 
@@ -94,7 +106,10 @@ npm run desktop:dev
 - **Direct** disables TURN and permits LAN, public routes and STUN. NAT/firewall failure is reported clearly.
 - **Relay** requires TURN, prefers UDP and falls back to TCP/TLS. It uses WebRTC because SNV2 does not relay media through the signaling server.
 
-For Internet-facing shared mode, terminate HTTPS/WSS at a reverse proxy, use an explicit `ALLOWED_ORIGINS`, and configure `TURN_SHARED_SECRET` so the server mints short-lived TURN credentials. Do not expose static production credentials to clients.
+For Internet-facing deployment, terminate HTTPS/WSS at a reverse proxy, use an explicit `ALLOWED_ORIGINS`, and configure `TURN_SHARED_SECRET` so the server mints short-lived TURN credentials. Do not expose static production credentials to clients.
+
+Keep `tauri://localhost` and `http://tauri.localhost` in `ALLOWED_ORIGINS` for
+the packaged macOS and Windows webviews. Do not use `*`.
 
 ## Build and test
 
@@ -126,7 +141,13 @@ npm run native:host-windows:build
 Bundle the desktop application with:
 
 ```bash
-npm run desktop:bundle
+VITE_SANSER_SERVER_URL=https://api.your-domain.com npm run desktop:bundle
+```
+
+For a local unsigned verification bundle only:
+
+```bash
+npm run desktop:bundle:local
 ```
 
 Expected release artifact names and unverified platform items are tracked in [the release ledger](docs/sanser-2-release.md). Local unsigned macOS builds are not notarized.
@@ -139,13 +160,13 @@ Expected release artifact names and unverified platform items are tracked in [th
 
 ## Migration
 
-The v2 migrator backs up legacy data, imports only validated non-secret preferences/device identity, discards incompatible tokens and cryptographic material, and writes migration version 2 transactionally. See [migration details](docs/sanser-2-migration.md).
+The v2 migrator backs up legacy data, imports only validated non-secret preferences/device identity, and discards incompatible tokens and cryptographic material. Local preferences use an atomic JSON write; cloud metadata is written to Neon only after authentication. See [migration details](docs/sanser-2-migration.md).
 
 ## Troubleshooting
 
 - `relay requires TURN`: configure `TURN_URLS` plus a shared secret or development credential pair.
 - Direct connection fails across networks: verify firewall/NAT, then use Auto or Relay.
 - Native capability is unavailable: build/install the platform v2 sidecar and inspect sanitized Diagnostics output.
-- Database is not ready: verify `STORAGE_MODE`, path permissions, migration access and the PostgreSQL URL without pasting credentials into logs/issues.
+- Database is not ready: verify the Neon pooled endpoint, TLS query, network allowlist and migration access without pasting credentials into logs/issues.
 
 Sanser never sends realtime input, video or audio through PostgreSQL or the signaling REST API.

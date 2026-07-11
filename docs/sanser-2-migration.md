@@ -7,8 +7,9 @@ Migration is transactional and never deletes the old data directory before verif
 3. Import safe preferences, server URL, display/audio choices, and a stable device ID only when its format validates.
 4. Map Tailscale network settings to `Auto`; map its quality profile to `Balanced` or `Internet`.
 5. Do not import legacy access tokens, TURN credentials, database credentials, or cryptographic session material.
-6. Write migration version `2` and commit the SQLite transaction.
-7. Preserve the backup and report individual skipped fields without logging their values.
+6. Atomically write local non-secret preferences and migration version `2`.
+7. Upload account/device metadata to Neon only after the user authenticates and authorizes the import.
+8. Preserve the backup and report individual skipped fields without logging their values.
 
 ## Legacy feature parity inventory
 

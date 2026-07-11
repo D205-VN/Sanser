@@ -10,6 +10,12 @@ pub struct HistoryConfig {
 }
 
 impl HistoryConfig {
+    /// Validates the configured history capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryConfigError`] when `max_samples` is zero or exceeds the
+    /// supported maximum.
     pub fn validate(self) -> Result<Self, HistoryConfigError> {
         if self.max_samples == 0 || self.max_samples > MAX_HISTORY_SAMPLES {
             return Err(HistoryConfigError(self.max_samples));
@@ -31,6 +37,12 @@ pub struct DiagnosticsHistory {
 }
 
 impl DiagnosticsHistory {
+    /// Creates a bounded metrics history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryConfigError`] when the requested sample capacity is
+    /// outside the supported range.
     pub fn new(config: HistoryConfig) -> Result<Self, HistoryConfigError> {
         Ok(Self {
             samples: VecDeque::with_capacity(config.max_samples.min(1_024)),

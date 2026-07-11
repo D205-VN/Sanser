@@ -3,7 +3,6 @@ use sanser_core::{NetworkMode, PROTOCOL_VERSION, VERSION};
 use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
-    path::PathBuf,
 };
 use thiserror::Error;
 use url::Url;
@@ -22,11 +21,21 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// Loads and validates configuration from the process environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a required value is missing or invalid.
     pub fn from_env() -> Result<Self, ConfigError> {
-        Self::from_iter(std::env::vars())
+        Self::from_values(std::env::vars())
     }
 
-    pub fn from_iter<I, K, V>(values: I) -> Result<Self, ConfigError>
+    /// Validates configuration supplied as key/value pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a required value is missing or invalid.
+    pub fn from_values<I, K, V>(values: I) -> Result<Self, ConfigError>
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
@@ -66,16 +75,7 @@ impl AppConfig {
             value_or(&values, "ALLOWED_ORIGINS", "http://127.0.0.1:5174"),
         )?;
 
-        let postgres_url = values
-            .get("DATABASE_URL")
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| validate_database_url(value))
-            .transpose()?
-            .map(SecretString::new);
-        let sqlite_path = PathBuf::from(value_or(&values, "SQLITE_PATH", "./data/sanser.db"));
-        if sqlite_path.as_os_str().is_empty() {
-            return Err(ConfigError::InvalidValue("SQLITE_PATH"));
-        }
+        let database = parse_database(&values)?;
 
         let mode = parse_network_mode(value_or(&values, "NETWORK_MODE", "auto"))?;
         let stun_urls = parse_ice_urls(
@@ -124,10 +124,7 @@ impl AppConfig {
             return Err(ConfigError::InvalidValue("REFRESH_TOKEN_TTL_SECONDS"));
         }
 
-        let rust_log = value_or(&values, "RUST_LOG", "info").trim().to_owned();
-        if rust_log.is_empty() || rust_log.len() > 256 || rust_log.chars().any(char::is_control) {
-            return Err(ConfigError::InvalidValue("RUST_LOG"));
-        }
+        let rust_log = parse_rust_log(&values)?;
 
         Ok(Self {
             version: VERSION.to_owned(),
@@ -138,10 +135,7 @@ impl AppConfig {
                 public_base_url,
                 allowed_origins,
             },
-            database: DatabaseConfig {
-                postgres_url,
-                sqlite_path,
-            },
+            database,
             network: NetworkConfig {
                 mode,
                 stun_urls,
@@ -166,8 +160,7 @@ pub struct ServerConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseConfig {
-    pub postgres_url: Option<SecretString>,
-    pub sqlite_path: PathBuf,
+    pub url: SecretString,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,6 +185,24 @@ pub struct AuthConfig {
 
 fn value_or<'a>(values: &'a BTreeMap<String, String>, key: &str, default: &'a str) -> &'a str {
     values.get(key).map_or(default, String::as_str)
+}
+
+fn parse_database(values: &BTreeMap<String, String>) -> Result<DatabaseConfig, ConfigError> {
+    let database_url = values
+        .get("DATABASE_URL")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ConfigError::Missing("DATABASE_URL"))?;
+    Ok(DatabaseConfig {
+        url: SecretString::new(validate_database_url(database_url)?),
+    })
+}
+
+fn parse_rust_log(values: &BTreeMap<String, String>) -> Result<String, ConfigError> {
+    let rust_log = value_or(values, "RUST_LOG", "info").trim().to_owned();
+    if rust_log.is_empty() || rust_log.len() > 256 || rust_log.chars().any(char::is_control) {
+        return Err(ConfigError::InvalidValue("RUST_LOG"));
+    }
+    Ok(rust_log)
 }
 
 fn parse_or<T>(
@@ -274,7 +285,19 @@ fn split_list<'a>(name: &'static str, value: &'a str) -> Result<Vec<&'a str>, Co
 
 fn validate_database_url(value: &str) -> Result<String, ConfigError> {
     let parsed = Url::parse(value.trim()).map_err(|_| ConfigError::InvalidValue("DATABASE_URL"))?;
-    if !matches!(parsed.scheme(), "postgres" | "postgresql") || parsed.host_str().is_none() {
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+    let neon_host = host == "neon.tech" || host.ends_with(".neon.tech");
+    let tls_required = parsed.query_pairs().any(|(key, value)| {
+        key == "sslmode" && matches!(value.as_ref(), "require" | "verify-ca" | "verify-full")
+    });
+    if !matches!(parsed.scheme(), "postgres" | "postgresql")
+        || !neon_host
+        || parsed.username().is_empty()
+        || parsed.password().is_none_or(str::is_empty)
+        || parsed.path().trim_matches('/').is_empty()
+        || parsed.fragment().is_some()
+        || !tls_required
+    {
         return Err(ConfigError::InvalidValue("DATABASE_URL"));
     }
     Ok(value.trim().to_owned())
@@ -309,13 +332,16 @@ mod tests {
         vec![
             ("SANSER_VERSION", "2.0.0"),
             ("SANSER_PROTOCOL_VERSION", "2"),
-            ("DATABASE_URL", "postgresql://user:secret@db/sanser"),
+            (
+                "DATABASE_URL",
+                "postgresql://user:secret@ep-example-pooler.us-east-1.aws.neon.tech/sanser?sslmode=require",
+            ),
         ]
     }
 
     #[test]
     fn parses_defaults_without_logging_database_password() {
-        let config = AppConfig::from_iter(base())
+        let config = AppConfig::from_values(base())
             .unwrap_or_else(|error| panic!("config parse failed: {error}"));
         assert_eq!(config.network.mode, NetworkMode::Auto);
         assert_eq!(config.server.port, 5_174);
@@ -329,7 +355,7 @@ mod tests {
         let mut values = base();
         values.push(("NETWORK_MODE", "relay"));
         assert_eq!(
-            AppConfig::from_iter(values),
+            AppConfig::from_values(values),
             Err(ConfigError::RelayRequiresTurn)
         );
 
@@ -340,7 +366,7 @@ mod tests {
             ("TURN_USERNAME", "temporary"),
         ]);
         assert_eq!(
-            AppConfig::from_iter(values),
+            AppConfig::from_values(values),
             Err(ConfigError::IncompleteTurnCredentials)
         );
     }
@@ -350,8 +376,39 @@ mod tests {
         let mut values = base();
         values.push(("NETWORK_MODE", "tailscale"));
         assert_eq!(
-            AppConfig::from_iter(values),
+            AppConfig::from_values(values),
             Err(ConfigError::InvalidValue("NETWORK_MODE"))
+        );
+    }
+
+    #[test]
+    fn requires_a_tls_neon_database() {
+        let missing = base().into_iter().filter(|(key, _)| *key != "DATABASE_URL");
+        assert_eq!(
+            AppConfig::from_values(missing),
+            Err(ConfigError::Missing("DATABASE_URL"))
+        );
+
+        let mut non_neon = base();
+        non_neon.retain(|(key, _)| *key != "DATABASE_URL");
+        non_neon.push((
+            "DATABASE_URL",
+            "postgresql://user:secret@db.example.com/sanser?sslmode=require",
+        ));
+        assert_eq!(
+            AppConfig::from_values(non_neon),
+            Err(ConfigError::InvalidValue("DATABASE_URL"))
+        );
+
+        let mut no_tls = base();
+        no_tls.retain(|(key, _)| *key != "DATABASE_URL");
+        no_tls.push((
+            "DATABASE_URL",
+            "postgresql://user:secret@ep-example.us-east-1.aws.neon.tech/sanser",
+        ));
+        assert_eq!(
+            AppConfig::from_values(no_tls),
+            Err(ConfigError::InvalidValue("DATABASE_URL"))
         );
     }
 }

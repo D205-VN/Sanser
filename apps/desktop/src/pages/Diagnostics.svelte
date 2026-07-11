@@ -11,6 +11,10 @@
   let message = $state<string | null>(null);
   const events = $derived($diagnostics.filter((event) => filter === 'all' || event.level === filter).slice().reverse());
 
+  function isLegacyLocalServer(engine: unknown): boolean {
+    return typeof engine === 'object' && engine !== null && 'kind' in engine && engine.kind === 'localServer';
+  }
+
   async function exportEvents(): Promise<void> {
     try {
       const result = await exportDiagnostics(diagnostics.exportJson());
@@ -41,7 +45,6 @@
       <CapabilityNotice title="Secure storage" capability={runtime.capabilities.secureStorage} />
       <CapabilityNotice title="Windows host" capability={runtime.capabilities.hostEngine} />
       <CapabilityNotice title="macOS client" capability={runtime.capabilities.clientEngine} />
-      <CapabilityNotice title="Local server" capability={runtime.capabilities.localServer} />
       <CapabilityNotice title="WebRTC" capability={runtime.capabilities.webRtc} />
       <CapabilityNotice title="SNV2" capability={runtime.capabilities.nativeSnv2} />
     </article>
@@ -49,7 +52,7 @@
     <article class="card card-body stack">
       <div><h2 class="card-title">Native processes</h2><p class="card-subtitle">Process identifiers are shown only inside the local app.</p></div>
       <div class="engine-list">
-        {#each runtime.engines as engine}
+        {#each runtime.engines.filter((engine) => !isLegacyLocalServer(engine)) as engine}
           <div><div><strong>{engine.kind}</strong><span>{engine.lastError ?? (engine.installed ? 'Sidecar installed' : 'Sidecar not bundled')}</span></div><StatusPill state={engine.running ? 'online' : engine.installed ? 'neutral' : 'offline'} label={engine.running ? `Running · PID ${engine.processId ?? '—'}` : engine.installed ? 'Stopped' : 'Missing'} /></div>
         {/each}
       </div>

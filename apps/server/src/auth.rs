@@ -6,7 +6,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{RngCore, rngs::OsRng};
 use sanser_auth::{PasswordHashString, PasswordHasherService};
 use sha2::{Digest, Sha256};
-use sqlx::{AnyPool, Row};
+use sqlx::{PgPool, Postgres, Row};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -128,41 +128,108 @@ pub async fn create_login_session(
     let now = now_unix();
     let access_expires_at = expires_at(state.config.access_token_ttl);
     let refresh_expires_at = expires_at(state.config.refresh_token_ttl);
-    let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
-
     sqlx::query(
-        "INSERT INTO auth_sessions \
-         (id, user_id, device_name, platform, created_at, last_seen_at, expires_at, revoked_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)",
+        "WITH inserted_session AS ( \
+             INSERT INTO auth_sessions \
+                 (id, user_id, device_name, platform, created_at, last_seen_at, expires_at, revoked_at) \
+             VALUES ($1, $2, $3, $4, $5, $5, $6, NULL) \
+             RETURNING id \
+         ), inserted_access AS ( \
+             INSERT INTO access_tokens \
+                 (digest, auth_session_id, created_at, expires_at, revoked_at) \
+             SELECT $7, id, $5, $8, NULL FROM inserted_session \
+             RETURNING digest \
+         ) \
+         INSERT INTO refresh_tokens \
+             (digest, auth_session_id, created_at, expires_at, revoked_at, rotated_at, replaced_by_digest) \
+         SELECT $9, id, $5, $6, NULL, NULL, NULL FROM inserted_session",
     )
     .bind(&auth_session_id)
     .bind(&account.id)
     .bind(device_name)
     .bind(platform)
     .bind(now)
-    .bind(now)
     .bind(refresh_expires_at)
-    .execute(&mut *transaction)
+    .bind(&access_digest)
+    .bind(access_expires_at)
+    .bind(&refresh_digest)
+    .execute(&state.pool)
     .await
     .map_err(AppError::from_db)?;
 
-    insert_access_token(
-        &mut transaction,
-        &access_digest,
-        &auth_session_id,
-        now,
+    Ok(AuthTokens {
+        token_type: "Bearer",
+        access_token,
         access_expires_at,
-    )
-    .await?;
-    insert_refresh_token(
-        &mut transaction,
-        &refresh_digest,
-        &auth_session_id,
-        now,
+        refresh_token,
         refresh_expires_at,
+        account,
+        session_id: auth_session_id,
+    })
+}
+
+pub async fn create_account_session(
+    state: &AppState,
+    account: Account,
+    password_hash: String,
+    device_name: &str,
+    platform: &str,
+) -> Result<AuthTokens, AppError> {
+    let auth_session_id = Uuid::new_v4().to_string();
+    let access_token = new_token(ACCESS_PREFIX);
+    let refresh_token = new_token(REFRESH_PREFIX);
+    let access_digest = token_digest(&access_token);
+    let refresh_digest = token_digest(&refresh_token);
+    let now = account.created_at;
+    let access_expires_at = expires_at(state.config.access_token_ttl);
+    let refresh_expires_at = expires_at(state.config.refresh_token_ttl);
+    let inserted = sqlx::query(
+        "WITH inserted_user AS ( \
+             INSERT INTO users (id, email, display_name, password_hash, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $5) \
+             RETURNING id \
+         ), inserted_session AS ( \
+             INSERT INTO auth_sessions \
+                 (id, user_id, device_name, platform, created_at, last_seen_at, expires_at, revoked_at) \
+             SELECT $6, id, $7, $8, $5, $5, $9, NULL FROM inserted_user \
+             RETURNING id \
+         ), inserted_access AS ( \
+             INSERT INTO access_tokens \
+                 (digest, auth_session_id, created_at, expires_at, revoked_at) \
+             SELECT $10, id, $5, $11, NULL FROM inserted_session \
+             RETURNING digest \
+         ) \
+         INSERT INTO refresh_tokens \
+             (digest, auth_session_id, created_at, expires_at, revoked_at, rotated_at, replaced_by_digest) \
+         SELECT $12, id, $5, $9, NULL, NULL, NULL FROM inserted_session",
     )
-    .await?;
-    transaction.commit().await.map_err(AppError::from_db)?;
+    .bind(&account.id)
+    .bind(&account.email)
+    .bind(&account.display_name)
+    .bind(password_hash)
+    .bind(now)
+    .bind(&auth_session_id)
+    .bind(device_name)
+    .bind(platform)
+    .bind(refresh_expires_at)
+    .bind(&access_digest)
+    .bind(access_expires_at)
+    .bind(&refresh_digest)
+    .execute(&state.pool)
+    .await;
+
+    if let Err(error) = inserted {
+        if error
+            .as_database_error()
+            .and_then(|database_error| database_error.code())
+            .is_some_and(|code| code == "23505")
+        {
+            return Err(AppError::Conflict(
+                "an account with this email already exists".into(),
+            ));
+        }
+        return Err(AppError::from_db(error));
+    }
 
     Ok(AuthTokens {
         token_type: "Bearer",
@@ -192,7 +259,8 @@ pub async fn rotate_refresh_token(
          FROM refresh_tokens r \
          JOIN auth_sessions s ON s.id = r.auth_session_id \
          JOIN users u ON u.id = s.user_id \
-         WHERE r.digest = $1",
+         WHERE r.digest = $1 \
+         FOR UPDATE OF r, s",
     )
     .bind(&old_digest)
     .fetch_optional(&mut *transaction)
@@ -295,22 +363,24 @@ pub async fn rotate_refresh_token(
     })
 }
 
-pub async fn revoke_auth_session(pool: &AnyPool, auth_session_id: &str) -> Result<(), AppError> {
+pub async fn revoke_auth_session(pool: &PgPool, auth_session_id: &str) -> Result<(), AppError> {
     let now = now_unix();
     let mut transaction = pool.begin().await.map_err(AppError::from_db)?;
     revoke_session_in_transaction(&mut transaction, auth_session_id, now).await?;
     transaction.commit().await.map_err(AppError::from_db)
 }
 
-pub async fn revoke_all_user_sessions(pool: &AnyPool, user_id: &str) -> Result<(), AppError> {
+pub async fn revoke_all_user_sessions(pool: &PgPool, user_id: &str) -> Result<(), AppError> {
     let now = now_unix();
     let mut transaction = pool.begin().await.map_err(AppError::from_db)?;
-    sqlx::query("UPDATE auth_sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL")
-        .bind(now)
-        .bind(user_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AppError::from_db)?;
+    sqlx::query(
+        "UPDATE auth_sessions SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(now)
+    .bind(user_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::from_db)?;
     sqlx::query(
         "UPDATE access_tokens SET revoked_at = $1 WHERE revoked_at IS NULL AND auth_session_id IN \
          (SELECT id FROM auth_sessions WHERE user_id = $2)",
@@ -380,7 +450,7 @@ pub fn clean_label(value: &str, field: &str, max_length: usize) -> Result<String
 }
 
 pub async fn audit(
-    pool: &AnyPool,
+    pool: &PgPool,
     user_id: Option<&str>,
     action: &str,
     target_type: Option<&str>,
@@ -440,7 +510,7 @@ fn websocket_protocol_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 async fn insert_access_token(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
     digest: &str,
     auth_session_id: &str,
     now: i64,
@@ -462,7 +532,7 @@ async fn insert_access_token(
 }
 
 async fn insert_refresh_token(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
     digest: &str,
     auth_session_id: &str,
     now: i64,
@@ -484,7 +554,7 @@ async fn insert_refresh_token(
 }
 
 async fn revoke_session_in_transaction(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
+    transaction: &mut sqlx::Transaction<'_, Postgres>,
     auth_session_id: &str,
     now: i64,
 ) -> Result<(), AppError> {

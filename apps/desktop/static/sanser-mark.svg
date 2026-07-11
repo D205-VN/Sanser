@@ -1,5 +1,23 @@
 <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="2" y="2" width="60" height="60" rx="17" fill="#11151E" stroke="#2A3140" stroke-width="2"/>
-  <path d="M45.5 19.2C41.9 16.7 37.6 15.5 32.4 15.5C23.5 15.5 17.8 19.6 17.8 26C17.8 32.1 22.1 34.8 31.2 36.7C36.7 37.8 38.7 38.9 38.7 41.2C38.7 43.6 36.2 45 32.1 45C27.7 45 23.6 43.6 19.5 40.7L15 47.1C19.8 50.8 25.6 52.6 32 52.6C41.5 52.6 47.8 48.1 47.8 40.8C47.8 34.8 44 31.8 34.6 29.8C28.8 28.6 26.8 27.6 26.8 25.5C26.8 23.5 29 22.2 32.5 22.2C35.9 22.2 39.1 23.2 42.2 25.2L45.5 19.2Z" fill="url(#paint0_linear)"/>
-  <defs><linearGradient id="paint0_linear" x1="17" y1="17" x2="48" y2="51" gradientUnits="userSpaceOnUse"><stop stop-color="#9B8CFF"/><stop offset="1" stop-color="#62D7B5"/></linearGradient></defs>
+  <title>Sanser</title>
+  <defs>
+    <linearGradient id="shell" x1="8" y1="5" x2="57" y2="61" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#181D2B"/>
+      <stop offset="1" stop-color="#090C13"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="18" y1="16" x2="48" y2="50" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B1A7FF"/>
+      <stop offset="0.48" stop-color="#8B9BFF"/>
+      <stop offset="1" stop-color="#5FE2C2"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(23 16) rotate(48) scale(43)">
+      <stop stop-color="#8E80FF" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#8E80FF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="18" fill="url(#shell)"/>
+  <rect x="3" y="3" width="58" height="58" rx="17" fill="url(#glow)" stroke="#30384A" stroke-width="2"/>
+  <path d="M18.5 23.5C18.5 18.5 23 15 30.2 15H44.8L39.3 22.5H30.5C27.2 22.5 25.5 23.5 25.5 25.3C25.5 27.1 27.2 27.9 31.4 28.8L35 29.6C42.3 31.2 45.8 34.2 45.8 39.5C45.8 45.2 40.9 49 33.5 49H17.2L22.8 41.5H33.2C36.8 41.5 38.6 40.5 38.6 38.6C38.6 36.9 37 36 32.9 35.1L29.3 34.3C21.9 32.7 18.5 29.5 18.5 23.5Z" fill="url(#signal)"/>
+  <path d="M17.5 49L24.1 40.2" stroke="#B3A9FF" stroke-width="2" stroke-linecap="round" opacity=".55"/>
+  <circle cx="48.5" cy="15.5" r="2.5" fill="#62DFC1"/>
 </svg>

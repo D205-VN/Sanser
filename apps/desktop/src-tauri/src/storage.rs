@@ -7,6 +7,7 @@ use std::{
 use keyring::Entry;
 use tauri::{AppHandle, Manager};
 use url::Url;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -86,11 +87,16 @@ pub fn load_preferences(app: &AppHandle) -> Result<Option<Preferences>, DesktopE
         return Ok(None);
     };
     if metadata.len() > MAX_PREFERENCES_BYTES {
-        return Err(DesktopError::Storage("preferences file is too large".into()));
+        return Err(DesktopError::Storage(
+            "preferences file is too large".into(),
+        ));
     }
-    let mut file = fs::File::open(path)?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_PREFERENCES_BYTES + 1).read_to_end(&mut bytes)?;
+    let file = fs::File::open(path)?;
+    let capacity = usize::try_from(metadata.len())
+        .map_err(|_| DesktopError::Storage("preferences file length is invalid".into()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_PREFERENCES_BYTES + 1)
+        .read_to_end(&mut bytes)?;
     let preferences: Preferences = serde_json::from_slice(&bytes)
         .map_err(|error| DesktopError::Storage(format!("invalid preferences: {error}")))?;
     validate_preferences(&preferences)?;
@@ -102,23 +108,41 @@ pub fn save_preferences(app: &AppHandle, preferences: &Preferences) -> Result<()
     let serialized = serde_json::to_vec_pretty(preferences)
         .map_err(|error| DesktopError::Storage(error.to_string()))?;
     if serialized.len() as u64 > MAX_PREFERENCES_BYTES {
-        return Err(DesktopError::InvalidRequest("preferences are too large".into()));
+        return Err(DesktopError::InvalidRequest(
+            "preferences are too large".into(),
+        ));
     }
     let path = preferences_path(app)?;
     let directory = path
         .parent()
         .ok_or_else(|| DesktopError::Storage("preferences path has no parent".into()))?;
     fs::create_dir_all(directory)?;
-    let temporary = directory.join("preferences-v2.tmp");
-    {
-        let mut file = fs::File::create(&temporary)?;
+    let temporary = directory.join(format!(".preferences-v2-{}.tmp", Uuid::new_v4()));
+    let write_result = (|| -> Result<(), DesktopError> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
         file.write_all(&serialized)?;
         file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
+
+    #[cfg(target_os = "windows")]
     if path.exists() {
+        // std::fs::rename cannot replace an existing file on Windows. The
+        // unique temporary file still prevents concurrent writers from
+        // corrupting one another.
         fs::remove_file(&path)?;
     }
-    fs::rename(temporary, path)?;
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
     Ok(())
 }
 

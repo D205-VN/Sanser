@@ -87,12 +87,17 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/devices/heartbeat",
             post(routes::devices::heartbeat),
         )
+        .route("/api/v2/devices/offline", post(routes::devices::offline))
         .route(
             "/api/v2/devices/{id}",
             patch(routes::devices::update).delete(routes::devices::remove),
         )
         .route("/api/v2/sessions", post(routes::sessions::create))
         .route("/api/v2/sessions/{id}", get(routes::sessions::get))
+        .route(
+            "/api/v2/sessions/{id}/credentials",
+            get(routes::sessions::credentials),
+        )
         .route(
             "/api/v2/sessions/{id}/accept",
             post(routes::sessions::accept),

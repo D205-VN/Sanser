@@ -1,0 +1,15 @@
+target/
+node_modules/
+.git/
+.env
+.env.*
+*.md
+docs/
+build/
+native/
+data/
+apps/desktop/
+!apps/desktop/src-tauri/Cargo.toml
+scripts/
+.github/
+.DS_Store

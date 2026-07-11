@@ -1,5 +1,6 @@
 <script lang="ts">
   import CapabilityNotice from '../components/CapabilityNotice.svelte';
+  import BrandMark from '../components/BrandMark.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import Toggle from '../components/Toggle.svelte';
   import { normalizeServerUrl } from '../lib/api';
@@ -7,7 +8,7 @@
   import { NATIVE_PROTOCOL, PROTOCOL_VERSION, SANSER_VERSION } from '../lib/types';
   import { exportDiagnostics } from '../lib/platform';
   import { diagnostics } from '../stores/diagnostics';
-  import { preferences } from '../stores/preferences';
+  import { SERVER_ENDPOINT_LOCKED, preferences } from '../stores/preferences';
   import { session } from '../stores/session';
 
   let { runtime }: { runtime: RuntimeStatus } = $props();
@@ -16,6 +17,10 @@
   let saveMessage = $state<string | null>(null);
   let loginSessions = $state<LoginSession[]>([]);
   let accountBusy = $state(false);
+  let securityBusy = $state(false);
+  let currentPassword = $state('');
+  let newPassword = $state('');
+  let confirmPassword = $state('');
 
   const sections: { id: SettingsSection; label: string }[] = [
     { id: 'general', label: 'General' }, { id: 'stream', label: 'Stream' }, { id: 'video', label: 'Video' },
@@ -35,6 +40,7 @@
   }
 
   async function saveServer(): Promise<void> {
+    if (SERVER_ENDPOINT_LOCKED) return;
     try {
       const normalized = normalizeServerUrl(serverUrl);
       serverUrl = normalized;
@@ -84,6 +90,33 @@
     }
   }
 
+  async function changePassword(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    saveMessage = null;
+    if (newPassword.length < 12) {
+      saveMessage = 'The new password must contain at least 12 characters';
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      saveMessage = 'The new passwords do not match';
+      return;
+    }
+    const client = session.client();
+    if (!client) return;
+    securityBusy = true;
+    try {
+      await client.changePassword(currentPassword, newPassword);
+      currentPassword = '';
+      newPassword = '';
+      confirmPassword = '';
+      await session.logout();
+    } catch (error) {
+      saveMessage = error instanceof Error ? error.message : 'Unable to change password';
+    } finally {
+      securityBusy = false;
+    }
+  }
+
   async function exportEvents(): Promise<void> {
     const result = await exportDiagnostics(diagnostics.exportJson());
     saveMessage = `Exported: ${result.path}`;
@@ -97,7 +130,7 @@
   function chooseSection(section: SettingsSection): void {
     active = section;
     saveMessage = null;
-    if (section === 'account' && $session.mode === 'cloud') void loadLoginSessions();
+    if (section === 'account') void loadLoginSessions();
   }
 </script>
 
@@ -111,7 +144,11 @@
       {#if active === 'general'}
         <article class="card card-body settings-card stack">
           <div><h2 class="card-title">General</h2><p class="card-subtitle">Core application behavior.</p></div>
-          <div class="field"><label for="general-server">Server URL</label><div class="inline-field"><input id="general-server" class="input" type="url" bind:value={serverUrl} spellcheck="false" /><button class="button" onclick={saveServer}>Save</button></div><small>Changing the server takes effect after signing out.</small></div>
+          {#if SERVER_ENDPOINT_LOCKED}
+            <div class="notice"><strong>Sanser service is configured.</strong> The release endpoint is built into the application and cannot be changed locally. Database credentials are never stored in the desktop app.</div>
+          {:else}
+            <div class="field"><label for="general-server">Development API URL</label><div class="inline-field"><input id="general-server" class="input" type="url" bind:value={serverUrl} spellcheck="false" /><button class="button" onclick={saveServer}>Save</button></div><small>This override is available only in an unconfigured developer build.</small></div>
+          {/if}
           <div class="field"><label for="language">Language</label><select id="language" class="select" disabled><option>English · Vietnamese translation planned</option></select></div>
           <Toggle checked={false} disabled label="Start minimized" description="Planned: desktop lifecycle integration is not enabled yet." onchange={() => undefined} />
         </article>
@@ -164,7 +201,7 @@
           <div><h2 class="card-title">Network</h2><p class="card-subtitle">No Tailscale or external VPN is installed or required.</p></div>
           <div class="network-options">
             {#each [['auto', 'Auto', 'LAN → direct ICE → TURN UDP/TCP/TLS fallback.'], ['direct', 'Direct', 'Never use TURN; NAT or firewall may block the route.'], ['relay', 'Relay', 'Require TURN; native SNV2 is disabled.']] as mode}
-              <button class="network-option" class:active={$preferences.networkMode === mode[0]} onclick={() => saveRoot({ networkMode: mode[0] as NetworkMode })}><strong>{mode[1]}</strong><span>{mode[2]}</span></button>
+              <button class="network-option" class:active={$preferences.networkMode === mode[0]} disabled={mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available'} title={mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available' ? runtime.capabilities.webRtc.reason ?? 'Native WebRTC relay is unavailable' : undefined} onclick={() => saveRoot({ networkMode: mode[0] as NetworkMode })}><strong>{mode[1]}{mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available' ? ' · Unavailable' : ''}</strong><span>{mode[2]}</span></button>
             {/each}
           </div>
           <CapabilityNotice title="Native SNV2" capability={runtime.capabilities.nativeSnv2} />
@@ -174,13 +211,13 @@
       {:else if active === 'host'}
         <article class="card card-body settings-card stack"><div><h2 class="card-title">Host</h2><p class="card-subtitle">Defaults for authenticated Windows host sessions.</p></div><Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="System audio" description="Enable WASAPI loopback on new sessions." onchange={(value) => saveHost({ audioEnabled: value })} /><Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Remote input" description="Open the authenticated control backchannel." onchange={(value) => saveHost({ inputEnabled: value })} /><Toggle checked={false} disabled label="Lock after disconnect" description="Planned: OS session lifecycle integration is not available." onchange={() => undefined} /></article>
       {:else if active === 'security'}
-        <article class="card card-body settings-card stack"><div><h2 class="card-title">Security</h2><p class="card-subtitle">Capabilities remain narrow and native arguments are allowlisted.</p></div><CapabilityNotice title="OS secure storage" capability={runtime.capabilities.secureStorage} /><div class="security-list"><div><strong>Content Security Policy</strong><span>Local scripts only; remote content and frames blocked.</span></div><div><strong>Sidecars</strong><span>Only sanser-host-windows, sanser-client-macos and sanser-server.</span></div><div><strong>Session authentication</strong><span>Session-scoped proof; Relay never falls back to unauthenticated SNV2.</span></div></div><button class="button" disabled title="Password API unavailable">Change password · Planned</button></article>
+        <article class="card card-body settings-card stack"><div><h2 class="card-title">Security</h2><p class="card-subtitle">Capabilities remain narrow and native arguments are allowlisted.</p></div><CapabilityNotice title="OS secure storage" capability={runtime.capabilities.secureStorage} /><div class="security-list"><div><strong>Content Security Policy</strong><span>Local scripts only; remote content and frames blocked.</span></div><div><strong>Sidecars</strong><span>Only the native host and client engines for this platform.</span></div><div><strong>Session authentication</strong><span>Session-scoped proof; Relay never falls back to unauthenticated SNV2.</span></div></div><form class="password-form" onsubmit={changePassword}><h3>Change password</h3><p>All signed-in sessions are revoked after this change.</p><div class="field"><label for="current-password">Current password</label><input id="current-password" class="input" type="password" bind:value={currentPassword} required minlength="12" maxlength="256" autocomplete="current-password" /></div><div class="grid two"><div class="field"><label for="new-password">New password</label><input id="new-password" class="input" type="password" bind:value={newPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div><div class="field"><label for="confirm-password">Confirm new password</label><input id="confirm-password" class="input" type="password" bind:value={confirmPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div></div><button class="button" type="submit" disabled={securityBusy}>{securityBusy ? 'Updating…' : 'Update password'}</button></form></article>
       {:else if active === 'diagnostics'}
         <article class="card card-body settings-card stack"><div><h2 class="card-title">Diagnostics</h2><p class="card-subtitle">A bounded in-memory buffer keeps at most 300 sanitized events.</p></div><Toggle checked={$preferences.diagnosticsEnabled} label="Collect basic diagnostics" description="Record connection lifecycle events without raw packets, input movement or secrets." onchange={setDiagnosticsEnabled} /><div class="button-row"><button class="button" onclick={exportEvents}>Export sanitized JSON</button><button class="button danger" onclick={() => diagnostics.clear()}>Clear events</button></div></article>
       {:else if active === 'account'}
-        <article class="card card-body settings-card stack"><div><h2 class="card-title">Account</h2><p class="card-subtitle">{$session.mode === 'cloud' ? $session.account?.email : 'Local mode · no cloud account'}</p></div>{#if $session.mode === 'cloud'}<div class="button-row"><button class="button" onclick={loadLoginSessions} disabled={accountBusy}>Refresh sessions</button><button class="button danger" onclick={() => session.logout()}>Sign out</button></div>{#if loginSessions.length > 0}<div class="login-session-list">{#each loginSessions as item (item.id)}<div><div><strong>{item.deviceName}</strong><span>{item.platform} · last seen {item.lastSeenAt}</span></div><StatusPill state={item.current ? 'online' : 'neutral'} label={item.current ? 'Current' : 'Active'} />{#if !item.current}<button class="button small danger" disabled={accountBusy} onclick={() => revokeLoginSession(item.id)}>Revoke</button>{/if}</div>{/each}</div>{:else}<div class="notice">Select “Refresh sessions” to retrieve revocable login sessions from the server.</div>{/if}{:else}<div class="notice">Local mode does not create a cloud login session.</div><button class="button danger" onclick={() => session.logout()}>Leave local mode</button>{/if}</article>
+        <article class="card card-body settings-card stack"><div><h2 class="card-title">Account</h2><p class="card-subtitle">{$session.account?.email}</p></div><div class="button-row"><button class="button" onclick={loadLoginSessions} disabled={accountBusy}>Refresh sessions</button><button class="button danger" onclick={() => session.logout()}>Sign out</button></div>{#if loginSessions.length > 0}<div class="login-session-list">{#each loginSessions as item (item.id)}<div><div><strong>{item.deviceName}</strong><span>{item.platform} · last seen {item.lastSeenAt}</span></div><StatusPill state={item.current ? 'online' : 'neutral'} label={item.current ? 'Current' : 'Active'} />{#if !item.current}<button class="button small danger" disabled={accountBusy} onclick={() => revokeLoginSession(item.id)}>Revoke</button>{/if}</div>{/each}</div>{:else}<div class="notice">No login-session list has been loaded yet. Select “Refresh sessions” to retrieve it from the server.</div>{/if}</article>
       {:else}
-        <article class="card card-body settings-card about-settings"><img src="/sanser-mark.svg" alt="" /><div><h2>Sanser {SANSER_VERSION}</h2><p>Protocol v{PROTOCOL_VERSION}<br />{NATIVE_PROTOCOL}</p></div></article>
+        <article class="card card-body settings-card about-settings"><BrandMark size={76} label="Sanser" /><div><h2>Sanser {SANSER_VERSION}</h2><p>Protocol v{PROTOCOL_VERSION}<br />{NATIVE_PROTOCOL}</p></div></article>
       {/if}
     </div>
   </div>
