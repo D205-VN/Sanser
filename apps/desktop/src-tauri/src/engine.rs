@@ -75,6 +75,7 @@ fn executable_filename(base: &str) -> String {
 }
 
 #[cfg(debug_assertions)]
+#[allow(unused_variables)]
 fn staged_sidecar_filename(base: &str) -> Option<String> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     return Some(format!("{base}-aarch64-apple-darwin"));
