@@ -846,7 +846,8 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   impl_->currentBitrate = impl_->options.bitrate;
 
   EncoderSelection encoderSelection;
-  impl_->transform = createEncoderTransform(impl_->options.codec, impl_->options, encoderSelection);
+  auto activation = createEncoderTransform(impl_->options.codec, impl_->options, encoderSelection);
+  impl_->transform = activation.transform;
   impl_->usingHardware = encoderSelection.hardware;
   impl_->encoderName = encoderSelection.name;
   impl_->encoderBackend = encoderSelection.backend;
