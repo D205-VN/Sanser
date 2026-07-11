@@ -45,6 +45,9 @@ jobs:
           $capabilities = (& build/host-windows-x64/Release/sanser-host-windows.exe --capabilities-json) | ConvertFrom-Json
           if ($capabilities.nativeSnv2 -ne $true) { throw 'nativeSnv2 is not release-ready' }
       - run: npm --workspace @sanser/desktop run tauri -- build --target x86_64-pc-windows-msvc
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Name artifacts
         shell: pwsh
         run: |
@@ -52,6 +55,13 @@ jobs:
           $setup = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $setup) { throw 'NSIS installer was not produced' }
           Copy-Item $setup.FullName artifacts/Sanser-Windows-2.0.0-x64-setup.exe
+          
+          # Copy các file zip và chữ ký cập nhật (Tauri Auto-update)
+          $updaterFiles = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/updater/*
+          foreach ($file in $updaterFiles) {
+            Copy-Item $file.FullName artifacts/
+          }
+          
           New-Item -ItemType Directory -Force build/portable | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/sanser.exe build/portable/sanser.exe
           Copy-Item build/host-windows-x64/Release/sanser-host-windows.exe build/portable/sanser-host-windows.exe

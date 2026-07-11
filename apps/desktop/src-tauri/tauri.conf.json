@@ -47,6 +47,15 @@
     "targets": "all",
     "externalBin": [],
     "resources": [],
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/D205-VN/Sanser/releases/latest/download/updater-latest.json"
+      ],
+      "pubkey": "dW5kZWZpbmVkX3B1YmxpY19rZXlfcGxhY2Vob2xkZXJfcGxlYXNlX2dlbmVyYXRlX29uZQ=="
+    }
   }
 }

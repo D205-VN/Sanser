@@ -13,6 +13,8 @@ use engine::EngineManager;
 /// Returns an error when Tauri cannot initialize or run the application.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineManager::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_status,

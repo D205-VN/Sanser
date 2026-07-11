@@ -16,6 +16,7 @@
   import { preferences } from './stores/preferences';
   import { presence } from './stores/presence';
   import { session } from './stores/session';
+  import Updater from './components/Updater.svelte';
 
   let page = $state<Page>('computers');
   let runtime = $state<RuntimeStatus | null>(null);
@@ -98,4 +99,5 @@
       </main>
     </div>
   </div>
+  <Updater />
 {/if}
