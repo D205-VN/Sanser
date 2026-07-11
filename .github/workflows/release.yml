@@ -47,7 +47,11 @@ jobs:
       - name: Write signing key to temporary file
         shell: bash
         run: |
-          echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" > "${{ runner.temp }}/minisign.key"
+          # Làm sạch khóa: Xóa header nếu có, xóa tất cả các dấu xuống dòng và dấu cách dư thừa
+          CLEAN_KEY=$(echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" | sed 's/untrusted comment: minisign secret key//g' | tr -d '\r\n ')
+          # Ghi đè lại đúng cấu trúc 2 dòng tiêu chuẩn
+          echo "untrusted comment: minisign secret key" > "${{ runner.temp }}/minisign.key"
+          echo "$CLEAN_KEY" >> "${{ runner.temp }}/minisign.key"
       - run: npm --workspace @sanser/desktop run tauri -- build --target x86_64-pc-windows-msvc
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/minisign.key
