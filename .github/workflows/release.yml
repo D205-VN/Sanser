@@ -44,10 +44,23 @@ jobs:
         run: |
           $capabilities = (& build/host-windows-x64/Release/sanser-host-windows.exe --capabilities-json) | ConvertFrom-Json
           if ($capabilities.nativeSnv2 -ne $true) { throw 'nativeSnv2 is not release-ready' }
+      - name: Write signing key to temporary file
+        shell: pwsh
+        run: |
+          $rawKey = @"
+          ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          "@
+          # Làm sạch khóa: Xóa header, xóa dấu cách, dấu xuống dòng
+          $cleanKey = $rawKey -replace "untrusted comment: minisign secret key", ""
+          $cleanKey = $cleanKey -replace "`r", "" -replace "`n", "" -replace " ", ""
+          # Tạo nội dung 2 dòng chuẩn
+          $finalKey = "untrusted comment: minisign secret key`n" + $cleanKey
+          # Ghi trực tiếp ra file tạm bằng UTF-8 không BOM
+          [System.IO.File]::WriteAllText("${{ runner.temp }}\minisign.key", $finalKey)
       - name: Build Tauri application
         run: npm --workspace @sanser/desktop run tauri -- build --target x86_64-pc-windows-msvc
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}\minisign.key
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Name artifacts
         shell: pwsh
