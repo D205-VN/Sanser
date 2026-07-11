@@ -13,6 +13,7 @@ pub async fn connect(config: &Config) -> Result<PgPool, AppError> {
         .map_err(AppError::from_db)?
         .application_name("sanser-server/2.0.0")
         .statement_cache_capacity(256);
+    tracing::info!("opening Neon PostgreSQL connection pool");
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections)
         .min_connections(config.database_min_connections)
@@ -24,6 +25,7 @@ pub async fn connect(config: &Config) -> Result<PgPool, AppError> {
         .await
         .map_err(AppError::from_db)?;
 
+    tracing::info!("Neon PostgreSQL pool is ready; applying migrations");
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
@@ -31,6 +33,7 @@ pub async fn connect(config: &Config) -> Result<PgPool, AppError> {
             tracing::error!(error = %error, "database migration failed");
             AppError::Internal
         })?;
+    tracing::info!("database migrations are current");
 
     Ok(pool)
 }

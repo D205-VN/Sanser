@@ -1,11 +1,39 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, copyFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, copyFileSync, chmodSync, realpathSync } from 'node:fs';
 import { arch, env, platform } from 'node:process';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 
 const root = resolve(import.meta.dirname, '..');
 const binaries = resolve(root, 'apps/desktop/src-tauri/binaries');
-const buildRoot = resolve(root, 'build');
+
+function nativeCacheRoot() {
+  if (env.SANSER_NATIVE_BUILD_DIR) return resolve(env.SANSER_NATIVE_BUILD_DIR);
+  const workspaceId = createHash('sha256')
+    .update(realpathSync.native(root))
+    .digest('hex')
+    .slice(0, 12);
+  if (platform === 'darwin') {
+    return resolve(homedir(), 'Library', 'Caches', 'Sanser', 'native-build', workspaceId);
+  }
+  if (platform === 'win32') {
+    return resolve(
+      env.LOCALAPPDATA || resolve(homedir(), 'AppData', 'Local'),
+      'Sanser',
+      'native-build',
+      workspaceId
+    );
+  }
+  return resolve(
+    env.XDG_CACHE_HOME || resolve(homedir(), '.cache'),
+    'sanser',
+    'native-build',
+    workspaceId
+  );
+}
+
+const buildRoot = nativeCacheRoot();
 
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, stdio: 'inherit', shell: false });

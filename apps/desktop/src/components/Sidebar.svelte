@@ -16,6 +16,10 @@
     { page: 'diagnostics', label: 'Diagnostics' },
     { page: 'about', label: 'About' }
   ];
+  const nativeSnv2Ready = $derived(
+    runtime.capabilities.hostEngine.state === 'available' ||
+      runtime.capabilities.clientEngine.state === 'available'
+  );
 </script>
 
 <aside class="sidebar">
@@ -47,6 +51,6 @@
   <div class="sidebar-footer">
     <span class="footer-label">Runtime</span>
     <div class="runtime-line"><StatusPill state={runtime.capabilities.desktopShell.state} label={runtime.platform} /></div>
-    <div class="runtime-line">Protocol v{runtime.protocolVersion} · SNV2</div>
+    <div class="runtime-line">Protocol v{runtime.protocolVersion} · SNV2 {nativeSnv2Ready ? 'ready' : 'pending'}</div>
   </div>
 </aside>

@@ -37,7 +37,7 @@ returned. Rotating it invalidates native handoffs that have not started yet.
 Start the API from the repository root:
 
 ```bash
-cargo run -p sanser-server
+npm run server:dev
 ```
 
 SQLx applies `apps/server/migrations` on startup. Readiness reports failure

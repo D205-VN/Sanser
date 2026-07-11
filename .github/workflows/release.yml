@@ -42,7 +42,7 @@ jobs:
         if: github.event_name == 'push'
         shell: pwsh
         run: |
-          $capabilities = (& build/host-windows-x64/Release/sanser-host-windows.exe --capabilities-json) | ConvertFrom-Json
+          $capabilities = (& apps/desktop/src-tauri/binaries/sanser-host-windows-x86_64-pc-windows-msvc.exe --capabilities-json) | ConvertFrom-Json
           if ($capabilities.nativeSnv2 -ne $true) { throw 'nativeSnv2 is not release-ready' }
       - name: Build Tauri application
         run: npm --workspace @sanser/desktop run tauri -- build --target x86_64-pc-windows-msvc
@@ -55,15 +55,14 @@ jobs:
           New-Item -ItemType Directory -Force artifacts | Out-Null
           $setup = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $setup) { throw 'NSIS installer was not produced' }
+          $setupSignature = "$($setup.FullName).sig"
+          if (-not (Test-Path $setupSignature)) { throw 'Signed NSIS updater artifact was not produced' }
           Copy-Item $setup.FullName artifacts/Sanser-Windows-2.0.0-x64-setup.exe
-          
-          # Copy các file zip và chữ ký cập nhật (Tauri Auto-update)
-          Copy-Item target/x86_64-pc-windows-msvc/release/bundle/nsis/*.zip artifacts/
-          Copy-Item target/x86_64-pc-windows-msvc/release/bundle/nsis/*.sig artifacts/
+          Copy-Item $setupSignature artifacts/Sanser-Windows-2.0.0-x64-setup.exe.sig
           
           New-Item -ItemType Directory -Force build/portable | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/sanser.exe build/portable/sanser.exe
-          Copy-Item build/host-windows-x64/Release/sanser-host-windows.exe build/portable/sanser-host-windows.exe
+          Copy-Item apps/desktop/src-tauri/binaries/sanser-host-windows-x86_64-pc-windows-msvc.exe build/portable/sanser-host-windows.exe
           7z a -t7z -mx=9 build/sanser-portable.7z ./build/portable/*
           @'
           ;!@Install@!UTF-8!
@@ -81,7 +80,6 @@ jobs:
           if-no-files-found: error
 
   macos-arm64:
-    if: false
     needs: source-policy
     runs-on: macos-14
     env:
@@ -116,7 +114,7 @@ jobs:
       - name: Reject incomplete native protocol on a production tag
         if: github.event_name == 'push'
         shell: bash
-        run: build/client-macos-arm64/sanser-client-macos --capabilities-json | jq -e '.nativeSnv2 == true'
+        run: apps/desktop/src-tauri/binaries/sanser-client-macos-aarch64-apple-darwin --capabilities-json | jq -e '.nativeSnv2 == true'
       - name: Build application and DMG
         run: npm --workspace @sanser/desktop run tauri -- build --target aarch64-apple-darwin
         env:
@@ -131,11 +129,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          app="$(find /tmp/sanser-target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          bundle_dir="/tmp/sanser-target/aarch64-apple-darwin/release/bundle/macos"
+          app="$(find "$bundle_dir" -maxdepth 1 -name '*.app' -print -quit)"
           dmg="$(find /tmp/sanser-target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
-          test -n "$app" && test -n "$dmg"
+          updater="$(find "$bundle_dir" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          test -n "$app" && test -n "$dmg" && test -n "$updater" && test -f "$updater.sig"
           cp "$dmg" artifacts/Sanser-macOS-2.0.0-arm64.dmg
           ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/Sanser-macOS-2.0.0-arm64.zip
+          cp "$updater" artifacts/Sanser-macOS-2.0.0-arm64.app.tar.gz
+          cp "$updater.sig" artifacts/Sanser-macOS-2.0.0-arm64.app.tar.gz.sig
       - uses: actions/upload-artifact@v4
         with:
           name: sanser-macos-2.0.0-arm64
@@ -144,17 +146,25 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [windows-x64]
+    needs: [windows-x64, macos-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: actions/download-artifact@v4
         with:
           pattern: sanser-*
           path: artifacts
           merge-multiple: true
+      - name: Generate signed updater manifest
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/generate-updater-manifest.mjs artifacts
       - working-directory: artifacts
-        run: sha256sum Sanser-* > SHA256SUMS.txt
+        run: sha256sum Sanser-* updater-latest.json > SHA256SUMS.txt
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

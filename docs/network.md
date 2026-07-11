@@ -2,6 +2,10 @@
 
 Sanser 2 exposes only `Auto`, `Direct`, and `Relay`.
 
+This document defines the route-selection contract. The current desktop keeps
+signed LAN discovery, WebRTC/libdatachannel, and native SNV2 routes disabled
+until their runtime capability probes report a verified implementation.
+
 ## Auto
 
 Auto evaluates signed LAN discovery and private routes first, then ICE host/server-reflexive candidates, TURN/UDP, TURN/TCP, and TURN/TLS. SNV2 is eligible only for an authenticated direct route. If its direct probe fails, the session negotiator falls back to WebRTC without leaving an accepted native session orphaned.

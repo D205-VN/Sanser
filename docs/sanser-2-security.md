@@ -17,6 +17,12 @@ The Svelte WebView, Tauri core, sidecars, remote peers, discovery datagrams, sig
 - Sidecar executable and argument whitelists; no `shell=true`.
 - Sanitized diagnostics/log exports.
 
+The shared SNV2 library currently verifies its bounded header and authentication
+primitives in isolation. The Windows and macOS media engines have not integrated
+that shared handshake, session binding, packet framing, and replay protection
+end to end, so their `nativeSnv2` capability must remain disabled until an
+interoperability test passes.
+
 ## Environment warning
 
 `.env` is ignored and locally restricted to owner read/write. A database credential appeared in historical commits before the Sanser 2 migration. It must be rotated/revoked before release, then removed from Git history with a coordinated history rewrite. Deleting the current file is not sufficient.

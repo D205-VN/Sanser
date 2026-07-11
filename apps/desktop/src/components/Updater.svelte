@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { isTauri } from '@tauri-apps/api/core';
   import { check, type Update } from '@tauri-apps/plugin-updater';
   import { relaunch } from '@tauri-apps/plugin-process';
 
@@ -8,11 +9,13 @@
   let updateStatus = $state<'idle' | 'checking' | 'downloading' | 'installing' | 'done' | 'error'>('idle');
   let progress = $state(0);
   let totalSize = $state(0);
+  let downloadedSize = $state(0);
   let errorMessage = $state('');
 
   onMount(() => {
-    // Chờ 5 giây sau khi mở app để kiểm tra cập nhật (tránh làm chậm ứng dụng khi khởi động)
-    setTimeout(checkForUpdates, 5000);
+    if (!isTauri()) return;
+    const timer = window.setTimeout(() => void checkForUpdates(), 5000);
+    return () => window.clearTimeout(timer);
   });
 
   async function checkForUpdates() {
@@ -36,6 +39,7 @@
     if (!manifest) return;
     updateStatus = 'downloading';
     progress = 0;
+    downloadedSize = 0;
     
     try {
       // Bắt đầu quá trình tải xuống và cài đặt với hàm callback được định kiểu rõ ràng
@@ -43,14 +47,17 @@
         switch (event.event) {
           case 'Started':
             totalSize = event.data.contentLength || 0;
+            downloadedSize = 0;
             updateStatus = 'downloading';
             break;
           case 'Progress':
+            downloadedSize += event.data.chunkLength;
             if (totalSize > 0) {
-              progress = Math.round((event.data.chunkLength / totalSize) * 100);
+              progress = Math.min(100, Math.round((downloadedSize / totalSize) * 100));
             }
             break;
           case 'Finished':
+            progress = 100;
             updateStatus = 'installing';
             break;
         }

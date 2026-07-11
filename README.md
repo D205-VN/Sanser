@@ -6,7 +6,7 @@ Sanser is a low-latency remote desktop and remote game streaming platform. Versi
 Product:  Sanser 2.0.0
 App ID:   com.sanser.desktop
 Protocol: v2
-Native:   SNV2
+Native:   SNV2 target (engine integration is capability-gated)
 ```
 
 ## Capabilities
@@ -102,6 +102,10 @@ npm run desktop:dev
 
 ## Network modes
 
+The modes below define the v2 negotiation policy. The desktop enables a route
+only when its native capability probe succeeds; signed LAN discovery and the
+native WebRTC transport are still marked planned in the current build.
+
 - **Auto** tries signed LAN discovery, direct/private routes, ICE direct, STUN candidates, then TURN UDP/TCP/TLS. SNV2 is selected only for an authenticated direct route; otherwise the session falls back to WebRTC.
 - **Direct** disables TURN and permits LAN, public routes and STUN. NAT/firewall failure is reported clearly.
 - **Relay** requires TURN, prefers UDP and falls back to TCP/TLS. It uses WebRTC because SNV2 does not relay media through the signaling server.
@@ -114,15 +118,15 @@ the packaged macOS and Windows webviews. Do not use `*`.
 ## Build and test
 
 ```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-npm run desktop:check
-npm run desktop:lint
-npm run desktop:test
-npm run desktop:build
+npm run check
+npm run test
+npm run build
 npm run native:protocol:test
 ```
+
+The npm commands keep Cargo output in the operating-system cache instead of
+the repository, preventing cloud-synced workspaces from corrupting Rust
+artifacts. An explicit `CARGO_TARGET_DIR` is still honored.
 
 Build the current macOS client engine:
 

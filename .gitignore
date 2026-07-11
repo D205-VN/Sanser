@@ -3,6 +3,13 @@
 .env.*
 !.env.example
 
+# Local signing credentials (store production material in CI/OS key storage)
+*.key
+*.key.pub
+*.p8
+*.p12
+*.mobileprovision
+
 # Rust / Tauri
 target/
 **/target/

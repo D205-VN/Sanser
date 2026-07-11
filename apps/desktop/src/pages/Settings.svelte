@@ -157,7 +157,7 @@
           <div><h2 class="card-title">Stream</h2><p class="card-subtitle">Profiles are sent with each connection request.</p></div>
           <div class="profile-grid">
             {#each [
-              ['auto', 'Auto', 'Adapts route, codec and quality from feedback.'],
+              ['auto', 'Auto', 'Uses conservative defaults; live adaptation requires the verified native transport.'],
               ['competitive', 'Competitive', 'Shortest queues and lowest input latency.'],
               ['balanced', 'Balanced', '1080p60 with a moderate bitrate.'],
               ['quality', 'Quality', 'Higher resolution and HEVC when available.'],
@@ -166,7 +166,7 @@
               <button class="profile-option" class:active={$preferences.stream.profile === profile[0]} onclick={() => saveStream({ profile: profile[0] as QualityProfile })}><strong>{profile[1]}</strong><span>{profile[2]}</span></button>
             {/each}
           </div>
-          <div class="notice">Auto never lets old frames build a long queue: newest input → newest frame → continuous audio.</div>
+          <div class="notice">Realtime policy target: newest input → newest frame → continuous audio. End-to-end adaptive feedback remains capability-gated.</div>
         </article>
       {:else if active === 'video'}
         <article class="card card-body settings-card stack">
@@ -177,7 +177,7 @@
             <div class="field"><label for="fps">Frame rate</label><select id="fps" class="select" value={$preferences.stream.fps} onchange={(event) => saveStream({ fps: Number((event.currentTarget as HTMLSelectElement).value) as typeof $preferences.stream.fps })}><option value="30">30 FPS</option><option value="60">60 FPS</option><option value="90">90 FPS</option><option value="120">120 FPS</option></select></div>
             <div class="field"><label for="bitrate">Bitrate · {$preferences.stream.bitrateMbps} Mb/s</label><input id="bitrate" type="range" min="1" max="100" step="1" value={$preferences.stream.bitrateMbps} onchange={(event) => saveStream({ bitrateMbps: Number((event.currentTarget as HTMLInputElement).value) })} /></div>
           </div>
-          <div class="notice">H.264 is the compatibility fallback. HEVC reduces network usage when both hardware endpoints support it. Auto begins conservatively and may switch only at a keyframe boundary.</div>
+          <div class="notice">H.264 is the compatibility fallback. HEVC reduces network usage when both hardware endpoints support it. Auto currently selects H.264 until negotiated keyframe-boundary switching is verified.</div>
         </article>
       {:else if active === 'audio'}
         <article class="card card-body settings-card stack">

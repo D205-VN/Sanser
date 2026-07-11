@@ -6764,7 +6764,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--capabilities-json") {
       std::cout << "{\"product\":\"Sanser\",\"version\":\"2.0.0\","
                    "\"protocolVersion\":2,\"engine\":\"host-windows\","
-                   "\"nativeSnv2\":true,\"h264EncoderImplementation\":true,"
+                   "\"nativeSnv2\":false,\"h264EncoderImplementation\":true,"
                    "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,"
                    "\"inputImplementation\":true,\"gamepadImplementation\":true}\n";
       return 0;

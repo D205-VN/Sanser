@@ -99,5 +99,6 @@
       </main>
     </div>
   </div>
-  <Updater />
 {/if}
+
+<Updater />
