@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { check } from '@tauri-apps/plugin-updater';
-  import { relaunch } from '@tauri-apps/plugin-process'; // Sử dụng đúng plugin của Tauri 2
+  import { check, type Update } from '@tauri-apps/plugin-updater';
+  import { relaunch } from '@tauri-apps/plugin-process';
 
   let updateAvailable = $state(false);
-  let manifest = $state<any>(null);
+  let manifest = $state<Update | null>(null);
   let updateStatus = $state<'idle' | 'checking' | 'downloading' | 'installing' | 'done' | 'error'>('idle');
   let progress = $state(0);
   let totalSize = $state(0);
@@ -19,12 +19,14 @@
     updateStatus = 'checking';
     try {
       const update = await check();
-      if (update && update.available) {
+      // Nếu update khác null nghĩa là có bản cập nhật mới
+      if (update) {
         manifest = update;
         updateAvailable = true;
       }
-    } catch (err: any) {
-      console.error('Failed to check for updates:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('Failed to check for updates:', msg);
     } finally {
       updateStatus = 'idle';
     }
@@ -36,8 +38,8 @@
     progress = 0;
     
     try {
-      // Bắt đầu quá trình tải xuống và cài đặt
-      await manifest.downloadAndInstall((event: any) => {
+      // Bắt đầu quá trình tải xuống và cài đặt với hàm callback được định kiểu rõ ràng
+      await manifest.downloadAndInstall((event) => {
         switch (event.event) {
           case 'Started':
             totalSize = event.data.contentLength || 0;
@@ -59,14 +61,14 @@
       setTimeout(async () => {
         try {
           await relaunch();
-        } catch (e) {
+        } catch {
           // Fallback nếu relaunch bị lỗi
           window.location.reload();
         }
       }, 1500);
-    } catch (err: any) {
+    } catch (err: unknown) {
       updateStatus = 'error';
-      errorMessage = err?.message || 'Có lỗi xảy ra trong quá trình cập nhật.';
+      errorMessage = err instanceof Error ? err.message : 'Có lỗi xảy ra trong quá trình cập nhật.';
     }
   }
 
