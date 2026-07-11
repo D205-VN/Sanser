@@ -58,10 +58,8 @@ jobs:
           Copy-Item $setup.FullName artifacts/Sanser-Windows-2.0.0-x64-setup.exe
           
           # Copy các file zip và chữ ký cập nhật (Tauri Auto-update)
-          $updaterFiles = Get-ChildItem target/x86_64-pc-windows-msvc/release/bundle/updater/*
-          foreach ($file in $updaterFiles) {
-            Copy-Item $file.FullName artifacts/
-          }
+          Copy-Item target/x86_64-pc-windows-msvc/release/bundle/nsis/*.zip artifacts/
+          Copy-Item target/x86_64-pc-windows-msvc/release/bundle/nsis/*.sig artifacts/
           
           New-Item -ItemType Directory -Force build/portable | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/sanser.exe build/portable/sanser.exe
