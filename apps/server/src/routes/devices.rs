@@ -40,7 +40,7 @@ pub struct RegisterDeviceRequest {
     codecs: Vec<String>,
     #[serde(default)]
     native_transport: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "webRtc")]
     webrtc: bool,
     #[serde(default = "default_true")]
     audio: bool,
