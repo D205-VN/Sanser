@@ -44,9 +44,13 @@ jobs:
         run: |
           $capabilities = (& build/host-windows-x64/Release/sanser-host-windows.exe --capabilities-json) | ConvertFrom-Json
           if ($capabilities.nativeSnv2 -ne $true) { throw 'nativeSnv2 is not release-ready' }
+      - name: Write signing key to temporary file
+        shell: bash
+        run: |
+          echo "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" > "${{ runner.temp }}/minisign.key"
       - run: npm --workspace @sanser/desktop run tauri -- build --target x86_64-pc-windows-msvc
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ runner.temp }}/minisign.key
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Name artifacts
         shell: pwsh
