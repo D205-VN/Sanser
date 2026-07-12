@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { DiagnosticsExport, EngineKind, LaunchEngineRequest, Preferences, RuntimeStatus } from './types';
+import type { DiagnosticsExport, EngineKind, EngineStatus, LaunchEngineRequest, Preferences, RuntimeStatus } from './types';
 import { PROTOCOL_VERSION, SANSER_VERSION, unavailableCapability } from './types';
 
 export function isTauriRuntime(): boolean {
@@ -20,6 +20,7 @@ export async function runtimeStatus(): Promise<RuntimeStatus> {
       hostEngine: unavailable,
       clientEngine: unavailable,
       webRtc: unavailableCapability('Native WebRTC backend is not installed', 'planned'),
+      nativeDirect: unavailableCapability('Authenticated native direct engine is not installed'),
       nativeSnv2: unavailableCapability('SNV2 engine is not installed'),
       gamepad: unavailableCapability('Native gamepad input is not installed', 'planned'),
       clipboard: unavailableCapability('Clipboard sharing is not installed', 'planned')
@@ -77,6 +78,16 @@ export async function launchEngine(request: LaunchEngineRequest): Promise<void> 
 export async function stopEngine(kind: EngineKind): Promise<void> {
   if (!isTauriRuntime()) throw new Error('Native engine requires the Sanser desktop app');
   await invoke('stop_engine', { kind });
+}
+
+export async function engineStatus(kind: EngineKind): Promise<EngineStatus> {
+  if (isTauriRuntime()) return invoke<EngineStatus>('get_engine_status', { kind });
+  return { kind, installed: false, running: false, processId: null, lastError: null };
+}
+
+export async function getLocalRouteAddress(serverUrl: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke<string | null>('get_local_route_address', { serverUrl });
 }
 
 export async function exportDiagnostics(contents: string): Promise<DiagnosticsExport> {

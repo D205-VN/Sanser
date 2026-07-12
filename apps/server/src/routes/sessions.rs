@@ -16,7 +16,7 @@ use crate::{
     auth::{AuthContext, audit},
     error::{ApiJson, AppError},
     events,
-    models::{ConnectionSession, Device},
+    models::{ConnectionSession, Device, Page},
     routes::devices,
     state::AppState,
     time::now_unix,
@@ -42,6 +42,20 @@ pub struct NativeCredentialsQuery {
     device_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeReadyRequest {
+    device_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListSessionsQuery {
+    host_device_id: String,
+    #[serde(default = "default_active_state")]
+    state: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeSessionCredentials {
@@ -52,6 +66,54 @@ pub struct NativeSessionCredentials {
     base_port: u16,
     expires_at: i64,
     session_token: String,
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Query(query): Query<ListSessionsQuery>,
+) -> Result<Json<Page<ConnectionSession>>, AppError> {
+    let host_id = validate_uuid(&query.host_device_id, "hostDeviceId")?;
+    // Confirm ownership before querying session rows. This deliberately returns
+    // the same not-found response as the rest of the device API for another
+    // account's device identifier.
+    devices::fetch_owned(&state, &auth.user_id, &host_id).await?;
+    let requested_state = query.state.trim().to_ascii_lowercase();
+    let rows = match requested_state.as_str() {
+        "active" => sqlx::query(
+            "SELECT * FROM connection_sessions WHERE user_id = $1 AND host_device_id = $2 \
+                 AND state IN ('pending', 'accepted') ORDER BY created_at DESC, id DESC LIMIT 20",
+        )
+        .bind(&auth.user_id)
+        .bind(&host_id)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::from_db)?,
+        "pending" | "accepted" | "rejected" | "disconnected" | "expired" => sqlx::query(
+            "SELECT * FROM connection_sessions WHERE user_id = $1 AND host_device_id = $2 \
+                 AND state = $3 ORDER BY created_at DESC, id DESC LIMIT 20",
+        )
+        .bind(&auth.user_id)
+        .bind(&host_id)
+        .bind(&requested_state)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(AppError::from_db)?,
+        _ => {
+            return Err(AppError::Validation(
+                "state must be active, pending, accepted, rejected, disconnected, or expired"
+                    .into(),
+            ));
+        }
+    };
+    let items = rows
+        .into_iter()
+        .map(row_to_session)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(Page {
+        items,
+        next_cursor: None,
+    }))
 }
 
 pub async fn create(
@@ -90,16 +152,9 @@ pub async fn create(
     if request.network_mode == NetworkMode::Relay && state.config.turn_urls.is_empty() {
         return Err(AppError::Unavailable);
     }
-    if !host.webrtc && !host.native_transport {
-        return Err(AppError::Conflict(
-            "host has no compatible transport".into(),
-        ));
-    }
-    if !requester.webrtc && !requester.native_transport {
-        return Err(AppError::Conflict(
-            "requester has no compatible transport".into(),
-        ));
-    }
+    // Validate the pair now so the UI never creates a request that can only
+    // fail later when the host attempts to accept it.
+    select_transport(None, request.network_mode, &host, &requester)?;
 
     let active = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM connection_sessions WHERE user_id = $1 \
@@ -189,9 +244,9 @@ pub async fn credentials(
             "native credentials require an accepted session".into(),
         ));
     }
-    if session.selected_transport.as_deref() != Some("snv2") {
+    if session.selected_transport.as_deref() != Some("native") {
         return Err(AppError::Conflict(
-            "native credentials require the SNV2 transport".into(),
+            "native credentials require the authenticated native direct transport".into(),
         ));
     }
 
@@ -264,6 +319,60 @@ pub async fn credentials(
         }),
     )
         .into_response())
+}
+
+pub async fn native_ready(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(id): Path<String>,
+    ApiJson(request): ApiJson<NativeReadyRequest>,
+) -> Result<Json<ConnectionSession>, AppError> {
+    let id = validate_uuid(&id, "id")?;
+    let device_id = validate_uuid(&request.device_id, "deviceId")?;
+    let current = fetch_owned(&state, &auth.user_id, &id).await?;
+    if current.state != "accepted" || current.selected_transport.as_deref() != Some("native") {
+        return Err(AppError::Conflict(
+            "native readiness requires an accepted native direct session".into(),
+        ));
+    }
+    if device_id != current.requester_device_id {
+        return Err(AppError::Forbidden);
+    }
+    let requester = devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
+    let host = devices::fetch_owned(&state, &auth.user_id, &current.host_device_id).await?;
+    ensure_device_online(&state, &requester)?;
+    ensure_device_online(&state, &host)?;
+
+    let now = now_unix();
+    // Recheck every session invariant in the write itself. A concurrent
+    // transition then affects zero rows and is reported as a conflict below.
+    let updated = sqlx::query(
+        "UPDATE connection_sessions SET requester_ready_at = COALESCE(requester_ready_at, $1), \
+         updated_at = $2 WHERE id = $3 AND user_id = $4 AND requester_device_id = $5 \
+         AND state = 'accepted' AND selected_transport = 'native'",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(&id)
+    .bind(&auth.user_id)
+    .bind(&device_id)
+    .execute(&state.pool)
+    .await
+    .map_err(AppError::from_db)?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::Conflict(
+            "session state changed before native readiness was recorded".into(),
+        ));
+    }
+    events::publish(
+        &state,
+        &auth.user_id,
+        Some(&id),
+        "session.native_ready",
+        serde_json::json!({"sessionId": id, "requesterDeviceId": device_id}),
+    )
+    .await?;
+    Ok(Json(fetch_owned(&state, &auth.user_id, &id).await?))
 }
 
 pub async fn accept(
@@ -458,6 +567,9 @@ fn row_to_session(row: sqlx::postgres::PgRow) -> Result<ConnectionSession, AppEr
         created_at: row.try_get("created_at").map_err(AppError::from_db)?,
         updated_at: row.try_get("updated_at").map_err(AppError::from_db)?,
         accepted_at: row.try_get("accepted_at").map_err(AppError::from_db)?,
+        requester_ready_at: row
+            .try_get("requester_ready_at")
+            .map_err(AppError::from_db)?,
         ended_at: row.try_get("ended_at").map_err(AppError::from_db)?,
         disconnect_reason: row
             .try_get("disconnect_reason")
@@ -500,7 +612,7 @@ fn select_transport(
                 && host.route_address.is_some()
                 && requester.route_address.is_some()
             {
-                "snv2"
+                "native"
             } else {
                 "webrtc"
             }
@@ -508,7 +620,7 @@ fn select_transport(
         str::trim,
     );
     match selected {
-        "snv2"
+        "native"
             if mode != NetworkMode::Relay
                 && host.native_transport
                 && requester.native_transport =>
@@ -516,11 +628,11 @@ fn select_transport(
             Ok(selected.into())
         }
         "webrtc" if host.webrtc && requester.webrtc => Ok(selected.into()),
-        "snv2" | "webrtc" => Err(AppError::Conflict(
+        "native" | "webrtc" => Err(AppError::Conflict(
             "selected transport is not supported by both devices".into(),
         )),
         _ => Err(AppError::Validation(
-            "selectedTransport must be snv2 or webrtc".into(),
+            "selectedTransport must be native or webrtc".into(),
         )),
     }
 }
@@ -602,7 +714,7 @@ fn derive_session_token(
     expires_at: i64,
 ) -> Result<String, AppError> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| AppError::Internal)?;
-    mac.update(b"sanser-snv2-session-credential-v1\0");
+    mac.update(b"sanser-native-session-credential-v1\0");
     for field in [session_id, requester_device_id, host_device_id] {
         let length = u32::try_from(field.len()).map_err(|_| AppError::Internal)?;
         mac.update(&length.to_be_bytes());
@@ -619,6 +731,10 @@ fn default_quality() -> String {
 
 fn default_codec() -> String {
     "auto".into()
+}
+
+fn default_active_state() -> String {
+    "active".into()
 }
 
 #[cfg(test)]

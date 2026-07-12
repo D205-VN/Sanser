@@ -14,7 +14,7 @@ Native:   SNV2 target (engine integration is capability-gated)
 - Account, device and signaling data backed only by PostgreSQL on Neon.
 - Local preferences stored as a bounded JSON file; secrets stay in Keychain/Credential Manager.
 - Versioned `/api/v2` auth, devices, connection sessions, ICE and WebSocket signaling.
-- Auto, Direct and Relay network modes with STUN/TURN.
+- Auto, Direct and Relay control-plane modes; authenticated Native Direct is available on reachable IPv4 routes, while WebRTC/TURN remains capability-gated.
 - Short-lived access tokens, refresh-token rotation/revocation and Argon2id passwords.
 - Typed Tauri commands and sidecar allowlists; Node.js is not a packaged runtime.
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
@@ -102,13 +102,14 @@ npm run desktop:dev
 
 ## Network modes
 
-The modes below define the v2 negotiation policy. The desktop enables a route
-only when its native capability probe succeeds; signed LAN discovery and the
-native WebRTC transport are still marked planned in the current build.
+The desktop enables a route only after its packaged sidecar passes the native
+capability probe. The current streaming path is authenticated Native Direct on
+a reachable IPv4 route, normally the same LAN. Signed discovery and native
+WebRTC/libdatachannel remain planned.
 
-- **Auto** tries signed LAN discovery, direct/private routes, ICE direct, STUN candidates, then TURN UDP/TCP/TLS. SNV2 is selected only for an authenticated direct route; otherwise the session falls back to WebRTC.
-- **Direct** disables TURN and permits LAN, public routes and STUN. NAT/firewall failure is reported clearly.
-- **Relay** requires TURN, prefers UDP and falls back to TCP/TLS. It uses WebRTC because SNV2 does not relay media through the signaling server.
+- **Auto** selects Native Direct when both devices advertise reachable routes; WebRTC fallback will be used once that engine is linked.
+- **Direct** uses only the reachable native route and never TURN. Different NATs or a firewall can block it.
+- **Relay** is disabled until the WebRTC/TURN engine is available.
 
 For Internet-facing deployment, terminate HTTPS/WSS at a reverse proxy, use an explicit `ALLOWED_ORIGINS`, and configure `TURN_SHARED_SECRET` so the server mints short-lived TURN credentials. Do not expose static production credentials to clients.
 

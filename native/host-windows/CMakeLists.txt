@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(sanser_host_windows VERSION 2.0.0 LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -24,6 +26,12 @@ target_compile_definitions(sanser-host-windows PRIVATE
 )
 
 target_include_directories(sanser-host-windows PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../common)
+
+if(BUILD_TESTING)
+  add_executable(sanser-wheel-delta-test ../common/wheel_delta_test.cpp)
+  target_include_directories(sanser-wheel-delta-test PRIVATE ../common)
+  add_test(NAME sanser-wheel-delta-test COMMAND sanser-wheel-delta-test)
+endif()
 
 target_link_libraries(sanser-host-windows PRIVATE
   sanser-snv2

@@ -18,6 +18,7 @@
   let editingId = $state<string | null>(null);
   let editingName = $state('');
   let connectingId = $state<string | null>(null);
+  let loadInFlight = false;
 
   const visibleDevices = $derived(
     devices
@@ -27,20 +28,23 @@
       .sort((left, right) => Number(right.pinned) - Number(left.pinned) || Number(right.online) - Number(left.online) || left.name.localeCompare(right.name))
   );
 
-  async function loadDevices(): Promise<void> {
+  async function loadDevices(showLoading = true): Promise<void> {
+    if (loadInFlight) return;
     const client = session.client();
     if (!client) {
       devices = [];
       return;
     }
-    loading = true;
+    loadInFlight = true;
+    if (showLoading) loading = true;
     error = null;
     try {
       devices = (await client.devices()).items;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Unable to load computers';
     } finally {
-      loading = false;
+      if (showLoading) loading = false;
+      loadInFlight = false;
     }
   }
 
@@ -51,7 +55,13 @@
     error = null;
     connectingId = device.id;
     try {
-      const created = await client.createSession(device.id, requesterDeviceId, $preferences.networkMode, $preferences.stream.profile);
+      const created = await client.createSession(
+        device.id,
+        requesterDeviceId,
+        $preferences.networkMode,
+        $preferences.stream.profile,
+        $preferences.stream.codec
+      );
       connection.begin(created);
       navigate('session');
     } catch (caught) {
@@ -70,7 +80,10 @@
     }
 
     const nativeCompatible =
-      runtime.capabilities.nativeSnv2.state === 'available' && device.capabilities.nativeTransport;
+      runtime.capabilities.nativeDirect.state === 'available' &&
+      device.capabilities.nativeTransport &&
+      device.route !== null &&
+      $presence.routeAddress !== null;
     const relayCompatible = runtime.capabilities.webRtc.state === 'available' && device.capabilities.webRtc;
     if ($preferences.networkMode === 'relay' && !relayCompatible) return 'Relay requires WebRTC on both computers';
     if (!nativeCompatible && !relayCompatible) return 'No verified transport is available on both computers';
@@ -133,6 +146,10 @@
 
   onMount(() => {
     void loadDevices();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadDevices(false);
+    }, 5_000);
+    return () => window.clearInterval(timer);
   });
 </script>
 
@@ -143,7 +160,7 @@
       <select class="select compact-select" aria-label="Default quality profile" value={$preferences.stream.profile} onchange={(event) => setProfile((event.currentTarget as HTMLSelectElement).value as QualityProfile)}>
         <option value="auto">Auto profile</option><option value="competitive">Competitive</option><option value="balanced">Balanced</option><option value="quality">Quality</option><option value="custom">Custom</option>
       </select>
-      <button class="button" onclick={loadDevices} disabled={loading}>Refresh</button>
+      <button class="button" onclick={() => void loadDevices()} disabled={loading}>Refresh</button>
     </div>
   </header>
 
@@ -166,6 +183,7 @@
   {:else}
     <div class="grid two computer-grid">
       {#each visibleDevices as device (device.id)}
+        {@const blockReason = connectionBlockReason(device)}
         <article class="card computer-card">
           <div class="computer-top">
             <div class="device-glyph"><Icon name="monitor" /></div>
@@ -188,16 +206,17 @@
             <div><span>Codec</span><strong>{device.capabilities.codecs.map((item) => item === 'h264' ? 'H.264' : item === 'hevc' ? 'HEVC' : 'Auto').join(' · ')}</strong></div>
           </div>
           <div class="capability-tags">
-            <span class:ok={device.capabilities.nativeTransport}>SNV2</span><span class:ok={device.capabilities.webRtc}>WebRTC</span><span class:ok={device.capabilities.audio}>Audio</span><span class:ok={device.capabilities.gamepad}>Gamepad</span>
+            <span class:ok={device.capabilities.nativeTransport}>Native direct</span><span class:ok={device.capabilities.webRtc}>WebRTC</span><span class:ok={device.capabilities.audio}>Audio</span><span class:ok={device.capabilities.gamepad}>Gamepad</span>
           </div>
           <div class="computer-actions">
-            <button class="button primary" disabled={connectionBlockReason(device) !== null || connectingId !== null} title={connectionBlockReason(device) ?? 'Request a secure session'} onclick={() => connect(device)}>{connectingId === device.id ? 'Requesting…' : 'Connect'}</button>
+            <button class="button primary" disabled={blockReason !== null || connectingId !== null} title={blockReason ?? 'Request a secure session'} onclick={() => connect(device)}>{connectingId === device.id ? 'Requesting…' : 'Connect'}</button>
             <button class="button small" onclick={() => togglePin(device)}>{device.pinned ? 'Unpin' : 'Pin'}</button>
             <button class="button small" onclick={() => beginRename(device)}>Rename</button>
             <button class="button small" onclick={() => inspect(device)}>Diagnostics</button>
             <button class="button small danger" onclick={() => remove(device)}>Remove</button>
             <button class="button small" disabled title="Wake-on-LAN backend is planned">Wake · Planned</button>
           </div>
+          {#if blockReason}<div class="connect-reason">Connect unavailable: {blockReason}</div>{/if}
           {#if device.route}<div class="device-route">Advanced route: {device.route}</div>{/if}
         </article>
       {/each}

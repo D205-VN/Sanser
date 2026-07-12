@@ -63,8 +63,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 }
 button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity: 0.46; }
 
-.app-shell { display: grid; grid-template-columns: 244px minmax(0, 1fr); height: 100%; }
-.content-shell { min-width: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr); }
+.app-shell { display: grid; grid-template-columns: 244px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; }
+.content-shell { min-width: 0; min-height: 0; display: grid; grid-template-rows: 58px minmax(0, 1fr); height: 100%; overflow: hidden; }
 .titlebar {
   position: relative;
   z-index: 5;
@@ -88,7 +88,7 @@ button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity:
 .mode-indicator { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; font-weight: 620; }
 .mode-indicator i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
 .title-account { max-width: 250px; overflow: hidden; color: var(--text-soft); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.page-scroll { min-width: 0; overflow: auto; padding: 36px 38px 56px; }
+.page-scroll { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 36px 38px 56px; }
 .page { width: min(1240px, 100%); margin: 0 auto; }
 .page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; margin-bottom: 28px; }
 .page-header h1 { margin: 0; font-size: 30px; font-weight: 700; letter-spacing: -0.045em; line-height: 1.1; }
@@ -333,6 +333,7 @@ button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity:
 .capability-tags span { padding: 5px 8px; border: 1px solid transparent; border-radius: 6px; color: var(--muted-2); background: rgba(255, 255, 255, 0.035); font-size: 8px; font-weight: 650; }
 .capability-tags span.ok { color: var(--green); border-color: rgba(105, 221, 182, 0.1); background: var(--green-soft); }
 .computer-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 19px; }
+.connect-reason { margin-top: 12px; color: #dec58f; font-size: 9px; line-height: 1.5; }
 .device-route { margin-top: 14px; overflow: hidden; color: var(--muted-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 
 .host-hero { position: relative; min-height: 124px; display: flex; align-items: center; gap: 19px; padding: 24px; margin-bottom: 17px; overflow: hidden; }

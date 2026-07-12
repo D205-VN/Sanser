@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import BrandMark from './components/BrandMark.svelte';
   import Sidebar from './components/Sidebar.svelte';
-  import { runtimeStatus } from './lib/platform';
+  import { runtimeStatus, stopEngine } from './lib/platform';
   import type { Page, RuntimeStatus } from './lib/types';
   import ActiveSession from './pages/ActiveSession.svelte';
   import About from './pages/About.svelte';
@@ -12,6 +12,7 @@
   import Settings from './pages/Settings.svelte';
   import Welcome from './pages/Welcome.svelte';
   import { diagnostics } from './stores/diagnostics';
+  import { connection } from './stores/connection';
   import { host } from './stores/host';
   import { preferences } from './stores/preferences';
   import { presence } from './stores/presence';
@@ -45,9 +46,25 @@
 
   async function signOut(): Promise<void> {
     try {
-      if ($host.online) await host.offline();
-      await presence.stop();
+      connection.clear();
+      const hostShutdown = $host.online || $host.busy || $host.engineRunning ? host.offline() : Promise.resolve();
+      const presenceShutdown = presence.stop();
+      if (runtime?.capabilities.desktopShell.state === 'available') {
+        const results = await Promise.allSettled([stopEngine('host'), stopEngine('client')]);
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            diagnostics.add({
+              level: 'warn',
+              category: 'engine',
+              message: result.reason instanceof Error ? result.reason.message : 'Unable to stop a native engine during sign out'
+            });
+          }
+        }
+      }
+      await Promise.all([hostShutdown, presenceShutdown]);
+      host.setEngineRunning(false);
       await session.logout();
+      page = 'computers';
     } catch (error) {
       diagnostics.add({ level: 'warn', category: 'auth', message: error instanceof Error ? error.message : 'Sign out failed' });
     }

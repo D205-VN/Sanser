@@ -92,11 +92,18 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/devices/{id}",
             patch(routes::devices::update).delete(routes::devices::remove),
         )
-        .route("/api/v2/sessions", post(routes::sessions::create))
+        .route(
+            "/api/v2/sessions",
+            get(routes::sessions::list).post(routes::sessions::create),
+        )
         .route("/api/v2/sessions/{id}", get(routes::sessions::get))
         .route(
             "/api/v2/sessions/{id}/credentials",
             get(routes::sessions::credentials),
+        )
+        .route(
+            "/api/v2/sessions/{id}/native-ready",
+            post(routes::sessions::native_ready),
         )
         .route(
             "/api/v2/sessions/{id}/accept",

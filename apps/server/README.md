@@ -63,8 +63,10 @@ POST   /api/v2/devices/offline
 PATCH  /api/v2/devices/:id
 DELETE /api/v2/devices/:id
 POST   /api/v2/sessions
+GET    /api/v2/sessions?hostDeviceId=<uuid>&state=active
 GET    /api/v2/sessions/:id
 GET    /api/v2/sessions/:id/credentials?deviceId=<uuid>
+POST   /api/v2/sessions/:id/native-ready
 POST   /api/v2/sessions/:id/accept
 POST   /api/v2/sessions/:id/reject
 POST   /api/v2/sessions/:id/disconnect
@@ -79,13 +81,14 @@ parameters. CORS uses the explicit `ALLOWED_ORIGINS` list and TURN credentials
 can be generated from a shared secret.
 
 The native credential route is available only while an account-owned session is
-accepted with `selectedTransport=snv2`. `deviceId` must be one of that session's
+accepted with `selectedTransport=native`. `deviceId` must be one of that session's
 two online, native-capable devices. The response contains the peer route,
 `basePort`, an acceptance-anchored expiry and the same opaque HMAC-SHA256
 `sessionToken` for both peers. Responses are `Cache-Control: no-store`. The
 credential expires after 15–300 configured seconds; create a new session after
-expiry. This is a secure handoff and does not advertise the unfinished native
-SNV2 engine as available.
+expiry. After the macOS requester binds its listener, it posts `native-ready`;
+only then does the Windows host launch its native process. This secure handoff
+does not advertise the unfinished SNV2 packet engine as available.
 
 Before a client exits or signs out, it should call:
 

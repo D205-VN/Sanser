@@ -39,7 +39,7 @@ describe('normalizeServerUrl', () => {
     const client = new ApiClient('https://sanser.example', () => Promise.resolve('access-token'));
 
     await client.heartbeatDevice('requester-id', false);
-    await client.createSession('host-id', 'requester-id', 'auto', 'balanced');
+    await client.createSession('host-id', 'requester-id', 'auto', 'balanced', 'hevc');
 
     const heartbeatInit = fetchMock.mock.calls[0]?.[1];
     const sessionInit = fetchMock.mock.calls[1]?.[1];
@@ -50,7 +50,8 @@ describe('normalizeServerUrl', () => {
       hostDeviceId: 'host-id',
       requesterDeviceId: 'requester-id',
       networkMode: 'auto',
-      qualityProfile: 'balanced'
+      qualityProfile: 'balanced',
+      requestedCodec: 'hevc'
     });
   });
 

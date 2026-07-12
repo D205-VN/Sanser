@@ -23,8 +23,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::secure_get,
             commands::secure_set,
             commands::secure_delete,
+            commands::get_local_route_address,
             commands::launch_engine,
             commands::stop_engine,
+            commands::get_engine_status,
             commands::export_diagnostics
         ])
         .run(tauri::generate_context!())?;

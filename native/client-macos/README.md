@@ -19,6 +19,11 @@ Sanser 2 additions:
 
 The legacy listener loop remains migration reference and is not reported as SNV2-capable until it consumes the shared header, session, replay and priority-lane implementation end-to-end. The Tauri shell keeps that capability unavailable meanwhile.
 
+The sidecar reports `nativeDirect=true` separately. In that mode it listens for
+authenticated/encrypted video on the negotiated base port, control on `base+1`
+and optional audio on `base+2`. It rejects unauthenticated media whenever a
+session credential is present. `nativeSnv2` remains `false`.
+
 ## Build and probe
 
 ```bash

@@ -27,6 +27,12 @@ add_executable(sanser-client-macos
   src/main.mm
 )
 
+if(BUILD_TESTING)
+  add_executable(sanser-wheel-delta-test ../common/wheel_delta_test.cpp)
+  target_include_directories(sanser-wheel-delta-test PRIVATE ../common)
+  add_test(NAME sanser-wheel-delta-test COMMAND sanser-wheel-delta-test)
+endif()
+
 find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
 find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
 find_library(COREAUDIO_FRAMEWORK CoreAudio REQUIRED)

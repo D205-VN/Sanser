@@ -2738,7 +2738,8 @@ std::string pointerJsonFromPoint(const char* type,
                                  CGFloat dy,
                                  bool relative,
                                  bool dragging,
-                                 std::uint32_t buttons) {
+                                 std::uint32_t buttons,
+                                 bool preciseWheel = false) {
   const NSRect bounds = [view bounds];
   const double width = std::max<double>(bounds.size.width, 1.0);
   const double height = std::max<double>(bounds.size.height, 1.0);
@@ -2753,8 +2754,11 @@ std::string pointerJsonFromPoint(const char* type,
       << ",\"dx\":" << dx
       << ",\"dy\":" << dy
       << ",\"relative\":" << jsonBool(relative)
-      << ",\"dragging\":" << jsonBool(dragging)
-      << "}";
+      << ",\"dragging\":" << jsonBool(dragging);
+  if (std::strcmp(type, "wheel") == 0) {
+    out << ",\"precise\":" << jsonBool(preciseWheel);
+  }
+  out << "}";
   return out.str();
 }
 
@@ -2776,7 +2780,8 @@ std::string pointerEventJson(const char* type,
                               dy,
                               gRelativeMouse,
                               dragging,
-                              buttons);
+                              buttons,
+                              wheel && [event hasPreciseScrollingDeltas]);
 }
 
 std::string keyEventJson(const char* type, NSEvent* event) {
@@ -7564,7 +7569,8 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--capabilities-json") {
       std::cout << "{\"product\":\"Sanser\",\"version\":\"2.0.0\","
                    "\"protocolVersion\":2,\"engine\":\"client-macos\","
-                   "\"nativeSnv2\":false,\"h264DecoderImplementation\":true,"
+                   "\"nativeSnv2\":true,\"nativeDirect\":true,"
+                   "\"h264DecoderImplementation\":true,"
                    "\"hevcDecoderImplementation\":true,\"metalImplementation\":true,"
                    "\"audioImplementation\":true,\"inputImplementation\":true,"
                    "\"gamepadImplementation\":true}\n";

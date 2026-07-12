@@ -72,7 +72,7 @@
       <div class="story-signals" aria-label="Sanser capabilities">
         <span><strong>Auto</strong> route selection</span>
         <span><strong>H.264 + HEVC</strong> video</span>
-        <span><strong>SNV2</strong> authenticated transport</span>
+        <span><strong>Native direct</strong> authenticated transport</span>
       </div>
     </div>
 

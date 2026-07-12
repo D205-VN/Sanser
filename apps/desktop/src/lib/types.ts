@@ -1,6 +1,6 @@
 export const SANSER_VERSION = '2.0.0' as const;
 export const PROTOCOL_VERSION = 2 as const;
-export const NATIVE_PROTOCOL = 'SNV2' as const;
+export const NATIVE_PROTOCOL = 'Native direct' as const;
 
 export type Page = 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about';
 export type SettingsSection =
@@ -33,6 +33,7 @@ export interface RuntimeCapabilities {
   hostEngine: Capability;
   clientEngine: Capability;
   webRtc: Capability;
+  nativeDirect: Capability;
   nativeSnv2: Capability;
   gamepad: Capability;
   clipboard: Capability;
@@ -146,17 +147,22 @@ export interface DeviceRegistration {
   webRtc: boolean;
   audio: boolean;
   gamepad: boolean;
+  /** Direct route selected by the native shell, when one has been verified. */
+  routeAddress?: string;
 }
 
 export interface ConnectionSession {
   id: string;
+  requesterDeviceId: string;
   hostDeviceId: string;
   status: 'pending' | 'accepted' | 'connecting' | 'connected' | 'rejected' | 'disconnected' | 'expired' | 'closed' | 'failed';
-  transport: 'snv2' | 'webrtc' | null;
+  transport: 'native' | 'webrtc' | null;
   networkMode: NetworkMode;
   qualityProfile: QualityProfile;
+  requestedCodec: VideoCodec;
   createdAt: string;
   updatedAt?: string;
+  requesterReadyAt?: string;
   address?: string;
   port?: number;
   /** Ephemeral, memory-only credential returned after media negotiation. */
@@ -196,7 +202,7 @@ export interface SessionMetrics {
   decodeLatencyMs: number;
   droppedFrames: number;
   codec: VideoCodec;
-  transport: 'SNV2' | 'WebRTC' | 'None';
+  transport: 'Native' | 'WebRTC' | 'None';
 }
 
 export interface LaunchEngineRequest {

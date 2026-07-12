@@ -78,5 +78,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S native/host-windows -B build/host-windows -A x64
+      - run: cmake -S native/host-windows -B build/host-windows -A x64 -DBUILD_TESTING=ON
       - run: cmake --build build/host-windows --config Release --parallel
+      - run: ctest --test-dir build/host-windows -C Release --output-on-failure

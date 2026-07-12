@@ -107,6 +107,7 @@ pub struct RuntimeCapabilities {
     pub local_server: Capability,
     pub local_discovery: Capability,
     pub web_rtc: Capability,
+    pub native_direct: Capability,
     pub native_snv2: Capability,
     pub gamepad: Capability,
     pub clipboard: Capability,

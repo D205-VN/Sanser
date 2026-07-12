@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import StatusPill from '../components/StatusPill.svelte';
-  import { launchEngine, stopEngine } from '../lib/platform';
-  import type { RuntimeStatus } from '../lib/types';
+  import { engineStatus, launchEngine, stopEngine } from '../lib/platform';
+  import type { ConnectionSession, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
   import { diagnostics } from '../stores/diagnostics';
   import { preferences } from '../stores/preferences';
@@ -11,13 +11,15 @@
 
   let { runtime }: { runtime: RuntimeStatus } = $props();
   let localError = $state<string | null>(null);
+  let componentActive = false;
+  let refreshInFlight = false;
 
   const sessionState = $derived($connection.session);
   const metrics = $derived($connection.metrics);
   const nativeReady = $derived(
     sessionState?.status === 'accepted' &&
       runtime.capabilities.clientEngine.state === 'available' &&
-      runtime.capabilities.nativeSnv2.state === 'available' &&
+      runtime.capabilities.nativeDirect.state === 'available' &&
       sessionState.address !== undefined &&
       sessionState.port !== undefined &&
       sessionState.sessionToken !== undefined &&
@@ -33,36 +35,70 @@
     }
   }
 
-  async function startNativeClient(): Promise<void> {
-    if (!sessionState || !nativeReady || !sessionState.port) return;
+  async function launchNativeClient(target: ConnectionSession): Promise<boolean> {
+    if (
+      $connection.engineRunning ||
+      $connection.busy ||
+      target.status !== 'accepted' ||
+      target.transport !== 'native' ||
+      !target.address ||
+      !target.port ||
+      !target.sessionToken
+    ) return false;
     const size = resolutionSize();
     connection.setBusy(true);
     localError = null;
     try {
       await launchEngine({
         kind: 'client',
-        sessionId: sessionState.id,
-        address: sessionState.address,
-        port: sessionState.port,
+        sessionId: target.id,
+        address: target.address,
+        port: target.port,
         codec: $preferences.stream.codec,
         fps: $preferences.stream.fps,
         bitrateKbps: Math.round($preferences.stream.bitrateMbps * 1_000),
         width: size.width,
         height: size.height,
-        networkMode: sessionState.networkMode,
+        networkMode: target.networkMode,
         audioEnabled: $preferences.host.audioEnabled,
         inputEnabled: $preferences.host.inputEnabled,
         relativeMouse: $preferences.input.mouseMode === 'relative',
-        sessionToken: sessionState.sessionToken
+        sessionToken: target.sessionToken
       });
+      if (!componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') {
+        await stopEngine('client').catch(() => undefined);
+        return false;
+      }
       connection.setEngineRunning(true);
       diagnostics.add({ level: 'info', category: 'engine', message: 'Native macOS client started' });
+      return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to start native client';
       localError = message;
       connection.setError(message);
+      return false;
     } finally {
       connection.setBusy(false);
+    }
+  }
+
+  async function startNativeClient(target = sessionState): Promise<void> {
+    const client = session.client();
+    const localDeviceId = $presence.deviceId;
+    if (!target || !client || !localDeviceId) return;
+    if (!(await launchNativeClient(target))) return;
+    if (!componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') {
+      await stopEngine('client').catch(() => undefined);
+      connection.setEngineRunning(false);
+      return;
+    }
+    try {
+      await client.markNativeReady(target.id, localDeviceId);
+      diagnostics.add({ level: 'info', category: 'session', message: 'macOS listener is ready for the host' });
+    } catch (error) {
+      await stopEngine('client').catch(() => undefined);
+      connection.setEngineRunning(false);
+      connection.setError(error instanceof Error ? error.message : 'Unable to announce native listener readiness');
     }
   }
 
@@ -93,31 +129,73 @@
   }
 
   async function refreshSession(): Promise<void> {
+    if (!componentActive || refreshInFlight) return;
     const client = session.client();
     const current = $connection.session;
     const localDeviceId = $presence.deviceId;
-    if (!client || !current) return;
-    const refreshed = await connection.refresh(client);
-    if (
-      refreshed?.status === 'accepted' &&
-      refreshed.transport === 'snv2' &&
-      localDeviceId &&
-      !refreshed.sessionToken
-    ) {
-      try {
-        connection.authorizeNative(await client.sessionCredentials(refreshed.id, localDeviceId));
-      } catch (error) {
-        connection.setError(error instanceof Error ? error.message : 'Unable to authorize the native session');
+    if (!client || !current || $connection.busy) return;
+    refreshInFlight = true;
+    try {
+      if ($connection.engineRunning) {
+        const status = await engineStatus('client');
+        if (!componentActive || $connection.session?.id !== current.id) return;
+        if (!status.running) {
+          const message = status.lastError ?? 'The native macOS client stopped unexpectedly';
+          connection.setEngineRunning(false);
+          connection.setError(message);
+          await client.disconnectSession(current.id).catch(() => undefined);
+          diagnostics.add({ level: 'warn', category: 'engine', message });
+          return;
+        }
       }
+
+      const refreshed = await connection.refresh(client);
+      if (!componentActive || $connection.session?.id !== current.id) return;
+      if (
+        refreshed &&
+        ['rejected', 'disconnected', 'expired', 'closed', 'failed'].includes(refreshed.status) &&
+        $connection.engineRunning
+      ) {
+        await stopEngine('client').catch(() => undefined);
+        connection.setEngineRunning(false);
+        return;
+      }
+      if (
+        refreshed?.status === 'accepted' &&
+        refreshed.transport === 'native' &&
+        localDeviceId &&
+        !refreshed.sessionToken
+      ) {
+        const credentials = await client.sessionCredentials(refreshed.id, localDeviceId);
+        if (!componentActive || $connection.session?.id !== refreshed.id) return;
+        connection.authorizeNative(credentials);
+        await startNativeClient({
+          ...refreshed,
+          address: credentials.peerRouteAddress,
+          port: credentials.basePort,
+          sessionToken: credentials.sessionToken,
+          credentialExpiresAt: credentials.expiresAt
+        });
+      } else if (refreshed?.status === 'accepted' && refreshed.transport === 'native' && refreshed.sessionToken) {
+        await startNativeClient(refreshed);
+      }
+    } catch (error) {
+      connection.setError(error instanceof Error ? error.message : 'Unable to refresh the native session');
+    } finally {
+      refreshInFlight = false;
     }
   }
 
   onMount(() => {
+    componentActive = true;
     const timer = window.setInterval(() => {
       const current = $connection.session;
       if (current && ['pending', 'accepted', 'connecting'].includes(current.status)) void refreshSession();
     }, 2_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      componentActive = false;
+      window.clearInterval(timer);
+    };
   });
 </script>
 
@@ -141,8 +219,8 @@
       <div class="native-stage-message">
         <span class="capture-dot waiting"></span>
         <h2>{sessionState.status === 'pending' ? 'Waiting for host approval' : sessionState.status === 'accepted' ? 'Host accepted the session' : `Session ${sessionState.status}`}</h2>
-        <p>{nativeReady ? 'The authenticated native endpoint is ready.' : sessionState.networkMode === 'relay' ? 'Relay requires the planned native WebRTC engine; SNV2 never runs through TURN.' : runtime.capabilities.clientEngine.reason ?? 'Waiting for a negotiated media endpoint.'}</p>
-        <button class="button primary" disabled={!nativeReady || $connection.busy} onclick={startNativeClient}>Start native stream</button>
+        <p>{nativeReady ? 'The authenticated native endpoint is ready.' : sessionState.networkMode === 'relay' ? 'Relay requires the planned native WebRTC engine; native direct never runs through TURN.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for a negotiated media endpoint.'}</p>
+        <button class="button primary" disabled={!nativeReady || $connection.busy} onclick={() => startNativeClient()}>Start native stream</button>
         {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">Media negotiation unavailable in this build</span>{/if}
       </div>
     {:else}
@@ -157,7 +235,7 @@
       <div><span>Loss</span><strong>{metrics ? `${metrics.packetLossPercent.toFixed(2)}%` : '—'}</strong></div>
       <div><span>Input</span><strong>{metrics ? `${metrics.inputLatencyMs} ms` : '—'}</strong></div>
       <div><span>Codec</span><strong>{metrics?.codec === 'hevc' ? 'HEVC' : metrics?.codec === 'h264' ? 'H.264' : metrics?.codec === 'auto' ? 'Auto' : '—'}</strong></div>
-      <div><span>Transport</span><strong>{metrics?.transport ?? (sessionState?.transport === 'snv2' ? 'SNV2' : sessionState?.transport === 'webrtc' ? 'WebRTC' : '—')}</strong></div>
+      <div><span>Transport</span><strong>{metrics?.transport ?? (sessionState?.transport === 'native' ? 'Native direct' : sessionState?.transport === 'webrtc' ? 'WebRTC' : '—')}</strong></div>
     </div>
   </div>
 

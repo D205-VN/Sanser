@@ -19,6 +19,12 @@ Sanser 2 additions:
 
 The migrated legacy stream loop is not considered SNV2-capable until its packet lanes and handshake use the shared protocol library end-to-end. The Tauri shell must not advertise or package this sidecar as `nativeSnv2=true` before that capability probe and interoperability tests pass.
 
+The sidecar reports the existing authenticated/encrypted path separately as
+`nativeDirect=true`. For a negotiated base port it sends video to the macOS
+client on `base`, always establishes authenticated control on `base+1`, and
+optionally sends audio on `base+2`. `--disable-input` keeps control/rekey/stats
+active while rejecting remote keyboard, pointer, clipboard and gamepad events.
+
 ## Build
 
 From a Visual Studio 2022 Developer PowerShell:

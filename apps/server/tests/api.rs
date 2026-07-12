@@ -318,6 +318,17 @@ async fn devices_and_session_state_machine_enforce_ownership() {
     assert_eq!(created.0, StatusCode::CREATED, "{}", created.1);
     let session_id = created.1["id"].as_str().expect("session id");
     assert_eq!(created.1["state"], "pending");
+    let host_queue = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/sessions?hostDeviceId={host_id}&state=active"),
+            None,
+            Some(access),
+        )
+        .await;
+    assert_eq!(host_queue.0, StatusCode::OK, "{}", host_queue.1);
+    assert_eq!(host_queue.1["items"][0]["id"], session_id);
+    assert_eq!(host_queue.1["items"][0]["requesterDeviceId"], requester_id);
     assert_eq!(
         server
             .request(
@@ -341,7 +352,29 @@ async fn devices_and_session_state_machine_enforce_ownership() {
         .await;
     assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
     assert_eq!(accepted.1["state"], "accepted");
-    assert_eq!(accepted.1["selectedTransport"], "snv2");
+    assert_eq!(accepted.1["selectedTransport"], "native");
+    assert_eq!(
+        server
+            .request(
+                Method::POST,
+                &format!("/api/v2/sessions/{session_id}/native-ready"),
+                Some(json!({"deviceId": host_id})),
+                Some(access),
+            )
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let requester_ready = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{session_id}/native-ready"),
+            Some(json!({"deviceId": requester_id})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(requester_ready.0, StatusCode::OK, "{}", requester_ready.1);
+    assert!(requester_ready.1["requesterReadyAt"].as_i64().is_some());
 
     let credential_path =
         format!("/api/v2/sessions/{session_id}/credentials?deviceId={requester_id}");
@@ -419,7 +452,7 @@ async fn devices_and_session_state_machine_enforce_ownership() {
             .0,
         StatusCode::CONFLICT
     );
-    sqlx::query("UPDATE connection_sessions SET selected_transport = 'snv2' WHERE id = $1")
+    sqlx::query("UPDATE connection_sessions SET selected_transport = 'native' WHERE id = $1")
         .bind(session_id)
         .execute(&server.state.pool)
         .await
@@ -620,7 +653,7 @@ async fn migration_and_cleanup_work_on_neon_postgres() {
         .fetch_one(&server.state.pool)
         .await
         .expect("migration metadata");
-    assert_eq!(migrations, 2);
+    assert_eq!(migrations, 3);
     assert!(db::ready(&server.state.pool).await);
 
     let auth = server.register("cleanup@example.test").await;

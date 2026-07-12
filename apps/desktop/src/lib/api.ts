@@ -117,13 +117,17 @@ function normalizeConnectionSession(raw: RawSession): ConnectionSession {
   const selected = raw.transport ?? raw.selectedTransport;
   return {
     id: raw.id ?? '',
+    requesterDeviceId: raw.requesterDeviceId ?? '',
     hostDeviceId: raw.hostDeviceId ?? '',
     status: raw.status ?? raw.state ?? 'pending',
-    transport: selected === 'snv2' || selected === 'webrtc' ? selected : null,
+    transport: selected === 'native' || selected === 'webrtc' ? selected : null,
     networkMode: raw.networkMode ?? 'auto',
     qualityProfile: raw.qualityProfile ?? 'auto',
+    requestedCodec:
+      raw.requestedCodec === 'h264' || raw.requestedCodec === 'hevc' ? raw.requestedCodec : 'auto',
     createdAt: dateString(raw.createdAt) ?? new Date().toISOString(),
     updatedAt: dateString(raw.updatedAt) ?? undefined,
+    requesterReadyAt: dateString(raw.requesterReadyAt) ?? undefined,
     address: raw.address,
     port: raw.port,
     sessionToken: raw.sessionToken ?? raw.mediaCredential
@@ -218,8 +222,11 @@ export class ApiClient {
     return normalizeDevice(await this.request<RawDevice>('/api/v2/devices/register', { method: 'POST', body: device }));
   }
 
-  async heartbeatDevice(id: string, streaming: boolean): Promise<void> {
-    await this.request('/api/v2/devices/heartbeat', { method: 'POST', body: { deviceId: id, streaming } });
+  async heartbeatDevice(id: string, streaming: boolean, routeAddress?: string): Promise<void> {
+    await this.request('/api/v2/devices/heartbeat', {
+      method: 'POST',
+      body: { deviceId: id, streaming, routeAddress }
+    });
   }
 
   async offlineDevice(id: string): Promise<Device> {
@@ -235,22 +242,51 @@ export class ApiClient {
     hostDeviceId: string,
     requesterDeviceId: string,
     networkMode: NetworkMode,
-    qualityProfile: QualityProfile
+    qualityProfile: QualityProfile,
+    requestedCodec: 'auto' | 'h264' | 'hevc'
   ): Promise<ConnectionSession> {
     const response = await this.request<RawSession>('/api/v2/sessions', {
       method: 'POST',
-      body: { hostDeviceId, requesterDeviceId, networkMode, qualityProfile }
+      body: { hostDeviceId, requesterDeviceId, networkMode, qualityProfile, requestedCodec }
     });
     return normalizeConnectionSession(response);
+  }
+
+  async hostSessions(hostDeviceId: string): Promise<PageEnvelope<ConnectionSession>> {
+    const response = await this.request<PageEnvelope<RawSession>>(
+      `/api/v2/sessions?hostDeviceId=${encodeURIComponent(hostDeviceId)}&state=active`
+    );
+    return { ...response, items: response.items.map(normalizeConnectionSession) };
   }
 
   async getSession(id: string): Promise<ConnectionSession> {
     return normalizeConnectionSession(await this.request<RawSession>(`/api/v2/sessions/${encodeURIComponent(id)}`));
   }
 
+  async acceptSession(id: string): Promise<ConnectionSession> {
+    return normalizeConnectionSession(
+      await this.request<RawSession>(`/api/v2/sessions/${encodeURIComponent(id)}/accept`, {
+        method: 'POST'
+      })
+    );
+  }
+
+  async rejectSession(id: string): Promise<void> {
+    await this.request(`/api/v2/sessions/${encodeURIComponent(id)}/reject`, { method: 'POST' });
+  }
+
   async sessionCredentials(id: string, deviceId: string): Promise<NativeSessionCredentials> {
     return this.request<NativeSessionCredentials>(
       `/api/v2/sessions/${encodeURIComponent(id)}/credentials?deviceId=${encodeURIComponent(deviceId)}`
+    );
+  }
+
+  async markNativeReady(id: string, deviceId: string): Promise<ConnectionSession> {
+    return normalizeConnectionSession(
+      await this.request<RawSession>(`/api/v2/sessions/${encodeURIComponent(id)}/native-ready`, {
+        method: 'POST',
+        body: { deviceId }
+      })
     );
   }
 

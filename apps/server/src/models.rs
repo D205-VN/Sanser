@@ -70,6 +70,8 @@ pub struct ConnectionSession {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accepted_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_ready_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disconnect_reason: Option<String>,

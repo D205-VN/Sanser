@@ -2,21 +2,26 @@
 
 Sanser 2 exposes only `Auto`, `Direct`, and `Relay`.
 
-This document defines the route-selection contract. The current desktop keeps
-signed LAN discovery, WebRTC/libdatachannel, and native SNV2 routes disabled
-until their runtime capability probes report a verified implementation.
+The current desktop provides authenticated Native Direct on a reachable IPv4
+route, normally the same LAN. It keeps signed discovery, WebRTC/libdatachannel,
+and shared SNV2 framing disabled until their capability probes report verified
+implementations.
 
 ## Auto
 
-Auto evaluates signed LAN discovery and private routes first, then ICE host/server-reflexive candidates, TURN/UDP, TURN/TCP, and TURN/TLS. SNV2 is eligible only for an authenticated direct route. If its direct probe fails, the session negotiator falls back to WebRTC without leaving an accepted native session orphaned.
+Auto selects Native Direct when both devices advertise a reachable IPv4 route.
+The control plane is ready to select WebRTC as a fallback, but that media engine
+is not linked in the current desktop build.
 
 ## Direct
 
-Direct disables TURN. LAN/private/public routes and STUN-derived candidates are allowed. The UI reports NAT/firewall failure instead of silently waiting on an impossible relay.
+Direct disables TURN and uses only the authenticated native route. A firewall
+or devices behind different NATs can block the connection.
 
 ## Relay
 
-Relay requires TURN and uses WebRTC/libdatachannel. It prefers UDP, then TCP/TLS. Native SNV2 is not selected because it has no relay path.
+Relay requires TURN and WebRTC/libdatachannel, so the UI disables it until that
+native engine is linked. Native Direct has no relay path.
 
 ## Discovery
 

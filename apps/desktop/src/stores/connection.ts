@@ -38,6 +38,7 @@ function createConnectionStore() {
       if (!current) return null;
       try {
         const refreshed = await client.getSession(current.id);
+        if (get(store).session?.id !== current.id) return null;
         const credentialActive =
           current.credentialExpiresAt !== undefined && current.credentialExpiresAt > Math.floor(Date.now() / 1_000);
         const merged = credentialActive

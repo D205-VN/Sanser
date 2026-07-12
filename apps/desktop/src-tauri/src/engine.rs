@@ -4,8 +4,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
+    thread,
+    time::{Duration, Instant},
 };
 
+use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
@@ -16,6 +19,9 @@ use crate::{
 
 const HOST_SIDECAR: &str = "sanser-host-windows";
 const CLIENT_SIDECAR: &str = "sanser-client-macos";
+const SIDECAR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const ENGINE_STARTUP_STABILIZATION: Duration = Duration::from_millis(250);
+const ENGINE_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const INHERITED_ENVIRONMENT: [&str; 7] = [
     "SystemRoot",
     "WINDIR",
@@ -58,12 +64,159 @@ fn sidecar_name(kind: EngineKind) -> &'static str {
     }
 }
 
+fn sidecar_engine_id(kind: EngineKind) -> &'static str {
+    match kind {
+        EngineKind::Host => "host-windows",
+        EngineKind::Client => "client-macos",
+        EngineKind::LocalServer => "server-disabled",
+    }
+}
+
 fn supported_on_platform(kind: EngineKind) -> bool {
     match kind {
         EngineKind::Host => cfg!(target_os = "windows"),
         EngineKind::Client => cfg!(target_os = "macos"),
         EngineKind::LocalServer => false,
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
+struct SidecarCapabilities {
+    product: String,
+    version: String,
+    protocol_version: u8,
+    engine: String,
+    native_snv2: bool,
+    native_direct: bool,
+    #[serde(default)]
+    h264_encoder_implementation: bool,
+    #[serde(default)]
+    h264_decoder_implementation: bool,
+    #[serde(default)]
+    hevc_encoder_implementation: bool,
+    #[serde(default)]
+    hevc_decoder_implementation: bool,
+}
+
+#[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct SidecarProbe {
+    pub compatible: bool,
+    pub native_snv2: bool,
+    pub native_direct: bool,
+    pub hevc: bool,
+    pub reason: Option<String>,
+}
+
+impl SidecarProbe {
+    fn incompatible(reason: impl Into<String>) -> Self {
+        Self {
+            compatible: false,
+            native_snv2: false,
+            native_direct: false,
+            hevc: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+fn parse_sidecar_capabilities(
+    bytes: &[u8],
+    kind: EngineKind,
+) -> Result<SidecarCapabilities, String> {
+    let capabilities = serde_json::from_slice::<SidecarCapabilities>(bytes)
+        .map_err(|_| "native sidecar returned an invalid capability document".to_owned())?;
+    let expected_engine = sidecar_engine_id(kind);
+    if capabilities.product != "Sanser"
+        || capabilities.version != crate::models::SANSER_VERSION
+        || capabilities.protocol_version != crate::models::PROTOCOL_VERSION
+        || capabilities.engine != expected_engine
+    {
+        return Err("native sidecar identity or protocol version does not match this app".into());
+    }
+    let media_implementation = match kind {
+        EngineKind::Host => capabilities.h264_encoder_implementation,
+        EngineKind::Client => capabilities.h264_decoder_implementation,
+        EngineKind::LocalServer => false,
+    };
+    if !media_implementation {
+        return Err("native sidecar does not provide the required H.264 media engine".into());
+    }
+    Ok(capabilities)
+}
+
+fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
+    let mut command = Command::new(path);
+    command
+        .arg("--capabilities-json")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for key in INHERITED_ENVIRONMENT {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
+    }
+
+    let Ok(mut child) = command.spawn() else {
+        return SidecarProbe::incompatible("native sidecar could not be started");
+    };
+    let deadline = Instant::now() + SIDECAR_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return SidecarProbe::incompatible("native sidecar capability probe failed");
+                }
+                break;
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return SidecarProbe::incompatible("native sidecar capability probe timed out");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return SidecarProbe::incompatible("native sidecar capability probe failed");
+            }
+        }
+    }
+
+    let Ok(output) = child.wait_with_output() else {
+        return SidecarProbe::incompatible("native sidecar capability output is unavailable");
+    };
+    match parse_sidecar_capabilities(&output.stdout, kind) {
+        Ok(capabilities) => {
+            let hevc = match kind {
+                EngineKind::Host => capabilities.hevc_encoder_implementation,
+                EngineKind::Client => capabilities.hevc_decoder_implementation,
+                EngineKind::LocalServer => false,
+            };
+            SidecarProbe {
+                compatible: true,
+                native_snv2: capabilities.native_snv2,
+                native_direct: capabilities.native_direct,
+                hevc,
+                reason: (!capabilities.native_direct).then(|| {
+                    "Native sidecar does not advertise the authenticated direct transport"
+                        .to_owned()
+                }),
+            }
+        }
+        Err(reason) => SidecarProbe::incompatible(reason),
+    }
+}
+
+pub fn probe_sidecar(app: &AppHandle, kind: EngineKind) -> SidecarProbe {
+    find_sidecar(app, kind).map_or_else(
+        || SidecarProbe::incompatible(format!("{} is not bundled", sidecar_name(kind))),
+        |path| probe_path(&path, kind),
+    )
 }
 
 fn executable_filename(base: &str) -> String {
@@ -176,7 +329,7 @@ fn validate_common(request: &LaunchEngineRequest) -> Result<(), DesktopError> {
     }
     if request.network_mode == NetworkMode::Relay && request.kind != EngineKind::LocalServer {
         return Err(DesktopError::InvalidRequest(
-            "SNV2 cannot be launched in Relay mode; use WebRTC TURN".into(),
+            "authenticated native direct cannot be launched in Relay mode; use WebRTC TURN".into(),
         ));
     }
     Ok(())
@@ -218,6 +371,11 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 .map_err(|_| {
                     DesktopError::InvalidRequest("host target address must be an IP".into())
                 })?;
+            if !address.is_ipv4() {
+                return Err(DesktopError::InvalidRequest(
+                    "authenticated native direct transport currently requires an IPv4 route".into(),
+                ));
+            }
             let mut args = vec![
                 "--encode-pipe".into(),
                 native_codec(request.codec).into(),
@@ -237,9 +395,11 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 endpoint(address, port),
                 "--low-latency-encoder".into(),
                 "--udp-pacing".into(),
+                "--control-connect".into(),
+                endpoint(address, port + 1),
             ];
-            if request.input_enabled {
-                args.extend(["--control-connect".into(), endpoint(address, port + 1)]);
+            if !request.input_enabled {
+                args.push("--disable-input".into());
             }
             if request.audio_enabled {
                 args.extend(["--audio-udp-connect".into(), endpoint(address, port + 2)]);
@@ -295,6 +455,30 @@ fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest
     command
 }
 
+fn stabilize_child(child: &mut Child) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => {
+                return Err(format!("process exited during startup with {status}"));
+            }
+            Err(error) => {
+                return Err(format!("could not inspect process during startup: {error}"));
+            }
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= ENGINE_STARTUP_STABILIZATION {
+            return Ok(());
+        }
+        let remaining = ENGINE_STARTUP_STABILIZATION
+            .checked_sub(elapsed)
+            .unwrap_or_default();
+        thread::sleep(ENGINE_STARTUP_POLL_INTERVAL.min(remaining));
+    }
+}
+
 impl EngineManager {
     pub fn launch(
         &self,
@@ -309,6 +493,22 @@ impl EngineManager {
         let path = find_sidecar(app, request.kind).ok_or_else(|| {
             DesktopError::Unavailable(format!("{} is not bundled", sidecar_name(request.kind)))
         })?;
+        let probe = probe_path(&path, request.kind);
+        if !probe.compatible {
+            return Err(DesktopError::Unavailable(probe.reason.unwrap_or_else(
+                || "native sidecar capability probe failed".into(),
+            )));
+        }
+        if !probe.native_direct {
+            return Err(DesktopError::Unavailable(
+                "native sidecar does not advertise the authenticated direct transport".into(),
+            ));
+        }
+        if request.codec == VideoCodec::Hevc && !probe.hevc {
+            return Err(DesktopError::Unavailable(
+                "native sidecar does not provide the requested HEVC engine".into(),
+            ));
+        }
         let args = build_args(request)?;
         let mut state = self
             .state
@@ -328,9 +528,22 @@ impl EngineManager {
             }
         }
 
-        let child = sanitized_command(&path, &args, request)
+        let mut child = sanitized_command(&path, &args, request)
             .spawn()
-            .map_err(|error| DesktopError::Process(error.to_string()))?;
+            .map_err(|error| {
+                let message = error.to_string();
+                state.last_errors.insert(request.kind, message.clone());
+                DesktopError::Process(message)
+            })?;
+        if let Err(message) = stabilize_child(&mut child) {
+            // `try_wait` reaps a child that already exited. If inspecting the
+            // child failed instead, make a best-effort cleanup so launch never
+            // leaves an unmanaged sidecar behind.
+            let _ = child.kill();
+            let _ = child.wait();
+            state.last_errors.insert(request.kind, message.clone());
+            return Err(DesktopError::Process(message));
+        }
         state.last_errors.remove(&request.kind);
         state.children.insert(request.kind, child);
         Ok(())
@@ -403,7 +616,7 @@ mod tests {
         LaunchEngineRequest {
             kind,
             session_id: Some("018f4d89-5e8b-7a80-bd1e-cb7cb9f43189".into()),
-            address: Some("2001:db8::1".into()),
+            address: Some("192.0.2.10".into()),
             port: Some(50_000),
             codec: VideoCodec::Auto,
             fps: 60,
@@ -422,6 +635,12 @@ mod tests {
     fn formats_ipv6_endpoints_without_ambiguity() {
         let address = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
         assert_eq!(endpoint(address, 5000), "[2001:db8::1]:5000");
+        let mut ipv6 = request(EngineKind::Host);
+        ipv6.address = Some("2001:db8::1".into());
+        assert!(matches!(
+            build_args(&ipv6),
+            Err(DesktopError::InvalidRequest(_))
+        ));
     }
 
     #[test]
@@ -433,11 +652,11 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--control-connect", "[2001:db8::1]:50001"])
+                .any(|pair| pair == ["--control-connect", "192.0.2.10:50001"])
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--audio-udp-connect", "[2001:db8::1]:50002"])
+                .any(|pair| pair == ["--audio-udp-connect", "192.0.2.10:50002"])
         );
         Ok(())
     }
@@ -453,10 +672,34 @@ mod tests {
     }
 
     #[test]
+    fn host_keeps_authenticated_control_when_remote_input_is_disabled() -> Result<(), DesktopError>
+    {
+        let mut disabled = request(EngineKind::Host);
+        disabled.input_enabled = false;
+        let args = build_args(&disabled)?;
+        assert!(args.iter().any(|argument| argument == "--control-connect"));
+        assert!(args.iter().any(|argument| argument == "--disable-input"));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_removed_local_server_mode() {
         assert!(matches!(
             build_args(&request(EngineKind::LocalServer)),
             Err(DesktopError::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn capability_parser_requires_matching_engine_and_media_implementation() -> Result<(), String> {
+        let valid = br#"{"product":"Sanser","version":"2.0.0","protocolVersion":2,"engine":"client-macos","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true,"hevcDecoderImplementation":true}"#;
+        let parsed = parse_sidecar_capabilities(valid, EngineKind::Client)?;
+        assert!(!parsed.native_snv2);
+        assert!(parsed.native_direct);
+        assert!(parsed.hevc_decoder_implementation);
+
+        let wrong_engine = br#"{"product":"Sanser","version":"2.0.0","protocolVersion":2,"engine":"host-windows","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true}"#;
+        assert!(parse_sidecar_capabilities(wrong_engine, EngineKind::Client).is_err());
+        Ok(())
     }
 }

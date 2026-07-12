@@ -3,6 +3,7 @@
 #include "mf_video_encoder.h"
 #include "mf_video_packet_encoder.h"
 #include "sanser_version.h"
+#include "wheel_delta.h"
 
 #include <algorithm>
 #include <atomic>
@@ -165,6 +166,8 @@ struct VirtualGamepadUpdateResult {
 InputBounds gInputBounds;
 std::mutex gInputBoundsMutex;
 std::mutex gRemoteInputStateMutex;
+std::atomic<bool> gRemoteInputAllowed{true};
+std::atomic<bool> gRemoteInputBlockedLogged{false};
 std::array<RemoteKeyState, 256> gRemoteKeysDown{};
 std::array<bool, 3> gRemoteMouseButtonsDown{};
 std::mutex gGamepadFallbackMutex;
@@ -453,6 +456,7 @@ struct Options {
   bool lowLatencyEncoder = true;
   bool udpPacing = true;
   bool listEncoders = false;
+  bool remoteInputEnabled = true;
 };
 
 struct StreamDimensions {
@@ -676,6 +680,8 @@ Options parseOptions(int argc, char** argv) {
       options.hardwareEncoder = false;
     } else if (arg == "--list-encoders") {
       options.listEncoders = true;
+    } else if (arg == "--disable-input") {
+      options.remoteInputEnabled = false;
     } else if (arg == "--help" || arg == "-h") {
       std::cout
         << "sanser-host-windows --frames 10 --interval-ms 100 --output-dir captures\n"
@@ -705,6 +711,7 @@ Options parseOptions(int argc, char** argv) {
         << "  --udp-pacing     Pace UDP video fragments by bitrate, default on\n"
         << "  --no-udp-pacing  Disable UDP video fragment pacing\n"
         << "  --control-connect H:P Connect a dedicated TCP native input/stats backchannel\n"
+        << "  --disable-input  Keep authenticated control/stats but reject remote input events\n"
         << "  --audio-udp-connect H:P Send loopback audio as SNA1/SNA2 float32 or negotiated SNA3/SNA4 PCM16\n"
         << "  --session-token T Enable native session proof and HMAC-authenticated control packets\n"
         << "  --list-encoders  List Media Foundation hardware encoders\n"
@@ -1542,9 +1549,11 @@ bool sendMouseButton(int button, bool down) {
   return sent;
 }
 
-bool sendWheel(double deltaY) {
+bool sendWheel(double deltaY, bool precise) {
+  if (!std::isfinite(deltaY)) return false;
   if (std::abs(deltaY) < 0.01) return true;
-  const double wheelSteps = std::clamp(-deltaY / 8.0, -3.0, 3.0);
+
+  const double wheelSteps = sanser::input::windowsWheelStepsFromCocoa(deltaY, precise);
   const double clamped = std::clamp(wheelSteps * static_cast<double>(WHEEL_DELTA), -360.0, 360.0);
   INPUT input{};
   input.type = INPUT_MOUSE;
@@ -3071,6 +3080,26 @@ void handleUdpRepairStatsPayload(const std::string& json) {
 
 int handleControlPayload(const std::string& json) {
   const std::string type = jsonStringValue(json, "type");
+  const bool remoteInputEvent = type == "input-batch" ||
+                                type == "pointer-move" ||
+                                type == "pointer-down" ||
+                                type == "pointer-up" ||
+                                type == "wheel" ||
+                                type == "gamepad-state" ||
+                                type == "key-down" ||
+                                type == "key-up" ||
+                                type == "modifiers" ||
+                                type == "clipboard" ||
+                                type == "copy" ||
+                                type == "cut" ||
+                                type == "paste" ||
+                                type == "select-all";
+  if (remoteInputEvent && !gRemoteInputAllowed.load(std::memory_order_relaxed)) {
+    if (!gRemoteInputBlockedLogged.exchange(true, std::memory_order_relaxed)) {
+      std::cerr << "SNINPUT_BLOCKED reason=host-permission-disabled\n";
+    }
+    return 0;
+  }
   if (type == "input-batch") {
     const auto events = jsonObjectArrayValue(json, "events");
     int applied = 0;
@@ -3144,11 +3173,13 @@ int handleControlPayload(const std::string& json) {
     return clicked ? 1 : 0;
   } else if (type == "wheel") {
     const bool relative = jsonBoolValue(json, "relative");
+    const bool precise = jsonBoolValue(json, "precise");
     const bool moved = relative ? true : movePointerNormalized(jsonDoubleValue(json, "x"), jsonDoubleValue(json, "y"));
-    const bool wheeled = sendWheel(jsonDoubleValue(json, "dy"));
+    const bool wheeled = sendWheel(jsonDoubleValue(json, "dy"), precise);
     std::cerr << "SNINPUT_APPLIED wheel"
               << " mode=" << (relative ? "relative" : "absolute")
               << " dy=" << jsonDoubleValue(json, "dy")
+              << " precise=" << (precise ? "yes" : "no")
               << " moved=" << (moved ? "yes" : "no")
               << " sent=" << (wheeled ? "yes" : "no")
               << "\n";
@@ -3254,7 +3285,9 @@ public:
       configureSocket(socket_);
     }
     if (!controlEndpoint.empty()) {
-      controlSocket_ = connectEndpoint(controlEndpoint, "--control-connect");
+      controlSocket_ = connectEndpointWithRetry(controlEndpoint,
+                                                "--control-connect",
+                                                std::chrono::seconds(15));
       configureSocket(controlSocket_);
       std::cerr << "SNINPUT dedicated control connecting " << controlEndpoint << "\n";
     }
@@ -3350,6 +3383,36 @@ private:
                                ", WSA error " + std::to_string(WSAGetLastError()));
     }
     return connected;
+  }
+
+  static SOCKET connectEndpointWithRetry(const std::string& endpoint,
+                                         const char* optionName,
+                                         std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::size_t attempts = 0;
+    std::string lastError;
+    while (true) {
+      attempts += 1;
+      try {
+        return connectEndpoint(endpoint, optionName);
+      } catch (const std::exception& error) {
+        lastError = error.what();
+      }
+
+      if (std::chrono::steady_clock::now() >= deadline) {
+        throw std::runtime_error(std::string("Could not establish ") + optionName +
+                                 " within " + std::to_string(timeout.count()) +
+                                 "ms after " + std::to_string(attempts) +
+                                 " attempts. Last error: " + lastError);
+      }
+      if (attempts == 1 || attempts % 25 == 0) {
+        std::cerr << "SNINPUT initial control waiting endpoint=" << endpoint
+                  << " attempts=" << attempts
+                  << " timeoutMs=" << timeout.count()
+                  << "\n";
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
   }
 
   static void configureSocket(SOCKET socket) {
@@ -6764,13 +6827,15 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--capabilities-json") {
       std::cout << "{\"product\":\"Sanser\",\"version\":\"2.0.0\","
                    "\"protocolVersion\":2,\"engine\":\"host-windows\","
-                   "\"nativeSnv2\":true,\"h264EncoderImplementation\":true,"
+                   "\"nativeSnv2\":false,\"nativeDirect\":true,"
+                   "\"h264EncoderImplementation\":true,"
                    "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,"
                    "\"inputImplementation\":true,\"gamepadImplementation\":true}\n";
       return 0;
     }
     makeProcessDpiAware();
     Options options = parseOptions(argc, argv);
+    gRemoteInputAllowed.store(options.remoteInputEnabled, std::memory_order_relaxed);
     if (options.sessionToken.empty()) {
       if (const char* token = std::getenv("SANSER_NATIVE_SESSION_TOKEN")) {
         options.sessionToken = token;

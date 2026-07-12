@@ -46,6 +46,7 @@
       <CapabilityNotice title="Windows host" capability={runtime.capabilities.hostEngine} />
       <CapabilityNotice title="macOS client" capability={runtime.capabilities.clientEngine} />
       <CapabilityNotice title="WebRTC" capability={runtime.capabilities.webRtc} />
+      <CapabilityNotice title="Native direct" capability={runtime.capabilities.nativeDirect} />
       <CapabilityNotice title="SNV2" capability={runtime.capabilities.nativeSnv2} />
     </article>
 
