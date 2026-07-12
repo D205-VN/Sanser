@@ -692,14 +692,19 @@ mod tests {
 
     #[test]
     fn capability_parser_requires_matching_engine_and_media_implementation() -> Result<(), String> {
-        let valid = br#"{"product":"Sanser","version":"2.0.0","protocolVersion":2,"engine":"client-macos","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true,"hevcDecoderImplementation":true}"#;
-        let parsed = parse_sidecar_capabilities(valid, EngineKind::Client)?;
+        let version = crate::models::SANSER_VERSION;
+        let valid_json = format!(
+            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"client-macos","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true,"hevcDecoderImplementation":true}}"#
+        );
+        let parsed = parse_sidecar_capabilities(valid_json.as_bytes(), EngineKind::Client)?;
         assert!(!parsed.native_snv2);
         assert!(parsed.native_direct);
         assert!(parsed.hevc_decoder_implementation);
 
-        let wrong_engine = br#"{"product":"Sanser","version":"2.0.0","protocolVersion":2,"engine":"host-windows","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true}"#;
-        assert!(parse_sidecar_capabilities(wrong_engine, EngineKind::Client).is_err());
+        let wrong_engine_json = format!(
+            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"host-windows","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true}}"#
+        );
+        assert!(parse_sidecar_capabilities(wrong_engine_json.as_bytes(), EngineKind::Client).is_err());
         Ok(())
     }
 }
