@@ -100,11 +100,7 @@ impl Config {
                 "TURN_URLS requires TURN_SHARED_SECRET or TURN_USERNAME/TURN_CREDENTIAL".into(),
             ));
         }
-        if network_mode == NetworkMode::Relay && turn_urls.is_empty() {
-            return Err(ConfigError::Invalid(
-                "NETWORK_MODE=relay requires at least one TURN_URLS entry".into(),
-            ));
-        }
+        // Relay checks removed as TURN is deprecated.
 
         let config = Self {
             host,
@@ -252,10 +248,11 @@ impl Config {
 fn parse_network_mode(value: &str) -> Result<NetworkMode, ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "auto" => Ok(NetworkMode::Auto),
-        "direct" => Ok(NetworkMode::Direct),
-        "relay" => Ok(NetworkMode::Relay),
+        "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
+        "manual" => Ok(NetworkMode::Manual),
+        "relay" => Ok(NetworkMode::Auto), // Fallback relay to auto
         _ => Err(ConfigError::Invalid(
-            "NETWORK_MODE must be one of: auto, direct, relay".into(),
+            "NETWORK_MODE must be one of: auto, directonly, manual".into(),
         )),
     }
 }

@@ -16,8 +16,9 @@ pub enum EngineKind {
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     Auto,
-    Direct,
-    Relay,
+    #[serde(rename = "directonly")]
+    DirectOnly,
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -111,6 +112,7 @@ pub struct RuntimeCapabilities {
     pub native_snv2: Capability,
     pub gamepad: Capability,
     pub clipboard: Capability,
+    pub p2p_v2: Capability,
 }
 
 #[derive(Debug, Clone, Serialize)]

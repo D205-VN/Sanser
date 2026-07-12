@@ -1,6 +1,6 @@
 # Sanser Windows host engine
 
-This C++20 target contains the Windows media/input implementation being migrated into Sanser 2.0.0.
+This C++20 target contains the Windows media/input implementation being migrated into Sanser 2.0.2.
 
 Implemented and retained from the native engine:
 
@@ -15,7 +15,7 @@ Sanser 2 additions:
 
 - Target name `sanser-host-windows`.
 - Shared, tested `native/protocol` SNV2 header/authentication library.
-- Product/protocol compile-time version `2.0.0` / `2`.
+- Product/protocol compile-time version `2.0.2` / `2`.
 
 The migrated legacy stream loop is not considered SNV2-capable until its packet lanes and handshake use the shared protocol library end-to-end. The Tauri shell must not advertise or package this sidecar as `nativeSnv2=true` before that capability probe and interoperability tests pass.
 

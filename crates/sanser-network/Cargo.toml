@@ -6,9 +6,14 @@ edition.workspace = true
 license-file.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+p2p_v2 = ["dep:sanser-p2p"]
+
 [dependencies]
 hmac.workspace = true
 sanser-core = { path = "../sanser-core" }
+sanser-p2p = { path = "../sanser-p2p", optional = true }
 sanser-protocol = { path = "../sanser-protocol" }
 serde.workspace = true
 serde_json.workspace = true

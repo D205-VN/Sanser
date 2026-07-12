@@ -1,7 +1,7 @@
 # Sanser server
 
 Axum API, account service, device registry and WebSocket signaling for Sanser
-2.0.0. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
+2.0.2. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
 does not contain a SQLite or local-database fallback.
 
 ## Neon configuration
@@ -74,6 +74,22 @@ GET    /api/v2/network/ice
 WS     /api/v2/events
 WS     /api/v2/signaling?deviceId=<uuid>
 ```
+
+The signaling socket remains backward compatible with the existing WebRTC-style
+message names and also accepts the first native P2P metadata messages:
+`p2p.candidates` and `p2p.gatheringComplete`. A candidate batch is forwarded only
+when the session is accepted and the authenticated sending device and target are
+the session's two participants. Candidate metadata is transient: it is never
+written to PostgreSQL or the durable event log.
+
+Native P2P candidate signaling is deliberately bounded to UDP metadata: at most
+16 candidates per message, 64 per peer and 128 per session, with generations
+1–32. Loopback, multicast, unspecified, link-local, duplicate, invalid-port and
+mismatched mapping candidates are rejected. The in-memory quota expires after
+five minutes of inactivity and is also cleared when the signaling peer
+disconnects. Each socket is limited to 240 signaling messages per minute; the
+WebSocket frame limit remains 64 KiB and candidate payloads have a stricter
+16 KiB limit.
 
 Access and refresh tokens are random opaque values; only SHA-256 digests are
 stored. Passwords are Argon2id hashes. API queries use bound PostgreSQL

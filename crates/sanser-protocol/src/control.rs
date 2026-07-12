@@ -1,7 +1,71 @@
 use thiserror::Error;
 
 pub const MAX_NACK_SEQUENCES: usize = 256;
+/// Fixed width of an [`Acknowledgement`] payload on the wire.
+pub const ACKNOWLEDGEMENT_PAYLOAD_LEN: usize = 16;
 const NACK_PREFIX_LEN: usize = 12;
+
+/// A cumulative acknowledgement plus a 64-packet selective acknowledgement
+/// window for one stream.
+///
+/// `cumulative_sequence` acknowledges that sequence and every earlier sequence
+/// in the same `(session, stream, direction, key generation)` tuple. Bit `i`
+/// of `selective_mask`, where bit zero is the least-significant bit,
+/// acknowledges `cumulative_sequence + 1 + i`. Sequence numbers do not wrap
+/// within a key generation. A receiver emits no acknowledgement until it has
+/// a cumulative base sequence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Acknowledgement {
+    pub cumulative_sequence: u64,
+    pub selective_mask: u64,
+}
+
+impl Acknowledgement {
+    /// Encodes this ACK/SACK payload in network byte order.
+    #[must_use]
+    pub fn encode(self) -> [u8; ACKNOWLEDGEMENT_PAYLOAD_LEN] {
+        let mut encoded = [0_u8; ACKNOWLEDGEMENT_PAYLOAD_LEN];
+        encoded[..8].copy_from_slice(&self.cumulative_sequence.to_be_bytes());
+        encoded[8..].copy_from_slice(&self.selective_mask.to_be_bytes());
+        encoded
+    }
+
+    /// Decodes an ACK/SACK payload from its fixed-width wire representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlPayloadError::LengthMismatch`] unless `encoded`
+    /// contains exactly [`ACKNOWLEDGEMENT_PAYLOAD_LEN`] bytes.
+    pub fn decode(encoded: &[u8]) -> Result<Self, ControlPayloadError> {
+        let encoded: &[u8; ACKNOWLEDGEMENT_PAYLOAD_LEN] = encoded
+            .try_into()
+            .map_err(|_| ControlPayloadError::LengthMismatch)?;
+        Ok(Self {
+            cumulative_sequence: u64::from_be_bytes(
+                encoded[..8]
+                    .try_into()
+                    .map_err(|_| ControlPayloadError::LengthMismatch)?,
+            ),
+            selective_mask: u64::from_be_bytes(
+                encoded[8..]
+                    .try_into()
+                    .map_err(|_| ControlPayloadError::LengthMismatch)?,
+            ),
+        })
+    }
+
+    /// Reports whether this cumulative/selective window acknowledges
+    /// `sequence`. Callers are responsible for supplying a sequence from the
+    /// same stream and key generation as this payload.
+    #[must_use]
+    pub const fn acknowledges(self, sequence: u64) -> bool {
+        if sequence <= self.cumulative_sequence {
+            return true;
+        }
+        let offset = sequence - self.cumulative_sequence - 1;
+        offset < 64 && self.selective_mask & (1_u64 << offset) != 0
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Nack {
@@ -146,5 +210,31 @@ mod tests {
         let encoded = nack.encode().unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(&encoded[0..8], &9_u64.to_be_bytes());
         assert_eq!(Nack::decode(&encoded), Ok(nack));
+    }
+
+    #[test]
+    fn acknowledgement_matches_golden_bytes_and_bit_semantics() {
+        let acknowledgement = Acknowledgement {
+            cumulative_sequence: 0x0102_0304_0506_0708,
+            selective_mask: 0x8000_0000_0000_0005,
+        };
+        let expected = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x05,
+        ];
+
+        assert_eq!(acknowledgement.encode(), expected);
+        assert_eq!(Acknowledgement::decode(&expected), Ok(acknowledgement));
+        assert!(acknowledgement.acknowledges(acknowledgement.cumulative_sequence - 1));
+        assert!(acknowledgement.acknowledges(acknowledgement.cumulative_sequence));
+        assert!(acknowledgement.acknowledges(acknowledgement.cumulative_sequence + 1));
+        assert!(!acknowledgement.acknowledges(acknowledgement.cumulative_sequence + 2));
+        assert!(acknowledgement.acknowledges(acknowledgement.cumulative_sequence + 3));
+        assert!(acknowledgement.acknowledges(acknowledgement.cumulative_sequence + 64));
+        assert!(!acknowledgement.acknowledges(acknowledgement.cumulative_sequence + 65));
+        assert_eq!(
+            Acknowledgement::decode(&expected[..ACKNOWLEDGEMENT_PAYLOAD_LEN - 1]),
+            Err(ControlPayloadError::LengthMismatch)
+        );
     }
 }

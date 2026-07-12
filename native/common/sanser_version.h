@@ -4,7 +4,7 @@
 #include <string_view>
 
 #ifndef SANSER_VERSION
-#define SANSER_VERSION "2.0.0"
+#define SANSER_VERSION "2.0.3"
 #endif
 
 #ifndef SANSER_PROTOCOL_VERSION
@@ -17,7 +17,7 @@ inline constexpr std::string_view kProductName = "Sanser";
 inline constexpr std::string_view kVersion = SANSER_VERSION;
 inline constexpr std::uint8_t kProtocolVersion = SANSER_PROTOCOL_VERSION;
 
-static_assert(kVersion == "2.0.0", "Native engine version must match Sanser 2.0.0.");
+static_assert(!kVersion.empty(), "Native engine version must not be empty.");
 static_assert(kProtocolVersion == 2, "Native engine protocol must be v2.");
 
 } // namespace sanser

@@ -1,6 +1,6 @@
 [package]
 name = "sanser-desktop"
-version = "2.0.2"
+version = "2.0.3"
 description = "Sanser low-latency remote desktop shell"
 edition.workspace = true
 license.workspace = true
@@ -28,6 +28,8 @@ thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+sanser-p2p = { path = "../../../crates/sanser-p2p" }
 
 [lints]
 workspace = true

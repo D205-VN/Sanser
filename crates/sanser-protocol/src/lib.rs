@@ -10,7 +10,10 @@ mod reassembly;
 mod replay;
 mod wire;
 
-pub use control::{ControlPayloadError, KeyframeRequest, MAX_NACK_SEQUENCES, Nack};
+pub use control::{
+    ACKNOWLEDGEMENT_PAYLOAD_LEN, Acknowledgement, ControlPayloadError, KeyframeRequest,
+    MAX_NACK_SEQUENCES, Nack,
+};
 pub use packet::{PacketFlags, PacketPriority, PacketType};
 pub use reassembly::{
     CompletedFrame, FrameAssembler, FrameAssemblerConfig, FrameAssemblerError, FramePush,

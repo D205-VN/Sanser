@@ -149,12 +149,30 @@ pub async fn create(
             "both devices must support {requested_codec}"
         )));
     }
-    if request.network_mode == NetworkMode::Relay && state.config.turn_urls.is_empty() {
-        return Err(AppError::Unavailable);
-    }
+    // Relay checks removed as TURN is deprecated.
     // Validate the pair now so the UI never creates a request that can only
     // fail later when the host attempts to accept it.
     select_transport(None, request.network_mode, &host, &requester)?;
+
+    // Serialize session creation for both devices. The previous COUNT followed
+    // by an independent INSERT allowed two concurrent requests to create
+    // overlapping active sessions before either row became visible.
+    let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
+    let locked_devices = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM devices WHERE user_id = $1 AND id IN ($2, $3) \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(&auth.user_id)
+    .bind(&requester_id)
+    .bind(&host_id)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(AppError::from_db)?;
+    if locked_devices.len() != 2 {
+        return Err(AppError::Conflict(
+            "one of the session devices changed while the request was being created".into(),
+        ));
+    }
 
     let active = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM connection_sessions WHERE user_id = $1 \
@@ -166,7 +184,7 @@ pub async fn create(
     .bind(&host_id)
     .bind(&requester_id)
     .bind(&host_id)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(AppError::from_db)?;
     if active > 0 {
@@ -193,9 +211,10 @@ pub async fn create(
     .bind(&requested_codec)
     .bind(now)
     .bind(now)
-    .execute(&state.pool)
+    .execute(&mut *transaction)
     .await
     .map_err(AppError::from_db)?;
+    transaction.commit().await.map_err(AppError::from_db)?;
     let session = fetch_owned(&state, &auth.user_id, &id).await?;
     events::publish(
         &state,
@@ -606,7 +625,7 @@ fn select_transport(
 ) -> Result<String, AppError> {
     let selected = requested.map_or_else(
         || {
-            if mode != NetworkMode::Relay
+            if mode != NetworkMode::Manual
                 && host.native_transport
                 && requester.native_transport
                 && host.route_address.is_some()
@@ -621,7 +640,7 @@ fn select_transport(
     );
     match selected {
         "native"
-            if mode != NetworkMode::Relay
+            if mode != NetworkMode::Manual
                 && host.native_transport
                 && requester.native_transport =>
         {
@@ -682,8 +701,9 @@ fn normalize_codec(value: &str) -> Result<String, AppError> {
 fn parse_network_mode(value: &str) -> Result<NetworkMode, AppError> {
     match value {
         "auto" => Ok(NetworkMode::Auto),
-        "direct" => Ok(NetworkMode::Direct),
-        "relay" => Ok(NetworkMode::Relay),
+        "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
+        "manual" => Ok(NetworkMode::Manual),
+        "relay" => Ok(NetworkMode::Auto), // Fallback relay to auto
         _ => {
             tracing::error!(value, "stored session has an invalid network mode");
             Err(AppError::Internal)
@@ -694,8 +714,8 @@ fn parse_network_mode(value: &str) -> Result<NetworkMode, AppError> {
 const fn network_mode_str(mode: NetworkMode) -> &'static str {
     match mode {
         NetworkMode::Auto => "auto",
-        NetworkMode::Direct => "direct",
-        NetworkMode::Relay => "relay",
+        NetworkMode::DirectOnly => "directonly",
+        NetworkMode::Manual => "manual",
     }
 }
 

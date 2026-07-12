@@ -71,6 +71,7 @@ struct PartialFrame {
     created_at_us: u64,
     timestamp_us: u64,
     key_frame: bool,
+    start_sequence: Option<u64>,
     end_sequence: Option<u64>,
     fragments: BTreeMap<u64, Vec<u8>>,
     bytes: usize,
@@ -116,8 +117,9 @@ impl FrameAssembler {
     /// # Errors
     ///
     /// Returns an error for non-video, wrong-session or stale packets; when a
-    /// byte or fragment bound would be exceeded; when a frame contains more
-    /// than one end marker; or if the internal frame state is inconsistent.
+    /// byte or fragment bound would be exceeded; when a frame contains
+    /// conflicting start/end markers or out-of-bound fragments; or if the
+    /// internal frame state is inconsistent.
     pub fn push(&mut self, packet: Packet, now_us: u64) -> Result<FramePush, FrameAssemblerError> {
         if packet.header.packet_type != PacketType::Video {
             return Err(FrameAssemblerError::NotVideo);
@@ -134,6 +136,16 @@ impl FrameAssembler {
         self.expire(now_us);
         if packet.payload.len() > self.config.max_bytes {
             return Err(FrameAssemblerError::ByteCapacity);
+        }
+        // Duplicate delivery must be side-effect free. In particular, do not
+        // charge the duplicate payload against the byte budget or evict a
+        // different in-flight frame before recognizing it.
+        if self
+            .frames
+            .get(&packet.header.frame_id)
+            .is_some_and(|frame| frame.fragments.contains_key(&packet.header.sequence))
+        {
+            return Ok(FramePush::Duplicate);
         }
 
         let mut evicted_frame = None;
@@ -154,19 +166,27 @@ impl FrameAssembler {
                 created_at_us: now_us,
                 timestamp_us: packet.header.timestamp_us,
                 key_frame: packet.header.flags.contains(PacketFlags::KEY_FRAME),
+                start_sequence: None,
                 end_sequence: None,
                 fragments: BTreeMap::new(),
                 bytes: 0,
             }),
             Entry::Occupied(entry) => entry.into_mut(),
         };
-        if frame.fragments.contains_key(&packet.header.sequence) {
-            return Ok(FramePush::Duplicate);
-        }
         if frame.fragments.len() == self.config.max_fragments_per_frame {
             return Err(FrameAssemblerError::FragmentCapacity);
         }
-        if packet.header.flags.contains(PacketFlags::END_OF_FRAME) {
+        let starts_frame = packet.header.flags.contains(PacketFlags::START_OF_FRAME);
+        let ends_frame = packet.header.flags.contains(PacketFlags::END_OF_FRAME);
+        validate_fragment_bounds(frame, packet.header.sequence, starts_frame, ends_frame)?;
+        if starts_frame {
+            frame.start_sequence = Some(packet.header.sequence);
+            // Frame metadata is authoritative on the explicit first fragment,
+            // even when later fragments reached the assembler first.
+            frame.timestamp_us = packet.header.timestamp_us;
+            frame.key_frame = packet.header.flags.contains(PacketFlags::KEY_FRAME);
+        }
+        if ends_frame {
             if frame.end_sequence.is_some() {
                 return Err(FrameAssemblerError::MultipleEndFragments);
             }
@@ -203,8 +223,8 @@ impl FrameAssembler {
     #[must_use]
     pub fn nack(&self, frame_id: u64) -> Option<Nack> {
         let frame = self.frames.get(&frame_id)?;
+        let start = frame.start_sequence?;
         let end = frame.end_sequence?;
-        let start = *frame.fragments.first_key_value()?.0;
         let missing_sequences: Vec<_> = (start..=end)
             .filter(|sequence| !frame.fragments.contains_key(sequence))
             .take(crate::MAX_NACK_SEQUENCES)
@@ -254,14 +274,52 @@ impl FrameAssembler {
     }
 }
 
+fn validate_fragment_bounds(
+    frame: &PartialFrame,
+    sequence: u64,
+    starts_frame: bool,
+    ends_frame: bool,
+) -> Result<(), FrameAssemblerError> {
+    if starts_frame && frame.start_sequence.is_some() {
+        return Err(FrameAssemblerError::MultipleStartFragments);
+    }
+    if ends_frame && frame.end_sequence.is_some() {
+        return Err(FrameAssemblerError::MultipleEndFragments);
+    }
+
+    let start = starts_frame.then_some(sequence).or(frame.start_sequence);
+    let end = ends_frame.then_some(sequence).or(frame.end_sequence);
+    if start.zip(end).is_some_and(|(start, end)| start > end) {
+        return Err(FrameAssemblerError::FragmentOutsideFrame);
+    }
+    if start.is_some_and(|start| {
+        sequence < start
+            || frame
+                .fragments
+                .first_key_value()
+                .is_some_and(|(&first, _)| first < start)
+    }) || end.is_some_and(|end| {
+        sequence > end
+            || frame
+                .fragments
+                .last_key_value()
+                .is_some_and(|(&last, _)| last > end)
+    }) {
+        return Err(FrameAssemblerError::FragmentOutsideFrame);
+    }
+    Ok(())
+}
+
 fn is_complete(frame: &PartialFrame) -> bool {
+    let Some(start) = frame.start_sequence else {
+        return false;
+    };
     let Some(end) = frame.end_sequence else {
         return false;
     };
-    let Some((&start, _)) = frame.fragments.first_key_value() else {
+    let Some(expected) = end.checked_sub(start).and_then(|span| span.checked_add(1)) else {
         return false;
     };
-    let expected = end.saturating_sub(start).saturating_add(1);
     u64::try_from(frame.fragments.len()).is_ok_and(|count| count == expected)
 }
 
@@ -279,8 +337,12 @@ pub enum FrameAssemblerError {
     ByteCapacity,
     #[error("frame exceeds bounded fragment capacity")]
     FragmentCapacity,
+    #[error("frame contains multiple start fragments")]
+    MultipleStartFragments,
     #[error("frame contains multiple end fragments")]
     MultipleEndFragments,
+    #[error("fragment sequence lies outside the explicit frame boundaries")]
+    FragmentOutsideFrame,
     #[error("frame assembler internal state is inconsistent")]
     InternalState,
 }
@@ -291,7 +353,16 @@ mod tests {
     use crate::PacketHeader;
     use sanser_core::StreamId;
 
-    fn fragment(session_id: SessionId, sequence: u64, end: bool, payload: u8) -> Packet {
+    fn fragment(
+        session_id: SessionId,
+        sequence: u64,
+        start: bool,
+        end: bool,
+        payload: u8,
+    ) -> Packet {
+        let mut flags = PacketFlags::empty();
+        flags.set(PacketFlags::START_OF_FRAME, start);
+        flags.set(PacketFlags::END_OF_FRAME, end);
         Packet {
             header: PacketHeader {
                 packet_type: PacketType::Video,
@@ -300,11 +371,7 @@ mod tests {
                 sequence,
                 frame_id: 7,
                 timestamp_us: 1,
-                flags: if end {
-                    PacketFlags::END_OF_FRAME
-                } else {
-                    PacketFlags::empty()
-                },
+                flags,
                 key_id: 1,
             },
             payload: vec![payload],
@@ -317,11 +384,11 @@ mod tests {
         let mut assembler = FrameAssembler::new(session, FrameAssemblerConfig::default())
             .unwrap_or_else(|error| panic!("assembler failed: {error}"));
         assert!(matches!(
-            assembler.push(fragment(session, 10, false, 1), 0),
+            assembler.push(fragment(session, 10, true, false, 1), 0),
             Ok(FramePush::Pending { .. })
         ));
         assert!(matches!(
-            assembler.push(fragment(session, 12, true, 3), 1),
+            assembler.push(fragment(session, 12, false, true, 3), 1),
             Ok(FramePush::Pending { .. })
         ));
         assert_eq!(
@@ -329,7 +396,7 @@ mod tests {
             Some(vec![11])
         );
         let completed = assembler
-            .push(fragment(session, 11, false, 2), 2)
+            .push(fragment(session, 11, false, false, 2), 2)
             .unwrap_or_else(|error| panic!("push failed: {error}"));
         assert!(matches!(
             completed,
@@ -349,9 +416,130 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("assembler failed: {error}"));
         let _outcome = assembler
-            .push(fragment(session, 1, false, 1), 1)
+            .push(fragment(session, 1, true, false, 1), 1)
             .unwrap_or_else(|error| panic!("push failed: {error}"));
         assert_eq!(assembler.expire(12), vec![7]);
         assert_eq!(assembler.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn duplicate_fragment_does_not_evict_another_frame_at_the_byte_limit() {
+        let session = SessionId::new();
+        let mut assembler = FrameAssembler::new(
+            session,
+            FrameAssemblerConfig {
+                max_bytes: 2,
+                ..FrameAssemblerConfig::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("assembler failed: {error}"));
+
+        let first = fragment(session, 10, true, false, 1);
+        let _pending = assembler
+            .push(first.clone(), 0)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+        let mut second_frame = fragment(session, 20, true, false, 2);
+        second_frame.header.frame_id = 8;
+        let _pending = assembler
+            .push(second_frame, 1)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+
+        assert_eq!(assembler.push(first, 2), Ok(FramePush::Duplicate));
+        assert_eq!(assembler.pending_frames(), 2);
+        assert_eq!(assembler.buffered_bytes(), 2);
+    }
+
+    #[test]
+    fn missing_true_first_fragment_never_completes_a_truncated_frame() {
+        let session = SessionId::new();
+        let mut assembler = FrameAssembler::new(session, FrameAssemblerConfig::default())
+            .unwrap_or_else(|error| panic!("assembler failed: {error}"));
+
+        assert!(matches!(
+            assembler.push(fragment(session, 11, false, false, 2), 0),
+            Ok(FramePush::Pending { .. })
+        ));
+        assert!(matches!(
+            assembler.push(fragment(session, 12, false, true, 3), 1),
+            Ok(FramePush::Pending { .. })
+        ));
+        assert_eq!(assembler.nack(7), None);
+
+        let completed = assembler
+            .push(fragment(session, 10, true, false, 1), 2)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+        assert!(matches!(
+            completed,
+            FramePush::Complete(CompletedFrame { payload, .. }) if payload == [1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn single_fragment_frame_requires_both_boundaries() {
+        let session = SessionId::new();
+        let mut missing_start = FrameAssembler::new(session, FrameAssemblerConfig::default())
+            .unwrap_or_else(|error| panic!("assembler failed: {error}"));
+        assert!(matches!(
+            missing_start.push(fragment(session, 10, false, true, 1), 0),
+            Ok(FramePush::Pending { .. })
+        ));
+
+        let mut complete = FrameAssembler::new(session, FrameAssemblerConfig::default())
+            .unwrap_or_else(|error| panic!("assembler failed: {error}"));
+        assert!(matches!(
+            complete.push(fragment(session, 10, true, true, 1), 0),
+            Ok(FramePush::Complete(CompletedFrame { payload, .. })) if payload == [1]
+        ));
+    }
+
+    #[test]
+    fn rejects_conflicting_boundaries_without_corrupting_buffered_data() {
+        let session = SessionId::new();
+        let mut assembler = FrameAssembler::new(session, FrameAssemblerConfig::default())
+            .unwrap_or_else(|error| panic!("assembler failed: {error}"));
+        let _pending = assembler
+            .push(fragment(session, 9, false, false, 1), 0)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+        assert_eq!(
+            assembler.push(fragment(session, 10, true, false, 2), 1),
+            Err(FrameAssemblerError::FragmentOutsideFrame)
+        );
+        assert_eq!(assembler.buffered_bytes(), 1);
+
+        let _pending = assembler
+            .push(fragment(session, 8, true, false, 0), 2)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+        assert_eq!(
+            assembler.push(fragment(session, 10, true, true, 2), 3),
+            Err(FrameAssemblerError::MultipleStartFragments)
+        );
+        assert_eq!(assembler.buffered_bytes(), 2);
+    }
+
+    #[test]
+    fn rejects_reversed_and_duplicate_end_boundaries() {
+        let session = SessionId::new();
+        let mut reversed = FrameAssembler::new(session, FrameAssemblerConfig::default())
+            .unwrap_or_else(|error| panic!("assembler failed: {error}"));
+        let _pending = reversed
+            .push(fragment(session, 11, false, true, 2), 0)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+        assert_eq!(
+            reversed.push(fragment(session, 12, true, false, 3), 1),
+            Err(FrameAssemblerError::FragmentOutsideFrame)
+        );
+
+        let mut duplicate_end = FrameAssembler::new(session, FrameAssemblerConfig::default())
+            .unwrap_or_else(|error| panic!("assembler failed: {error}"));
+        let _pending = duplicate_end
+            .push(fragment(session, 10, true, false, 1), 0)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+        let _pending = duplicate_end
+            .push(fragment(session, 12, false, true, 3), 1)
+            .unwrap_or_else(|error| panic!("push failed: {error}"));
+        assert_eq!(
+            duplicate_end.push(fragment(session, 13, false, true, 4), 2),
+            Err(FrameAssemblerError::MultipleEndFragments)
+        );
     }
 }

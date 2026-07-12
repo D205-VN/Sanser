@@ -1,9 +1,9 @@
-# Sanser 2.0.0
+# Sanser 2.0.2
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.0.0
+Product:  Sanser 2.0.2
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   SNV2 target (engine integration is capability-gated)
@@ -13,7 +13,7 @@ Native:   SNV2 target (engine integration is capability-gated)
 
 - Account, device and signaling data backed only by PostgreSQL on Neon.
 - Local preferences stored as a bounded JSON file; secrets stay in Keychain/Credential Manager.
-- Versioned `/api/v2` auth, devices, connection sessions, ICE and WebSocket signaling.
+- Versioned `/api/v2` auth, devices, connection sessions, ICE and bounded WebSocket candidate signaling.
 - Auto, Direct and Relay control-plane modes; authenticated Native Direct is available on reachable IPv4 routes, while WebRTC/TURN remains capability-gated.
 - Short-lived access tokens, refresh-token rotation/revocation and Argon2id passwords.
 - Typed Tauri commands and sidecar allowlists; Node.js is not a packaged runtime.
@@ -30,10 +30,10 @@ apps/server                  Axum + Tokio API/signaling server
 crates/sanser-*              Rust protocol/core/network/auth/storage modules
 native/host-windows          Windows capture/encode/audio/input engine
 native/client-macos          macOS receive/decode/render/audio/input engine
-native/protocol              Portable C++ SNV2 codec/authentication
+native/protocol              Portable C++ SNV2 authentication and STUN codecs
 ```
 
-See [architecture](docs/sanser-2-architecture.md), [SNV2](docs/sanser-2-protocol.md), [security](docs/sanser-2-security.md), and [performance](docs/sanser-2-performance.md).
+See [architecture](docs/sanser-2-architecture.md), [P2P v2 rollout](docs/p2p-v2.md), [SNV2](docs/sanser-2-protocol.md), [security](docs/sanser-2-security.md), and [performance](docs/sanser-2-performance.md).
 
 ## Prerequisites
 
@@ -106,6 +106,10 @@ The desktop enables a route only after its packaged sidecar passes the native
 capability probe. The current streaming path is authenticated Native Direct on
 a reachable IPv4 route, normally the same LAN. Signed discovery and native
 WebRTC/libdatachannel remain planned.
+
+The opt-in P2P v2 foundation now validates and exchanges transient UDP
+candidates, but native STUN, hole punching and one-socket SNV2 streaming are not
+connected yet. See the rollout document for the exact release gates.
 
 - **Auto** selects Native Direct when both devices advertise reachable routes; WebRTC fallback will be used once that engine is linked.
 - **Direct** uses only the reachable native route and never TURN. Different NATs or a firewall can block it.

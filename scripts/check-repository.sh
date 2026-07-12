@@ -16,6 +16,14 @@ fail() {
 grep -Fq "version = \"${expected_version}\"" Cargo.toml || fail "Cargo workspace version is not ${expected_version}"
 grep -Fq "\"version\": \"${expected_version}\"" package.json || fail "root package version is not ${expected_version}"
 grep -Fq "\"identifier\": \"${expected_app_id}\"" apps/desktop/src-tauri/tauri.conf.json || fail "Tauri identifier is not ${expected_app_id}"
+grep -Fq "\"version\": \"${expected_version}\"" apps/desktop/package.json || fail "desktop package version is not ${expected_version}"
+grep -Fq "version = \"${expected_version}\"" apps/desktop/src-tauri/Cargo.toml || fail "desktop Rust version is not ${expected_version}"
+grep -Fq "\"version\": \"${expected_version}\"" apps/desktop/src-tauri/tauri.conf.json || fail "Tauri bundle version is not ${expected_version}"
+grep -Fq "SANSER_VERSION=${expected_version}" .env.example || fail ".env.example version is not ${expected_version}"
+grep -Fq "SANSER_VERSION \"${expected_version}\"" native/common/sanser_version.h || fail "native fallback version is not ${expected_version}"
+grep -Fq "VERSION ${expected_version}" native/client-macos/CMakeLists.txt || fail "macOS native project version is not ${expected_version}"
+grep -Fq "VERSION ${expected_version}" native/host-windows/CMakeLists.txt || fail "Windows native project version is not ${expected_version}"
+grep -Fq "SANSER_VERSION = '${expected_version}'" apps/desktop/src/lib/types.ts || fail "frontend version is not ${expected_version}"
 
 for retired in desktop/main.js desktop/preload.js server.js scripts/install-tailscale.js; do
   [[ ! -e "$retired" ]] || fail "retired runtime file still exists: ${retired}"

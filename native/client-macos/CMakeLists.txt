@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_client_macos VERSION 2.0.0 LANGUAGES CXX OBJCXX)
+project(sanser_client_macos VERSION 2.0.2 LANGUAGES CXX OBJCXX)
+
+set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
 if (NOT APPLE)
   message(FATAL_ERROR "sanser-client-macos is macOS-only.")
@@ -48,7 +50,7 @@ find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
 
 target_compile_definitions(sanser-client-macos PRIVATE
   SANSER_PROTOCOL_VERSION=2
-  SANSER_VERSION="2.0.0"
+  SANSER_VERSION="${SANSER_APP_VERSION}"
 )
 target_include_directories(sanser-client-macos PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 

@@ -5,18 +5,15 @@ use serde::{Deserialize, Serialize};
 pub enum NetworkMode {
     #[default]
     Auto,
-    Direct,
-    Relay,
+    #[serde(rename = "directonly")]
+    DirectOnly,
+    Manual,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
-    Snv2,
-    WebRtcDirect,
-    WebRtcRelayUdp,
-    WebRtcRelayTcp,
-    WebRtcRelayTls,
+    Snv2Udp,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

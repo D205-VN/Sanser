@@ -157,6 +157,64 @@ struct GamepadInputState {
   double rt = 0.0;
 };
 
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+
+template <typename T>
+class ThreadSafeQueue {
+private:
+    std::queue<T> queue_;
+    mutable std::mutex mutex_;
+    std::condition_variable cond_;
+    bool stopped_ = false;
+public:
+    void push(T value) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_.push(std::move(value));
+        }
+        cond_.notify_one();
+    }
+    bool pop(T& value) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait(lock, [this] { return !queue_.empty() || stopped_; });
+        if (queue_.empty()) return false;
+        value = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+    template <typename Rep, typename Period>
+    bool pop_with_timeout(T& value, std::chrono::duration<Rep, Period> timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!cond_.wait_for(lock, timeout, [this] { return !queue_.empty() || stopped_; })) {
+            return false;
+        }
+        if (queue_.empty()) return false;
+        value = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopped_ = true;
+        }
+        cond_.notify_all();
+    }
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::queue<T> empty;
+        std::swap(queue_, empty);
+    }
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+};
+
+static ThreadSafeQueue<std::string> gControlHostQueue;
+
 struct VirtualGamepadUpdateResult {
   bool handled = false;
   int applied = 0;
@@ -312,6 +370,9 @@ std::uint64_t gNextVideoNackSequence = 0;
 constexpr std::size_t kMaxQueuedVideoNacks = 64;
 constexpr std::size_t kMaxCoalescedVideoNackPackets = 256;
 std::atomic<bool> gClientAudioPcm16{false};
+static SOCKET gUdpMainSocket = INVALID_SOCKET;
+static std::mutex gUdpMainSocketMutex;
+static bool gSingleSocketMode = false;
 
 std::uint64_t unixMicros();
 
@@ -3339,7 +3400,7 @@ public:
 
   void startControlReceiver() {
     if (controlThread_.joinable()) return;
-    if (controlReceiveSocket() == INVALID_SOCKET) return;
+    if (!gSingleSocketMode && controlReceiveSocket() == INVALID_SOCKET) return;
     running_ = true;
     controlThread_ = std::thread([this]() { controlLoop(); });
   }
@@ -3467,12 +3528,23 @@ private:
   }
 
   void sendControlJson(const std::string& json) {
-    const SOCKET sendSocket = controlReceiveSocket();
-    if (sendSocket == INVALID_SOCKET) return;
-
     const std::string payload = packetAuthEnabled_
       ? makeSecureControlEnvelope(sessionToken_, "h2c", ++hostSecureSequence_, json)
       : json;
+
+    if (gSingleSocketMode && gUdpMainSocket != INVALID_SOCKET) {
+      std::vector<std::uint8_t> sendBuf;
+      sendBuf.resize(1 + payload.size());
+      sendBuf[0] = 0x02; // Control Byte
+      std::memcpy(sendBuf.data() + 1, payload.data(), payload.size());
+      
+      std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
+      send(gUdpMainSocket, reinterpret_cast<const char*>(sendBuf.data()), static_cast<int>(sendBuf.size()), 0);
+      return;
+    }
+
+    const SOCKET sendSocket = controlReceiveSocket();
+    if (sendSocket == INVALID_SOCKET) return;
 
     ControlMessageHeader header{};
     header.payloadSize = static_cast<std::uint32_t>(payload.size());
@@ -3628,41 +3700,54 @@ private:
 
   bool serviceControlSocket() {
     auto lastControlRxAt = std::chrono::steady_clock::now();
-    while (running_ && controlReceiveSocket() != INVALID_SOCKET) {
-      ControlMessageHeader header{};
-      const RecvStatus headerStatus = recvAll(&header, sizeof(header));
-      if (headerStatus == RecvStatus::Timeout) {
-        releaseStaleRemoteInputIfNeeded("header", lastControlRxAt);
-        flushGamepadRumbleEvents("timeout");
-        if (handleControlTimeout("header", lastControlRxAt)) return false;
-        continue;
-      }
-      if (headerStatus != RecvStatus::Complete) return false;
-      lastControlRxAt = std::chrono::steady_clock::now();
-      if (std::memcmp(header.magic, "SNI1", 4) != 0 ||
-          header.headerSize < sizeof(ControlMessageHeader) ||
-          header.headerSize > 64 * 1024) {
-        std::cerr << "SNINPUT invalid control header.\n";
-        return false;
-      }
-      if (header.payloadSize > 4 * 1024 * 1024) {
-        std::cerr << "SNINPUT payload too large: " << header.payloadSize << "\n";
-        return false;
-      }
-      if (header.headerSize > sizeof(ControlMessageHeader)) {
-        std::vector<char> extra(header.headerSize - sizeof(ControlMessageHeader));
-        if (recvAll(extra.data(), extra.size()) != RecvStatus::Complete) {
-          handleControlTimeout("extra-header", lastControlRxAt);
+    while (running_) {
+      std::string payload;
+      if (gSingleSocketMode) {
+        if (!gControlHostQueue.pop_with_timeout(payload, std::chrono::seconds(1))) {
+          releaseStaleRemoteInputIfNeeded("header", lastControlRxAt);
+          flushGamepadRumbleEvents("timeout");
+          if (handleControlTimeout("header", lastControlRxAt)) return false;
+          continue;
+        }
+        lastControlRxAt = std::chrono::steady_clock::now();
+      } else {
+        if (controlReceiveSocket() == INVALID_SOCKET) break;
+        ControlMessageHeader header{};
+        const RecvStatus headerStatus = recvAll(&header, sizeof(header));
+        if (headerStatus == RecvStatus::Timeout) {
+          releaseStaleRemoteInputIfNeeded("header", lastControlRxAt);
+          flushGamepadRumbleEvents("timeout");
+          if (handleControlTimeout("header", lastControlRxAt)) return false;
+          continue;
+        }
+        if (headerStatus != RecvStatus::Complete) return false;
+        lastControlRxAt = std::chrono::steady_clock::now();
+        if (std::memcmp(header.magic, "SNI1", 4) != 0 ||
+            header.headerSize < sizeof(ControlMessageHeader) ||
+            header.headerSize > 64 * 1024) {
+          std::cerr << "SNINPUT invalid control header.\n";
           return false;
         }
+        if (header.payloadSize > 4 * 1024 * 1024) {
+          std::cerr << "SNINPUT payload too large: " << header.payloadSize << "\n";
+          return false;
+        }
+        if (header.headerSize > sizeof(ControlMessageHeader)) {
+          std::vector<char> extra(header.headerSize - sizeof(ControlMessageHeader));
+          if (recvAll(extra.data(), extra.size()) != RecvStatus::Complete) {
+            handleControlTimeout("extra-header", lastControlRxAt);
+            return false;
+          }
+        }
+
+        payload.resize(header.payloadSize, '\0');
+        if (!payload.empty() && recvAll(payload.data(), payload.size()) != RecvStatus::Complete) {
+          handleControlTimeout("payload", lastControlRxAt);
+          return false;
+        }
+        lastControlRxAt = std::chrono::steady_clock::now();
       }
 
-      std::string payload(header.payloadSize, '\0');
-      if (!payload.empty() && recvAll(payload.data(), payload.size()) != RecvStatus::Complete) {
-        handleControlTimeout("payload", lastControlRxAt);
-        return false;
-      }
-      lastControlRxAt = std::chrono::steady_clock::now();
       try {
         const std::string rawType = jsonStringValue(payload, "type");
         bool securePayload = false;
@@ -3845,6 +3930,14 @@ private:
 
   void controlLoop() {
     while (running_) {
+      if (gSingleSocketMode) {
+        std::cerr << "SNINPUT control backchannel enabled (UDP multiplexed queue).\n";
+        serviceControlSocket();
+        resetRemoteInputState("control-closed");
+        resetAllGamepadSlots("control-closed");
+        std::cerr << "SNINPUT control backchannel closed (UDP multiplexed queue).\n";
+        break;
+      }
       if (controlReceiveSocket() == INVALID_SOCKET && !reconnectDedicatedControlSocket()) break;
       std::cerr << "SNINPUT control backchannel enabled"
                 << (controlSocket_ != INVALID_SOCKET ? " dedicated=yes" : " dedicated=no")
@@ -3963,9 +4056,47 @@ public:
               << " mediaEpoch=" << crypto.epoch
               << " bitrate=" << bitrate_
               << "\n";
+
+    {
+      std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
+      gUdpMainSocket = socket_;
+    }
+    if (gSingleSocketMode) {
+      std::thread receiverThread([this]() {
+        std::array<std::uint8_t, 65536> buffer;
+        while (true) {
+          SOCKET sock = INVALID_SOCKET;
+          {
+            std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
+            sock = gUdpMainSocket;
+          }
+          if (sock == INVALID_SOCKET) break;
+          int received = recv(sock, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0);
+          if (received <= 0) {
+            int err = WSAGetLastError();
+            if (err == WSAEINTR || err == WSAEWOULDBLOCK) {
+              std::this_thread::sleep_for(std::chrono::milliseconds(5));
+              continue;
+            }
+            break;
+          }
+          if (received < 1) continue;
+          const std::uint8_t mtype = buffer[0];
+          if (mtype == 0x02) {
+            std::string controlJson(reinterpret_cast<const char*>(buffer.data() + 1), received - 1);
+            gControlHostQueue.push(controlJson);
+          }
+        }
+      });
+      receiverThread.detach();
+    }
   }
 
   ~UdpVideoClient() {
+    {
+      std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
+      gUdpMainSocket = INVALID_SOCKET;
+    }
     if (socket_ != INVALID_SOCKET) {
       closesocket(socket_);
     }
@@ -4152,10 +4283,25 @@ private:
       }
 
 	      paceDatagram(datagram.size(), packetPacingStartedAt, packetPacingBudget);
-      const int sent = send(socket_,
-                            reinterpret_cast<const char*>(datagram.data()),
-                            static_cast<int>(datagram.size()),
-                            0);
+      int sent = 0;
+      if (gSingleSocketMode) {
+        std::vector<std::uint8_t> sendBuf;
+        sendBuf.resize(1 + datagram.size());
+        sendBuf[0] = 0x00; // Video Byte
+        std::memcpy(sendBuf.data() + 1, datagram.data(), datagram.size());
+        
+        std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
+        sent = send(socket_,
+                    reinterpret_cast<const char*>(sendBuf.data()),
+                    static_cast<int>(sendBuf.size()),
+                    0);
+        if (sent > 0) sent -= 1;
+      } else {
+        sent = send(socket_,
+                    reinterpret_cast<const char*>(datagram.data()),
+                    static_cast<int>(datagram.size()),
+                    0);
+      }
       if (sent == SOCKET_ERROR || sent != static_cast<int>(datagram.size())) {
         throw std::runtime_error("UDP video send failed, WSA error " + std::to_string(WSAGetLastError()));
       }
@@ -4428,10 +4574,25 @@ public:
                           usePcm16);
         datagramSize = static_cast<int>(sizeof(header) + payloadSize);
       }
-      const int sent = send(socket_,
-                            reinterpret_cast<const char*>(datagram.data()),
-                            datagramSize,
-                            0);
+      int sent = 0;
+      if (gSingleSocketMode && gUdpMainSocket != INVALID_SOCKET) {
+        std::vector<std::uint8_t> sendBuf;
+        sendBuf.resize(1 + datagramSize);
+        sendBuf[0] = 0x01; // Audio Byte
+        std::memcpy(sendBuf.data() + 1, datagram.data(), datagramSize);
+        
+        std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
+        sent = send(gUdpMainSocket,
+                    reinterpret_cast<const char*>(sendBuf.data()),
+                    static_cast<int>(sendBuf.size()),
+                    0);
+        if (sent > 0) sent -= 1;
+      } else {
+        sent = send(socket_,
+                    reinterpret_cast<const char*>(datagram.data()),
+                    datagramSize,
+                    0);
+      }
       if (sent == SOCKET_ERROR || sent != datagramSize) {
         throw std::runtime_error("SNA1 audio UDP send failed, WSA error " + std::to_string(WSAGetLastError()));
       }
@@ -5150,7 +5311,10 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       controlClient = std::make_unique<TcpClient>("", options.controlConnect, options.sessionToken, mediaCrypto);
       controlClient->startControlReceiver();
     } else {
-      std::cerr << "SNU1 UDP video has no --control-connect; native input/stats feedback disabled.\n";
+      gSingleSocketMode = true;
+      controlClient = std::make_unique<TcpClient>("", "", options.sessionToken, mediaCrypto);
+      controlClient->startControlReceiver();
+      std::cerr << "SNU1 UDP video is running in Single Socket UDP mode (control multiplexed).\n";
     }
 #else
     throw std::runtime_error("--udp-connect is currently implemented for Windows host builds.");
@@ -6825,8 +6989,9 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (argc == 2 && std::string_view(argv[1]) == "--capabilities-json") {
-      std::cout << "{\"product\":\"Sanser\",\"version\":\"2.0.2\","
-                   "\"protocolVersion\":2,\"engine\":\"host-windows\","
+      std::cout << "{\"product\":\"Sanser\",\"version\":\"" << sanser::kVersion
+                << "\",\"protocolVersion\":" << static_cast<unsigned>(sanser::kProtocolVersion)
+                << ",\"engine\":\"host-windows\","
                    "\"nativeSnv2\":true,\"nativeDirect\":true,"
                    "\"h264EncoderImplementation\":true,"
                    "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,"

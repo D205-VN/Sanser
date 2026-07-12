@@ -193,6 +193,15 @@ fn authentication_tag(
 }
 
 fn validate_payload(packet_type: PacketType, length: usize) -> Result<(), ProtocolError> {
+    if let Some(expected) = packet_type.exact_payload_len() {
+        if length != expected {
+            return Err(ProtocolError::InvalidPayloadLength {
+                packet_type,
+                expected,
+                actual: length,
+            });
+        }
+    }
     let limit = packet_type.max_payload_len().min(GLOBAL_MAX_PAYLOAD_LEN);
     if length > limit {
         return Err(ProtocolError::PayloadTooLarge(length));
@@ -257,6 +266,12 @@ pub enum ProtocolError {
     SessionMismatch,
     #[error("payload length {0} exceeds the packet limit")]
     PayloadTooLarge(usize),
+    #[error("{packet_type:?} payload must be exactly {expected} bytes, got {actual}")]
+    InvalidPayloadLength {
+        packet_type: PacketType,
+        expected: usize,
+        actual: usize,
+    },
     #[error("packet length mismatch: declared {declared}, actual {actual}")]
     LengthMismatch { declared: usize, actual: usize },
     #[error("authentication setup failed")]
@@ -280,7 +295,9 @@ mod tests {
                     sequence: 42,
                     frame_id: 7,
                     timestamp_us: 123_456,
-                    flags: PacketFlags::KEY_FRAME | PacketFlags::END_OF_FRAME,
+                    flags: PacketFlags::KEY_FRAME
+                        | PacketFlags::START_OF_FRAME
+                        | PacketFlags::END_OF_FRAME,
                     key_id: 3,
                 },
                 payload: vec![1, 2, 3, 4],
@@ -360,6 +377,77 @@ mod tests {
         assert_eq!(
             Packet::decode(&encoded, &key, session),
             Err(ProtocolError::PriorityMismatch)
+        );
+    }
+
+    #[test]
+    fn acknowledgement_uses_control_priority_and_exact_payload_width() {
+        let (packet, key, session) = fixture();
+        assert_eq!(
+            PacketType::Acknowledgement.priority(),
+            PacketPriority::VideoControl
+        );
+        let acknowledgement = Packet {
+            header: PacketHeader {
+                packet_type: PacketType::Acknowledgement,
+                flags: PacketFlags::empty(),
+                ..packet.header.clone()
+            },
+            payload: crate::Acknowledgement {
+                cumulative_sequence: 40,
+                selective_mask: 0b101,
+            }
+            .encode()
+            .to_vec(),
+        };
+        let encoded = acknowledgement
+            .encode(&key)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(Packet::decode(&encoded, &key, session), Ok(acknowledgement));
+
+        let mut malformed = encoded;
+        malformed[59] = u8::try_from(crate::ACKNOWLEDGEMENT_PAYLOAD_LEN - 1)
+            .unwrap_or_else(|_| panic!("acknowledgement payload width exceeds u8"));
+        malformed.pop();
+        assert_eq!(
+            Packet::decode(&malformed, &key, session),
+            Err(ProtocolError::InvalidPayloadLength {
+                packet_type: PacketType::Acknowledgement,
+                expected: crate::ACKNOWLEDGEMENT_PAYLOAD_LEN,
+                actual: crate::ACKNOWLEDGEMENT_PAYLOAD_LEN - 1,
+            })
+        );
+
+        assert_eq!(
+            Packet {
+                header: PacketHeader {
+                    packet_type: PacketType::Acknowledgement,
+                    ..packet.header.clone()
+                },
+                payload: vec![0; crate::ACKNOWLEDGEMENT_PAYLOAD_LEN - 1],
+            }
+            .encode(&key),
+            Err(ProtocolError::InvalidPayloadLength {
+                packet_type: PacketType::Acknowledgement,
+                expected: crate::ACKNOWLEDGEMENT_PAYLOAD_LEN,
+                actual: crate::ACKNOWLEDGEMENT_PAYLOAD_LEN - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_flags_but_accepts_start_of_frame() {
+        let (packet, key, session) = fixture();
+        let encoded = packet
+            .encode(&key)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(Packet::decode(&encoded, &key, session).is_ok());
+
+        let mut unknown = encoded;
+        unknown[9] |= 1 << 6;
+        assert_eq!(
+            Packet::decode(&unknown, &key, session),
+            Err(ProtocolError::UnknownFlags(0x0063))
         );
     }
 

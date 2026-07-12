@@ -535,6 +535,14 @@ class NativeInputSender {
 public:
   NativeInputSender() : inputSessionId_(randomHex(8)), worker_(&NativeInputSender::workerLoop, this) {}
 
+  void setUdpTarget(int fd, const sockaddr_in& addr) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    udpFd_ = fd;
+    hostAddr_ = addr;
+    isUdp_ = true;
+    condition_.notify_all();
+  }
+
   ~NativeInputSender() {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -639,7 +647,7 @@ public:
 
   bool sendJson(const std::string& json) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (fd_ < 0 || stopped_) return false;
+    if ((fd_ < 0 && (!isUdp_ || udpFd_ < 0)) || stopped_) return false;
     if (authRequired_ && !controlAuthenticated_ && !isAllowedBeforeAuth(json)) return false;
     if (isPriorityInput(json)) {
       const MoveFlushResult flush = flushPointerMovesToUrgentLocked();
@@ -1163,27 +1171,38 @@ private:
       bool retry = false;
       std::uint64_t generation = 0;
       int sendFd = -1;
+      bool isUdp = false;
+      int udpFd = -1;
+      sockaddr_in hostAddr{};
       {
         std::unique_lock<std::mutex> lock(mutex_);
         condition_.wait_for(lock, retryPollInterval_, [&] {
           const auto now = std::chrono::steady_clock::now();
-          return stopped_ || (fd_ >= 0 && (!urgentQueue_.empty() || !queue_.empty() || hasRetryWorkLocked(now)));
+          return stopped_ || ((fd_ >= 0 || (isUdp_ && udpFd_ >= 0)) && (!urgentQueue_.empty() || !queue_.empty() || hasRetryWorkLocked(now)));
         });
         if (stopped_) return;
-        if (fd_ < 0) continue;
+        isUdp = isUdp_ && udpFd_ >= 0;
+        if (isUdp) {
+          udpFd = udpFd_;
+          hostAddr = hostAddr_;
+        } else {
+          if (fd_ < 0) continue;
+        }
         const auto wakeNow = std::chrono::steady_clock::now();
         observePendingHealthLocked(wakeNow);
         if (urgentQueue_.empty() && queue_.empty() && !hasRetryWorkLocked(wakeNow)) continue;
         generation = fdGeneration_;
-        sendFd = dup(fd_);
-        if (sendFd < 0) {
-          fd_ = -1;
-          fdGeneration_ += 1;
-          queue_.clear();
-          urgentQueue_.clear();
-          pausePendingBatchesLocked("dup-failed");
-          std::cerr << "SNINPUT async dup failed; waiting for reconnect.\n";
-          continue;
+        if (!isUdp) {
+          sendFd = dup(fd_);
+          if (sendFd < 0) {
+            fd_ = -1;
+            fdGeneration_ += 1;
+            queue_.clear();
+            urgentQueue_.clear();
+            pausePendingBatchesLocked("dup-failed");
+            std::cerr << "SNINPUT async dup failed; waiting for reconnect.\n";
+            continue;
+          }
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -1242,16 +1261,32 @@ private:
           outbound = makeSecureControlEnvelope(packetAuthToken_, "c2h", ++packetAuthSequence_, json);
         }
       }
-      const bool sent = sendJsonToFd(sendFd, outbound);
-      close(sendFd);
+      bool sent = false;
+      if (isUdp) {
+        std::vector<std::uint8_t> payload;
+        payload.push_back(0x02); // Control Byte
+        payload.insert(payload.end(), outbound.begin(), outbound.end());
+        const int s = sendto(udpFd,
+                             reinterpret_cast<const char*>(payload.data()),
+                             payload.size(),
+                             0,
+                             reinterpret_cast<const sockaddr*>(&hostAddr),
+                             sizeof(hostAddr));
+        sent = (s == static_cast<int>(payload.size()));
+      } else {
+        sent = sendJsonToFd(sendFd, outbound);
+        close(sendFd);
+      }
       if (!sent) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (generation == fdGeneration_) {
-          fd_ = -1;
-          fdGeneration_ += 1;
-          queue_.clear();
-          urgentQueue_.clear();
-          pausePendingBatchesLocked("send-failed");
+          if (!isUdp) {
+            fd_ = -1;
+            fdGeneration_ += 1;
+            queue_.clear();
+            urgentQueue_.clear();
+            pausePendingBatchesLocked("send-failed");
+          }
         }
         std::cerr << "SNINPUT async send failed; waiting for reconnect.\n";
       }
@@ -1474,6 +1509,9 @@ private:
   std::chrono::steady_clock::time_point lastPriorityStallLogAt_{};
   std::uint64_t fdGeneration_ = 0;
   int fd_ = -1;
+  int udpFd_ = -1;
+  sockaddr_in hostAddr_{};
+  bool isUdp_ = false;
   bool batchEnabled_ = false;
   bool authRequired_ = false;
   bool controlAuthenticated_ = true;
@@ -5302,6 +5340,64 @@ private:
   double smoothedAvLeadMs_ = 0.0;
 };
 
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+
+template <typename T>
+class ThreadSafeQueue {
+private:
+    std::queue<T> queue_;
+    mutable std::mutex mutex_;
+    std::condition_variable cond_;
+    bool stopped_ = false;
+public:
+    void push(T value) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_.push(std::move(value));
+        }
+        cond_.notify_one();
+    }
+    bool pop(T& value) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait(lock, [this] { return !queue_.empty() || stopped_; });
+        if (queue_.empty()) return false;
+        value = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+    bool pop_with_timeout(T& value, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!cond_.wait_for(lock, timeout, [this] { return !queue_.empty() || stopped_; })) {
+            return false;
+        }
+        if (queue_.empty()) return false;
+        value = std::move(queue_.front());
+        queue_.pop();
+        return true;
+    }
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopped_ = true;
+        }
+        cond_.notify_all();
+    }
+    void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::queue<T> empty;
+        std::swap(queue_, empty);
+    }
+    bool empty() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.empty();
+    }
+};
+
+static ThreadSafeQueue<std::vector<std::uint8_t>> gAudioUdpQueue;
+static ThreadSafeQueue<std::string> gControlUdpQueue;
+
 class ScopedFd {
 public:
   explicit ScopedFd(int fd = -1) : fd_(fd) {}
@@ -5430,21 +5526,27 @@ void serviceControlSocket(int fd) {
       sendControlHello();
     }
 
-    fd_set readSet;
-    FD_ZERO(&readSet);
-    FD_SET(fd, &readSet);
-    timeval timeout{};
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 200000;
-    const int ready = select(fd + 1, &readSet, nullptr, nullptr, &timeout);
-    if (ready == 0) continue;
-    if (ready < 0) {
-      if (errno == EINTR) continue;
-      return;
+    std::string payload;
+    bool hasPacket = false;
+    if (fd <= 0) {
+      hasPacket = gControlUdpQueue.pop_with_timeout(payload, std::chrono::milliseconds(200));
+    } else {
+      fd_set readSet;
+      FD_ZERO(&readSet);
+      FD_SET(fd, &readSet);
+      timeval timeout{};
+      timeout.tv_sec = 0;
+      timeout.tv_usec = 200000;
+      const int ready = select(fd + 1, &readSet, nullptr, nullptr, &timeout);
+      if (ready == 0) continue;
+      if (ready < 0) {
+        if (errno == EINTR) continue;
+        return;
+      }
+      hasPacket = readControlPayloadFromFd(fd, payload);
     }
 
-    std::string payload;
-    if (!readControlPayloadFromFd(fd, payload)) return;
+    if (!hasPacket) continue;
     const HostControlEvent event = handleHostControlPayload(payload);
     const auto receivedAt = std::chrono::steady_clock::now();
     if (event == HostControlEvent::HelloAck) {
@@ -6384,13 +6486,21 @@ void listenUdpAudio(std::uint16_t audioPort,
                     double audioJitterMs,
                     std::shared_ptr<AudioQueuePcmPlayer> player,
                     std::shared_ptr<AvSyncClock> avSyncClock) {
-  if (audioPort == 0 || !player) return;
+  if (!player) return;
+  const bool useQueue = (audioPort == 0);
   @autoreleasepool {
     try {
-      ScopedFd server = createUdpListener(audioPort, "SNA1 audio");
-      std::cout << "SNA1 audio listener ready on 0.0.0.0:" << audioPort
-                << " mediaCrypto=" << boolText(gMediaCryptoEnabled)
-                << "\n";
+      ScopedFd server;
+      if (!useQueue) {
+        server = createUdpListener(audioPort, "SNA1 audio");
+        std::cout << "SNA1 audio listener ready on 0.0.0.0:" << audioPort
+                  << " mediaCrypto=" << boolText(gMediaCryptoEnabled)
+                  << "\n";
+      } else {
+        std::cout << "SNA1 audio queue receiver ready (multiplexed UDP)"
+                  << " mediaCrypto=" << boolText(gMediaCryptoEnabled)
+                  << "\n";
+      }
 
       AudioJitterBuffer jitter(player, avSyncClock, audioJitterMs);
       std::cout << "SNA1_JITTER_CONFIG targetMs=" << std::fixed << std::setprecision(1)
@@ -6404,24 +6514,37 @@ void listenUdpAudio(std::uint16_t audioPort,
       UdpPeerLock audioPeerLock("SNA1");
       auto statsStartedAt = std::chrono::steady_clock::now();
       while (true) {
+        std::vector<std::uint8_t> queuePacket;
+        ssize_t received = 0;
         sockaddr_in peerAddress{};
         socklen_t peerLength = sizeof(peerAddress);
-        const ssize_t received = recvfrom(server.get(),
-                                          datagramBuffer.data(),
-                                          datagramBuffer.size(),
-                                          0,
-                                          reinterpret_cast<sockaddr*>(&peerAddress),
-                                          &peerLength);
-        if (received < 0) {
-          if (errno == EINTR) continue;
-          throw std::runtime_error("SNA1 UDP receive failed.");
+        if (useQueue) {
+          if (!gAudioUdpQueue.pop(queuePacket)) {
+            break;
+          }
+          if (queuePacket.size() > datagramBuffer.size()) {
+            continue;
+          }
+          std::memcpy(datagramBuffer.data(), queuePacket.data(), queuePacket.size());
+          received = static_cast<ssize_t>(queuePacket.size());
+        } else {
+          received = recvfrom(server.get(),
+                              datagramBuffer.data(),
+                              datagramBuffer.size(),
+                              0,
+                              reinterpret_cast<sockaddr*>(&peerAddress),
+                              &peerLength);
+          if (received < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error("SNA1 UDP receive failed.");
+          }
+          if (received == 0) continue;
         }
-        if (received == 0) continue;
 
         const std::uint64_t mediaGeneration = gMediaPeerGeneration.load(std::memory_order_relaxed);
         audioPeerLock.observeGeneration(mediaGeneration);
         jitter.resetForMediaGeneration(mediaGeneration);
-        if (audioPeerLock.isLocked() && !audioPeerLock.acceptKnownPeer(peerAddress)) {
+        if (!useQueue && audioPeerLock.isLocked() && !audioPeerLock.acceptKnownPeer(peerAddress)) {
           stats.peerRejected += 1;
           continue;
         }
@@ -6854,18 +6977,28 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
     try {
       ScopedFd server = createUdpListener(port, "SNU1 render");
 
+      const bool isSingleSocket = (controlPort == 0 && audioPort == 0);
       std::cout << "SNU1 UDP render listener ready on 0.0.0.0:" << port
                 << " mediaCrypto=" << boolText(gMediaCryptoEnabled)
+                << " singleSocket=" << boolText(isSingleSocket)
                 << "\n";
-      std::cout << "Start Windows host with: --encode-pipe h264 --udp-connect <MAC_IP>:" << port;
-      if (controlPort > 0) {
-        std::cout << " --control-connect <MAC_IP>:" << controlPort;
-        startDedicatedControlListener(controlPort, inputSender);
+      if (isSingleSocket) {
+        std::cout << "Start Windows host in Single Socket UDP mode with: --encode-pipe h264 --udp-connect <MAC_IP>:" << port << "\n";
+        std::thread controlWorker([]() {
+          serviceControlSocket(0);
+        });
+        controlWorker.detach();
+      } else {
+        std::cout << "Start Windows host with: --encode-pipe h264 --udp-connect <MAC_IP>:" << port;
+        if (controlPort > 0) {
+          std::cout << " --control-connect <MAC_IP>:" << controlPort;
+          startDedicatedControlListener(controlPort, inputSender);
+        }
+        if (audioPort > 0) {
+          std::cout << " --audio-udp-connect <MAC_IP>:" << audioPort;
+        }
+        std::cout << "\n";
       }
-      if (audioPort > 0) {
-        std::cout << " --audio-udp-connect <MAC_IP>:" << audioPort;
-      }
-      std::cout << "\n";
 
       VtH264Decoder decoder(submitFrameToVideoRenderer, retainedRendererContext);
       DecodeSummary summary;
@@ -6908,15 +7041,48 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         std::uint64_t completedPacketId = 0;
         std::uint64_t completedMediaEpoch = 0;
         bool completedRekeyGrace = false;
-        const bool completedPacket = reassembler.push(
-                                                      std::span(datagramBuffer.data(), static_cast<std::size_t>(received)),
-                                                      packetBytes,
-                                                      udpStats,
-                                                      completedPacketId,
-                                                      completedMediaEpoch,
-                                                      completedRekeyGrace,
-                                                      peerAddress,
-                                                      videoPeerLock);
+
+        bool completedPacket = false;
+        if (isSingleSocket) {
+          if (received < 1) continue;
+          const std::uint8_t mtype = datagramBuffer[0];
+          if (mtype == 0x00) {
+            // Video
+            inputSender->setUdpTarget(server.get(), peerAddress);
+            completedPacket = reassembler.push(
+                                                std::span(datagramBuffer.data() + 1, static_cast<std::size_t>(received - 1)),
+                                                packetBytes,
+                                                udpStats,
+                                                completedPacketId,
+                                                completedMediaEpoch,
+                                                completedRekeyGrace,
+                                                peerAddress,
+                                                videoPeerLock);
+          } else if (mtype == 0x01) {
+            // Audio
+            std::vector<std::uint8_t> audioPacket(datagramBuffer.data() + 1, datagramBuffer.data() + received);
+            gAudioUdpQueue.push(audioPacket);
+            continue;
+          } else if (mtype == 0x02) {
+            // Control
+            std::string controlJson(reinterpret_cast<const char*>(datagramBuffer.data() + 1), received - 1);
+            gControlUdpQueue.push(controlJson);
+            continue;
+          } else {
+            // Keepalive or Probes
+            continue;
+          }
+        } else {
+          completedPacket = reassembler.push(
+                                              std::span(datagramBuffer.data(), static_cast<std::size_t>(received)),
+                                              packetBytes,
+                                              udpStats,
+                                              completedPacketId,
+                                              completedMediaEpoch,
+                                              completedRekeyGrace,
+                                              peerAddress,
+                                              videoPeerLock);
+        }
         nackController.observeMissing(udpStats.newNackPacketIds);
         udpStats.newNackPacketIds.clear();
         if (completedPacketId != 0) {
@@ -7567,8 +7733,9 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (argc == 2 && std::string_view(argv[1]) == "--capabilities-json") {
-      std::cout << "{\"product\":\"Sanser\",\"version\":\"2.0.2\","
-                   "\"protocolVersion\":2,\"engine\":\"client-macos\","
+      std::cout << "{\"product\":\"Sanser\",\"version\":\"" << sanser::kVersion
+                << "\",\"protocolVersion\":" << static_cast<unsigned>(sanser::kProtocolVersion)
+                << ",\"engine\":\"client-macos\","
                    "\"nativeSnv2\":true,\"nativeDirect\":true,"
                    "\"h264DecoderImplementation\":true,"
                    "\"hevcDecoderImplementation\":true,\"metalImplementation\":true,"

@@ -68,6 +68,7 @@ Priority canonicalPriority(PacketType type) {
     case PacketType::Nack:
     case PacketType::KeyframeRequest:
     case PacketType::Keepalive:
+    case PacketType::Acknowledgement:
       return Priority::VideoControl;
     case PacketType::Video:
       return Priority::VideoPayload;
@@ -85,6 +86,8 @@ std::uint32_t maxPayloadFor(PacketType type) {
     case PacketType::Video: return kMaxPayloadSize;
     case PacketType::Audio: return 64U * 1024U;
     case PacketType::Clipboard: return 256U * 1024U;
+    case PacketType::Acknowledgement:
+      return static_cast<std::uint32_t>(kAcknowledgementPayloadSize);
     case PacketType::Handshake:
     case PacketType::Authentication: return 16U * 1024U;
     case PacketType::MouseMove:
@@ -97,7 +100,28 @@ std::uint32_t maxPayloadFor(PacketType type) {
 
 bool isKnownPacketType(std::uint8_t value) {
   return value >= static_cast<std::uint8_t>(PacketType::Handshake) &&
-         value <= static_cast<std::uint8_t>(PacketType::Error);
+         value <= static_cast<std::uint8_t>(PacketType::Acknowledgement);
+}
+
+bool Acknowledgement::acknowledges(std::uint64_t sequence) const {
+  if (sequence <= cumulativeSequence) return true;
+  const std::uint64_t offset = sequence - cumulativeSequence - 1U;
+  return offset < 64U && (selectiveMask & (std::uint64_t{1} << offset)) != 0U;
+}
+
+AcknowledgementPayload encodeAcknowledgement(const Acknowledgement& acknowledgement) {
+  AcknowledgementPayload payload{};
+  writeU64(payload.data(), acknowledgement.cumulativeSequence);
+  writeU64(payload.data() + 8, acknowledgement.selectiveMask);
+  return payload;
+}
+
+bool decodeAcknowledgement(std::span<const std::uint8_t> payload,
+                           Acknowledgement& acknowledgement) {
+  if (payload.size() != kAcknowledgementPayloadSize) return false;
+  acknowledgement.cumulativeSequence = readU64(payload.data());
+  acknowledgement.selectiveMask = readU64(payload.data() + 8);
+  return true;
 }
 
 WireHeader encodeHeader(const Header& header) {
@@ -153,6 +177,10 @@ DecodeResult decodePacket(std::span<const std::uint8_t> packet) {
     return result;
   }
   result.header.flags = readU16(packet.data() + 8);
+  if ((result.header.flags & static_cast<std::uint16_t>(~kKnownPacketFlags)) != 0U) {
+    result.error = DecodeError::UnknownFlags;
+    return result;
+  }
   std::copy_n(packet.begin() + 12, result.header.sessionId.size(), result.header.sessionId.begin());
   if (emptySession(result.header.sessionId)) {
     result.error = DecodeError::EmptySession;
@@ -166,6 +194,12 @@ DecodeResult decodePacket(std::span<const std::uint8_t> packet) {
   result.header.keyId = readU32(packet.data() + 60);
   std::copy_n(packet.begin() + 64, result.header.authTag.size(), result.header.authTag.begin());
 
+  if (result.header.packetType == PacketType::Acknowledgement &&
+      result.header.payloadLength !=
+          static_cast<std::uint32_t>(kAcknowledgementPayloadSize)) {
+    result.error = DecodeError::InvalidPayloadLength;
+    return result;
+  }
   if (result.header.payloadLength > kMaxPayloadSize) {
     result.error = DecodeError::PayloadTooLarge;
     return result;
@@ -197,9 +231,11 @@ std::string_view decodeErrorMessage(DecodeError error) {
     case DecodeError::ReservedBitsSet: return "reserved header bits must be zero";
     case DecodeError::UnknownPacketType: return "unknown packet type";
     case DecodeError::PriorityMismatch: return "packet priority does not match packet type";
+    case DecodeError::UnknownFlags: return "packet contains unknown flag bits";
     case DecodeError::EmptySession: return "session id must not be empty";
     case DecodeError::PayloadTooLarge: return "payload exceeds the global limit";
     case DecodeError::TypePayloadTooLarge: return "payload exceeds the packet-type limit";
+    case DecodeError::InvalidPayloadLength: return "packet type requires an exact payload length";
     case DecodeError::LengthMismatch: return "packet length does not match payload length";
   }
   return "unknown decode error";

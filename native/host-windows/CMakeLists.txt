@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_host_windows VERSION 2.0.0 LANGUAGES CXX)
+project(sanser_host_windows VERSION 2.0.2 LANGUAGES CXX)
+
+set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
 include(CTest)
 
@@ -21,7 +23,7 @@ add_executable(sanser-host-windows
 target_compile_definitions(sanser-host-windows PRIVATE
   NOMINMAX
   SANSER_PROTOCOL_VERSION=2
-  SANSER_VERSION="2.0.0"
+  SANSER_VERSION="${SANSER_APP_VERSION}"
   WIN32_LEAN_AND_MEAN
 )
 

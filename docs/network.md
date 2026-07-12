@@ -7,6 +7,10 @@ route, normally the same LAN. It keeps signed discovery, WebRTC/libdatachannel,
 and shared SNV2 framing disabled until their capability probes report verified
 implementations.
 
+The opt-in `p2p_v2` policy foundation and transient candidate signaling are
+implemented, but they do not yet gather candidates or punch NATs at runtime.
+See `docs/p2p-v2.md`; Native Direct remains the only working media route.
+
 ## Auto
 
 Auto selects Native Direct when both devices advertise a reachable IPv4 route.

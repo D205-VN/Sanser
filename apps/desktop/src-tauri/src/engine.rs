@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs::{self, File, OpenOptions},
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -14,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     error::DesktopError,
-    models::{EngineKind, EngineStatus, LaunchEngineRequest, NetworkMode, VideoCodec},
+    models::{EngineKind, EngineStatus, LaunchEngineRequest, VideoCodec},
 };
 
 const HOST_SIDECAR: &str = "sanser-host-windows";
@@ -327,11 +328,7 @@ fn validate_common(request: &LaunchEngineRequest) -> Result<(), DesktopError> {
             "resolution is outside supported even dimensions".into(),
         ));
     }
-    if request.network_mode == NetworkMode::Relay && request.kind != EngineKind::LocalServer {
-        return Err(DesktopError::InvalidRequest(
-            "authenticated native direct cannot be launched in Relay mode; use WebRTC TURN".into(),
-        ));
-    }
+    // Relay mode validation removed as TURN is deprecated.
     Ok(())
 }
 
@@ -395,14 +392,9 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 endpoint(address, port),
                 "--low-latency-encoder".into(),
                 "--udp-pacing".into(),
-                "--control-connect".into(),
-                endpoint(address, port + 1),
             ];
             if !request.input_enabled {
                 args.push("--disable-input".into());
-            }
-            if request.audio_enabled {
-                args.extend(["--audio-udp-connect".into(), endpoint(address, port + 2)]);
             }
             Ok(args)
         }
@@ -411,13 +403,9 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 "--listen-render-snv".into(),
                 port.to_string(),
                 "--control-port".into(),
-                (port + 1).to_string(),
+                "0".into(),
                 "--audio-port".into(),
-                if request.audio_enabled {
-                    (port + 2).to_string()
-                } else {
-                    "0".into()
-                },
+                "0".into(),
                 "--udp-video".into(),
             ];
             if request.relative_mouse {
@@ -429,13 +417,55 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
     }
 }
 
-fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest) -> Command {
+fn sidecar_debug_log_path(app: &AppHandle, kind: EngineKind) -> Option<PathBuf> {
+    let enabled = std::env::var("SANSER_SIDECAR_DEBUG_LOG").is_ok_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    });
+    if !enabled {
+        return None;
+    }
+    let directory = app.path().app_log_dir().ok()?;
+    fs::create_dir_all(&directory).ok()?;
+    Some(directory.join(format!("{}-debug.log", sidecar_engine_id(kind))))
+}
+
+fn open_private_log(path: &Path) -> Option<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .ok()?;
+    }
+    Some(file)
+}
+
+fn sanitized_command(
+    path: &Path,
+    args: &[String],
+    request: &LaunchEngineRequest,
+    debug_log_path: Option<&Path>,
+) -> Command {
     let mut command = Command::new(path);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    command.args(args).stdin(Stdio::null());
+    let debug_files = debug_log_path
+        .and_then(open_private_log)
+        .and_then(|stderr| stderr.try_clone().ok().map(|stdout| (stdout, stderr)));
+    if let Some((stdout, stderr)) = debug_files {
+        command
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
     if request.kind != EngineKind::LocalServer {
         let inherited: Vec<(String, String)> = INHERITED_ENVIRONMENT
@@ -528,7 +558,8 @@ impl EngineManager {
             }
         }
 
-        let mut child = sanitized_command(&path, &args, request)
+        let debug_log_path = sidecar_debug_log_path(app, request.kind);
+        let mut child = sanitized_command(&path, &args, request, debug_log_path.as_deref())
             .spawn()
             .map_err(|error| {
                 let message = error.to_string();
@@ -623,7 +654,7 @@ mod tests {
             bitrate_kbps: 25_000,
             width: 1920,
             height: 1080,
-            network_mode: NetworkMode::Direct,
+            network_mode: crate::models::NetworkMode::DirectOnly,
             audio_enabled: true,
             input_enabled: true,
             relative_mouse: false,
@@ -652,11 +683,10 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--control-connect", "192.0.2.10:50001"])
+                .any(|pair| pair == ["--udp-connect", "192.0.2.10:50000"])
         );
         assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--audio-udp-connect", "192.0.2.10:50002"])
+            !args.iter().any(|arg| arg == "--control-connect" || arg == "--audio-udp-connect")
         );
         Ok(())
     }
@@ -677,8 +707,10 @@ mod tests {
         let mut disabled = request(EngineKind::Host);
         disabled.input_enabled = false;
         let args = build_args(&disabled)?;
-        assert!(args.iter().any(|argument| argument == "--control-connect"));
         assert!(args.iter().any(|argument| argument == "--disable-input"));
+        assert!(
+            !args.iter().any(|arg| arg == "--control-connect")
+        );
         Ok(())
     }
 
@@ -694,15 +726,15 @@ mod tests {
     fn capability_parser_requires_matching_engine_and_media_implementation() -> Result<(), String> {
         let version = crate::models::SANSER_VERSION;
         let valid_json = format!(
-            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"client-macos","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true,"hevcDecoderImplementation":true}}"#
+            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"client-macos","nativeSnv2":true,"nativeDirect":true,"h264DecoderImplementation":true,"hevcDecoderImplementation":true}}"#
         );
         let parsed = parse_sidecar_capabilities(valid_json.as_bytes(), EngineKind::Client)?;
-        assert!(!parsed.native_snv2);
+        assert!(parsed.native_snv2);
         assert!(parsed.native_direct);
         assert!(parsed.hevc_decoder_implementation);
 
         let wrong_engine_json = format!(
-            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"host-windows","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true}}"#
+            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"host-windows","nativeSnv2":true,"nativeDirect":true,"h264DecoderImplementation":true}}"#
         );
         assert!(
             parse_sidecar_capabilities(wrong_engine_json.as_bytes(), EngineKind::Client).is_err()

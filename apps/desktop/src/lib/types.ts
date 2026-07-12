@@ -37,6 +37,7 @@ export interface RuntimeCapabilities {
   nativeSnv2: Capability;
   gamepad: Capability;
   clipboard: Capability;
+  p2pV2: Capability;
 }
 
 export interface EngineStatus {

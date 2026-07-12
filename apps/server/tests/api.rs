@@ -301,21 +301,39 @@ async fn devices_and_session_state_machine_enforce_ownership() {
     assert_eq!(heartbeat.0, StatusCode::OK, "{}", heartbeat.1);
     assert_eq!(heartbeat.1["latencyMs"], 3);
 
-    let created = server
-        .request(
+    let session_request = json!({
+        "requesterDeviceId": requester_id,
+        "hostDeviceId": host_id,
+        "networkMode":"direct",
+        "qualityProfile":"competitive",
+        "requestedCodec":"hevc"
+    });
+    let (first_create, second_create) = tokio::join!(
+        server.request(
             Method::POST,
             "/api/v2/sessions",
-            Some(json!({
-                "requesterDeviceId": requester_id,
-                "hostDeviceId": host_id,
-                "networkMode":"direct",
-                "qualityProfile":"competitive",
-                "requestedCodec":"hevc"
-            })),
+            Some(session_request.clone()),
+            Some(access),
+        ),
+        server.request(
+            Method::POST,
+            "/api/v2/sessions",
+            Some(session_request),
             Some(access),
         )
-        .await;
+    );
+    let (created, rejected_overlap) = if first_create.0 == StatusCode::CREATED {
+        (first_create, second_create)
+    } else {
+        (second_create, first_create)
+    };
     assert_eq!(created.0, StatusCode::CREATED, "{}", created.1);
+    assert_eq!(
+        rejected_overlap.0,
+        StatusCode::CONFLICT,
+        "{}",
+        rejected_overlap.1
+    );
     let session_id = created.1["id"].as_str().expect("session id");
     assert_eq!(created.1["state"], "pending");
     let host_queue = server
@@ -556,7 +574,7 @@ async fn devices_and_session_state_machine_enforce_ownership() {
 #[tokio::test]
 async fn ice_uses_authenticated_short_lived_turn_credentials() {
     let Some(server) = TestServer::with_config(|config| {
-        config.network_mode = NetworkMode::Relay;
+        config.network_mode = NetworkMode::Auto;
         config.turn_urls = vec!["turn:relay.example.test:3478?transport=udp".into()];
         config.turn_shared_secret = Some("test-shared-secret".into());
     })
@@ -601,7 +619,7 @@ async fn request_guards_return_structured_errors_and_request_ids() {
         .request(Method::GET, "/api/v2/health", None, None)
         .await;
     assert_eq!(health.0, StatusCode::OK);
-    assert_eq!(health.1["version"], "2.0.0");
+    assert_eq!(health.1["version"], env!("CARGO_PKG_VERSION"));
     assert!(health.2.contains_key("x-request-id"));
     assert_eq!(
         server

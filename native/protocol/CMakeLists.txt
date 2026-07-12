@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sanser_snv2_protocol LANGUAGES CXX)
+project(sanser_native_protocol LANGUAGES CXX)
 
 add_library(sanser-snv2 STATIC snv2.cpp snv2_auth.cpp)
 target_include_directories(sanser-snv2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -8,9 +8,29 @@ if(WIN32)
   target_link_libraries(sanser-snv2 PUBLIC bcrypt)
 endif()
 
+add_library(sanser-stun STATIC stun.cpp)
+target_include_directories(sanser-stun PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(sanser-stun PUBLIC cxx_std_20)
+
+if(MSVC)
+  target_compile_options(sanser-stun PRIVATE /W4 /permissive-)
+else()
+  target_compile_options(sanser-stun PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
   add_executable(sanser-snv2-test snv2_test.cpp)
   target_link_libraries(sanser-snv2-test PRIVATE sanser-snv2)
   add_test(NAME sanser-snv2-test COMMAND sanser-snv2-test)
+
+  add_executable(sanser-stun-test stun_test.cpp)
+  target_link_libraries(sanser-stun-test PRIVATE sanser-stun)
+  if(MSVC)
+    target_compile_options(sanser-stun-test PRIVATE /W4 /permissive-)
+  else()
+    target_compile_options(sanser-stun-test PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+  endif()
+  add_test(NAME sanser-stun-test COMMAND sanser-stun-test)
 endif()

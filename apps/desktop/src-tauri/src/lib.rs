@@ -16,6 +16,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineManager::default())
+        .manage(commands::P2pSessionManager::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_status,
             commands::load_preferences,
@@ -27,7 +28,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::launch_engine,
             commands::stop_engine,
             commands::get_engine_status,
-            commands::export_diagnostics
+            commands::export_diagnostics,
+            commands::p2p_start,
+            commands::p2p_stop,
+            commands::p2p_get_state,
+            commands::p2p_get_candidates,
+            commands::p2p_get_metrics
         ])
         .run(tauri::generate_context!())?;
     Ok(())

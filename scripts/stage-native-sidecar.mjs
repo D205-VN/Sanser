@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, copyFileSync, chmodSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, copyFileSync, chmodSync, realpathSync, readFileSync } from 'node:fs';
 import { arch, env, platform } from 'node:process';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -7,6 +7,10 @@ import { createHash } from 'node:crypto';
 
 const root = resolve(import.meta.dirname, '..');
 const binaries = resolve(root, 'apps/desktop/src-tauri/binaries');
+const productVersion = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
+if (typeof productVersion !== 'string' || !/^\d+\.\d+\.\d+$/.test(productVersion)) {
+  throw new Error('package.json contains an invalid Sanser version');
+}
 
 function nativeCacheRoot() {
   if (env.SANSER_NATIVE_BUILD_DIR) return resolve(env.SANSER_NATIVE_BUILD_DIR);
@@ -63,6 +67,7 @@ function stageMacOS() {
     '-B', build,
     '-DCMAKE_BUILD_TYPE=Release',
     '-DBUILD_TESTING=OFF',
+    `-DSANSER_APP_VERSION=${productVersion}`,
     `-DCMAKE_OSX_ARCHITECTURES=${cmakeArch}`,
   ]);
   run('cmake', ['--build', build, '--config', 'Release', '--parallel']);
@@ -78,7 +83,13 @@ function stageWindows() {
   if (arch !== 'x64') throw new Error(`Unsupported Windows architecture: ${arch}`);
   const target = 'x86_64-pc-windows-msvc';
   const build = resolve(buildRoot, 'host-windows-x64');
-  run('cmake', ['-S', 'native/host-windows', '-B', build, '-A', 'x64', '-DBUILD_TESTING=OFF']);
+  run('cmake', [
+    '-S', 'native/host-windows',
+    '-B', build,
+    '-A', 'x64',
+    '-DBUILD_TESTING=OFF',
+    `-DSANSER_APP_VERSION=${productVersion}`,
+  ]);
   run('cmake', ['--build', build, '--config', 'Release', '--parallel']);
   const source = resolve(build, 'Release/sanser-host-windows.exe');
   if (!existsSync(source)) throw new Error('Windows native host was not produced');

@@ -349,7 +349,7 @@ button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity:
 .host-grid { align-items: start; }
 .capability-line { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 0; border-top: 1px solid var(--border); }
 .capability-line > div { min-width: 0; }
-.capability-line strong, .capability-line span { display: block; }
+.capability-line > div strong, .capability-line > div span { display: block; }
 .capability-line strong { color: var(--text-soft); font-size: 11px; }
 .capability-line > div > span { margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .compact-empty { min-height: 154px; padding: 20px; }
@@ -412,7 +412,7 @@ input[type='range'] { width: 100%; accent-color: var(--accent); }
 .login-session-list > div { display: flex; align-items: center; gap: 12px; padding: 12px 13px; }
 .login-session-list > div + div { border-top: 1px solid var(--border); }
 .login-session-list > div > div { min-width: 0; flex: 1; }
-.login-session-list strong, .login-session-list span { display: block; }
+.login-session-list > div > div strong, .login-session-list > div > div span { display: block; }
 .login-session-list strong { font-size: 10px; }
 .login-session-list span { margin-top: 4px; color: var(--muted); font-size: 8px; }
 .about-settings { min-height: 300px; display: flex; align-items: center; justify-content: center; gap: 22px; text-align: left; }
@@ -430,7 +430,7 @@ input[type='range'] { width: 100%; accent-color: var(--accent); }
 .diagnostics-grid { align-items: start; margin-bottom: 16px; }
 .engine-list { display: grid; }
 .engine-list > div { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); }
-.engine-list strong, .engine-list span { display: block; }
+.engine-list > div > div strong, .engine-list > div > div span { display: block; }
 .engine-list strong { color: var(--text-soft); font-size: 10px; text-transform: capitalize; }
 .engine-list span { margin-top: 4px; color: var(--muted); font-size: 8px; }
 .advanced-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: rgba(8, 11, 17, 0.68); }

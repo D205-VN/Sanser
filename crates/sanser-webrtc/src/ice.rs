@@ -120,18 +120,10 @@ impl ConnectionPolicy {
             .into_iter()
             .map(IceServer::validate)
             .collect::<Result<_, _>>()?;
-        let has_turn = servers.iter().any(IceServer::has_turn_url);
-        if mode == NetworkMode::Relay && !has_turn {
-            return Err(IceServerError::RelayRequiresTurn);
-        }
         Ok(Self {
             mode,
-            ice_transport: if mode == NetworkMode::Relay {
-                IceTransportPolicy::Relay
-            } else {
-                IceTransportPolicy::All
-            },
-            allow_native_snv2: mode != NetworkMode::Relay,
+            ice_transport: IceTransportPolicy::All,
+            allow_native_snv2: true,
             servers,
         })
     }
@@ -178,11 +170,11 @@ mod tests {
     }
 
     #[test]
-    fn relay_forces_ice_relay_and_disables_native_transport() {
-        let policy = ConnectionPolicy::build(NetworkMode::Relay, vec![turn()])
+    fn policy_allows_native_transport_with_auto_mode() {
+        let policy = ConnectionPolicy::build(NetworkMode::Auto, vec![turn()])
             .unwrap_or_else(|error| panic!("policy failed: {error}"));
-        assert_eq!(policy.ice_transport, IceTransportPolicy::Relay);
-        assert!(!policy.allow_native_snv2);
+        assert_eq!(policy.ice_transport, IceTransportPolicy::All);
+        assert!(policy.allow_native_snv2);
         assert!(!format!("{policy:?}").contains("temporary-secret"));
     }
 }

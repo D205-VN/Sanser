@@ -11,7 +11,7 @@ pub async fn connect(config: &Config) -> Result<PgPool, AppError> {
     let connection_url = sqlx_connection_url(&config.database_url)?;
     let options = PgConnectOptions::from_str(&connection_url)
         .map_err(AppError::from_db)?
-        .application_name("sanser-server/2.0.0")
+        .application_name(concat!("sanser-server/", env!("CARGO_PKG_VERSION")))
         .statement_cache_capacity(256);
     tracing::info!("opening Neon PostgreSQL connection pool");
     let pool = PgPoolOptions::new()

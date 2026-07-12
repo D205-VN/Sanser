@@ -33,7 +33,7 @@ pub async fn ice(
     auth: AuthContext,
 ) -> Result<Json<IceConfiguration>, AppError> {
     let mut servers = Vec::with_capacity(2);
-    if !state.config.stun_urls.is_empty() && state.config.network_mode != NetworkMode::Relay {
+    if !state.config.stun_urls.is_empty() && state.config.network_mode != NetworkMode::Manual {
         servers.push(IceServer {
             urls: state.config.stun_urls.clone(),
             username: None,
@@ -81,11 +81,7 @@ pub async fn ice(
     Ok(Json(IceConfiguration {
         ice_servers: servers,
         network_mode: state.config.network_mode,
-        ice_transport_policy: if state.config.network_mode == NetworkMode::Relay {
-            "relay"
-        } else {
-            "all"
-        },
+        ice_transport_policy: "all",
         expires_at: credential_expiry,
     }))
 }

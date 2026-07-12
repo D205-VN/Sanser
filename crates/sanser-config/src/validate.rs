@@ -99,9 +99,7 @@ impl AppConfig {
         if turn_username.is_some() != turn_credential.is_some() {
             return Err(ConfigError::IncompleteTurnCredentials);
         }
-        if mode == NetworkMode::Relay && turn_urls.is_empty() {
-            return Err(ConfigError::RelayRequiresTurn);
-        }
+        // Relay checks removed as TURN is deprecated.
         let turn = if turn_urls.is_empty() {
             None
         } else {
@@ -224,8 +222,9 @@ where
 fn parse_network_mode(value: &str) -> Result<NetworkMode, ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "auto" => Ok(NetworkMode::Auto),
-        "direct" => Ok(NetworkMode::Direct),
-        "relay" => Ok(NetworkMode::Relay),
+        "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
+        "manual" => Ok(NetworkMode::Manual),
+        "relay" => Ok(NetworkMode::Auto), // Fallback relay config to auto
         _ => Err(ConfigError::InvalidValue("NETWORK_MODE")),
     }
 }
@@ -351,17 +350,27 @@ mod tests {
     }
 
     #[test]
-    fn relay_requires_turn_and_complete_credentials() {
+    fn parses_network_mode_correctly() {
         let mut values = base();
-        values.push(("NETWORK_MODE", "relay"));
-        assert_eq!(
-            AppConfig::from_values(values),
-            Err(ConfigError::RelayRequiresTurn)
-        );
+        values.push(("NETWORK_MODE", "directonly"));
+        let config = AppConfig::from_values(values).unwrap();
+        assert_eq!(config.network.mode, NetworkMode::DirectOnly);
 
         let mut values = base();
+        values.push(("NETWORK_MODE", "manual"));
+        let config = AppConfig::from_values(values).unwrap();
+        assert_eq!(config.network.mode, NetworkMode::Manual);
+
+        let mut values = base();
+        values.push(("NETWORK_MODE", "relay"));
+        let config = AppConfig::from_values(values).unwrap();
+        assert_eq!(config.network.mode, NetworkMode::Auto); // Fallback to Auto
+    }
+
+    #[test]
+    fn incomplete_turn_credentials() {
+        let mut values = base();
         values.extend([
-            ("NETWORK_MODE", "relay"),
             ("TURN_URLS", "turn:relay.example.com:3478"),
             ("TURN_USERNAME", "temporary"),
         ]);

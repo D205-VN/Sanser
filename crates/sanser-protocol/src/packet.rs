@@ -49,6 +49,7 @@ pub enum PacketType {
     Keepalive = 15,
     Disconnect = 16,
     Error = 17,
+    Acknowledgement = 18,
 }
 
 impl PacketType {
@@ -63,7 +64,8 @@ impl PacketType {
             | Self::NetworkFeedback
             | Self::Nack
             | Self::KeyframeRequest
-            | Self::Keepalive => PacketPriority::VideoControl,
+            | Self::Keepalive
+            | Self::Acknowledgement => PacketPriority::VideoControl,
             Self::Video => PacketPriority::VideoPayload,
             Self::Clipboard | Self::EncoderFeedback | Self::DecoderFeedback | Self::Error => {
                 PacketPriority::Diagnostics
@@ -76,6 +78,7 @@ impl PacketType {
         match self {
             Self::Video => 1_048_576,
             Self::Clipboard => 262_144,
+            Self::Acknowledgement => crate::ACKNOWLEDGEMENT_PAYLOAD_LEN,
             Self::Audio
             | Self::NetworkFeedback
             | Self::EncoderFeedback
@@ -87,6 +90,16 @@ impl PacketType {
             | Self::Error => 65_536,
             Self::Handshake | Self::Authentication => 16_384,
             Self::MouseMove | Self::MouseButton | Self::Keyboard | Self::Gamepad => 4_096,
+        }
+    }
+
+    /// Returns the exact payload width for packet classes whose wire schema is
+    /// fixed-size. Other classes are bounded only by [`Self::max_payload_len`].
+    #[must_use]
+    pub const fn exact_payload_len(self) -> Option<usize> {
+        match self {
+            Self::Acknowledgement => Some(crate::ACKNOWLEDGEMENT_PAYLOAD_LEN),
+            _ => None,
         }
     }
 }
@@ -113,6 +126,7 @@ impl TryFrom<u8> for PacketType {
             15 => Ok(Self::Keepalive),
             16 => Ok(Self::Disconnect),
             17 => Ok(Self::Error),
+            18 => Ok(Self::Acknowledgement),
             _ => Err(UnknownPacketType(value)),
         }
     }
@@ -126,6 +140,8 @@ bitflags! {
         const RETRANSMITTED = 1 << 2;
         const ACK_REQUIRED = 1 << 3;
         const DISCONTINUITY = 1 << 4;
+        /// Marks the fragment whose sequence starts a video frame.
+        const START_OF_FRAME = 1 << 5;
     }
 }
 

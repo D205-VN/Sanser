@@ -48,6 +48,7 @@
       <CapabilityNotice title="WebRTC" capability={runtime.capabilities.webRtc} />
       <CapabilityNotice title="Native direct" capability={runtime.capabilities.nativeDirect} />
       <CapabilityNotice title="SNV2" capability={runtime.capabilities.nativeSnv2} />
+      <CapabilityNotice title="P2P Transport" capability={runtime.capabilities.p2pV2} />
     </article>
 
     <article class="card card-body stack">

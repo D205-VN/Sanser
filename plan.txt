@@ -1,0 +1,1449 @@
+# KẾ HOẠCH HOÀN CHỈNH PHÁT TRIỂN P2P CHO SANSER
+
+## 1. Mục tiêu tổng thể
+
+Nâng cấp Sanser thành hệ thống remote desktop và game streaming có khả năng:
+
+* Kết nối trực tiếp giữa hai thiết bị qua LAN hoặc Internet.
+* Không yêu cầu Tailscale, ZeroTier hay VPN ảo.
+* Không truyền video, âm thanh và input qua server.
+* Không dùng TURN relay.
+* Tự động xuyên NAT bằng STUN và UDP hole punching.
+* Tự động mở port bằng PCP, NAT-PMP hoặc UPnP khi router hỗ trợ.
+* Ưu tiên IPv6 Direct và LAN Direct.
+* Có tùy chọn mở port thủ công khi NAT traversal thất bại.
+* Duy trì một giao thức media duy nhất là SNV2.
+* Hỗ trợ adaptive bitrate, packet pacing và phục hồi mất gói.
+* Đạt trải nghiệm sử dụng gần Parsec và Moonlight/Sunshine.
+
+## 2. Trạng thái hiện tại của Sanser
+
+### Đã có
+
+Sanser hiện đã có các thành phần nền tảng:
+
+* Tauri 2 và Svelte 5 cho ứng dụng desktop.
+* Rust/Axum server.
+* PostgreSQL lưu tài khoản, thiết bị và phiên kết nối.
+* WebSocket cho sự kiện và signaling.
+* Windows native host.
+* macOS native client.
+* H.264 native encode/decode.
+* Giao thức SNV2.
+* Xác thực packet bằng session key.
+* Video, audio, input và control lane riêng.
+* Route policy cho LAN, Direct IP, STUN và TURN.
+* Session token ngắn hạn.
+* LAN Native Direct.
+
+### Chưa có hoặc chưa hoàn chỉnh
+
+* STUN Binding Request chạy thực tế trên desktop.
+* Thu thập public IP và public UDP port.
+* UDP hole punching.
+* Candidate gathering và candidate pair checking.
+* IPv6 Direct tự động.
+* PCP.
+* NAT-PMP.
+* UPnP IGD.
+* Port mapping lifecycle.
+* Connection racing.
+* Route scoring.
+* Route migration.
+* Native WebRTC/libdatachannel.
+* Internet P2P thực sự.
+* Adaptive bitrate hoàn chỉnh.
+* Congestion control hoàn chỉnh.
+* Mã hóa toàn bộ media bằng AEAD.
+
+## 3. Kiến trúc mục tiêu
+
+```text
+                           SANSER SERVER
+              ┌──────────────────────────────────┐
+              │ Đăng nhập                        │
+              │ Quản lý tài khoản và thiết bị    │
+              │ Presence                         │
+              │ Tạo và chấp nhận phiên           │
+              │ WebSocket signaling              │
+              │ Cấp session credential           │
+              └─────────────────┬────────────────┘
+                                │
+                   Chỉ trao đổi metadata kết nối
+                                │
+               ┌────────────────┴────────────────┐
+               │                                 │
+        WINDOWS HOST                       macOS CLIENT
+   ┌────────────────────┐             ┌────────────────────┐
+   │ Capture            │             │ UDP receive        │
+   │ H.264/HEVC encode  │             │ H.264/HEVC decode  │
+   │ Audio capture      │             │ Metal render       │
+   │ Input injection    │             │ Audio output       │
+   │ P2P Transport      │◄═══════════►│ P2P Transport      │
+   └────────────────────┘    SNV2     └────────────────────┘
+                           Direct UDP
+```
+
+Server không được truyền:
+
+* Video frame.
+* Audio packet.
+* Mouse input.
+* Keyboard input.
+* Gamepad input.
+* Clipboard payload lớn.
+
+Server chỉ truyền:
+
+* Session ID.
+* Device ID.
+* Candidate.
+* Public key tạm thời.
+* Trạng thái kết nối.
+* Kết quả chọn route.
+* Session authorization token.
+
+## 4. Chiến lược kết nối kết hợp
+
+Sanser sẽ kết hợp ưu điểm của hai hướng.
+
+### Hướng Moonlight/Sunshine
+
+* LAN Direct.
+* IPv6 Direct.
+* PCP.
+* NAT-PMP.
+* UPnP port mapping.
+* Port forwarding thủ công.
+* Native UDP streaming.
+* Hardware encode/decode.
+
+### Hướng Parsec-like
+
+* Signaling server.
+* STUN discovery.
+* UDP hole punching.
+* Thu thập nhiều candidate.
+* Kiểm tra nhiều route.
+* Tự động chọn đường có RTT thấp nhất.
+* Connection racing.
+* Tự thích nghi với mạng.
+
+### Thứ tự ưu tiên
+
+```text
+1. LAN IPv4 Direct
+2. LAN IPv6 Direct
+3. Public IPv6 Direct
+4. PCP mapped IPv4
+5. NAT-PMP mapped IPv4
+6. UPnP mapped IPv4
+7. STUN UDP hole punching
+8. Port forwarding thủ công
+9. Thông báo không thể tạo kết nối P2P
+```
+
+Không dùng TURN và không chuyển media qua server.
+
+## 5. Nguyên tắc quan trọng: không dùng full WebRTC media
+
+Sanser không nên thay toàn bộ SNV2 bằng WebRTC.
+
+WebRTC full stack sẽ bổ sung:
+
+* ICE.
+* DTLS.
+* SRTP.
+* SCTP.
+* DataChannel.
+* RTP packetization.
+* Congestion controller riêng.
+
+Điều này tạo ra một media pipeline thứ hai và làm kiến trúc phức tạp hơn.
+
+Hướng mục tiêu:
+
+```text
+ICE-like candidate gathering
++ STUN
++ UDP hole punching
++ port mapping
+              ↓
+      tạo direct UDP path
+              ↓
+      SNV2 chạy trên path đó
+```
+
+Sanser chỉ học cách WebRTC thực hiện NAT traversal, nhưng vẫn giữ giao thức truyền native của mình.
+
+## 6. Tạo crate P2P mới
+
+Tạo:
+
+```text
+crates/sanser-p2p
+```
+
+Cấu trúc:
+
+```text
+crates/sanser-p2p/src/
+├── lib.rs
+├── candidate.rs
+├── gatherer.rs
+├── interface.rs
+├── stun.rs
+├── mapping/
+│   ├── mod.rs
+│   ├── pcp.rs
+│   ├── nat_pmp.rs
+│   └── upnp.rs
+├── signaling.rs
+├── punch.rs
+├── connectivity.rs
+├── nomination.rs
+├── scoring.rs
+├── migration.rs
+├── keepalive.rs
+├── security.rs
+├── metrics.rs
+└── error.rs
+```
+
+Crate này chịu trách nhiệm:
+
+* Mở UDP socket.
+* Thu thập địa chỉ mạng.
+* Gọi STUN.
+* Yêu cầu port mapping.
+* Tạo candidate.
+* Kiểm tra candidate pair.
+* Hole punching.
+* Chọn đường.
+* Theo dõi chất lượng đường truyền.
+* Giữ NAT mapping.
+* Phát hiện thay đổi mạng.
+* Chuyển route khi cần.
+
+## 7. Mô hình Candidate
+
+Tạo kiểu dữ liệu dùng chung:
+
+```rust
+pub enum CandidateType {
+    Host,
+    Ipv6Global,
+    PortMapped,
+    ServerReflexive,
+    Manual,
+}
+
+pub enum MappingProtocol {
+    None,
+    Pcp,
+    NatPmp,
+    Upnp,
+    Manual,
+}
+
+pub struct P2pCandidate {
+    pub id: String,
+    pub candidate_type: CandidateType,
+    pub address: IpAddr,
+    pub port: u16,
+    pub protocol: TransportProtocol,
+    pub interface_index: Option<u32>,
+    pub mapping_protocol: MappingProtocol,
+    pub priority: u32,
+    pub foundation: String,
+}
+```
+
+Không gửi candidate sau lên server:
+
+* Loopback.
+* Địa chỉ multicast.
+* IPv6 link-local không có scope hợp lệ.
+* Interface đã bị vô hiệu hóa.
+* Candidate trùng lặp.
+* Candidate VPN không được người dùng cho phép.
+
+## 8. Sử dụng một UDP socket duy nhất
+
+Hiện native engine đang chia thành nhiều port cho video, audio và control.
+
+Kiến trúc mới nên dùng một UDP socket:
+
+```text
+UDP socket
+├── Handshake
+├── Authentication
+├── Video
+├── Audio
+├── Keyboard
+├── Mouse button
+├── Mouse movement
+├── Gamepad
+├── Clipboard
+├── Network feedback
+├── NACK
+├── Keyframe request
+└── Keepalive
+```
+
+SNV2 đã có packet type, stream ID và priority nên không cần nhiều port.
+
+Lợi ích:
+
+* Chỉ cần một NAT mapping.
+* Chỉ hole punch một port.
+* Chỉ mở một firewall rule.
+* Dễ duy trì kết nối khi đổi mạng.
+* Ít lỗi hơn khi router chỉ mở được một số port.
+* Giảm số lượng socket và thread.
+* Dễ triển khai packet pacing chung.
+
+Dữ liệu dùng chung socket nhưng không được dùng chung một hàng đợi khóa cứng.
+
+Các lane vẫn phải độc lập:
+
+```text
+Lane 0: handshake và authentication
+Lane 1: keyboard, mouse button, disconnect
+Lane 2: mouse movement, gamepad
+Lane 3: audio
+Lane 4: video control
+Lane 5: video payload
+Lane 6: diagnostics và clipboard
+```
+
+## 9. Candidate Gathering
+
+Mỗi thiết bị thực hiện song song các công việc sau.
+
+### 9.1 Host candidate
+
+Liệt kê interface mạng:
+
+* Ethernet.
+* Wi-Fi.
+* IPv4 private.
+* IPv6 global.
+* IPv6 unique-local khi phù hợp.
+
+### 9.2 STUN server-reflexive candidate
+
+Dùng chính socket UDP sẽ truyền SNV2 để gửi STUN Binding Request.
+
+Kết quả:
+
+```text
+Local socket:     192.168.1.12:52014
+Public mapping:   113.x.x.x:43892
+```
+
+Không mở một STUN socket riêng rồi đóng nó, vì NAT mapping của socket mới có thể khác.
+
+### 9.3 Port-mapped candidate
+
+Thử theo thứ tự:
+
+```text
+PCP
+→ NAT-PMP
+→ UPnP IGD
+```
+
+Khi thành công:
+
+```text
+Router public IP:50000
+→ local machine:52014
+```
+
+Port mapping phải có:
+
+* Thời gian hết hạn.
+* Gia hạn định kỳ.
+* Xóa mapping khi ứng dụng đóng.
+* Xử lý router reboot.
+* Xử lý public IP thay đổi.
+
+### 9.4 IPv6 candidate
+
+Chỉ công bố IPv6 global nếu:
+
+* Interface đang hoạt động.
+* Route mặc định tồn tại.
+* Firewall rule đã được tạo.
+* Connectivity probe thành công.
+
+## 10. Signaling protocol mới
+
+WebSocket signaling hiện tại được giữ lại, nhưng bổ sung các message sau:
+
+```text
+p2p.hello
+p2p.candidates
+p2p.gatheringComplete
+p2p.punchReady
+p2p.punchStart
+p2p.probe
+p2p.probeAck
+p2p.nominate
+p2p.selected
+p2p.pathChanged
+p2p.failed
+p2p.closed
+```
+
+Ví dụ candidate message:
+
+```json
+{
+  "type": "p2p.candidates",
+  "sessionId": "SESSION_UUID",
+  "targetDeviceId": "DEVICE_UUID",
+  "payload": {
+    "generation": 1,
+    "candidates": [
+      {
+        "id": "srflx-1",
+        "type": "serverReflexive",
+        "address": "113.x.x.x",
+        "port": 43892,
+        "protocol": "udp",
+        "priority": 900
+      }
+    ]
+  }
+}
+```
+
+Server phải kiểm tra:
+
+* Session tồn tại.
+* Session đã được chấp nhận.
+* Người gửi thuộc session.
+* Người nhận là thiết bị còn lại trong session.
+* Số candidate không vượt giới hạn.
+* Candidate chỉ dùng UDP.
+* Port hợp lệ.
+* Payload không vượt kích thước cho phép.
+* Không forward candidate sang tài khoản khác.
+* Không lưu public candidate lâu dài trong database.
+
+## 11. UDP hole punching
+
+Sau khi hai bên trao đổi candidate:
+
+```text
+Client                        Host
+  │                             │
+  │──── p2p.punchReady ────────►│
+  │◄─── p2p.punchReady ─────────│
+  │                             │
+  │       server chọn T0         │
+  │                             │
+  │──── UDP authenticated probe ►│
+  │◄─── UDP authenticated probe ─│
+  │──── UDP probe ACK ──────────►│
+  │◄─── UDP probe ACK ───────────│
+  │                             │
+  │════ SNV2 session begins ═════│
+```
+
+Punch schedule đề xuất:
+
+```text
+T+0 ms
+T+50 ms
+T+100 ms
+T+200 ms
+T+400 ms
+T+800 ms
+T+1200 ms
+T+1800 ms
+```
+
+Không gửi packet vô hạn.
+
+Mỗi probe phải chứa:
+
+```text
+Magic
+Protocol version
+Session ID
+Sender device ID hash
+Candidate pair ID
+Transaction ID
+Timestamp
+Nonce
+Authentication tag
+```
+
+Packet không hợp lệ phải bị bỏ trước khi cấp phát payload lớn.
+
+## 12. Connection racing
+
+Không thử từng phương pháp theo kiểu chờ timeout nối tiếp.
+
+Chạy song song:
+
+```text
+0 ms:
+- LAN IPv4 checks
+- LAN IPv6 checks
+- Public IPv6 checks
+
+50 ms:
+- Port-mapped candidate checks
+
+100 ms:
+- STUN server-reflexive hole punching
+
+500–1500 ms:
+- đánh giá và chọn candidate pair tốt nhất
+```
+
+Một route thành công sớm có thể được sử dụng ngay, nhưng hệ thống tiếp tục kiểm tra ngắn hạn để tìm route tốt hơn.
+
+Ví dụ:
+
+```text
+STUN route:
+RTT 46 ms
+
+Sau 300 ms tìm thấy IPv6 direct:
+RTT 28 ms
+
+Sanser chuyển sang IPv6 direct trước khi bắt đầu media chính.
+```
+
+Không chuyển route liên tục trong lúc streaming nếu lợi ích quá nhỏ.
+
+## 13. Route scoring
+
+Mỗi candidate pair được chấm điểm:
+
+```text
+Điểm =
+  Direct bonus
++ IPv6 bonus
++ Port-mapping stability bonus
+- RTT penalty
+- Packet-loss penalty
+- Jitter penalty
+- Mapping-expiry penalty
+- Interface-cost penalty
+```
+
+Thứ tự ưu tiên mặc định:
+
+```text
+LAN direct              cao nhất
+IPv6 direct
+PCP mapped
+NAT-PMP mapped
+UPnP mapped
+STUN hole punched
+Manual mapping
+```
+
+Chỉ chọn đường khi:
+
+* Handshake hợp lệ.
+* Cả hai chiều gửi và nhận được packet.
+* RTT đo được.
+* Không có endpoint mismatch.
+* Session token còn hiệu lực.
+
+## 14. P2P state machine
+
+```text
+Idle
+→ SessionRequested
+→ SessionAccepted
+→ Gathering
+→ ExchangingCandidates
+→ PunchPreparing
+→ Checking
+→ Connected
+→ Authenticating
+→ Streaming
+→ Reconnecting
+→ Closed
+```
+
+Trạng thái lỗi:
+
+```text
+NoLocalCandidate
+StunUnavailable
+PortMappingUnavailable
+PeerOffline
+CandidateExchangeTimeout
+PunchTimeout
+AuthenticationFailed
+FirewallBlocked
+NetworkChanged
+SessionExpired
+NoDirectRoute
+```
+
+Mỗi lỗi phải được ánh xạ thành thông báo dễ hiểu trên UI.
+
+## 15. Thay đổi server
+
+### Giữ lại
+
+* Auth.
+* Account.
+* Devices.
+* Presence.
+* Sessions.
+* Events WebSocket.
+* Signaling WebSocket.
+* Neon PostgreSQL.
+* Session authorization.
+* Audit log.
+
+### Xóa hoặc vô hiệu hóa
+
+* TURN credential generation.
+* `TURN_URLS`.
+* `TURN_USERNAME`.
+* `TURN_CREDENTIAL`.
+* `TURN_SHARED_SECRET`.
+* `TURN_CREDENTIAL_TTL_SECONDS`.
+* Relay-only network mode.
+* TURN route attempts.
+
+### Network mode mới
+
+```rust
+pub enum NetworkMode {
+    Auto,
+    DirectOnly,
+    Manual,
+}
+```
+
+Ý nghĩa:
+
+* `Auto`: tự thử LAN, IPv6, port mapping và hole punching.
+* `DirectOnly`: chỉ LAN hoặc địa chỉ direct có thể kết nối ngay.
+* `Manual`: người dùng cung cấp IP và port.
+
+## 16. Thay đổi route policy
+
+Sửa `crates/sanser-network/src/route.rs`.
+
+Route mới:
+
+```rust
+pub enum RouteKind {
+    LanIpv4,
+    LanIpv6,
+    PublicIpv6,
+    PcpMapped,
+    NatPmpMapped,
+    UpnpMapped,
+    StunHolePunch,
+    ManualForward,
+}
+```
+
+Transport chỉ còn:
+
+```rust
+pub enum TransportKind {
+    Snv2Udp,
+}
+```
+
+Không nên dùng các tên:
+
+```text
+WebRtcDirect
+WebRtcRelayUdp
+WebRtcRelayTcp
+WebRtcRelayTls
+```
+
+vì media path cuối cùng đều là SNV2 UDP.
+
+## 17. Thay đổi session credential
+
+Server không còn trả một `peer_route_address` cố định.
+
+Response mới:
+
+```rust
+pub struct P2pSessionCredential {
+    pub session_id: String,
+    pub device_id: String,
+    pub peer_device_id: String,
+    pub role: P2pRole,
+    pub authorization_token: String,
+    pub expires_at: i64,
+    pub signaling_url: String,
+    pub stun_urls: Vec<String>,
+}
+```
+
+Role:
+
+```rust
+pub enum P2pRole {
+    Controlling,
+    Controlled,
+}
+```
+
+Controlling peer chịu trách nhiệm nominate candidate pair cuối cùng.
+
+## 18. Xác thực và mã hóa
+
+Session token hiện tại chỉ nên dùng để xác nhận rằng hai peer được server cho phép kết nối.
+
+Không dùng trực tiếp token đó làm khóa mã hóa lâu dài.
+
+Handshake:
+
+```text
+1. Mỗi peer tạo X25519 ephemeral key pair.
+2. Public key được gửi qua signaling.
+3. Hai peer tính shared secret.
+4. Kết hợp shared secret với session credential.
+5. Dùng HKDF-SHA256 tạo directional keys.
+6. Xác nhận key bằng authenticated handshake.
+7. Bắt đầu encrypted SNV2.
+```
+
+Khóa cần tạo:
+
+```text
+host_to_client_key
+client_to_host_key
+header_protection_key
+rekey_key
+handshake_confirmation_key
+```
+
+Media và input phải dùng AEAD:
+
+* ChaCha20-Poly1305, hoặc
+* AES-256-GCM khi có hardware acceleration phù hợp.
+
+Nonce có thể được tạo từ:
+
+```text
+key_id + stream_id + sequence_number
+```
+
+Không được tái sử dụng nonce với cùng key.
+
+Rekey khi:
+
+* Đạt giới hạn packet.
+* Đạt giới hạn thời gian.
+* Đổi route.
+* Thiết bị resume sau sleep.
+* Phát hiện sequence gần tràn.
+
+Không đưa private key hoặc raw shared secret vào log.
+
+## 19. Tích hợp desktop Tauri
+
+Tạo các Tauri command mới:
+
+```text
+p2p_start
+p2p_stop
+p2p_get_state
+p2p_get_candidates
+p2p_apply_remote_candidates
+p2p_get_metrics
+p2p_force_recheck
+p2p_set_manual_endpoint
+```
+
+Không nên truyền packet video qua Tauri command.
+
+Tauri chỉ quản lý:
+
+* Session lifecycle.
+* Signaling.
+* Candidate metadata.
+* Engine process.
+* Diagnostics.
+* UI state.
+
+Native sidecar xử lý realtime packet.
+
+## 20. Tích hợp native engine
+
+### Windows host
+
+Thay kiểu chạy:
+
+```text
+--udp-connect PEER_IP:PORT
+```
+
+bằng:
+
+```text
+--p2p-session SESSION_ID
+--p2p-bind 0.0.0.0:0
+--p2p-ipv6-bind [::]:0
+--p2p-role controlled
+--p2p-control-pipe PIPE_NAME
+```
+
+Host phải:
+
+* Bind socket trước khi candidate gathering.
+* Giữ nguyên socket sau STUN.
+* Nhận remote candidate qua local IPC.
+* Hole punch từ chính socket media.
+* Chỉ capture/encode sau khi P2P được xác thực.
+* Dừng input injection khi session mất xác thực.
+
+### macOS client
+
+Client cũng phải:
+
+* Bind UDP socket.
+* Thu thập candidate.
+* Hole punch hai chiều.
+* Không chỉ đứng nghe trên một port cố định.
+* Gửi feedback, input và keepalive trên cùng socket.
+* Dừng gửi input khi mất phiên.
+
+## 21. IPC giữa Tauri và native sidecar
+
+Dùng local authenticated IPC:
+
+* Named pipe trên Windows.
+* Unix domain socket trên macOS.
+
+Message IPC:
+
+```text
+SetSessionCredential
+AddRemoteCandidate
+StartConnectivityChecks
+SelectCandidatePair
+StartStreaming
+UpdateBitrate
+RequestKeyframe
+GetMetrics
+StopSession
+```
+
+Không truyền secret qua command-line vì command-line có thể bị hệ điều hành hoặc công cụ chẩn đoán đọc được.
+
+## 22. Windows Firewall
+
+Khi bắt đầu host lần đầu:
+
+* Tạo rule cho executable Sanser.
+* Chỉ cho phép inbound UDP vào ứng dụng.
+* Không mở port TCP không cần thiết.
+* Ưu tiên profile Private.
+* Yêu cầu người dùng xác nhận trước khi cho phép Public network.
+* Xóa rule cũ khi executable path thay đổi.
+* Không chạy toàn bộ ứng dụng bằng Administrator.
+
+Ứng dụng phải phân biệt:
+
+```text
+Firewall blocked
+NAT traversal failed
+Peer offline
+Authentication failed
+```
+
+## 23. Adaptive streaming
+
+NAT traversal chỉ giúp tạo kết nối. Muốn hình ảnh mượt cần hoàn thiện media controller.
+
+### Thu thập metrics
+
+Mỗi 250–500 ms:
+
+* RTT.
+* Jitter.
+* Packet loss.
+* Packet reorder.
+* Decode time.
+* Render time.
+* Encoder queue.
+* Decoder queue.
+* Bitrate thực tế.
+* Frame drop.
+* NACK rate.
+* Keyframe rate.
+
+### Adaptive bitrate
+
+Ví dụ:
+
+```text
+Mạng ổn định:
+tăng bitrate từ từ 5–10%
+
+Packet loss tăng:
+giảm bitrate nhanh 15–30%
+
+RTT tăng mạnh:
+giảm bitrate và encoder queue
+
+Decoder chậm:
+giảm độ phân giải hoặc FPS
+```
+
+Không tăng bitrate ngay sau một khoảng mạng tốt rất ngắn.
+
+### Chế độ chất lượng
+
+```text
+Competitive:
+- ưu tiên latency
+- buffer rất nhỏ
+- bitrate vừa phải
+- drop frame cũ
+
+Balanced:
+- cân bằng latency và hình ảnh
+
+Quality:
+- bitrate cao hơn
+- buffer lớn hơn một chút
+
+Custom:
+- người dùng chọn resolution, FPS và bitrate
+```
+
+## 24. Packet pacing
+
+Không gửi toàn bộ frame thành một burst lớn.
+
+Ví dụ frame 40 KB phải được chia packet và trải đều trong khoảng thời gian phù hợp.
+
+Packet pacing phải:
+
+* Tôn trọng MTU.
+* Tránh IP fragmentation.
+* Ưu tiên input và audio.
+* Giới hạn burst.
+* Điều chỉnh theo bandwidth estimate.
+* Không để keyframe phá hỏng audio/input latency.
+
+Kích thước UDP payload mục tiêu ban đầu:
+
+```text
+1200 bytes
+```
+
+Sau đó có thể thêm Path MTU Discovery có kiểm soát.
+
+## 25. Xử lý mất gói
+
+### Video
+
+* Packet quá hạn không retransmit.
+* NACK chỉ cho packet còn hữu ích.
+* Frame thiếu packet và quá deadline phải bị bỏ.
+* Yêu cầu keyframe khi mất reference frame.
+* Giới hạn retransmission window.
+* Có thể thêm FEC nhẹ cho mạng loss thấp đến trung bình.
+
+### Audio
+
+* Jitter buffer nhỏ.
+* Packet audio quá cũ bị bỏ.
+* Có packet-loss concealment.
+* Không để audio queue tăng vô hạn.
+
+### Input
+
+Keyboard và mouse button:
+
+* Reliable.
+* Ordered.
+* Có ACK.
+* Có retransmission giới hạn.
+
+Mouse movement và gamepad analog:
+
+* Latest-state-wins.
+* Không retransmit trạng thái cũ.
+
+## 26. Keepalive và reconnect
+
+Keepalive UDP:
+
+```text
+Mỗi 2–5 giây khi idle
+Nhanh hơn khi NAT được phát hiện có timeout thấp
+```
+
+Khi mất packet:
+
+```text
+0–1 giây:
+tiếp tục kiểm tra route hiện tại
+
+1–3 giây:
+thử lại candidate pair cũ
+
+3–8 giây:
+gather candidate generation mới
+
+Sau giới hạn:
+thông báo không thể khôi phục P2P
+```
+
+Khi đổi Wi-Fi:
+
+```text
+Network generation 1
+→ phát hiện interface thay đổi
+→ generation 2 candidate gathering
+→ trao đổi candidate mới
+→ chọn route mới
+→ rekey
+→ tiếp tục stream
+```
+
+## 27. Giao diện người dùng
+
+Màn hình kết nối:
+
+```text
+Đang tìm thiết bị...
+Đang kiểm tra mạng LAN...
+Đang kiểm tra IPv6...
+Đang yêu cầu router mở cổng...
+Đang tạo kết nối P2P...
+Đang xác thực thiết bị...
+Đã kết nối trực tiếp
+```
+
+Hiển thị khi kết nối:
+
+```text
+Loại đường truyền: Direct UDP
+Phương thức: IPv6 / PCP / NAT-PMP / UPnP / Hole punching
+RTT: 24 ms
+Jitter: 2 ms
+Packet loss: 0.3%
+Bitrate: 35 Mbps
+Codec: H.264
+Resolution: 1920×1080
+FPS: 60
+```
+
+Không hiển thị public IP đầy đủ trong diagnostics mặc định.
+
+Ví dụ:
+
+```text
+113.x.x.x:43xxx
+```
+
+## 28. Mở port thủ công
+
+Khi tự động P2P thất bại, cung cấp chế độ Manual.
+
+Host hiển thị:
+
+```text
+Hãy forward UDP port 50000 đến:
+192.168.1.12:50000
+```
+
+Sau đó client nhập:
+
+```text
+Public IP hoặc hostname
+UDP port
+```
+
+Manual connection vẫn phải:
+
+* Có session authorization.
+* Có X25519 handshake.
+* Có AEAD encryption.
+* Kiểm tra device identity.
+* Không cho phép anonymous raw connection.
+
+## 29. Diagnostics
+
+Diagnostics cần có:
+
+```text
+Network interfaces
+Candidate types
+Candidate gathering duration
+STUN success/failure
+PCP success/failure
+NAT-PMP success/failure
+UPnP success/failure
+Connectivity check count
+Selected candidate type
+RTT
+Jitter
+Loss
+Reconnect count
+Firewall state
+Public IPv6 availability
+```
+
+Không được ghi:
+
+* Access token.
+* Refresh token.
+* Session credential.
+* Encryption key.
+* Full public IP mặc định.
+* Database URL.
+* STUN transaction secrets.
+
+## 30. Kiểm thử
+
+### Unit test
+
+* Candidate serialization.
+* Candidate priority.
+* Candidate deduplication.
+* Route scoring.
+* HMAC validation.
+* AEAD encrypt/decrypt.
+* Replay rejection.
+* Sequence handling.
+* Timeout handling.
+* Port mapping lease renewal.
+* Candidate generation changes.
+
+### Integration test
+
+Mô phỏng:
+
+* LAN IPv4.
+* LAN IPv6.
+* Public IPv6.
+* Full-cone NAT.
+* Address-restricted NAT.
+* Port-restricted NAT.
+* Symmetric NAT.
+* Double NAT.
+* CGNAT.
+* Firewall chặn inbound.
+* Firewall chặn UDP.
+* STUN unavailable.
+* Router UPnP disabled.
+* Network switching.
+* Sleep/resume.
+
+### Hardware test
+
+Windows host:
+
+* NVIDIA NVENC.
+* Intel Quick Sync.
+* AMD AMF.
+
+macOS client:
+
+* Apple Silicon.
+* VideoToolbox.
+* Metal.
+* Wi-Fi.
+* Ethernet.
+
+### Network impairment test
+
+Kiểm thử với:
+
+```text
+RTT: 10, 30, 60, 100, 150 ms
+Loss: 0%, 0.5%, 1%, 3%, 5%
+Jitter: 0, 5, 15, 30 ms
+Bandwidth: 5, 10, 25, 50, 100 Mbps
+Reordering
+Burst loss
+```
+
+## 31. Tiêu chí nghiệm thu
+
+### Kết nối
+
+* LAN connection dưới 1 giây trong điều kiện bình thường.
+* Internet P2P connection mục tiêu dưới 3 giây.
+* Không có video/audio/input đi qua server.
+* Không cần Tailscale.
+* Không cần TURN.
+* UPnP/PCP/NAT-PMP mapping được dọn khi đóng ứng dụng.
+* Candidate khác session không được chấp nhận.
+* Packet replay bị loại bỏ.
+
+### Streaming
+
+Mục tiêu ban đầu:
+
+```text
+1920×1080
+60 FPS
+H.264 hardware encode
+H.264 hardware decode
+10–50 Mbps
+```
+
+Sau đó:
+
+```text
+2560×1440 60/120 FPS
+3840×2160 60 FPS
+HEVC
+HDR khi engine hỗ trợ
+```
+
+### Độ ổn định
+
+* Packet loss nhỏ không làm disconnect phiên.
+* Video queue không tăng vô hạn.
+* Input không bị video keyframe chặn.
+* Mất route kích hoạt reconnect.
+* Network change tạo candidate generation mới.
+* Session đóng sẽ release toàn bộ phím đang được giữ.
+
+## 32. Lộ trình triển khai
+
+### Giai đoạn 1 — Chuẩn hóa kiến trúc
+
+* Tạo `sanser-p2p`.
+* Tạo candidate model.
+* Tạo P2P state machine.
+* Xóa route TURN khỏi kế hoạch mới.
+* Giữ Native Direct hiện tại để regression testing.
+* Thêm feature flag `p2p_v2`.
+
+Kết quả:
+
+```text
+Code có abstraction P2P nhưng chưa kết nối Internet.
+```
+
+### Giai đoạn 2 — Một UDP socket
+
+* Gộp video, audio và control.
+* Chuẩn hóa SNV2 multiplexing.
+* Thêm packet pacing.
+* Thêm queue priority.
+* Kiểm thử LAN.
+
+Kết quả:
+
+```text
+LAN Native Direct ổn định trên một UDP socket.
+```
+
+### Giai đoạn 3 — STUN và candidate gathering
+
+* STUN Binding Request.
+* Host candidate.
+* IPv6 candidate.
+* Server-reflexive candidate.
+* Candidate exchange qua signaling.
+
+Kết quả:
+
+```text
+Hai thiết bị nhìn thấy đầy đủ candidate của nhau.
+```
+
+### Giai đoạn 4 — UDP hole punching
+
+* Punch scheduling.
+* Authenticated probes.
+* Candidate pair checks.
+* Nomination.
+* Endpoint locking.
+* Keepalive.
+
+Kết quả:
+
+```text
+P2P Internet hoạt động trên NAT thông thường.
+```
+
+### Giai đoạn 5 — Port mapping
+
+* PCP.
+* NAT-PMP.
+* UPnP.
+* Mapping renewal.
+* Mapping cleanup.
+* Router reboot handling.
+
+Kết quả:
+
+```text
+Kết nối ổn định hơn trên router gia đình.
+```
+
+### Giai đoạn 6 — Security
+
+* X25519.
+* HKDF-SHA256.
+* AEAD.
+* Rekey.
+* Replay protection.
+* Secure IPC.
+
+Kết quả:
+
+```text
+Internet P2P đủ điều kiện bảo mật để phát hành.
+```
+
+### Giai đoạn 7 — Adaptive media
+
+* RTT/loss/jitter estimator.
+* Adaptive bitrate.
+* Congestion controller.
+* NACK.
+* Keyframe recovery.
+* Audio jitter buffer.
+* Optional FEC.
+
+Kết quả:
+
+```text
+Streaming thích nghi với thay đổi đường truyền.
+```
+
+### Giai đoạn 8 — Reconnect và route migration
+
+* Network change detection.
+* Candidate restart.
+* Fast reconnect.
+* Route re-selection.
+* Sleep/resume.
+* IPv4 sang IPv6 migration.
+
+Kết quả:
+
+```text
+Phiên không dễ bị mất khi mạng thay đổi ngắn hạn.
+```
+
+### Giai đoạn 9 — UI và diagnostics
+
+* Connection progress.
+* Route information.
+* Network quality overlay.
+* Manual forwarding.
+* Sanitized diagnostics export.
+
+Kết quả:
+
+```text
+Người dùng hiểu Sanser đang kết nối bằng phương pháp nào.
+```
+
+### Giai đoạn 10 — Production hardening
+
+* NAT test matrix.
+* Fuzz SNV2 và handshake.
+* Soak test nhiều giờ.
+* Memory leak test.
+* CPU/GPU profiling.
+* Packet loss testing.
+* Release signing.
+* Crash recovery.
+* Security review.
+
+Kết quả:
+
+```text
+Sanser P2P sẵn sàng phát hành.
+```
+
+## 33. Thứ tự ưu tiên thực tế
+
+Không làm tất cả cùng lúc.
+
+Thứ tự bắt buộc:
+
+```text
+1. Một UDP socket ổn định trong LAN
+2. STUN candidate gathering
+3. Signaling candidate exchange
+4. UDP hole punching
+5. Authenticated connectivity checks
+6. IPv6 Direct
+7. PCP/NAT-PMP/UPnP
+8. AEAD encryption
+9. Adaptive bitrate
+10. Reconnect và route migration
+11. Manual port forwarding
+12. Production testing
+```
+
+Không nên làm UI lớn trước khi native transport hoạt động.
+
+## 34. Kiến trúc cuối cùng
+
+```text
+                        CONTROL PLANE
+       Tauri UI ⇄ Axum API ⇄ PostgreSQL ⇄ WebSocket signaling
+
+                              │
+                  session + candidate metadata
+                              │
+
+                         MEDIA PLANE
+ Windows Host  ═════════ SNV2 encrypted UDP ═════════ macOS Client
+
+ Route selection:
+ LAN
+ → IPv6
+ → PCP
+ → NAT-PMP
+ → UPnP
+ → STUN hole punching
+ → Manual port forwarding
+ → Fail clearly
+```
+
+## 35. Kết luận
+
+Sanser hiện không có WebRTC/NAT traversal hoạt động end-to-end. Nó mới có control-plane, signaling API, route enum và cấu hình ICE/TURN.
+
+Hướng triển khai phù hợp nhất không phải là thay SNV2 bằng full WebRTC.
+
+Hướng đúng là:
+
+```text
+Parsec-like NAT traversal
++ Moonlight/Sunshine-like direct native transport
++ SNV2 media protocol
++ hardware encode/decode
++ adaptive streaming
+```
+
+Kết quả mục tiêu:
+
+* Tự kết nối P2P qua phần lớn router gia đình.
+* Không cần Tailscale.
+* Không dùng TURN.
+* Server không chịu băng thông video.
+* Độ trễ thấp.
+* Một media engine duy nhất.
+* LAN và Internet dùng chung SNV2.
+* Có đường kết nối ổn định bằng IPv6, port mapping hoặc hole punching.

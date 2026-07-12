@@ -180,6 +180,7 @@ pub fn get_runtime_status(
             clipboard: Capability::planned(
                 "Permission-gated clipboard transport is not linked yet",
             ),
+            p2p_v2: Capability::available(),
         },
         engines: vec![host, client, local_server],
     })
@@ -267,6 +268,188 @@ pub async fn export_diagnostics(
     tauri::async_runtime::spawn_blocking(move || storage::export_diagnostics(&app, &contents))
         .await
         .map_err(|error| DesktopError::Storage(format!("diagnostics task failed: {error}")))?
+}
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use sanser_p2p::{GathererConfig, gather_candidates, CandidatePair, P2pDiagnostics, check_connectivity, GatheringEvent};
+use tokio::sync::mpsc;
+
+pub struct P2pSession {
+    pub state: String,
+    pub candidates: Vec<String>,
+    pub diagnostics: P2pDiagnostics,
+    pub active_pair: Option<CandidatePair>,
+    pub abort_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+pub struct P2pSessionManager {
+    pub session: Arc<Mutex<Option<P2pSession>>>,
+}
+
+#[tauri::command]
+pub async fn p2p_start(
+    manager: State<'_, P2pSessionManager>,
+    stun_server: String,
+) -> Result<(), String> {
+    let mut session_guard = manager.session.lock().unwrap();
+    if let Some(ref mut old_session) = *session_guard {
+        if let Some(ref handle) = old_session.abort_handle {
+            handle.abort();
+        }
+    }
+
+    let manager_clone = manager.session.clone();
+    let stun_server_clone = stun_server.clone();
+
+    let join_handle = tokio::spawn(async move {
+        let config = GathererConfig {
+            stun_servers: vec![stun_server_clone],
+            total_timeout: Duration::from_secs(5),
+            port_mapping_enabled: true,
+            ipv6_enabled: true,
+            generation: 1,
+        };
+
+        let (tx, mut rx) = mpsc::channel(32);
+
+        let gather_task = tokio::spawn(async move {
+            let _ = gather_candidates(config, tx).await;
+        });
+
+        {
+            let mut session_g = manager_clone.lock().unwrap();
+            if let Some(ref mut sess) = *session_g {
+                sess.state = "gathering".to_string();
+            }
+        }
+
+        let mut gathered_candidates = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                GatheringEvent::CandidateFound(cand) => {
+                    gathered_candidates.push(cand.clone());
+                    let mut session_g = manager_clone.lock().unwrap();
+                    if let Some(ref mut sess) = *session_g {
+                        sess.candidates.push(format!("{:?}", cand));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let _ = gather_task.await;
+
+        {
+            let mut session_g = manager_clone.lock().unwrap();
+            if let Some(ref mut sess) = *session_g {
+                sess.state = "connecting".to_string();
+            }
+        }
+
+        let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(_) => {
+                let mut session_g = manager_clone.lock().unwrap();
+                if let Some(ref mut sess) = *session_g {
+                    sess.state = "failed".to_string();
+                }
+                return;
+            }
+        };
+
+        let mut pairs = Vec::new();
+        for (idx, cand) in gathered_candidates.iter().enumerate() {
+            pairs.push(CandidatePair {
+                pair_id: format!("pair-{idx}"),
+                local: socket.local_addr().unwrap(),
+                remote: cand.endpoint(),
+                local_candidate_id: cand.id.clone(),
+                remote_candidate_id: cand.id.clone(),
+                priority: u64::from(cand.priority),
+                state: sanser_p2p::PairState::Waiting,
+            });
+        }
+
+        let session_id = uuid::Uuid::new_v4();
+        let hmac_key = b"session-secret";
+
+        let check_res = check_connectivity(
+            &socket,
+            &mut pairs,
+            session_id,
+            12345,
+            hmac_key,
+            true,
+            Duration::from_secs(3),
+        ).await;
+
+        let mut session_g = manager_clone.lock().unwrap();
+        if let Some(ref mut sess) = *session_g {
+            match check_res {
+                Ok(pair) => {
+                    sess.state = "connected".to_string();
+                    sess.active_pair = Some(pair);
+                }
+                Err(_) => {
+                    sess.state = "failed".to_string();
+                }
+            }
+        }
+    });
+
+    *session_guard = Some(P2pSession {
+        state: "starting".to_string(),
+        candidates: Vec::new(),
+        diagnostics: P2pDiagnostics::default(),
+        active_pair: None,
+        abort_handle: Some(join_handle),
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn p2p_stop(manager: State<'_, P2pSessionManager>) -> Result<(), String> {
+    let mut session_guard = manager.session.lock().unwrap();
+    if let Some(ref mut session) = *session_guard {
+        if let Some(ref handle) = session.abort_handle {
+            handle.abort();
+        }
+    }
+    *session_guard = None;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn p2p_get_state(manager: State<'_, P2pSessionManager>) -> Result<String, String> {
+    let session_guard = manager.session.lock().unwrap();
+    if let Some(ref session) = *session_guard {
+        Ok(session.state.clone())
+    } else {
+        Ok("idle".into())
+    }
+}
+
+#[tauri::command]
+pub fn p2p_get_candidates(manager: State<'_, P2pSessionManager>) -> Result<Vec<String>, String> {
+    let session_guard = manager.session.lock().unwrap();
+    if let Some(ref session) = *session_guard {
+        Ok(session.candidates.clone())
+    } else {
+        Ok(vec![])
+    }
+}
+
+#[tauri::command]
+pub fn p2p_get_metrics(manager: State<'_, P2pSessionManager>) -> Result<P2pDiagnostics, String> {
+    let session_guard = manager.session.lock().unwrap();
+    if let Some(ref session) = *session_guard {
+        Ok(session.diagnostics.clone())
+    } else {
+        Ok(P2pDiagnostics::default())
+    }
 }
 
 #[cfg(test)]
