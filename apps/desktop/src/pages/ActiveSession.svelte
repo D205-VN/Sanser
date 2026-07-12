@@ -138,6 +138,7 @@
     try {
       if ($connection.engineRunning) {
         const status = await engineStatus('client');
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (!componentActive || $connection.session?.id !== current.id) return;
         if (!status.running) {
           const message = status.lastError ?? 'The native macOS client stopped unexpectedly';
@@ -150,6 +151,7 @@
       }
 
       const refreshed = await connection.refresh(client);
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (!componentActive || $connection.session?.id !== current.id) return;
       if (
         refreshed &&
@@ -167,6 +169,7 @@
         !refreshed.sessionToken
       ) {
         const credentials = await client.sessionCredentials(refreshed.id, localDeviceId);
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (!componentActive || $connection.session?.id !== refreshed.id) return;
         connection.authorizeNative(credentials);
         await startNativeClient({
