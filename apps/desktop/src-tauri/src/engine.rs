@@ -704,7 +704,9 @@ mod tests {
         let wrong_engine_json = format!(
             r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"host-windows","nativeSnv2":false,"nativeDirect":true,"h264DecoderImplementation":true}}"#
         );
-        assert!(parse_sidecar_capabilities(wrong_engine_json.as_bytes(), EngineKind::Client).is_err());
+        assert!(
+            parse_sidecar_capabilities(wrong_engine_json.as_bytes(), EngineKind::Client).is_err()
+        );
         Ok(())
     }
 }
