@@ -168,9 +168,11 @@ pub async fn register(
     let platform = clean_label(&request.platform, "platform", 40)?;
     let os_version = optional_label(&request.os_version, "osVersion", 120)?;
     let gpu = optional_label(&request.gpu, "gpu", 240)?;
-    if request.sanser_version != SANSER_VERSION {
+    let version_prefix = SANSER_VERSION.rsplitn(2, '.').last().unwrap_or(SANSER_VERSION);
+    let client_prefix = request.sanser_version.rsplitn(2, '.').last().unwrap_or(&request.sanser_version);
+    if client_prefix != version_prefix {
         return Err(AppError::Validation(format!(
-            "sanserVersion must be {SANSER_VERSION}"
+            "sanserVersion must be compatible with {SANSER_VERSION}"
         )));
     }
     if request.protocol_version != PROTOCOL_VERSION {
