@@ -1,11 +1,11 @@
 //! Security handshake and encryption.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use serde::{Deserialize, Serialize};
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
-use x25519_dalek::{EphemeralSecret, PublicKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -104,7 +104,9 @@ pub fn public_key_to_base64(pk: &PublicKey) -> String {
 /// Returns an error string if decoding fails or length is incorrect.
 pub fn public_key_from_base64(s: &str) -> Result<PublicKey, String> {
     let bytes = STANDARD.decode(s).map_err(|e| e.to_string())?;
-    let array: [u8; 32] = bytes.try_into().map_err(|_| "invalid public key length".to_owned())?;
+    let array: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "invalid public key length".to_owned())?;
     Ok(PublicKey::from(array))
 }
 
@@ -113,10 +115,15 @@ pub fn public_key_from_base64(s: &str) -> Result<PublicKey, String> {
 /// # Errors
 ///
 /// Returns an error string if HMAC setup fails.
-pub fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8], okm_len: usize) -> Result<Vec<u8>, String> {
+pub fn hkdf_sha256(
+    salt: &[u8],
+    ikm: &[u8],
+    info: &[u8],
+    okm_len: usize,
+) -> Result<Vec<u8>, String> {
     let prk = {
-        let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(salt)
-            .map_err(|error| error.to_string())?;
+        let mut mac =
+            <HmacSha256 as hmac::Mac>::new_from_slice(salt).map_err(|error| error.to_string())?;
         mac.update(ikm);
         mac.finalize().into_bytes()
     };
@@ -126,8 +133,8 @@ pub fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8], okm_len: usize) -> Resu
     let mut counter = 1u8;
 
     while okm.len() < okm_len {
-        let mut mac = <HmacSha256 as hmac::Mac>::new_from_slice(&prk)
-            .map_err(|error| error.to_string())?;
+        let mut mac =
+            <HmacSha256 as hmac::Mac>::new_from_slice(&prk).map_err(|error| error.to_string())?;
         mac.update(&t);
         mac.update(info);
         mac.update(&[counter]);
@@ -179,7 +186,8 @@ pub fn encrypt_payload(
 ) -> Result<Vec<u8>, String> {
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_bytes = nonce.to_bytes();
-    cipher.encrypt(&nonce_bytes.into(), plaintext)
+    cipher
+        .encrypt(&nonce_bytes.into(), plaintext)
         .map_err(|e| format!("encryption failed: {e}"))
 }
 
@@ -195,7 +203,8 @@ pub fn decrypt_payload(
 ) -> Result<Vec<u8>, String> {
     let cipher = ChaCha20Poly1305::new(key.into());
     let nonce_bytes = nonce.to_bytes();
-    cipher.decrypt(&nonce_bytes.into(), ciphertext)
+    cipher
+        .decrypt(&nonce_bytes.into(), ciphertext)
         .map_err(|e| format!("decryption failed: {e}"))
 }
 

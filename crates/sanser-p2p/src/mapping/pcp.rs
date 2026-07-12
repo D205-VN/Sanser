@@ -1,9 +1,9 @@
 //! PCP (Port Control Protocol, RFC 6887) client.
 
-use crate::mapping::{PortMapper, MappingConfig, PortMapping, MappingError, MappingProtocolKind};
-use tokio::net::UdpSocket;
+use crate::mapping::{MappingConfig, MappingError, MappingProtocolKind, PortMapper, PortMapping};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
+use tokio::net::UdpSocket;
 
 /// PCP opcodes.
 pub const PCP_OPCODE_MAP: u8 = 1;
@@ -38,8 +38,15 @@ impl PortMapper for PcpMapper {
         config: &MappingConfig,
         internal_port: u16,
     ) -> Result<PortMapping, MappingError> {
-        let socket = UdpSocket::bind(if self.gateway.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        let socket = UdpSocket::bind(if self.gateway.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })
+        .await
+        .map_err(|e| MappingError::NetworkError {
+            reason: e.to_string(),
+        })?;
 
         let server_addr = SocketAddr::new(self.gateway, 5351);
 
@@ -67,8 +74,12 @@ impl PortMapper for PcpMapper {
         req[40..42].copy_from_slice(&internal_port.to_be_bytes());
         req[42..44].copy_from_slice(&config.requested_port.to_be_bytes());
 
-        socket.send_to(&req, server_addr).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        socket
+            .send_to(&req, server_addr)
+            .await
+            .map_err(|e| MappingError::NetworkError {
+                reason: e.to_string(),
+            })?;
 
         let mut buf = [0u8; 128];
         let sleep_timer = tokio::time::sleep(Duration::from_millis(200));

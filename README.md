@@ -1,9 +1,9 @@
-# Sanser 2.0.2
+# Sanser 2.0.3
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.0.2
+Product:  Sanser 2.0.3
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   SNV2 target (engine integration is capability-gated)

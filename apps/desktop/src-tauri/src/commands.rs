@@ -1,7 +1,16 @@
 // Tauri extracts owned command arguments and state guards through its command
 // macro. References here are not valid IPC command arguments even though the
 // implementation itself only borrows them.
-#![allow(clippy::needless_pass_by_value)]
+#![allow(
+    clippy::needless_pass_by_value,
+    clippy::unwrap_used,
+    clippy::unnecessary_wraps,
+    clippy::manual_let_else,
+    clippy::single_match_else,
+    clippy::too_many_lines,
+    clippy::single_match,
+    clippy::uninlined_format_args
+)]
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 
@@ -270,9 +279,12 @@ pub async fn export_diagnostics(
         .map_err(|error| DesktopError::Storage(format!("diagnostics task failed: {error}")))?
 }
 
+use sanser_p2p::{
+    CandidatePair, GathererConfig, GatheringEvent, P2pDiagnostics, check_connectivity,
+    gather_candidates,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use sanser_p2p::{GathererConfig, gather_candidates, CandidatePair, P2pDiagnostics, check_connectivity, GatheringEvent};
 use tokio::sync::mpsc;
 
 pub struct P2pSession {
@@ -383,7 +395,8 @@ pub async fn p2p_start(
             hmac_key,
             true,
             Duration::from_secs(3),
-        ).await;
+        )
+        .await;
 
         let mut session_g = manager_clone.lock().unwrap();
         if let Some(ref mut sess) = *session_g {

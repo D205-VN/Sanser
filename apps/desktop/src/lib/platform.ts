@@ -23,7 +23,8 @@ export async function runtimeStatus(): Promise<RuntimeStatus> {
       nativeDirect: unavailableCapability('Authenticated native direct engine is not installed'),
       nativeSnv2: unavailableCapability('SNV2 engine is not installed'),
       gamepad: unavailableCapability('Native gamepad input is not installed', 'planned'),
-      clipboard: unavailableCapability('Clipboard sharing is not installed', 'planned')
+      clipboard: unavailableCapability('Clipboard sharing is not installed', 'planned'),
+      p2pV2: unavailableCapability('P2P transport is not installed')
     },
     engines: [
       { kind: 'host', installed: false, running: false, processId: null, lastError: null },

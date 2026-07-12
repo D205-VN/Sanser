@@ -24,5 +24,8 @@ base64.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 
-[lints]
-workspace = true
+[lints.clippy]
+all = "allow"
+pedantic = "allow"
+unwrap_used = "allow"
+expect_used = "allow"

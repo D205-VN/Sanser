@@ -686,7 +686,9 @@ mod tests {
                 .any(|pair| pair == ["--udp-connect", "192.0.2.10:50000"])
         );
         assert!(
-            !args.iter().any(|arg| arg == "--control-connect" || arg == "--audio-udp-connect")
+            !args
+                .iter()
+                .any(|arg| arg == "--control-connect" || arg == "--audio-udp-connect")
         );
         Ok(())
     }
@@ -708,9 +710,7 @@ mod tests {
         disabled.input_enabled = false;
         let args = build_args(&disabled)?;
         assert!(args.iter().any(|argument| argument == "--disable-input"));
-        assert!(
-            !args.iter().any(|arg| arg == "--control-connect")
-        );
+        assert!(!args.iter().any(|arg| arg == "--control-connect"));
         Ok(())
     }
 

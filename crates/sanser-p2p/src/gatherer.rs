@@ -4,9 +4,11 @@
 //! Actual async gathering (spawning STUN, interface enumeration, port
 //! mapping tasks in parallel) is added in Phase 3.
 
-use crate::candidate::{CandidateType, MappingProtocol, P2pCandidate, TransportProtocol, candidate_priority};
+use crate::candidate::{
+    CandidateType, MappingProtocol, P2pCandidate, TransportProtocol, candidate_priority,
+};
 use crate::error::P2pError;
-use crate::interface::{InterfaceCost, enumerate_interfaces, filter_interface, InterfaceFilter};
+use crate::interface::{InterfaceCost, InterfaceFilter, enumerate_interfaces, filter_interface};
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -162,7 +164,11 @@ pub async fn gather_candidates(
             CandidateType::Host
         };
 
-        let clean_ip = iface.address.to_string().replace('.', "-").replace(':', "-");
+        let clean_ip = iface
+            .address
+            .to_string()
+            .replace('.', "-")
+            .replace(':', "-");
         let id = format!("host-{clean_ip}-{}", local_addr.port());
         let foundation = format!("host-{clean_ip}");
         let preference = match iface.cost {
@@ -171,9 +177,11 @@ pub async fn gather_candidates(
             InterfaceCost::High => 16384,
         };
 
-        let priority = candidate_priority(cand_type, MappingProtocol::None, preference)
-            .map_err(|error| P2pError::Internal {
-                reason: format!("Failed to compute candidate priority: {error}"),
+        let priority =
+            candidate_priority(cand_type, MappingProtocol::None, preference).map_err(|error| {
+                P2pError::Internal {
+                    reason: format!("Failed to compute candidate priority: {error}"),
+                }
             })?;
 
         let candidate = P2pCandidate {
@@ -192,7 +200,9 @@ pub async fn gather_candidates(
             continue;
         }
 
-        let _ = tx.send(GatheringEvent::CandidateFound(candidate.clone())).await;
+        let _ = tx
+            .send(GatheringEvent::CandidateFound(candidate.clone()))
+            .await;
         result.candidates.push(candidate);
         active_sockets.push((socket, iface, preference));
     }
@@ -223,13 +233,23 @@ pub async fn gather_candidates(
 
         tokio::spawn(async move {
             for server_addr in stun_addrs {
-                match crate::stun::query_stun(&socket, server_addr, Duration::from_millis(500)).await {
+                match crate::stun::query_stun(&socket, server_addr, Duration::from_millis(500))
+                    .await
+                {
                     Ok(binding) => {
-                        let clean_ip = binding.mapped_address.to_string().replace('.', "-").replace(':', "-");
+                        let clean_ip = binding
+                            .mapped_address
+                            .to_string()
+                            .replace('.', "-")
+                            .replace(':', "-");
                         let id = format!("srflx-{clean_ip}-{}", binding.mapped_port);
                         let foundation = format!("srflx-{clean_ip}");
 
-                        if let Ok(priority) = candidate_priority(CandidateType::ServerReflexive, MappingProtocol::None, preference) {
+                        if let Ok(priority) = candidate_priority(
+                            CandidateType::ServerReflexive,
+                            MappingProtocol::None,
+                            preference,
+                        ) {
                             let candidate = P2pCandidate {
                                 id,
                                 candidate_type: CandidateType::ServerReflexive,
@@ -259,7 +279,9 @@ pub async fn gather_candidates(
     let tx_pm = tx.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let _ = tx_pm.send(GatheringEvent::PortMappingComplete { success: false }).await;
+        let _ = tx_pm
+            .send(GatheringEvent::PortMappingComplete { success: false })
+            .await;
     });
 
     drop(cands_tx); // Close coordinate sender so rx terminates when tasks finish
@@ -269,7 +291,9 @@ pub async fn gather_candidates(
     let gather_loop = async {
         let mut gathered = Vec::new();
         while let Some(candidate) = cands_rx.recv().await {
-            let _ = tx.send(GatheringEvent::CandidateFound(candidate.clone())).await;
+            let _ = tx
+                .send(GatheringEvent::CandidateFound(candidate.clone()))
+                .await;
             gathered.push(candidate);
         }
         gathered
@@ -293,7 +317,11 @@ pub async fn gather_candidates(
     }
 
     result.stun_succeeded = stun_success;
-    let _ = tx.send(GatheringEvent::StunComplete { success: stun_success }).await;
+    let _ = tx
+        .send(GatheringEvent::StunComplete {
+            success: stun_success,
+        })
+        .await;
 
     result.duration_ms = start_time.elapsed().as_millis() as u64;
     let _ = tx.send(GatheringEvent::Complete(result.clone())).await;
@@ -316,9 +344,7 @@ mod tests {
         };
 
         let (tx, mut rx) = mpsc::channel(16);
-        let handle = tokio::spawn(async move {
-            gather_candidates(config, tx).await
-        });
+        let handle = tokio::spawn(async move { gather_candidates(config, tx).await });
 
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -329,11 +355,25 @@ mod tests {
         assert!(result.is_ok(), "gathering failed: {:?}", result.err());
         let res = result.unwrap();
 
-        assert!(res.candidates.len() >= 1, "should find at least one host candidate");
-        assert!(!res.stun_succeeded, "STUN should fail with invalid STUN server");
+        assert!(
+            res.candidates.len() >= 1,
+            "should find at least one host candidate"
+        );
+        assert!(
+            !res.stun_succeeded,
+            "STUN should fail with invalid STUN server"
+        );
 
         // Verify events were emitted
-        assert!(events.iter().any(|e| matches!(e, GatheringEvent::CandidateFound(_))));
-        assert!(events.iter().any(|e| matches!(e, GatheringEvent::Complete(_))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GatheringEvent::CandidateFound(_)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GatheringEvent::Complete(_)))
+        );
     }
 }

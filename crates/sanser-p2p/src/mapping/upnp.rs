@@ -1,10 +1,10 @@
 //! UPnP IGD (Internet Gateway Device) client.
 
-use crate::mapping::{PortMapper, MappingConfig, PortMapping, MappingError, MappingProtocolKind};
-use tokio::net::{UdpSocket, TcpStream};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use std::net::{SocketAddr};
+use crate::mapping::{MappingConfig, MappingError, MappingProtocolKind, PortMapper, PortMapping};
+use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 
 /// UPnP IGD service types.
 pub const URN_WAN_IP_CONNECTION: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
@@ -37,8 +37,12 @@ impl PortMapper for UpnpMapper {
         config: &MappingConfig,
         internal_port: u16,
     ) -> Result<PortMapping, MappingError> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        let socket =
+            UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| MappingError::NetworkError {
+                    reason: e.to_string(),
+                })?;
 
         let msearch = format!(
             "M-SEARCH * HTTP/1.1\r\n\
@@ -49,8 +53,12 @@ impl PortMapper for UpnpMapper {
             SSDP_MX, URN_WAN_IP_CONNECTION
         );
 
-        socket.send_to(msearch.as_bytes(), SSDP_MULTICAST_ADDR).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        socket
+            .send_to(msearch.as_bytes(), SSDP_MULTICAST_ADDR)
+            .await
+            .map_err(|e| MappingError::NetworkError {
+                reason: e.to_string(),
+            })?;
 
         let mut buf = [0u8; 1024];
         let sleep_timer = tokio::time::sleep(Duration::from_millis(200));
@@ -75,34 +83,59 @@ impl PortMapper for UpnpMapper {
         };
 
         let location = location.ok_or(MappingError::NotSupported)?;
-        let parsed_url = url::Url::parse(&location)
-            .map_err(|_| MappingError::NetworkError { reason: "invalid location".into() })?;
-        
-        let host = parsed_url.host_str().ok_or(MappingError::NetworkError { reason: "no host".into() })?;
-        let port = parsed_url.port().unwrap_or(80);
-        let control_addr: SocketAddr = format!("{host}:{port}").parse()
-            .map_err(|e| MappingError::NetworkError { reason: format!("invalid control addr: {e}") })?;
+        let parsed_url = url::Url::parse(&location).map_err(|_| MappingError::NetworkError {
+            reason: "invalid location".into(),
+        })?;
 
-        let mut client = TcpStream::connect(control_addr).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        let host = parsed_url.host_str().ok_or(MappingError::NetworkError {
+            reason: "no host".into(),
+        })?;
+        let port = parsed_url.port().unwrap_or(80);
+        let control_addr: SocketAddr =
+            format!("{host}:{port}")
+                .parse()
+                .map_err(|e| MappingError::NetworkError {
+                    reason: format!("invalid control addr: {e}"),
+                })?;
+
+        let mut client =
+            TcpStream::connect(control_addr)
+                .await
+                .map_err(|e| MappingError::NetworkError {
+                    reason: e.to_string(),
+                })?;
 
         let req = format!(
             "GET {} HTTP/1.1\r\n\
              Host: {}\r\n\
              Connection: close\r\n\r\n",
-            parsed_url.path(), host
+            parsed_url.path(),
+            host
         );
-        client.write_all(req.as_bytes()).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        client
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| MappingError::NetworkError {
+                reason: e.to_string(),
+            })?;
 
         let mut root_xml = String::new();
-        client.read_to_string(&mut root_xml).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        client
+            .read_to_string(&mut root_xml)
+            .await
+            .map_err(|e| MappingError::NetworkError {
+                reason: e.to_string(),
+            })?;
 
-        let (service_type, control_path) = parse_upnp_desc(&root_xml).ok_or(MappingError::NotSupported)?;
+        let (service_type, control_path) =
+            parse_upnp_desc(&root_xml).ok_or(MappingError::NotSupported)?;
 
-        let mut client = TcpStream::connect(control_addr).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        let mut client =
+            TcpStream::connect(control_addr)
+                .await
+                .map_err(|e| MappingError::NetworkError {
+                    reason: e.to_string(),
+                })?;
 
         let local_ip = socket.local_addr().unwrap().ip().to_string();
 
@@ -133,18 +166,32 @@ impl PortMapper for UpnpMapper {
              SOAPAction: \"{}#AddPortMapping\"\r\n\
              Connection: close\r\n\r\n\
              {}",
-            control_path, host, soap_body.len(), service_type, soap_body
+            control_path,
+            host,
+            soap_body.len(),
+            service_type,
+            soap_body
         );
 
-        client.write_all(soap_req.as_bytes()).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        client
+            .write_all(soap_req.as_bytes())
+            .await
+            .map_err(|e| MappingError::NetworkError {
+                reason: e.to_string(),
+            })?;
 
         let mut resp = String::new();
-        client.read_to_string(&mut resp).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        client
+            .read_to_string(&mut resp)
+            .await
+            .map_err(|e| MappingError::NetworkError {
+                reason: e.to_string(),
+            })?;
 
         if !resp.contains("200 OK") && !resp.contains("AddPortMappingResponse") {
-            return Err(MappingError::Refused { reason: "soap rejected".into() });
+            return Err(MappingError::Refused {
+                reason: "soap rejected".into(),
+            });
         }
 
         Ok(PortMapping {

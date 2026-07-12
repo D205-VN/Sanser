@@ -116,9 +116,21 @@ mod tests {
         let schedule = ReconnectSchedule::default();
         let controller = MigrationController::new(schedule);
 
-        assert_eq!(controller.check_reconnect_action(500), ReconnectAction::ProbeCurrentRoute);
-        assert_eq!(controller.check_reconnect_action(1500), ReconnectAction::RetryOldCandidates);
-        assert_eq!(controller.check_reconnect_action(4000), ReconnectAction::GatherNewCandidates);
-        assert_eq!(controller.check_reconnect_action(9000), ReconnectAction::FailConnection);
+        assert_eq!(
+            controller.check_reconnect_action(500),
+            ReconnectAction::ProbeCurrentRoute
+        );
+        assert_eq!(
+            controller.check_reconnect_action(1500),
+            ReconnectAction::RetryOldCandidates
+        );
+        assert_eq!(
+            controller.check_reconnect_action(4000),
+            ReconnectAction::GatherNewCandidates
+        );
+        assert_eq!(
+            controller.check_reconnect_action(9000),
+            ReconnectAction::FailConnection
+        );
     }
 }

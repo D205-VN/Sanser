@@ -1,9 +1,9 @@
 //! NAT-PMP (RFC 6886) client.
 
-use crate::mapping::{PortMapper, MappingConfig, PortMapping, MappingError, MappingProtocolKind};
-use tokio::net::UdpSocket;
+use crate::mapping::{MappingConfig, MappingError, MappingProtocolKind, PortMapper, PortMapping};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
+use tokio::net::UdpSocket;
 
 /// NAT-PMP opcodes.
 pub const NATPMP_OPCODE_EXTERNAL_ADDRESS: u8 = 0;
@@ -37,8 +37,12 @@ impl PortMapper for NatPmpMapper {
             IpAddr::V6(_) => return Err(MappingError::NotSupported), // NAT-PMP is IPv4 only
         };
 
-        let socket = UdpSocket::bind("0.0.0.0:0").await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        let socket =
+            UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| MappingError::NetworkError {
+                    reason: e.to_string(),
+                })?;
 
         let server_addr = SocketAddr::new(IpAddr::V4(gateway_ip), 5351);
 
@@ -50,8 +54,12 @@ impl PortMapper for NatPmpMapper {
         req[6..8].copy_from_slice(&config.requested_port.to_be_bytes());
         req[8..12].copy_from_slice(&config.lifetime_seconds.to_be_bytes());
 
-        socket.send_to(&req, server_addr).await
-            .map_err(|e| MappingError::NetworkError { reason: e.to_string() })?;
+        socket
+            .send_to(&req, server_addr)
+            .await
+            .map_err(|e| MappingError::NetworkError {
+                reason: e.to_string(),
+            })?;
 
         let mut buf = [0u8; 16];
         let sleep_timer = tokio::time::sleep(Duration::from_millis(200));

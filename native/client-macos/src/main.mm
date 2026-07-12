@@ -27,6 +27,7 @@
 #include <cstring>
 #include <cmath>
 #include <deque>
+#include <queue>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -5339,10 +5340,6 @@ private:
   bool stopped_ = false;
   double smoothedAvLeadMs_ = 0.0;
 };
-
-#include <queue>
-#include <mutex>
-#include <condition_variable>
 
 template <typename T>
 class ThreadSafeQueue {

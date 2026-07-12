@@ -3,9 +3,9 @@
 //! Phase 1 defines the wire format types and parsing logic. Actual socket I/O
 //! (sending requests to `stun.l.google.com:19302`) is added in Phase 3.
 
+use crate::error::P2pError;
 use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use crate::error::P2pError;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
@@ -159,7 +159,9 @@ pub fn parse_binding_response(
         return Err(StunParseError::TransactionIdMismatch);
     }
     if msg_type == STUN_BINDING_ERROR {
-        let reason = parse_error_code(&data[STUN_HEADER_SIZE..][..msg_len.min(data.len() - STUN_HEADER_SIZE)]);
+        let reason = parse_error_code(
+            &data[STUN_HEADER_SIZE..][..msg_len.min(data.len() - STUN_HEADER_SIZE)],
+        );
         return Err(StunParseError::BindingError {
             code: reason.0,
             reason: reason.1,

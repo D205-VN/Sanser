@@ -3,10 +3,10 @@
 //! Phase 1 defines the pair model and authenticated probe format.
 //! Actual UDP probe sending/receiving is added in Phase 4.
 
-use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::net::SocketAddr;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Magic bytes at the start of every connectivity probe packet.
@@ -153,8 +153,8 @@ pub fn build_probe_packet(
     packet[49..57].copy_from_slice(&fields.timestamp.to_be_bytes());
     packet[57..61].copy_from_slice(&fields.nonce.to_be_bytes());
 
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|error| crate::error::P2pError::Internal {
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|error| crate::error::P2pError::Internal {
             reason: format!("HMAC setup failed: {error}"),
         })?;
     mac.update(&packet[..64]);
@@ -192,15 +192,16 @@ pub fn parse_probe_packet(
         });
     }
 
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|error| crate::error::P2pError::Internal {
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|error| crate::error::P2pError::Internal {
             reason: format!("HMAC setup failed: {error}"),
         })?;
     mac.update(&packet[..64]);
-    mac.verify_slice(&packet[64..96])
-        .map_err(|_| crate::error::P2pError::AuthenticationFailed {
+    mac.verify_slice(&packet[64..96]).map_err(|_| {
+        crate::error::P2pError::AuthenticationFailed {
             reason: "HMAC signature verification failed".into(),
-        })?;
+        }
+    })?;
 
     let session_id = uuid::Uuid::from_slice(&packet[5..21]).map_err(|error| {
         crate::error::P2pError::InvalidProbe {

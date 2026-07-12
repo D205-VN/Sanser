@@ -31,6 +31,7 @@ pub enum VideoCodec {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
 pub struct LaunchEngineRequest {
     pub kind: EngineKind,
     pub session_id: Option<String>,

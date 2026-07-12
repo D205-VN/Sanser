@@ -17,7 +17,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Sanser 2.0.2",
+        "title": "Sanser 2.0.3",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -43,7 +43,7 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Low-latency remote desktop and game streaming",
-    "longDescription": "Sanser 2.0.2 is a secure, low-latency remote desktop and remote game streaming application.",
+    "longDescription": "Sanser 2.0.3 is a secure, low-latency remote desktop and remote game streaming application.",
     "targets": "all",
     "externalBin": [],
     "resources": [],

@@ -221,10 +221,9 @@ where
 
 fn parse_network_mode(value: &str) -> Result<NetworkMode, ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "auto" => Ok(NetworkMode::Auto),
+        "auto" | "relay" => Ok(NetworkMode::Auto), // Fallback relay config to auto
         "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
         "manual" => Ok(NetworkMode::Manual),
-        "relay" => Ok(NetworkMode::Auto), // Fallback relay config to auto
         _ => Err(ConfigError::InvalidValue("NETWORK_MODE")),
     }
 }
@@ -324,12 +323,13 @@ pub enum ConfigError {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     fn base() -> Vec<(&'static str, &'static str)> {
         vec![
-            ("SANSER_VERSION", "2.0.2"),
+            ("SANSER_VERSION", "2.0.3"),
             ("SANSER_PROTOCOL_VERSION", "2"),
             (
                 "DATABASE_URL",

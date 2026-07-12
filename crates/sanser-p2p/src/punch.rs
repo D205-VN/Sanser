@@ -1,15 +1,15 @@
 //! UDP hole punching orchestration.
 
 use crate::connectivity::{
-    CandidatePair, PairState, ProbeFields, build_probe_packet, parse_probe_packet,
-    PUNCH_SCHEDULE, compute_pair_hash,
+    CandidatePair, PUNCH_SCHEDULE, PairState, ProbeFields, build_probe_packet, compute_pair_hash,
+    parse_probe_packet,
 };
 use crate::error::P2pError;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use std::collections::HashMap;
 
 /// State of a punch attempt against one candidate pair.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -87,7 +87,11 @@ pub async fn check_connectivity(
     for (idx, pair) in pairs.iter().enumerate() {
         let hash = compute_pair_hash(&pair.pair_id);
         pair_map.insert(hash, idx);
-        attempts.push(PunchAttempt::new(pair.pair_id.clone(), pair.local, pair.remote));
+        attempts.push(PunchAttempt::new(
+            pair.pair_id.clone(),
+            pair.local,
+            pair.remote,
+        ));
     }
 
     let start_time = std::time::Instant::now();
@@ -117,7 +121,7 @@ pub async fn check_connectivity(
                         let scheduled_delay = PUNCH_SCHEDULE[next_probe_idx].delay_ms;
                         if elapsed_ms >= scheduled_delay {
                             attempt.state = PunchState::Punching;
-                            
+
                             // Build a request probe (nonce represents request if top bit is 0)
                             let fields = ProbeFields {
                                 session_id,
@@ -155,7 +159,7 @@ pub async fn check_connectivity(
                                 // If the nonce is even, it's a request. Send a response back.
                                 if parsed.nonce % 2 == 0 {
                                     peer_verified.insert(pair.pair_id.clone(), true);
-                                    
+
                                     // Reply with an ACK/response probe (using odd nonce to indicate response)
                                     let fields = ProbeFields {
                                         session_id,
@@ -209,21 +213,18 @@ pub async fn check_connectivity(
 mod tests {
     use super::*;
 
-
     #[tokio::test]
     async fn test_connectivity_check_timeout() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut pairs = vec![
-            CandidatePair {
-                pair_id: "pair-1".into(),
-                local: socket.local_addr().unwrap(),
-                remote: "127.0.0.1:55555".parse().unwrap(),
-                local_candidate_id: "c-1".into(),
-                remote_candidate_id: "c-2".into(),
-                priority: 100,
-                state: PairState::Waiting,
-            }
-        ];
+        let mut pairs = vec![CandidatePair {
+            pair_id: "pair-1".into(),
+            local: socket.local_addr().unwrap(),
+            remote: "127.0.0.1:55555".parse().unwrap(),
+            local_candidate_id: "c-1".into(),
+            remote_candidate_id: "c-2".into(),
+            priority: 100,
+            state: PairState::Waiting,
+        }];
         let res = check_connectivity(
             &socket,
             &mut pairs,
@@ -232,7 +233,8 @@ mod tests {
             b"key",
             true,
             Duration::from_millis(50),
-        ).await;
+        )
+        .await;
 
         assert!(matches!(res, Err(P2pError::NoDirectRoute)));
     }

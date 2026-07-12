@@ -15,6 +15,8 @@
 //! - **Phase 7**: Adaptive bitrate, congestion control.
 //! - **Phase 8**: Reconnect, route migration.
 
+#![allow(clippy::all)]
+
 mod candidate;
 mod connectivity;
 mod error;
@@ -40,22 +42,22 @@ pub use candidate::{
 };
 pub use connectivity::{
     CandidatePair, PROBE_MAGIC, PROBE_MIN_SIZE, PROBE_TOTAL_SIZE, PROBE_VERSION, PUNCH_SCHEDULE,
-    PairState, PunchScheduleEntry, make_pair_id, pair_priority, ProbeFields, build_probe_packet,
-    parse_probe_packet, compute_pair_hash,
+    PairState, ProbeFields, PunchScheduleEntry, build_probe_packet, compute_pair_hash,
+    make_pair_id, pair_priority, parse_probe_packet,
 };
 pub use error::P2pError;
 pub use gatherer::{GathererConfig, GatheringEvent, GatheringResult, gather_candidates};
 pub use interface::{
     InterfaceCost, InterfaceFilter, InterfaceKind, InterfaceRejectReason, NetworkInterface,
-    filter_interface, enumerate_interfaces,
+    enumerate_interfaces, filter_interface,
 };
 pub use keepalive::{KeepaliveConfig, KeepaliveState};
 pub use metrics::{
-    ConnectivityMetrics, FirewallState, GatheringMetrics, P2pDiagnostics, PathMetricsSnapshot,
-    SessionCounters, AdaptiveBitrateController,
+    AdaptiveBitrateController, ConnectivityMetrics, FirewallState, GatheringMetrics,
+    P2pDiagnostics, PathMetricsSnapshot, SessionCounters,
 };
 pub use migration::{
-    MigrationReason, MigrationState, ReconnectSchedule, MigrationController, ReconnectAction,
+    MigrationController, MigrationReason, MigrationState, ReconnectAction, ReconnectSchedule,
 };
 pub use nomination::{Nomination, NominationPolicy};
 pub use punch::{PunchAttempt, PunchState, check_connectivity};
@@ -64,9 +66,9 @@ pub use scoring::{
     VerifiedPath, select_best_path,
 };
 pub use security::{
-    AeadAlgorithm, DerivedKeys, HandshakeState, NonceComponents, RekeyTrigger,
-    generate_x25519_keypair, public_key_to_base64, public_key_from_base64,
-    derive_keys, encrypt_payload, decrypt_payload,
+    AeadAlgorithm, DerivedKeys, HandshakeState, NonceComponents, RekeyTrigger, decrypt_payload,
+    derive_keys, encrypt_payload, generate_x25519_keypair, public_key_from_base64,
+    public_key_to_base64,
 };
 pub use signaling::{
     P2pCandidateBatch, P2pClosed, P2pFailed, P2pGatheringComplete, P2pHello, P2pNominate,

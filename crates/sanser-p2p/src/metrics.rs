@@ -159,7 +159,8 @@ impl AdaptiveBitrateController {
             self.current_bitrate_kbps = (self.current_bitrate_kbps as f64 * 1.08) as u32;
         }
 
-        self.current_bitrate_kbps = self.current_bitrate_kbps
+        self.current_bitrate_kbps = self
+            .current_bitrate_kbps
             .clamp(self.min_bitrate_kbps, self.max_bitrate_kbps);
         self.current_bitrate_kbps
     }

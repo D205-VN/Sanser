@@ -4,10 +4,10 @@
 //! (`getifaddrs` on macOS, `GetAdaptersAddresses` on Windows) is added
 //! when the gatherer starts performing real I/O.
 
-use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use crate::error::P2pError;
 use network_interface::{Addr, NetworkInterface as ExternalInterface, NetworkInterfaceConfig};
+use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 /// Enumerates all local network interfaces and maps them to our [`NetworkInterface`] struct.
 ///
@@ -15,10 +15,9 @@ use network_interface::{Addr, NetworkInterface as ExternalInterface, NetworkInte
 ///
 /// Returns a [`P2pError::Internal`] if listing system network interfaces fails.
 pub fn enumerate_interfaces() -> Result<Vec<NetworkInterface>, P2pError> {
-    let external_interfaces = ExternalInterface::show()
-        .map_err(|error| P2pError::Internal {
-            reason: format!("Failed to list network interfaces: {error}"),
-        })?;
+    let external_interfaces = ExternalInterface::show().map_err(|error| P2pError::Internal {
+        reason: format!("Failed to list network interfaces: {error}"),
+    })?;
 
     let mut result = Vec::new();
     for ext_iface in external_interfaces {
@@ -49,9 +48,21 @@ fn detect_interface_kind(name: &str) -> InterfaceKind {
     let name_lower = name.to_lowercase();
     if name_lower.contains("loopback") || name_lower == "lo" || name_lower == "lo0" {
         InterfaceKind::Loopback
-    } else if name_lower.contains("wlan") || name_lower.contains("wifi") || name_lower.contains("wi-fi") || name_lower.contains("awdl") {
+    } else if name_lower.contains("wlan")
+        || name_lower.contains("wifi")
+        || name_lower.contains("wi-fi")
+        || name_lower.contains("awdl")
+    {
         InterfaceKind::WiFi
-    } else if name_lower.contains("vpn") || name_lower.contains("tun") || name_lower.contains("tap") || name_lower.contains("utun") || name_lower.contains("wg") || name_lower.contains("tailscale") || name_lower.contains("zerotier") || name_lower.contains("ppp") {
+    } else if name_lower.contains("vpn")
+        || name_lower.contains("tun")
+        || name_lower.contains("tap")
+        || name_lower.contains("utun")
+        || name_lower.contains("wg")
+        || name_lower.contains("tailscale")
+        || name_lower.contains("zerotier")
+        || name_lower.contains("ppp")
+    {
         InterfaceKind::Vpn
     } else if name_lower.contains("eth") || name_lower.contains("ethernet") {
         InterfaceKind::Ethernet
@@ -65,11 +76,12 @@ fn detect_interface_kind(name: &str) -> InterfaceKind {
 fn cost_from_kind(kind: InterfaceKind) -> InterfaceCost {
     match kind {
         InterfaceKind::Ethernet | InterfaceKind::Loopback => InterfaceCost::Low,
-        InterfaceKind::WiFi | InterfaceKind::Virtual | InterfaceKind::Unknown => InterfaceCost::Medium,
+        InterfaceKind::WiFi | InterfaceKind::Virtual | InterfaceKind::Unknown => {
+            InterfaceCost::Medium
+        }
         InterfaceKind::Cellular | InterfaceKind::Vpn => InterfaceCost::High,
     }
 }
-
 
 /// A discovered local network interface suitable for P2P candidate gathering.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -266,7 +278,11 @@ mod tests {
     #[test]
     fn test_enumerate_interfaces_contains_valid_entries() {
         let result = enumerate_interfaces();
-        assert!(result.is_ok(), "enumerate_interfaces failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "enumerate_interfaces failed: {:?}",
+            result.err()
+        );
         let list = result.unwrap();
         assert!(!list.is_empty(), "interface list is empty");
         for iface in list {
