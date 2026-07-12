@@ -19,7 +19,7 @@ use crate::{
 
 const HOST_SIDECAR: &str = "sanser-host-windows";
 const CLIENT_SIDECAR: &str = "sanser-client-macos";
-const SIDECAR_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const SIDECAR_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const ENGINE_STARTUP_STABILIZATION: Duration = Duration::from_millis(250);
 const ENGINE_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const INHERITED_ENVIRONMENT: [&str; 7] = [

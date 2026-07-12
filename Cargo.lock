@@ -3216,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-audio"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-auth"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3240,7 +3240,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-config"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-core"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3260,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-desktop"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "keyring",
  "serde",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-diagnostics"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3288,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-input"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "bitflags 2.13.0",
  "serde",
@@ -3297,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-network"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "hmac",
  "sanser-core",
@@ -3311,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-protocol"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "bitflags 2.13.0",
  "hex",
@@ -3326,7 +3326,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-server"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3359,7 +3359,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-storage"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -3374,7 +3374,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-webrtc"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "sanser-core",
  "serde",
