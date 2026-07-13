@@ -7775,9 +7775,6 @@ int main(int argc, char** argv) {
       if (audioPort > 0 && controlPort > 0 && audioPort == controlPort) {
         throw std::runtime_error("--audio-port must differ from --control-port, or use 0 to disable.");
       }
-      if (!options.sessionToken.empty() && controlPort == 0) {
-        throw std::runtime_error("Authenticated native streaming requires a dedicated --control-port.");
-      }
       return runVideoRenderTcp(options.listenRenderPort,
                                controlPort,
                                audioPort,
