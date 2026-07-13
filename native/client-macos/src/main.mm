@@ -5446,6 +5446,22 @@ ScopedFd createTcpListener(std::uint16_t port, const char* label) {
   return server;
 }
 
+sockaddr_in resolveUdpAddress(const std::string& endpoint) {
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  const auto separator = endpoint.rfind(':');
+  if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
+    throw std::runtime_error("udp endpoint must be HOST:PORT");
+  }
+  std::string ip = endpoint.substr(0, separator);
+  std::string portStr = endpoint.substr(separator + 1);
+  addr.sin_port = htons(static_cast<std::uint16_t>(std::stoul(portStr)));
+  if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+    throw std::runtime_error("Invalid IPv4 address: " + ip);
+  }
+  return addr;
+}
+
 ScopedFd createUdpListener(std::uint16_t port, const char* label) {
   ScopedFd server(socket(AF_INET, SOCK_DGRAM, 0));
   if (server.get() < 0) {
@@ -6969,7 +6985,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                                std::uint64_t maxPackets,
                                void* retainedRendererContext,
                                std::shared_ptr<NativeInputSender> inputSender,
-                               std::shared_ptr<AvSyncClock> avSyncClock) {
+                               std::shared_ptr<AvSyncClock> avSyncClock,
+                               const std::string& udpConnect = "") {
   @autoreleasepool {
     try {
       ScopedFd server = createUdpListener(port, "SNU1 render");
@@ -6981,6 +6998,17 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                 << "\n";
       if (isSingleSocket) {
         std::cout << "Start Windows host in Single Socket UDP mode with: --encode-pipe h264 --udp-connect <MAC_IP>:" << port << "\n";
+        
+        if (!udpConnect.empty()) {
+          try {
+            sockaddr_in hostAddr = resolveUdpAddress(udpConnect);
+            inputSender->setUdpTarget(server.get(), hostAddr);
+            std::cout << "P2P Hole Punching: initialized target to " << udpConnect << "\n";
+          } catch (const std::exception& e) {
+            std::cerr << "P2P Hole Punching target initialization failed: " << e.what() << "\n";
+          }
+        }
+
         std::thread controlWorker([]() {
           serviceControlSocket(0);
         });
@@ -7378,7 +7406,8 @@ int runVideoRenderTcp(std::uint16_t port,
                       std::uint64_t maxPackets,
                       bool fullscreen,
                       bool hideCursor,
-                      bool relativeMouse) {
+                      bool relativeMouse,
+                      const std::string& udpConnect = "") {
   @autoreleasepool {
     id<MTLDevice> device = defaultMetalDevice();
     if (!device) {
@@ -7497,9 +7526,10 @@ int runVideoRenderTcp(std::uint16_t port,
     }
 
     void* rendererContext = (__bridge_retained void*)renderer;
-    std::thread worker([port, controlPort, audioPort, udpVideo, maxPackets, rendererContext, inputSender, avSyncClock]() {
+    std::string captureUdpConnect = udpConnect;
+    std::thread worker([port, controlPort, audioPort, udpVideo, maxPackets, rendererContext, inputSender, avSyncClock, captureUdpConnect]() {
       if (udpVideo) {
-        decodeUdpStreamToRenderer(port, controlPort, audioPort, maxPackets, rendererContext, inputSender, avSyncClock);
+        decodeUdpStreamToRenderer(port, controlPort, audioPort, maxPackets, rendererContext, inputSender, avSyncClock, captureUdpConnect);
       } else {
         decodeTcpStreamToRenderer(port, controlPort, audioPort, maxPackets, rendererContext, inputSender, avSyncClock);
       }
@@ -7621,6 +7651,7 @@ struct Options {
   std::string clipboardText;
   std::string sessionToken;
   std::string audioDeviceUid;
+  std::string udpConnect;
 };
 
 Options parseOptions(int argc, char** argv) {
@@ -7693,6 +7724,9 @@ Options parseOptions(int argc, char** argv) {
       options.relativeMouse = true;
     } else if (arg == "--udp-video") {
       options.udpVideo = true;
+    } else if (arg == "--udp-connect") {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for --udp-connect");
+      options.udpConnect = argv[++i];
     } else if (arg == "--clipboard-read") {
       options.clipboardRead = true;
     } else if (arg == "--clipboard-write") {
@@ -7784,7 +7818,8 @@ int main(int argc, char** argv) {
                                options.maxPackets,
                                options.fullscreen,
                                options.hideCursor,
-                               options.relativeMouse);
+                               options.relativeMouse,
+                               options.udpConnect);
     }
     if (options.clipboardRead) return clipboardRead();
     if (options.clipboardWrite) return clipboardWrite(options.clipboardText);

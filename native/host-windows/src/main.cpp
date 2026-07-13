@@ -518,6 +518,7 @@ struct Options {
   bool udpPacing = true;
   bool listEncoders = false;
   bool remoteInputEnabled = true;
+  std::uint16_t udpBindPort = 0;
 };
 
 struct StreamDimensions {
@@ -727,6 +728,8 @@ Options parseOptions(int argc, char** argv) {
       options.udpPacing = true;
     } else if (arg == "--no-udp-pacing") {
       options.udpPacing = false;
+    } else if (arg == "--udp-bind-port") {
+      options.udpBindPort = static_cast<std::uint16_t>(readUintArg(argc, argv, i, "--udp-bind-port"));
     } else if (arg == "--pipe") {
       options.pipe = true;
     } else if (arg == "--encode") {
@@ -771,6 +774,7 @@ Options parseOptions(int argc, char** argv) {
         << "  --udp-connect H:P Send SNV1 video over UDP with SNU1/SNU2 fragmentation\n"
         << "  --udp-pacing     Pace UDP video fragments by bitrate, default on\n"
         << "  --no-udp-pacing  Disable UDP video fragment pacing\n"
+        << "  --udp-bind-port PORT Bind the UDP video socket to a specific local port\n"
         << "  --control-connect H:P Connect a dedicated TCP native input/stats backchannel\n"
         << "  --disable-input  Keep authenticated control/stats but reject remote input events\n"
         << "  --audio-udp-connect H:P Send loopback audio as SNA1/SNA2 float32 or negotiated SNA3/SNA4 PCM16\n"
@@ -4006,7 +4010,8 @@ public:
   explicit UdpVideoClient(const std::string& endpoint,
                           std::uint32_t bitrate,
                           bool pacingEnabled,
-                          std::shared_ptr<MediaCryptoState> mediaCrypto = {})
+                          std::shared_ptr<MediaCryptoState> mediaCrypto = {},
+                          std::uint16_t udpBindPort = 0)
     : bitrate_(std::max<std::uint32_t>(bitrate, 1000000)),
       pacingEnabled_(pacingEnabled),
       mediaCrypto_(std::move(mediaCrypto)),
@@ -4032,6 +4037,25 @@ public:
     for (addrinfo* item = results; item; item = item->ai_next) {
       SOCKET candidate = socket(item->ai_family, item->ai_socktype, item->ai_protocol);
       if (candidate == INVALID_SOCKET) continue;
+
+      if (udpBindPort > 0) {
+        int reuse = 1;
+        setsockopt(candidate, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+        
+        if (item->ai_family == AF_INET) {
+          sockaddr_in localAddrV4{};
+          localAddrV4.sin_family = AF_INET;
+          localAddrV4.sin_addr.s_addr = INADDR_ANY;
+          localAddrV4.sin_port = htons(udpBindPort);
+          bind(candidate, reinterpret_cast<const sockaddr*>(&localAddrV4), sizeof(localAddrV4));
+        } else if (item->ai_family == AF_INET6) {
+          sockaddr_in6 localAddrV6{};
+          localAddrV6.sin6_family = AF_INET6;
+          localAddrV6.sin6_addr = in6addr_any;
+          localAddrV6.sin6_port = htons(udpBindPort);
+          bind(candidate, reinterpret_cast<const sockaddr*>(&localAddrV6), sizeof(localAddrV6));
+        }
+      }
 
       if (connect(candidate, item->ai_addr, static_cast<int>(item->ai_addrlen)) == 0) {
         socket_ = candidate;
@@ -5306,7 +5330,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     udpClient = std::make_unique<UdpVideoClient>(options.udpConnect,
                                                  initialAdaptiveBitrate,
                                                  options.udpPacing,
-                                                 mediaCrypto);
+                                                 mediaCrypto,
+                                                 options.udpBindPort);
     if (!options.controlConnect.empty()) {
       controlClient = std::make_unique<TcpClient>("", options.controlConnect, options.sessionToken, mediaCrypto);
       controlClient->startControlReceiver();

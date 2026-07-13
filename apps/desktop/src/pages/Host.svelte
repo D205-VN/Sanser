@@ -3,6 +3,7 @@
   import StatusPill from '../components/StatusPill.svelte';
   import Toggle from '../components/Toggle.svelte';
   import { launchEngine, stopEngine } from '../lib/platform';
+  import { coordinateP2pConnection } from '../lib/p2pSignaling';
   import type { ConnectionSession, RuntimeStatus } from '../lib/types';
   import { diagnostics } from '../stores/diagnostics';
   import { host } from '../stores/host';
@@ -85,11 +86,26 @@
     try {
       const credentials = await client.sessionCredentials(request.id, hostDeviceId);
       const size = resolutionSize();
+
+      const localDeviceId = hostDeviceId;
+      const peerDeviceId = request.requesterDeviceId;
+      if (!localDeviceId || !peerDeviceId) throw new Error('Missing device IDs for P2P connection');
+
+      diagnostics.add({ level: 'info', category: 'session', message: 'Starting P2P NAT Traversal...' });
+      const p2pResult = await coordinateP2pConnection(
+        client,
+        request.id,
+        localDeviceId,
+        peerDeviceId,
+        true // host is controlling
+      );
+      diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
+
       await launchEngine({
         kind: 'host',
         sessionId: request.id,
-        address: credentials.peerRouteAddress,
-        port: credentials.basePort,
+        address: p2pResult.remoteAddress,
+        port: p2pResult.remotePort,
         codec: request.requestedCodec,
         fps: $preferences.stream.fps,
         bitrateKbps: Math.round($preferences.stream.bitrateMbps * 1_000),
@@ -99,7 +115,8 @@
         audioEnabled: $preferences.host.audioEnabled,
         inputEnabled: $preferences.host.inputEnabled,
         relativeMouse: false,
-        sessionToken: credentials.sessionToken
+        sessionToken: credentials.sessionToken,
+        udpBindPort: p2pResult.localPort
       });
       host.setEngineRunning(true);
       diagnostics.add({ level: 'info', category: 'engine', message: 'Native Windows host started' });

@@ -151,6 +151,10 @@ export class ApiClient {
     return this.baseUrl;
   }
 
+  async getAccessToken(): Promise<string | null> {
+    return this.tokenProvider();
+  }
+
   async register(email: string, password: string, displayName?: string): Promise<AuthResult> {
     return this.request('/api/v2/auth/register', {
       method: 'POST',

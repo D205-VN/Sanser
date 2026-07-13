@@ -396,6 +396,10 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             if !request.input_enabled {
                 args.push("--disable-input".into());
             }
+            if let Some(bind_port) = request.udp_bind_port {
+                args.push("--udp-bind-port".into());
+                args.push(bind_port.to_string());
+            }
             Ok(args)
         }
         EngineKind::Client => {
@@ -411,6 +415,10 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             if request.relative_mouse {
                 args.push("--relative-mouse".into());
             }
+            if let Some(ref conn) = request.udp_connect {
+                args.push("--udp-connect".into());
+                args.push(conn.clone());
+            }
             Ok(args)
         }
         EngineKind::LocalServer => unreachable!("local server requests are rejected above"),
@@ -418,10 +426,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
 }
 
 fn sidecar_debug_log_path(app: &AppHandle, kind: EngineKind) -> Option<PathBuf> {
-    let enabled = std::env::var("SANSER_SIDECAR_DEBUG_LOG").is_ok_and(|value| {
-        let value = value.trim();
-        value == "1" || value.eq_ignore_ascii_case("true")
-    });
+    let enabled = std::env::var("SANSER_SIDECAR_DEBUG_LOG").is_ok_and(|val| val == "true");
     if !enabled {
         return None;
     }
@@ -659,6 +664,8 @@ mod tests {
             input_enabled: true,
             relative_mouse: false,
             session_token: Some("a".repeat(32)),
+            udp_connect: None,
+            udp_bind_port: None,
         }
     }
 

@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn release_constants_are_consistent() {
-        assert_eq!(VERSION, "2.0.3");
+        assert_eq!(VERSION, "2.0.4");
         assert_eq!(PROTOCOL_VERSION, 2);
         assert_eq!(NATIVE_PROTOCOL_NAME, "SNV2");
     }

@@ -51,6 +51,10 @@ pub struct LaunchEngineRequest {
     pub relative_mouse: bool,
     #[serde(default)]
     pub session_token: Option<String>,
+    #[serde(default)]
+    pub udp_connect: Option<String>,
+    #[serde(default)]
+    pub udp_bind_port: Option<u16>,
 }
 
 impl Drop for LaunchEngineRequest {

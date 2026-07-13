@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, stopEngine } from '../lib/platform';
+  import { coordinateP2pConnection } from '../lib/p2pSignaling';
   import type { ConnectionSession, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
   import { diagnostics } from '../stores/diagnostics';
@@ -49,11 +50,27 @@
     connection.setBusy(true);
     localError = null;
     try {
+      const localDeviceId = $presence.deviceId;
+      const peerDeviceId = target.hostDeviceId;
+      if (!localDeviceId || !peerDeviceId) throw new Error('Missing device IDs for P2P connection');
+
+      diagnostics.add({ level: 'info', category: 'session', message: 'Starting P2P NAT Traversal...' });
+      const client = session.client();
+      if (!client) throw new Error('Api client is unavailable');
+      const p2pResult = await coordinateP2pConnection(
+        client,
+        target.id,
+        localDeviceId,
+        peerDeviceId,
+        false // client is controlled
+      );
+      diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
+
       await launchEngine({
         kind: 'client',
         sessionId: target.id,
-        address: target.address,
-        port: target.port,
+        address: p2pResult.remoteAddress,
+        port: p2pResult.localPort,
         codec: $preferences.stream.codec,
         fps: $preferences.stream.fps,
         bitrateKbps: Math.round($preferences.stream.bitrateMbps * 1_000),
@@ -63,7 +80,8 @@
         audioEnabled: $preferences.host.audioEnabled,
         inputEnabled: $preferences.host.inputEnabled,
         relativeMouse: $preferences.input.mouseMode === 'relative',
-        sessionToken: target.sessionToken
+        sessionToken: target.sessionToken,
+        udpConnect: `${p2pResult.remoteAddress}:${p2pResult.remotePort}`
       });
       if (!componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') {
         await stopEngine('client').catch(() => undefined);
@@ -86,20 +104,14 @@
     const client = session.client();
     const localDeviceId = $presence.deviceId;
     if (!target || !client || !localDeviceId) return;
-    if (!(await launchNativeClient(target))) return;
-    if (!componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') {
-      await stopEngine('client').catch(() => undefined);
-      connection.setEngineRunning(false);
-      return;
-    }
     try {
       await client.markNativeReady(target.id, localDeviceId);
       diagnostics.add({ level: 'info', category: 'session', message: 'macOS listener is ready for the host' });
     } catch (error) {
-      await stopEngine('client').catch(() => undefined);
-      connection.setEngineRunning(false);
       connection.setError(error instanceof Error ? error.message : 'Unable to announce native listener readiness');
+      return;
     }
+    if (!(await launchNativeClient(target))) return;
   }
 
   async function disconnect(): Promise<void> {

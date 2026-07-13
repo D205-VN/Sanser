@@ -33,7 +33,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::p2p_stop,
             commands::p2p_get_state,
             commands::p2p_get_candidates,
-            commands::p2p_get_metrics
+            commands::p2p_get_metrics,
+            commands::p2p_gather,
+            commands::p2p_punch
         ])
         .run(tauri::generate_context!())?;
     Ok(())

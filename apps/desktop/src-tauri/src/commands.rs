@@ -280,9 +280,10 @@ pub async fn export_diagnostics(
 }
 
 use sanser_p2p::{
-    CandidatePair, GathererConfig, GatheringEvent, P2pDiagnostics, check_connectivity,
-    gather_candidates,
+    CandidatePair, GathererConfig, GatheringEvent, P2pCandidate, P2pDiagnostics, PairState,
+    check_connectivity, gather_candidates,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -463,6 +464,105 @@ pub fn p2p_get_metrics(manager: State<'_, P2pSessionManager>) -> Result<P2pDiagn
     } else {
         Ok(P2pDiagnostics::default())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2pGatherResult {
+    pub candidates: Vec<P2pCandidate>,
+}
+
+#[tauri::command]
+pub async fn p2p_gather(stun_server: String) -> Result<P2pGatherResult, String> {
+    let config = GathererConfig {
+        stun_servers: vec![stun_server],
+        total_timeout: Duration::from_secs(3),
+        port_mapping_enabled: false,
+        ipv6_enabled: false,
+        generation: 1,
+    };
+
+    let (tx, _rx) = mpsc::channel(32);
+    let gather_res = gather_candidates(config, tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(P2pGatherResult {
+        candidates: gather_res.candidates,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2pPunchRequest {
+    pub session_id: String,
+    pub local_candidates: Vec<P2pCandidate>,
+    pub remote_candidates: Vec<P2pCandidate>,
+    pub controlling: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct P2pPunchResult {
+    pub local_port: u16,
+    pub remote_address: String,
+    pub remote_port: u16,
+}
+
+#[tauri::command]
+pub async fn p2p_punch(request: P2pPunchRequest) -> Result<P2pPunchResult, String> {
+    let session_uuid = uuid::Uuid::parse_str(&request.session_id).map_err(|e| e.to_string())?;
+
+    let mut local_cands = request.local_candidates;
+    local_cands.sort_by_key(|b| std::cmp::Reverse(b.priority));
+
+    if local_cands.is_empty() {
+        return Err("No local candidates provided".into());
+    }
+
+    let bind_port = local_cands[0].port;
+    let bind_addr = format!("0.0.0.0:{}", bind_port);
+    let socket = tokio::net::UdpSocket::bind(&bind_addr)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut pairs = Vec::new();
+    for (idx, remote_cand) in request.remote_candidates.iter().enumerate() {
+        pairs.push(CandidatePair {
+            pair_id: format!("pair-{}", idx),
+            local: socket.local_addr().unwrap(),
+            remote: remote_cand.endpoint(),
+            local_candidate_id: local_cands[0].id.clone(),
+            remote_candidate_id: remote_cand.id.clone(),
+            priority: u64::from(remote_cand.priority),
+            state: PairState::Waiting,
+        });
+    }
+
+    if pairs.is_empty() {
+        return Err("No candidate pairs could be constructed".into());
+    }
+
+    let hmac_key = b"session-secret";
+    let local_device_hash = 12345;
+
+    let check_res = check_connectivity(
+        &socket,
+        &mut pairs,
+        session_uuid,
+        local_device_hash,
+        hmac_key,
+        request.controlling,
+        Duration::from_secs(4),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(P2pPunchResult {
+        local_port: bind_port,
+        remote_address: check_res.remote.ip().to_string(),
+        remote_port: check_res.remote.port(),
+    })
 }
 
 #[cfg(test)]
