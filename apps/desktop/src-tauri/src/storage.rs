@@ -68,6 +68,11 @@ fn validate_preferences(preferences: &Preferences) -> Result<(), DesktopError> {
             "input settings are outside supported bounds".into(),
         ));
     }
+    if preferences.host.direct_udp_port < 1_024 {
+        return Err(DesktopError::InvalidRequest(
+            "host direct UDP port must be between 1024 and 65535".into(),
+        ));
+    }
     if preferences.pinned_device_ids.len() > 200
         || preferences
             .pinned_device_ids
@@ -76,6 +81,16 @@ fn validate_preferences(preferences: &Preferences) -> Result<(), DesktopError> {
     {
         return Err(DesktopError::InvalidRequest(
             "pinned device list is outside supported bounds".into(),
+        ));
+    }
+    if preferences.trusted_device_ids.len() > 200
+        || preferences
+            .trusted_device_ids
+            .iter()
+            .any(|identifier| Uuid::parse_str(identifier).is_err())
+    {
+        return Err(DesktopError::InvalidRequest(
+            "trusted device list is outside supported bounds".into(),
         ));
     }
     Ok(())

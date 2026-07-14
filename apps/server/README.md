@@ -1,7 +1,7 @@
 # Sanser server
 
 Axum API, account service, device registry and WebSocket signaling for Sanser
-2.0.2. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
+2.0.6. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
 does not contain a SQLite or local-database fallback.
 
 ## Neon configuration
@@ -76,20 +76,31 @@ WS     /api/v2/signaling?deviceId=<uuid>
 ```
 
 The signaling socket remains backward compatible with the existing WebRTC-style
-message names and also accepts the first native P2P metadata messages:
-`p2p.candidates` and `p2p.gatheringComplete`. A candidate batch is forwarded only
-when the session is accepted and the authenticated sending device and target are
-the session's two participants. Candidate metadata is transient: it is never
-written to PostgreSQL or the durable event log.
+message names and accepts the native P2P metadata messages `p2p.candidates`,
+`p2p.candidatesAck` and `p2p.gatheringComplete`. A candidate batch or receipt is
+forwarded only when the session is accepted with native transport and the
+authenticated sender and target are that session's two devices. Candidate
+metadata is transient: it is never written to PostgreSQL or the durable event
+log, and media never passes through this WebSocket.
+
+`p2p.candidatesAck` is the explicit receipt used by current desktop clients.
+`p2p.gatheringComplete` remains a compatibility receipt for older deployments.
+The sender retries a candidate batch until it receives a matching-generation
+receipt. Repeating the same candidate ID and endpoint in the same generation is
+idempotent: the server forwards it again without consuming candidate quota.
+Reusing an ID for another endpoint is rejected as an ID collision, while reusing
+an endpoint under another ID is rejected as a duplicate. A failed forward rolls
+back only the candidates newly reserved by that attempt.
 
 Native P2P candidate signaling is deliberately bounded to UDP metadata: at most
-16 candidates per message, 64 per peer and 128 per session, with generations
-1–32. Loopback, multicast, unspecified, link-local, duplicate, invalid-port and
-mismatched mapping candidates are rejected. The in-memory quota expires after
-five minutes of inactivity and is also cleared when the signaling peer
-disconnects. Each socket is limited to 240 signaling messages per minute; the
-WebSocket frame limit remains 64 KiB and candidate payloads have a stricter
-16 KiB limit.
+16 candidates per message, 64 per peer and 128 per session. Generations must be
+non-zero; equal-generation retries are allowed and older generations are
+rejected after a newer one is seen. Loopback, multicast, unspecified,
+link-local, duplicate, invalid-port and mismatched mapping candidates are
+rejected. The in-memory quota expires after five minutes of inactivity and is
+also cleared when the signaling peer disconnects. Each socket is limited to 240
+signaling messages per minute; the WebSocket frame limit remains 64 KiB and
+candidate payloads have a stricter 16 KiB limit.
 
 Access and refresh tokens are random opaque values; only SHA-256 digests are
 stored. Passwords are Argon2id hashes. API queries use bound PostgreSQL

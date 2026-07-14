@@ -103,7 +103,7 @@ mod tests {
         .unwrap_or_else(|error| panic!("export setup failed: {error}"));
         let json = export_json(&export).unwrap_or_else(|error| panic!("export failed: {error}"));
         assert!(json.contains("Sanser"));
-        assert!(json.contains("2.0.4"));
+        assert!(json.contains("2.0.6"));
         assert!(!json.contains("never-export"));
     }
 }

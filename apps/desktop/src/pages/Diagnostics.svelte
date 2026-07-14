@@ -4,7 +4,8 @@
   import { exportDiagnostics } from '../lib/platform';
   import type { RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
-  import { diagnostics, type DiagnosticLevel } from '../stores/diagnostics';
+  import { diagnostics, networkDiagnostics, type DiagnosticLevel } from '../stores/diagnostics';
+  import { preferences } from '../stores/preferences';
 
   let { runtime }: { runtime: RuntimeStatus } = $props();
   let filter = $state<'all' | DiagnosticLevel>('all');
@@ -37,6 +38,21 @@
     <article class="card metric-card"><span>RTT</span><strong>{$connection.metrics ? `${$connection.metrics.rttMs} ms` : '—'}</strong><small>Measured only from engine feedback</small></article>
     <article class="card metric-card"><span>Frame rate</span><strong>{$connection.metrics ? `${$connection.metrics.fps} FPS` : '—'}</strong><small>{$connection.metrics ? `${$connection.metrics.droppedFrames} dropped` : 'No media metrics'}</small></article>
   </div>
+
+  <article class="card card-body stack">
+    <div><h2 class="card-title">Internet direct route</h2><p class="card-subtitle">Updated during the latest P2P attempt. The Windows host uses a stable UDP port for UPnP or manual forwarding.</p></div>
+    <div class="advanced-metrics">
+      <div><span>Host UDP port</span><strong>{$preferences.host.directUdpPort}</strong></div>
+      <div><span>Last bound port</span><strong>{$networkDiagnostics.localPort ?? 'Not tested'}</strong></div>
+      <div><span>STUN public route</span><strong>{$networkDiagnostics.stunSucceeded === null ? 'Not tested' : $networkDiagnostics.stunSucceeded ? 'Detected' : 'Unavailable'}</strong></div>
+      <div><span>UPnP mapping</span><strong>{$networkDiagnostics.portMappingSucceeded === null ? 'Not tested' : $networkDiagnostics.portMappingSucceeded ? 'Mapped' : 'Not mapped'}</strong></div>
+      <div><span>Public endpoint</span><strong>{$networkDiagnostics.publicEndpoint ?? 'Not detected'}</strong></div>
+      <div><span>Global IPv6</span><strong>{$networkDiagnostics.ipv6Available === null ? 'Not tested' : $networkDiagnostics.ipv6Available ? 'Detected' : 'Not detected'}</strong></div>
+      <div><span>Candidates</span><strong>{$networkDiagnostics.candidateCount || '—'}</strong></div>
+      <div><span>Gathering time</span><strong>{$networkDiagnostics.gatheringDurationMs === null ? '—' : `${$networkDiagnostics.gatheringDurationMs} ms`}</strong></div>
+    </div>
+    <div class="notice warning">If STUN works but direct connection still times out, forward UDP {$preferences.host.directUdpPort} on the home router to the Windows PC. Global IPv6 is tried first when both devices expose a validated IPv6 candidate; IPv4/STUN/UPnP/manual-forward remains the automatic fallback.</div>
+  </article>
 
   <div class="grid two diagnostics-grid">
     <article class="card card-body stack">

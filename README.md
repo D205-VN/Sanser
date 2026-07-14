@@ -1,9 +1,9 @@
-# Sanser 2.0.3
+# Sanser 2.0.6
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.0.3
+Product:  Sanser 2.0.6
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   SNV2 target (engine integration is capability-gated)
@@ -103,16 +103,17 @@ npm run desktop:dev
 ## Network modes
 
 The desktop enables a route only after its packaged sidecar passes the native
-capability probe. The current streaming path is authenticated Native Direct on
-a reachable IPv4 route, normally the same LAN. Signed discovery and native
-WebRTC/libdatachannel remain planned.
+capability probe. Authenticated Native Direct supports LAN, global IPv6 and
+IPv4 Internet routes negotiated with STUN/UPnP or a fixed manual-forward port.
+Native WebRTC/libdatachannel relay remains planned.
 
-The opt-in P2P v2 foundation now validates and exchanges transient UDP
-candidates, but native STUN, hole punching and one-socket SNV2 streaming are not
-connected yet. See the rollout document for the exact release gates.
+The desktop exchanges bounded transient UDP candidates, runs STUN, bounded UPnP
+IGD mapping and authenticated hole-punch checks on reserved IPv4/IPv6 sockets,
+then hands the selected port to the packaged native engine. The Windows host
+defaults to UDP `50000`, making a router rule stable across restarts.
 
-- **Auto** selects Native Direct when both devices advertise reachable routes; WebRTC fallback will be used once that engine is linked.
-- **Direct** uses only the reachable native route and never TURN. Different NATs or a firewall can block it.
+- **Auto** selects Native Direct when a candidate pair succeeds; automatic WebRTC fallback is not available until that engine is linked.
+- **Direct** uses only the reachable native route and never TURN. If UPnP is unavailable, forward external UDP `50000` to UDP `50000` on the Windows PC (or use the port selected in **Settings → Host**).
 - **Relay** is disabled until the WebRTC/TURN engine is available.
 
 For Internet-facing deployment, terminate HTTPS/WSS at a reverse proxy, use an explicit `ALLOWED_ORIGINS`, and configure `TURN_SHARED_SECRET` so the server mints short-lived TURN credentials. Do not expose static production credentials to clients.
@@ -174,7 +175,7 @@ The v2 migrator backs up legacy data, imports only validated non-secret preferen
 ## Troubleshooting
 
 - `relay requires TURN`: configure `TURN_URLS` plus a shared secret or development credential pair.
-- Direct connection fails across networks: verify firewall/NAT, then use Auto or Relay.
+- Direct connection fails across networks: enable UPnP on the router or allow Sanser through both firewalls and retry. Symmetric NAT, CGNAT or double-NAT requires a deployed relay path; that fallback is not enabled in this build.
 - Native capability is unavailable: build/install the platform v2 sidecar and inspect sanitized Diagnostics output.
 - Database is not ready: verify the Neon pooled endpoint, TLS query, network allowlist and migration access without pasting credentials into logs/issues.
 

@@ -3356,7 +3356,7 @@ public:
       configureSocket(controlSocket_);
       std::cerr << "SNINPUT dedicated control connecting " << controlEndpoint << "\n";
     }
-    if (socket_ == INVALID_SOCKET && controlSocket_ == INVALID_SOCKET) {
+    if (socket_ == INVALID_SOCKET && controlSocket_ == INVALID_SOCKET && !gSingleSocketMode) {
       throw std::runtime_error("TcpClient needs --tcp-connect or --control-connect.");
     }
   }
@@ -3415,7 +3415,10 @@ private:
     if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
       throw std::runtime_error(std::string(optionName) + " must be HOST:PORT");
     }
-    const std::string host = endpoint.substr(0, separator);
+    std::string host = endpoint.substr(0, separator);
+    if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+      host = host.substr(1, host.size() - 2);
+    }
     const std::string port = endpoint.substr(separator + 1);
 
     addrinfo hints{};
@@ -4020,7 +4023,10 @@ public:
     if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
       throw std::runtime_error("--udp-connect must be HOST:PORT");
     }
-    const std::string host = endpoint.substr(0, separator);
+    std::string host = endpoint.substr(0, separator);
+    if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+      host = host.substr(1, host.size() - 2);
+    }
     const std::string port = endpoint.substr(separator + 1);
 
     addrinfo hints{};
@@ -4039,21 +4045,70 @@ public:
       if (candidate == INVALID_SOCKET) continue;
 
       if (udpBindPort > 0) {
-        int reuse = 1;
-        setsockopt(candidate, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
-        
+        BOOL exclusive = TRUE;
+        if (setsockopt(candidate,
+                       SOL_SOCKET,
+                       SO_EXCLUSIVEADDRUSE,
+                       reinterpret_cast<const char*>(&exclusive),
+                       sizeof(exclusive)) == SOCKET_ERROR) {
+          const int error = WSAGetLastError();
+          closesocket(candidate);
+          freeaddrinfo(results);
+          throw std::runtime_error("Could not reserve the selected UDP port " +
+                                   std::to_string(udpBindPort) +
+                                   ", WSA error " + std::to_string(error));
+        }
+
+        int bindResult = SOCKET_ERROR;
         if (item->ai_family == AF_INET) {
           sockaddr_in localAddrV4{};
           localAddrV4.sin_family = AF_INET;
           localAddrV4.sin_addr.s_addr = INADDR_ANY;
           localAddrV4.sin_port = htons(udpBindPort);
-          bind(candidate, reinterpret_cast<const sockaddr*>(&localAddrV4), sizeof(localAddrV4));
+          bindResult = bind(candidate,
+                            reinterpret_cast<const sockaddr*>(&localAddrV4),
+                            sizeof(localAddrV4));
         } else if (item->ai_family == AF_INET6) {
           sockaddr_in6 localAddrV6{};
           localAddrV6.sin6_family = AF_INET6;
           localAddrV6.sin6_addr = in6addr_any;
           localAddrV6.sin6_port = htons(udpBindPort);
-          bind(candidate, reinterpret_cast<const sockaddr*>(&localAddrV6), sizeof(localAddrV6));
+          bindResult = bind(candidate,
+                            reinterpret_cast<const sockaddr*>(&localAddrV6),
+                            sizeof(localAddrV6));
+        }
+        if (bindResult == SOCKET_ERROR) {
+          const int error = WSAGetLastError();
+          closesocket(candidate);
+          freeaddrinfo(results);
+          throw std::runtime_error("Could not bind the selected UDP port " +
+                                   std::to_string(udpBindPort) +
+                                   ", WSA error " + std::to_string(error));
+        }
+
+        sockaddr_storage boundAddress{};
+        int boundAddressLength = sizeof(boundAddress);
+        if (getsockname(candidate,
+                        reinterpret_cast<sockaddr*>(&boundAddress),
+                        &boundAddressLength) == SOCKET_ERROR) {
+          const int error = WSAGetLastError();
+          closesocket(candidate);
+          freeaddrinfo(results);
+          throw std::runtime_error("Selected UDP port verification failed for " +
+                                   std::to_string(udpBindPort) +
+                                   ", WSA error " + std::to_string(error));
+        }
+        const std::uint16_t boundPort = boundAddress.ss_family == AF_INET
+          ? ntohs(reinterpret_cast<const sockaddr_in*>(&boundAddress)->sin_port)
+          : boundAddress.ss_family == AF_INET6
+            ? ntohs(reinterpret_cast<const sockaddr_in6*>(&boundAddress)->sin6_port)
+            : 0;
+        if (boundPort != udpBindPort) {
+          closesocket(candidate);
+          freeaddrinfo(results);
+          throw std::runtime_error("Selected UDP port verification returned " +
+                                   std::to_string(boundPort) +
+                                   " instead of " + std::to_string(udpBindPort));
         }
       }
 
@@ -4086,7 +4141,7 @@ public:
       gUdpMainSocket = socket_;
     }
     if (gSingleSocketMode) {
-      std::thread receiverThread([this]() {
+      std::thread receiverThread([]() {
         std::array<std::uint8_t, 65536> buffer;
         while (true) {
           SOCKET sock = INVALID_SOCKET;
@@ -5327,6 +5382,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   } else if (!options.udpConnect.empty()) {
 #ifdef _WIN32
     winsock = std::make_unique<WinsockRuntime>();
+    // The UDP client constructor starts the multiplexed control receiver, so
+    // the mode must be selected before the socket is created.
+    gSingleSocketMode = options.controlConnect.empty();
     udpClient = std::make_unique<UdpVideoClient>(options.udpConnect,
                                                  initialAdaptiveBitrate,
                                                  options.udpPacing,
@@ -5336,7 +5394,6 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       controlClient = std::make_unique<TcpClient>("", options.controlConnect, options.sessionToken, mediaCrypto);
       controlClient->startControlReceiver();
     } else {
-      gSingleSocketMode = true;
       controlClient = std::make_unique<TcpClient>("", "", options.sessionToken, mediaCrypto);
       controlClient->startControlReceiver();
       std::cerr << "SNU1 UDP video is running in Single Socket UDP mode (control multiplexed).\n";

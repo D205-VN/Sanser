@@ -16,6 +16,11 @@ describe('migratePreferences', () => {
     expect(migrated.stream.codec).toBe('auto');
   });
 
+  it('keeps a safe fixed host UDP port', () => {
+    expect(migratePreferences({ host: { directUdpPort: 50_123 } }).host.directUdpPort).toBe(50_123);
+    expect(migratePreferences({ host: { directUdpPort: 80 } }).host.directUdpPort).toBe(50_000);
+  });
+
   it('does not let a stale preference override a configured release endpoint', () => {
     const configured = 'https://api.sanser.example';
     const migrated = migratePreferences(
@@ -24,5 +29,13 @@ describe('migratePreferences', () => {
     );
 
     expect(migrated.serverUrl).toBe(configured);
+  });
+
+  it('keeps only bounded UUID device identities in the unattended-access allowlist', () => {
+    const trusted = '22222222-2222-4222-8222-222222222222';
+    const migrated = migratePreferences({
+      trustedDeviceIds: [trusted, trusted, 'not-a-device-id', '', 7]
+    });
+    expect(migrated.trustedDeviceIds).toEqual([trusted]);
   });
 });

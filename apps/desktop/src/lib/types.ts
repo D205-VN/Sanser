@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.0.4' as const;
+export const SANSER_VERSION = '2.0.6' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
@@ -67,6 +67,8 @@ export interface StreamPreferences {
 export interface HostPreferences {
   autoOnline: boolean;
   autoAcceptOwnDevices: boolean;
+  /** Stable UDP port used by the Windows host for UPnP/manual forwarding. */
+  directUdpPort: number;
   audioEnabled: boolean;
   inputEnabled: boolean;
   clipboardEnabled: boolean;
@@ -90,6 +92,8 @@ export interface Preferences {
   startMinimized: boolean;
   diagnosticsEnabled: boolean;
   pinnedDeviceIds: string[];
+  /** Device identities explicitly allowed to request unattended access. */
+  trustedDeviceIds: string[];
 }
 
 export interface Account {
@@ -180,6 +184,19 @@ export interface NativeSessionCredentials {
   expiresAt: number;
   /** Ephemeral and memory-only. Never persist or include in diagnostics. */
   sessionToken: string;
+}
+
+export interface IceServerConfiguration {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
+
+export interface IceConfiguration {
+  iceServers: IceServerConfiguration[];
+  networkMode: NetworkMode;
+  iceTransportPolicy: 'all' | 'relay';
+  expiresAt?: number;
 }
 
 export interface LoginSession {

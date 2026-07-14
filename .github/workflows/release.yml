@@ -1,8 +1,8 @@
-name: Release Sanser 2.0.4
+name: Release Sanser 2.0.6
 
 on:
   push:
-    tags: ["v2.0.4"]
+    tags: ["v2.0.6"]
   workflow_dispatch:
 
 permissions:
@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  SANSER_VERSION: 2.0.4
+  SANSER_VERSION: 2.0.6
   VITE_SANSER_SERVER_URL: ${{ vars.SANSER_API_URL }}
 
 jobs:
@@ -57,8 +57,8 @@ jobs:
           if (-not $setup) { throw 'NSIS installer was not produced' }
           $setupSignature = "$($setup.FullName).sig"
           if (-not (Test-Path $setupSignature)) { throw 'Signed NSIS updater artifact was not produced' }
-          Copy-Item $setup.FullName artifacts/Sanser-Windows-2.0.4-x64-setup.exe
-          Copy-Item $setupSignature artifacts/Sanser-Windows-2.0.4-x64-setup.exe.sig
+          Copy-Item $setup.FullName artifacts/Sanser-Windows-2.0.6-x64-setup.exe
+          Copy-Item $setupSignature artifacts/Sanser-Windows-2.0.6-x64-setup.exe.sig
           
           New-Item -ItemType Directory -Force build/portable | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/sanser.exe build/portable/sanser.exe
@@ -66,16 +66,16 @@ jobs:
           7z a -t7z -mx=9 build/sanser-portable.7z ./build/portable/*
           @'
           ;!@Install@!UTF-8!
-          Title="Sanser 2.0.4 Portable"
+          Title="Sanser 2.0.6 Portable"
           RunProgram="sanser.exe"
           GUIMode="2"
           ;!@InstallEnd@!
           '@ | Set-Content -NoNewline -Encoding utf8 build/sfx-config.txt
           $sfx = Join-Path $env:ProgramFiles '7-Zip/7z.sfx'
-          cmd /c copy /b `"$sfx`"+build\sfx-config.txt+build\sanser-portable.7z `"artifacts\Sanser-Windows-2.0.4-x64-portable.exe`"
+          cmd /c copy /b `"$sfx`"+build\sfx-config.txt+build\sanser-portable.7z `"artifacts\Sanser-Windows-2.0.6-x64-portable.exe`"
       - uses: actions/upload-artifact@v4
         with:
-          name: sanser-windows-2.0.4-x64
+          name: sanser-windows-2.0.6-x64
           path: artifacts/*
           if-no-files-found: error
 
@@ -135,13 +135,13 @@ jobs:
           dmg="$(find /tmp/sanser-target/aarch64-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
           updater="$(find "$bundle_dir" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
           test -n "$app" && test -n "$dmg" && test -n "$updater" && test -f "$updater.sig"
-          cp "$dmg" artifacts/Sanser-macOS-2.0.4-arm64.dmg
-          ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/Sanser-macOS-2.0.4-arm64.zip
-          cp "$updater" artifacts/Sanser-macOS-2.0.4-arm64.app.tar.gz
-          cp "$updater.sig" artifacts/Sanser-macOS-2.0.4-arm64.app.tar.gz.sig
+          cp "$dmg" artifacts/Sanser-macOS-2.0.6-arm64.dmg
+          ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/Sanser-macOS-2.0.6-arm64.zip
+          cp "$updater" artifacts/Sanser-macOS-2.0.6-arm64.app.tar.gz
+          cp "$updater.sig" artifacts/Sanser-macOS-2.0.6-arm64.app.tar.gz.sig
       - uses: actions/upload-artifact@v4
         with:
-          name: sanser-macos-2.0.4-arm64
+          name: sanser-macos-2.0.6-arm64
           path: artifacts/*
           if-no-files-found: error
 
@@ -171,5 +171,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Sanser 2.0.4" --generate-notes
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Sanser 2.0.6" --generate-notes
           gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber

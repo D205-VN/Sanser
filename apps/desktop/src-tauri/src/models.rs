@@ -180,9 +180,15 @@ pub struct StreamPreferences {
 pub struct HostPreferences {
     pub auto_online: bool,
     pub auto_accept_own_devices: bool,
+    #[serde(default = "default_direct_udp_port")]
+    pub direct_udp_port: u16,
     pub audio_enabled: bool,
     pub input_enabled: bool,
     pub clipboard_enabled: bool,
+}
+
+const fn default_direct_udp_port() -> u16 {
+    50_000
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -222,6 +228,8 @@ pub struct Preferences {
     pub start_minimized: bool,
     pub diagnostics_enabled: bool,
     pub pinned_device_ids: Vec<String>,
+    #[serde(default)]
+    pub trusted_device_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

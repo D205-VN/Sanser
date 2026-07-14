@@ -101,6 +101,24 @@
     }
   }
 
+  async function toggleTrust(device: Device): Promise<void> {
+    const trusted = $preferences.trustedDeviceIds.includes(device.id);
+    if (
+      !trusted &&
+      !window.confirm(
+        `Trust “${device.name}” for unattended access? Requests from this device may be accepted automatically by this Windows host.`
+      )
+    ) return;
+    try {
+      const trustedDeviceIds = trusted
+        ? $preferences.trustedDeviceIds.filter((id) => id !== device.id)
+        : [...new Set([...$preferences.trustedDeviceIds, device.id])];
+      await preferences.save({ ...$preferences, trustedDeviceIds });
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : 'Unable to update unattended-access trust';
+    }
+  }
+
   function beginRename(device: Device): void {
     editingId = device.id;
     editingName = device.name;
@@ -211,6 +229,13 @@
           <div class="computer-actions">
             <button class="button primary" disabled={blockReason !== null || connectingId !== null} title={blockReason ?? 'Request a secure session'} onclick={() => connect(device)}>{connectingId === device.id ? 'Requesting…' : 'Connect'}</button>
             <button class="button small" onclick={() => togglePin(device)}>{device.pinned ? 'Unpin' : 'Pin'}</button>
+            <button
+              class="button small"
+              class:danger={$preferences.trustedDeviceIds.includes(device.id)}
+              disabled={runtime.capabilities.hostEngine.state !== 'available'}
+              title={runtime.capabilities.hostEngine.state === 'available' ? 'Control unattended-access trust on this Windows host' : 'Trust is configured on the Windows host'}
+              onclick={() => toggleTrust(device)}
+            >{$preferences.trustedDeviceIds.includes(device.id) ? 'Revoke trust' : 'Trust device'}</button>
             <button class="button small" onclick={() => beginRename(device)}>Rename</button>
             <button class="button small" onclick={() => inspect(device)}>Diagnostics</button>
             <button class="button small danger" onclick={() => remove(device)}>Remove</button>

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_host_windows VERSION 2.0.4 LANGUAGES CXX)
+project(sanser_host_windows VERSION 2.0.6 LANGUAGES CXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 

@@ -69,7 +69,7 @@ struct CandidateSessionBudget {
 #[derive(Default)]
 struct PeerCandidateBudget {
     latest_generation: u32,
-    ids: HashSet<String>,
+    ids: HashMap<String, CandidateFingerprint>,
     endpoints: HashSet<CandidateFingerprint>,
 }
 
@@ -83,8 +83,7 @@ struct CandidateReservation {
     key: CandidateSessionKey,
     device_id: String,
     generation: u32,
-    ids: Vec<String>,
-    endpoints: Vec<CandidateFingerprint>,
+    candidates: Vec<(String, CandidateFingerprint)>,
 }
 
 #[derive(Clone, Serialize)]
@@ -186,21 +185,33 @@ impl SignalHub {
 
         let same_generation =
             existing_peer.is_some_and(|peer| batch.generation == peer.latest_generation);
-        if same_generation
-            && existing_peer.is_some_and(|peer| {
-                batch.candidates.iter().any(|candidate| {
-                    peer.ids.contains(&candidate.id)
-                        || peer.endpoints.contains(&CandidateFingerprint {
-                            address: candidate.address,
-                            port: candidate.port,
-                        })
-                })
-            })
-        {
-            return Err(SignalError::new(
-                "duplicate_candidate",
-                "candidate was already signaled for this generation",
-            ));
+        let mut new_candidates = Vec::with_capacity(batch.candidates.len());
+        for candidate in &batch.candidates {
+            let endpoint = CandidateFingerprint {
+                address: candidate.address,
+                port: candidate.port,
+            };
+            if same_generation && let Some(peer) = existing_peer {
+                if let Some(existing) = peer.ids.get(&candidate.id) {
+                    if existing != &endpoint {
+                        return Err(SignalError::new(
+                            "candidate_id_collision",
+                            "candidate id was reused for another endpoint",
+                        ));
+                    }
+                    // Idempotent retry: do not consume quota, but still forward
+                    // the batch because the earlier WebSocket delivery may
+                    // have failed after it entered the target queue.
+                    continue;
+                }
+                if peer.endpoints.contains(&endpoint) {
+                    return Err(SignalError::new(
+                        "duplicate_candidate",
+                        "candidate endpoint was reused with another id",
+                    ));
+                }
+            }
+            new_candidates.push((candidate.id.clone(), endpoint));
         }
 
         let peer_count = if same_generation {
@@ -217,32 +228,18 @@ impl SignalHub {
             session_count =
                 session_count.saturating_sub(existing_peer.map_or(0, |peer| peer.endpoints.len()));
         }
-        if peer_count.saturating_add(batch.candidates.len()) > MAX_CANDIDATES_PER_PEER {
+        if peer_count.saturating_add(new_candidates.len()) > MAX_CANDIDATES_PER_PEER {
             return Err(SignalError::new(
                 "candidate_peer_limit",
                 "candidate limit for this session peer was exceeded",
             ));
         }
-        if session_count.saturating_add(batch.candidates.len()) > MAX_CANDIDATES_PER_SESSION {
+        if session_count.saturating_add(new_candidates.len()) > MAX_CANDIDATES_PER_SESSION {
             return Err(SignalError::new(
                 "candidate_session_limit",
                 "candidate limit for this session was exceeded",
             ));
         }
-
-        let ids = batch
-            .candidates
-            .iter()
-            .map(|candidate| candidate.id.clone())
-            .collect::<Vec<_>>();
-        let endpoints = batch
-            .candidates
-            .iter()
-            .map(|candidate| CandidateFingerprint {
-                address: candidate.address,
-                port: candidate.port,
-            })
-            .collect::<Vec<_>>();
 
         let peer = budget.peers.entry(device_id.to_owned()).or_default();
         budget.last_seen = now;
@@ -251,14 +248,15 @@ impl SignalHub {
             peer.ids.clear();
             peer.endpoints.clear();
         }
-        peer.ids.extend(ids.iter().cloned());
-        peer.endpoints.extend(endpoints.iter().cloned());
+        for (id, endpoint) in &new_candidates {
+            peer.ids.insert(id.clone(), endpoint.clone());
+            peer.endpoints.insert(endpoint.clone());
+        }
         Ok(CandidateReservation {
             key,
             device_id: device_id.to_owned(),
             generation: batch.generation,
-            ids,
-            endpoints,
+            candidates: new_candidates,
         })
     }
 
@@ -308,11 +306,11 @@ impl SignalHub {
             if let Some(peer) = budget.peers.get_mut(&reservation.device_id)
                 && peer.latest_generation == reservation.generation
             {
-                for id in reservation.ids {
-                    peer.ids.remove(&id);
-                }
-                for endpoint in reservation.endpoints {
-                    peer.endpoints.remove(&endpoint);
+                for (id, endpoint) in reservation.candidates {
+                    if peer.ids.get(&id) == Some(&endpoint) {
+                        peer.ids.remove(&id);
+                        peer.endpoints.remove(&endpoint);
+                    }
                 }
             }
         }
@@ -360,6 +358,7 @@ struct ValidatedCandidateBatch {
 
 enum ValidatedP2pPayload {
     Candidates(ValidatedCandidateBatch),
+    CandidatesAcknowledged,
     GatheringComplete { generation: u32 },
 }
 
@@ -519,7 +518,14 @@ async fn run_signaling_socket(
                                 match relay_signal(&state, &auth.user_id, &device_id, signal).await {
                                     Ok(()) => {}
                                     Err(error) => {
-                                        invalid_messages = invalid_messages.saturating_add(1);
+                                        // A peer opening its signaling socket a
+                                        // little later is an expected race, not
+                                        // malformed client behavior. Keep this
+                                        // connection alive while its bounded
+                                        // retry loop waits for the target.
+                                        if !error.is_transient_delivery_failure() {
+                                            invalid_messages = invalid_messages.saturating_add(1);
+                                        }
                                         if send_ws_error(&mut writer, error.code(), &error.to_string()).await.is_err() { break; }
                                     }
                                 }
@@ -577,6 +583,7 @@ async fn relay_signal(
                 .await?;
             None
         }
+        Some(ValidatedP2pPayload::CandidatesAcknowledged) => None,
         None => None,
     };
     let target = PeerKey {
@@ -621,6 +628,7 @@ async fn authorize_signal(
             | "renegotiate"
             | "connectionState"
             | "p2p.candidates"
+            | "p2p.candidatesAck"
             | "p2p.gatheringComplete"
     ) {
         return Err(SignalError::new(
@@ -763,6 +771,18 @@ fn validate_signal_payload(
                 generation: payload.generation,
             }))
         }
+        "p2p.candidatesAck" => {
+            let payload =
+                serde_json::from_value::<GatheringCompletePayload>(signal.payload.clone())
+                    .map_err(|_| {
+                        SignalError::new(
+                            "invalid_candidate_ack",
+                            "candidate acknowledgement payload has an invalid shape",
+                        )
+                    })?;
+            validate_generation(payload.generation)?;
+            Ok(Some(ValidatedP2pPayload::CandidatesAcknowledged))
+        }
         _ => Ok(None),
     }
 }
@@ -873,6 +893,10 @@ impl SignalError {
 
     const fn code(&self) -> &'static str {
         self.code
+    }
+
+    fn is_transient_delivery_failure(&self) -> bool {
+        matches!(self.code, "target_offline" | "target_backpressure")
     }
 }
 
@@ -1007,6 +1031,17 @@ mod tests {
             payload: json!({"generation": u32::MAX}),
         };
         assert!(validate_signal_payload(&maximum_generation).is_ok());
+
+        let acknowledgement = IncomingSignal {
+            session_id: Uuid::nil().to_string(),
+            target_device_id: None,
+            signal_type: "p2p.candidatesAck".to_owned(),
+            payload: json!({"generation": 1}),
+        };
+        assert!(matches!(
+            validate_signal_payload(&acknowledgement),
+            Ok(Some(ValidatedP2pPayload::CandidatesAcknowledged))
+        ));
     }
 
     #[tokio::test]
@@ -1130,5 +1165,36 @@ mod tests {
                 .map(|error| error.code()),
             Some("stale_candidate_generation")
         );
+    }
+
+    #[tokio::test]
+    async fn identical_candidate_retry_is_idempotent_and_forwardable() {
+        let hub = SignalHub::default();
+        let batch = ValidatedCandidateBatch {
+            generation: 1,
+            candidates: vec![parsed_candidate(7)],
+        };
+        let first = hub
+            .reserve_candidates("user", "session", "peer", &batch)
+            .await;
+        assert!(first.is_ok());
+        if let Ok(first) = first {
+            assert_eq!(first.candidates.len(), 1);
+        }
+
+        let retry = hub
+            .reserve_candidates("user", "session", "peer", &batch)
+            .await;
+        assert!(retry.is_ok());
+        if let Ok(retry) = retry {
+            assert!(retry.candidates.is_empty());
+        }
+    }
+
+    #[test]
+    fn offline_peer_does_not_consume_the_protocol_violation_budget() {
+        assert!(SignalError::new("target_offline", "offline").is_transient_delivery_failure());
+        assert!(SignalError::new("target_backpressure", "busy").is_transient_delivery_failure());
+        assert!(!SignalError::new("forbidden", "forbidden").is_transient_delivery_failure());
     }
 }

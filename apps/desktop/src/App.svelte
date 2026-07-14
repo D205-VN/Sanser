@@ -22,6 +22,7 @@
   let page = $state<Page>('computers');
   let runtime = $state<RuntimeStatus | null>(null);
   let bootError = $state<string | null>(null);
+  let autoOnlineAccountId = $state<string | null>(null);
 
   const pageMeta: Record<Page, { section: string; label: string }> = {
     computers: { section: 'Workspace', label: 'Computers' },
@@ -41,6 +42,34 @@
       void presence.start(runtime);
     } else {
       void presence.stop();
+    }
+  });
+
+  $effect(() => {
+    const accountId = $session.account?.id ?? null;
+    if (accountId === null || !$preferences.host.autoOnline) {
+      autoOnlineAccountId = null;
+      return;
+    }
+    const activeRuntime = runtime;
+    if (
+      activeRuntime === null ||
+      $session.mode !== 'cloud' ||
+      activeRuntime.capabilities.hostEngine.state !== 'available'
+    ) return;
+    if (
+      autoOnlineAccountId !== accountId &&
+      !$host.online &&
+      !$host.busy
+    ) {
+      autoOnlineAccountId = accountId;
+      void host.online(activeRuntime).catch((error: unknown) => {
+        diagnostics.add({
+          level: 'warn',
+          category: 'engine',
+          message: error instanceof Error ? error.message : 'Unable to bring the Windows host online automatically'
+        });
+      });
     }
   });
 

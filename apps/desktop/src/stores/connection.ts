@@ -77,7 +77,7 @@ function createConnectionStore() {
         };
       });
     },
-    setError(message: string): void {
+    setError(message: string | null): void {
       store.update((state) => ({ ...state, busy: false, error: message }));
     },
     setBusy(busy: boolean): void {

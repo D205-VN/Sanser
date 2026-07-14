@@ -4,6 +4,7 @@ import type {
   ConnectionSession,
   Device,
   DeviceRegistration,
+  IceConfiguration,
   LoginSession,
   NativeSessionCredentials,
   NetworkMode,
@@ -292,6 +293,10 @@ export class ApiClient {
         body: { deviceId }
       })
     );
+  }
+
+  async iceConfiguration(): Promise<IceConfiguration> {
+    return this.request<IceConfiguration>('/api/v2/network/ice');
   }
 
   async disconnectSession(id: string): Promise<void> {

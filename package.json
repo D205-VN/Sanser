@@ -1,8 +1,8 @@
 {
   "name": "sanser",
-  "version": "2.0.4",
+  "version": "2.0.6",
   "private": true,
-  "description": "Sanser 2.0.4 low-latency remote desktop and game streaming platform.",
+  "description": "Sanser 2.0.6 low-latency remote desktop and game streaming platform.",
   "license": "UNLICENSED",
   "workspaces": [
     "apps/desktop"
