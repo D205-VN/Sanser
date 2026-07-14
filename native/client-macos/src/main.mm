@@ -46,6 +46,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <netdb.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -512,6 +513,11 @@ std::array<std::uint8_t, 12> mediaNonce(const char* media, std::uint64_t sequenc
   return nonce;
 }
 
+struct UdpEndpoint {
+  sockaddr_storage address{};
+  socklen_t length = 0;
+};
+
 void chacha20Xor(std::uint8_t* data,
                  std::size_t size,
                  const std::array<std::uint8_t, 32>& key,
@@ -536,10 +542,10 @@ class NativeInputSender {
 public:
   NativeInputSender() : inputSessionId_(randomHex(8)), worker_(&NativeInputSender::workerLoop, this) {}
 
-  void setUdpTarget(int fd, const sockaddr_in& addr) {
+  void setUdpTarget(int fd, const UdpEndpoint& endpoint) {
     std::lock_guard<std::mutex> lock(mutex_);
     udpFd_ = fd;
-    hostAddr_ = addr;
+    hostEndpoint_ = endpoint;
     isUdp_ = true;
     condition_.notify_all();
   }
@@ -1174,7 +1180,7 @@ private:
       int sendFd = -1;
       bool isUdp = false;
       int udpFd = -1;
-      sockaddr_in hostAddr{};
+      UdpEndpoint hostEndpoint{};
       {
         std::unique_lock<std::mutex> lock(mutex_);
         condition_.wait_for(lock, retryPollInterval_, [&] {
@@ -1185,7 +1191,7 @@ private:
         isUdp = isUdp_ && udpFd_ >= 0;
         if (isUdp) {
           udpFd = udpFd_;
-          hostAddr = hostAddr_;
+          hostEndpoint = hostEndpoint_;
         } else {
           if (fd_ < 0) continue;
         }
@@ -1271,8 +1277,8 @@ private:
                              reinterpret_cast<const char*>(payload.data()),
                              payload.size(),
                              0,
-                             reinterpret_cast<const sockaddr*>(&hostAddr),
-                             sizeof(hostAddr));
+                             reinterpret_cast<const sockaddr*>(&hostEndpoint.address),
+                             hostEndpoint.length);
         sent = (s == static_cast<int>(payload.size()));
       } else {
         sent = sendJsonToFd(sendFd, outbound);
@@ -1511,7 +1517,7 @@ private:
   std::uint64_t fdGeneration_ = 0;
   int fd_ = -1;
   int udpFd_ = -1;
-  sockaddr_in hostAddr_{};
+  UdpEndpoint hostEndpoint_{};
   bool isUdp_ = false;
   bool batchEnabled_ = false;
   bool authRequired_ = false;
@@ -1589,18 +1595,40 @@ private:
   bool hasHighest_ = false;
 };
 
-std::string udpPeerString(const sockaddr_in& peer) {
-  char ip[INET_ADDRSTRLEN]{};
-  inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+std::string udpPeerString(const UdpEndpoint& peer) {
+  char ip[INET6_ADDRSTRLEN]{};
+  std::uint16_t port = 0;
+  if (peer.address.ss_family == AF_INET) {
+    const auto* address = reinterpret_cast<const sockaddr_in*>(&peer.address);
+    inet_ntop(AF_INET, &address->sin_addr, ip, sizeof(ip));
+    port = ntohs(address->sin_port);
+  } else if (peer.address.ss_family == AF_INET6) {
+    const auto* address = reinterpret_cast<const sockaddr_in6*>(&peer.address);
+    inet_ntop(AF_INET6, &address->sin6_addr, ip, sizeof(ip));
+    port = ntohs(address->sin6_port);
+  }
   std::ostringstream out;
-  out << (ip[0] ? ip : "unknown") << ":" << ntohs(peer.sin_port);
+  if (peer.address.ss_family == AF_INET6) out << "[";
+  out << (ip[0] ? ip : "unknown");
+  if (peer.address.ss_family == AF_INET6) out << "]";
+  out << ":" << port;
   return out.str();
 }
 
-bool sameUdpPeer(const sockaddr_in& left, const sockaddr_in& right) {
-  return left.sin_family == right.sin_family &&
-         left.sin_addr.s_addr == right.sin_addr.s_addr &&
-         left.sin_port == right.sin_port;
+bool sameUdpPeer(const UdpEndpoint& left, const UdpEndpoint& right) {
+  if (left.address.ss_family != right.address.ss_family) return false;
+  if (left.address.ss_family == AF_INET) {
+    const auto* a = reinterpret_cast<const sockaddr_in*>(&left.address);
+    const auto* b = reinterpret_cast<const sockaddr_in*>(&right.address);
+    return a->sin_addr.s_addr == b->sin_addr.s_addr && a->sin_port == b->sin_port;
+  }
+  if (left.address.ss_family == AF_INET6) {
+    const auto* a = reinterpret_cast<const sockaddr_in6*>(&left.address);
+    const auto* b = reinterpret_cast<const sockaddr_in6*>(&right.address);
+    return std::memcmp(&a->sin6_addr, &b->sin6_addr, sizeof(in6_addr)) == 0 &&
+           a->sin6_port == b->sin6_port && a->sin6_scope_id == b->sin6_scope_id;
+  }
+  return false;
 }
 
 class UdpPeerLock {
@@ -1624,13 +1652,13 @@ public:
     peer_ = {};
   }
 
-  bool acceptKnownPeer(const sockaddr_in& peer) {
+  bool acceptKnownPeer(const UdpEndpoint& peer) {
     if (!locked_ || sameUdpPeer(peer_, peer)) return true;
     logReject(peer);
     return false;
   }
 
-  bool lockOrAccept(const sockaddr_in& peer) {
+  bool lockOrAccept(const UdpEndpoint& peer) {
     if (locked_) return acceptKnownPeer(peer);
     peer_ = peer;
     locked_ = true;
@@ -1639,7 +1667,7 @@ public:
   }
 
 private:
-  void logReject(const sockaddr_in& peer) {
+  void logReject(const UdpEndpoint& peer) {
     const auto now = std::chrono::steady_clock::now();
     if (now - lastRejectLogAt_ < std::chrono::seconds(1)) return;
     lastRejectLogAt_ = now;
@@ -1649,7 +1677,7 @@ private:
   }
 
   const char* label_ = "SNU1";
-  sockaddr_in peer_{};
+  UdpEndpoint peer_{};
   std::uint64_t generation_ = 0;
   bool locked_ = false;
   std::chrono::steady_clock::time_point lastRejectLogAt_{};
@@ -2692,6 +2720,16 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
       gNativeInputSender->setControlAuthenticated(sessionAccepted, sessionAccepted || !needsSessionAuth);
       gNativeInputSender->setPacketAuthEnabled(gHostPacketAuthVerified);
       gNativeInputSender->setBatchEnabled(sessionAccepted && inputBatch && inputAck);
+    }
+    if (sessionAccepted && proofAccepted && mediaCrypto && mediaEpoch > 0) {
+      // The host may have encoded its first epoch frame before this ACK
+      // reached the client. Request a fresh keyframe only after outbound
+      // control authentication is active, otherwise the sender rejects it.
+      sendKeyframeRequest("media-crypto-ready",
+                          0,
+                          0,
+                          0,
+                          std::chrono::milliseconds(0));
     }
     if (needsSessionAuth && !sessionAccepted) {
       std::cerr << "SNCONTROL_AUTH failed sessionAuth=" << boolText(sessionAuth)
@@ -3928,7 +3966,7 @@ public:
             std::uint64_t& completedPacketId,
             std::uint64_t& completedMediaEpoch,
             bool& completedRekeyGrace,
-            const sockaddr_in& peerAddress,
+            const UdpEndpoint& peerAddress,
             UdpPeerLock& peerLock) {
     completedPacketId = 0;
     completedMediaEpoch = 0;
@@ -5348,10 +5386,13 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cond_;
     bool stopped_ = false;
+    std::size_t maxSize_ = 1024;
 public:
+    explicit ThreadSafeQueue(std::size_t maxSize = 1024) : maxSize_(std::max<std::size_t>(1, maxSize)) {}
     void push(T value) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (queue_.size() >= maxSize_) queue_.pop();
             queue_.push(std::move(value));
         }
         cond_.notify_one();
@@ -5392,8 +5433,8 @@ public:
     }
 };
 
-static ThreadSafeQueue<std::vector<std::uint8_t>> gAudioUdpQueue;
-static ThreadSafeQueue<std::string> gControlUdpQueue;
+static ThreadSafeQueue<std::vector<std::uint8_t>> gAudioUdpQueue(256);
+static ThreadSafeQueue<std::string> gControlUdpQueue(128);
 
 class ScopedFd {
 public:
@@ -5446,24 +5487,51 @@ ScopedFd createTcpListener(std::uint16_t port, const char* label) {
   return server;
 }
 
-sockaddr_in resolveUdpAddress(const std::string& endpoint) {
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  const auto separator = endpoint.rfind(':');
-  if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
-    throw std::runtime_error("udp endpoint must be HOST:PORT");
+UdpEndpoint resolveUdpAddress(const std::string& endpoint) {
+  std::string host;
+  std::string port;
+  if (!endpoint.empty() && endpoint.front() == '[') {
+    const auto closing = endpoint.find(']');
+    if (closing == std::string::npos || closing + 2 >= endpoint.size() || endpoint[closing + 1] != ':') {
+      throw std::runtime_error("IPv6 UDP endpoint must be [ADDRESS]:PORT");
+    }
+    host = endpoint.substr(1, closing - 1);
+    port = endpoint.substr(closing + 2);
+  } else {
+    const auto separator = endpoint.rfind(':');
+    if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
+      throw std::runtime_error("UDP endpoint must be HOST:PORT");
+    }
+    host = endpoint.substr(0, separator);
+    port = endpoint.substr(separator + 1);
   }
-  std::string ip = endpoint.substr(0, separator);
-  std::string portStr = endpoint.substr(separator + 1);
-  addr.sin_port = htons(static_cast<std::uint16_t>(std::stoul(portStr)));
-  if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
-    throw std::runtime_error("Invalid IPv4 address: " + ip);
+
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+  hints.ai_flags = AI_NUMERICHOST | AI_NUMERICSERV;
+  addrinfo* resolved = nullptr;
+  const int status = getaddrinfo(host.c_str(), port.c_str(), &hints, &resolved);
+  if (status != 0 || !resolved) {
+    throw std::runtime_error("Invalid numeric UDP endpoint: " + endpoint);
   }
-  return addr;
+  UdpEndpoint result{};
+  if (resolved->ai_addrlen > sizeof(result.address)) {
+    freeaddrinfo(resolved);
+    throw std::runtime_error("UDP endpoint address is too large");
+  }
+  std::memcpy(&result.address, resolved->ai_addr, resolved->ai_addrlen);
+  result.length = static_cast<socklen_t>(resolved->ai_addrlen);
+  freeaddrinfo(resolved);
+  return result;
 }
 
-ScopedFd createUdpListener(std::uint16_t port, const char* label) {
-  ScopedFd server(socket(AF_INET, SOCK_DGRAM, 0));
+ScopedFd createUdpListener(std::uint16_t port, const char* label, int family = AF_INET) {
+  if (family != AF_INET && family != AF_INET6) {
+    throw std::runtime_error(std::string("Unsupported ") + label + " UDP address family.");
+  }
+  ScopedFd server(socket(family, SOCK_DGRAM, 0));
   if (server.get() < 0) {
     throw std::runtime_error(std::string("Could not create ") + label + " UDP listener socket.");
   }
@@ -5474,11 +5542,21 @@ ScopedFd createUdpListener(std::uint16_t port, const char* label) {
   int receiveBufferBytes = 4 * 1024 * 1024;
   setsockopt(server.get(), SOL_SOCKET, SO_RCVBUF, &receiveBufferBytes, sizeof(receiveBufferBytes));
 
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_ANY);
-  address.sin_port = htons(port);
-  if (bind(server.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+  UdpEndpoint endpoint{};
+  if (family == AF_INET6) {
+    auto* address = reinterpret_cast<sockaddr_in6*>(&endpoint.address);
+    address->sin6_family = AF_INET6;
+    address->sin6_addr = in6addr_any;
+    address->sin6_port = htons(port);
+    endpoint.length = sizeof(sockaddr_in6);
+  } else {
+    auto* address = reinterpret_cast<sockaddr_in*>(&endpoint.address);
+    address->sin_family = AF_INET;
+    address->sin_addr.s_addr = htonl(INADDR_ANY);
+    address->sin_port = htons(port);
+    endpoint.length = sizeof(sockaddr_in);
+  }
+  if (bind(server.get(), reinterpret_cast<sockaddr*>(&endpoint.address), endpoint.length) != 0) {
     throw std::runtime_error(std::string("Could not bind ") + label + " UDP listener on port " + std::to_string(port));
   }
   return server;
@@ -6529,8 +6607,8 @@ void listenUdpAudio(std::uint16_t audioPort,
       while (true) {
         std::vector<std::uint8_t> queuePacket;
         ssize_t received = 0;
-        sockaddr_in peerAddress{};
-        socklen_t peerLength = sizeof(peerAddress);
+        UdpEndpoint peerAddress{};
+        peerAddress.length = sizeof(peerAddress.address);
         if (useQueue) {
           if (!gAudioUdpQueue.pop(queuePacket)) {
             break;
@@ -6545,8 +6623,8 @@ void listenUdpAudio(std::uint16_t audioPort,
                               datagramBuffer.data(),
                               datagramBuffer.size(),
                               0,
-                              reinterpret_cast<sockaddr*>(&peerAddress),
-                              &peerLength);
+                              reinterpret_cast<sockaddr*>(&peerAddress.address),
+                              &peerAddress.length);
           if (received < 0) {
             if (errno == EINTR) continue;
             throw std::runtime_error("SNA1 UDP receive failed.");
@@ -6989,10 +7067,18 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                                const std::string& udpConnect = "") {
   @autoreleasepool {
     try {
-      ScopedFd server = createUdpListener(port, "SNU1 render");
-
       const bool isSingleSocket = (controlPort == 0 && audioPort == 0);
-      std::cout << "SNU1 UDP render listener ready on 0.0.0.0:" << port
+      UdpEndpoint negotiatedPeer{};
+      bool hasNegotiatedPeer = false;
+      if (isSingleSocket && !udpConnect.empty()) {
+        negotiatedPeer = resolveUdpAddress(udpConnect);
+        hasNegotiatedPeer = true;
+      }
+      const int udpFamily = hasNegotiatedPeer ? negotiatedPeer.address.ss_family : AF_INET;
+      ScopedFd server = createUdpListener(port, "SNU1 render", udpFamily);
+
+      std::cout << "SNU1 UDP render listener ready on "
+                << (udpFamily == AF_INET6 ? "[::]:" : "0.0.0.0:") << port
                 << " mediaCrypto=" << boolText(gMediaCryptoEnabled)
                 << " singleSocket=" << boolText(isSingleSocket)
                 << "\n";
@@ -7001,8 +7087,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         
         if (!udpConnect.empty()) {
           try {
-            sockaddr_in hostAddr = resolveUdpAddress(udpConnect);
-            inputSender->setUdpTarget(server.get(), hostAddr);
+            inputSender->setUdpTarget(server.get(), negotiatedPeer);
             std::cout << "P2P Hole Punching: initialized target to " << udpConnect << "\n";
           } catch (const std::exception& e) {
             std::cerr << "P2P Hole Punching target initialization failed: " << e.what() << "\n";
@@ -7041,19 +7126,22 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       std::uint64_t repairFeedbackSequence = 0;
       auto lastMalformedPacketLogAt = std::chrono::steady_clock::time_point{};
       while (maxPackets == 0 || summary.packets < maxPackets) {
-        sockaddr_in peerAddress{};
-        socklen_t peerLength = sizeof(peerAddress);
+        UdpEndpoint peerAddress{};
+        peerAddress.length = sizeof(peerAddress.address);
         const ssize_t received = recvfrom(server.get(),
                                           datagramBuffer.data(),
                                           datagramBuffer.size(),
                                           0,
-                                          reinterpret_cast<sockaddr*>(&peerAddress),
-                                          &peerLength);
+                                          reinterpret_cast<sockaddr*>(&peerAddress.address),
+                                          &peerAddress.length);
         if (received < 0) {
           if (errno == EINTR) continue;
           throw std::runtime_error("UDP receive failed.");
         }
         if (received == 0) continue;
+        if (isSingleSocket && hasNegotiatedPeer && !sameUdpPeer(peerAddress, negotiatedPeer)) {
+          continue;
+        }
 
         const std::uint64_t mediaGeneration = gMediaPeerGeneration.load(std::memory_order_relaxed);
         const bool jitterGenerationReset = jitterBuffer.resetForMediaGeneration(mediaGeneration);
@@ -7073,7 +7161,6 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           const std::uint8_t mtype = datagramBuffer[0];
           if (mtype == 0x00) {
             // Video
-            inputSender->setUdpTarget(server.get(), peerAddress);
             completedPacket = reassembler.push(
                                                 std::span(datagramBuffer.data() + 1, static_cast<std::size_t>(received - 1)),
                                                 packetBytes,

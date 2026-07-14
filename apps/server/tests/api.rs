@@ -374,6 +374,18 @@ async fn devices_and_session_state_machine_enforce_ownership() {
     assert_eq!(
         server
             .request(
+                Method::GET,
+                &format!("/api/v2/sessions/{session_id}/credentials?deviceId={requester_id}"),
+                None,
+                Some(access),
+            )
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        server
+            .request(
                 Method::POST,
                 &format!("/api/v2/sessions/{session_id}/native-ready"),
                 Some(json!({"deviceId": host_id})),
@@ -432,7 +444,9 @@ async fn devices_and_session_state_machine_enforce_ownership() {
     assert_eq!(credentials.1["basePort"], 50_000);
     assert_eq!(
         credentials.1["expiresAt"].as_i64(),
-        accepted.1["acceptedAt"].as_i64().map(|value| value + 60)
+        requester_ready.1["requesterReadyAt"]
+            .as_i64()
+            .map(|value| value + 60)
     );
     let session_token = credentials.1["sessionToken"]
         .as_str()

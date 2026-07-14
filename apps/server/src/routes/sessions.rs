@@ -288,8 +288,12 @@ pub async fn credentials(
     let peer_route_address = peer
         .route_address
         .ok_or_else(|| AppError::Conflict("peer device has no direct route address".into()))?;
-    let accepted_at = session.accepted_at.ok_or(AppError::Internal)?;
-    let expires_at = accepted_at
+    let credential_epoch = session.requester_ready_at.ok_or_else(|| {
+        AppError::Conflict(
+            "requester must announce native readiness before credentials are issued".into(),
+        )
+    })?;
+    let expires_at = credential_epoch
         .checked_add(
             i64::try_from(state.config.session_credential_ttl.as_secs())
                 .map_err(|_| AppError::Internal)?,
@@ -297,7 +301,7 @@ pub async fn credentials(
         .ok_or(AppError::Internal)?;
     if expires_at <= now_unix() {
         return Err(AppError::Conflict(
-            "native session credential has expired; create a new session".into(),
+            "native session credential has expired; announce readiness again".into(),
         ));
     }
     let session_token = derive_session_token(
@@ -305,7 +309,7 @@ pub async fn credentials(
         &session.id,
         &session.requester_device_id,
         &session.host_device_id,
-        accepted_at,
+        credential_epoch,
         expires_at,
     )?;
     audit(
@@ -366,7 +370,8 @@ pub async fn native_ready(
     // Recheck every session invariant in the write itself. A concurrent
     // transition then affects zero rows and is reported as a conflict below.
     let updated = sqlx::query(
-        "UPDATE connection_sessions SET requester_ready_at = COALESCE(requester_ready_at, $1), \
+        "UPDATE connection_sessions SET requester_ready_at = \
+         GREATEST(COALESCE(requester_ready_at + 1, $1), $1), \
          updated_at = $2 WHERE id = $3 AND user_id = $4 AND requester_device_id = $5 \
          AND state = 'accepted' AND selected_transport = 'native'",
     )
@@ -730,7 +735,7 @@ fn derive_session_token(
     session_id: &str,
     requester_device_id: &str,
     host_device_id: &str,
-    accepted_at: i64,
+    credential_epoch: i64,
     expires_at: i64,
 ) -> Result<String, AppError> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| AppError::Internal)?;
@@ -740,7 +745,7 @@ fn derive_session_token(
         mac.update(&length.to_be_bytes());
         mac.update(field.as_bytes());
     }
-    mac.update(&accepted_at.to_be_bytes());
+    mac.update(&credential_epoch.to_be_bytes());
     mac.update(&expires_at.to_be_bytes());
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }

@@ -41,12 +41,15 @@ pub use candidate::{
     TransportProtocol, candidate_priority,
 };
 pub use connectivity::{
-    CandidatePair, PROBE_MAGIC, PROBE_MIN_SIZE, PROBE_TOTAL_SIZE, PROBE_VERSION, PUNCH_SCHEDULE,
+    CandidatePair, PROBE_COMMIT_BIT, PROBE_FINAL_BIT, PROBE_MAGIC, PROBE_MIN_SIZE,
+    PROBE_NOMINATION_BIT, PROBE_RESPONSE_BIT, PROBE_TOTAL_SIZE, PROBE_VERSION, PUNCH_SCHEDULE,
     PairState, ProbeFields, PunchScheduleEntry, build_probe_packet, compute_pair_hash,
     make_pair_id, pair_priority, parse_probe_packet,
 };
 pub use error::P2pError;
-pub use gatherer::{GathererConfig, GatheringEvent, GatheringResult, gather_candidates};
+pub use gatherer::{
+    GathererConfig, GatheringEvent, GatheringResult, gather_candidates, gather_candidates_on_socket,
+};
 pub use interface::{
     InterfaceCost, InterfaceFilter, InterfaceKind, InterfaceRejectReason, NetworkInterface,
     enumerate_interfaces, filter_interface,

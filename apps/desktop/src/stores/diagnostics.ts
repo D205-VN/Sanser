@@ -12,6 +12,65 @@ export interface DiagnosticEvent {
   details?: Record<string, DiagnosticValue>;
 }
 
+export interface NetworkDiagnosticState {
+  checkedAt: string | null;
+  localPort: number | null;
+  fixedHostPort: boolean;
+  stunSucceeded: boolean | null;
+  portMappingSucceeded: boolean | null;
+  ipv6Available: boolean | null;
+  publicEndpoint: string | null;
+  gatheringDurationMs: number | null;
+  candidateCount: number;
+}
+
+interface GatherTelemetry {
+  candidates: Record<string, unknown>[];
+  localPort: number;
+  stunSucceeded: boolean;
+  portMappingSucceeded: boolean;
+  ipv6Available: boolean;
+  publicEndpoint: string | null;
+  durationMs: number;
+}
+
+const EMPTY_NETWORK_DIAGNOSTICS: NetworkDiagnosticState = {
+  checkedAt: null,
+  localPort: null,
+  fixedHostPort: false,
+  stunSucceeded: null,
+  portMappingSucceeded: null,
+  ipv6Available: null,
+  publicEndpoint: null,
+  gatheringDurationMs: null,
+  candidateCount: 0
+};
+
+function createNetworkDiagnosticStore() {
+  const store = writable<NetworkDiagnosticState>({ ...EMPTY_NETWORK_DIAGNOSTICS });
+  return {
+    subscribe: store.subscribe,
+    updateGather(result: GatherTelemetry, fixedHostPort: boolean): void {
+      store.set({
+        checkedAt: new Date().toISOString(),
+        localPort: result.localPort,
+        fixedHostPort,
+        stunSucceeded: result.stunSucceeded,
+        portMappingSucceeded: result.portMappingSucceeded,
+        ipv6Available: result.ipv6Available,
+        publicEndpoint: result.publicEndpoint,
+        gatheringDurationMs: result.durationMs,
+        candidateCount: result.candidates.length
+      });
+    },
+    clear(): void {
+      store.set({ ...EMPTY_NETWORK_DIAGNOSTICS });
+    }
+  };
+}
+
+export const networkDiagnostics = createNetworkDiagnosticStore();
+
 const MAX_EVENTS = 300;
 const SENSITIVE_KEY = /(password|token|credential|secret|authorization|private.?key|database.?url)/i;
 const BEARER_VALUE = /bearer\s+\S+/gi;
@@ -49,9 +108,15 @@ function createDiagnosticStore() {
     },
     clear(): void {
       store.set([]);
+      networkDiagnostics.clear();
     },
     exportJson(): string {
-      return JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), events: get(store) }, null, 2);
+      return JSON.stringify({
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        network: get(networkDiagnostics),
+        events: get(store)
+      }, null, 2);
     }
   };
 }

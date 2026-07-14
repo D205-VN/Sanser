@@ -3,6 +3,7 @@ import { loadNativePreferences, saveNativePreferences } from '../lib/platform';
 import type { NetworkMode, Preferences, QualityProfile, VideoCodec } from '../lib/types';
 
 const STORAGE_KEY = 'sanser.preferences.v2';
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const CONFIGURED_SERVER_URL = (import.meta.env.VITE_SANSER_SERVER_URL as string | undefined)?.trim() ?? '';
 export const SERVER_ENDPOINT_LOCKED = CONFIGURED_SERVER_URL.length > 0;
 
@@ -20,6 +21,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   host: {
     autoOnline: false,
     autoAcceptOwnDevices: false,
+    directUdpPort: 50_000,
     audioEnabled: true,
     inputEnabled: true,
     clipboardEnabled: false
@@ -33,7 +35,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
   locale: 'vi',
   startMinimized: false,
   diagnosticsEnabled: true,
-  pinnedDeviceIds: []
+  pinnedDeviceIds: [],
+  trustedDeviceIds: []
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -71,6 +74,10 @@ function codec(value: unknown): VideoCodec {
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((item): item is string => typeof item === 'string' && item.length > 0))].slice(0, 200);
+}
+
+function deviceIdArray(value: unknown): string[] {
+  return stringArray(value).filter((item) => UUID_PATTERN.test(item));
 }
 
 export function migratePreferences(
@@ -116,6 +123,9 @@ export function migratePreferences(
         host.autoAcceptOwnDevices ?? host.autoAccept,
         DEFAULT_PREFERENCES.host.autoAcceptOwnDevices
       ),
+      directUdpPort: Math.round(
+        pickNumber(host.directUdpPort, DEFAULT_PREFERENCES.host.directUdpPort, 1_024, 65_535)
+      ),
       audioEnabled: pickBoolean(host.audioEnabled, DEFAULT_PREFERENCES.host.audioEnabled),
       inputEnabled: pickBoolean(host.inputEnabled, DEFAULT_PREFERENCES.host.inputEnabled),
       clipboardEnabled: pickBoolean(host.clipboardEnabled, false)
@@ -129,7 +139,8 @@ export function migratePreferences(
     locale: value.locale === 'en' ? 'en' : 'vi',
     startMinimized: pickBoolean(value.startMinimized, false),
     diagnosticsEnabled: pickBoolean(value.diagnosticsEnabled, true),
-    pinnedDeviceIds: stringArray(value.pinnedDeviceIds)
+    pinnedDeviceIds: stringArray(value.pinnedDeviceIds),
+    trustedDeviceIds: deviceIdArray(value.trustedDeviceIds)
   };
 }
 

@@ -4,7 +4,7 @@ use std::{
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -519,6 +519,7 @@ impl EngineManager {
         &self,
         app: &AppHandle,
         request: &LaunchEngineRequest,
+        reserved_socket: Option<Arc<tokio::net::UdpSocket>>,
     ) -> Result<(), DesktopError> {
         if request.kind == EngineKind::LocalServer {
             return Err(DesktopError::Unavailable(
@@ -564,13 +565,16 @@ impl EngineManager {
         }
 
         let debug_log_path = sidecar_debug_log_path(app, request.kind);
-        let mut child = sanitized_command(&path, &args, request, debug_log_path.as_deref())
-            .spawn()
-            .map_err(|error| {
-                let message = error.to_string();
-                state.last_errors.insert(request.kind, message.clone());
-                DesktopError::Process(message)
-            })?;
+        let mut command = sanitized_command(&path, &args, request, debug_log_path.as_deref());
+        // Candidate gathering, STUN and connectivity checks all use this
+        // socket. Release it only after validation/probing and immediately
+        // before the sidecar binds the selected port.
+        drop(reserved_socket);
+        let mut child = command.spawn().map_err(|error| {
+            let message = error.to_string();
+            state.last_errors.insert(request.kind, message.clone());
+            DesktopError::Process(message)
+        })?;
         if let Err(message) = stabilize_child(&mut child) {
             // `try_wait` reaps a child that already exited. If inspecting the
             // child failed instead, make a best-effort cleanup so launch never

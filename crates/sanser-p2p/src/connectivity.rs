@@ -15,6 +15,25 @@ pub const PROBE_MAGIC: [u8; 4] = [0x53, 0x4E, 0x50, 0x32]; // "SNP2"
 /// Current probe protocol version.
 pub const PROBE_VERSION: u8 = 1;
 
+/// High bit used to distinguish a probe response from a request. Request
+/// nonces always keep this bit clear; responses echo the nonce with it set.
+pub const PROBE_RESPONSE_BIT: u32 = 1 << 31;
+
+/// Bit used by the controlling peer to nominate the candidate pair that both
+/// peers must hand to their media engines. Nomination requests keep the
+/// response bit clear; nomination acknowledgements set both bits.
+pub const PROBE_NOMINATION_BIT: u32 = 1 << 30;
+
+/// Final nomination commit bit. The controlled peer waits for this authenticated
+/// commit before returning the pair to its media engine, preventing one-sided
+/// engine startup when the first nomination acknowledgement is lost.
+pub const PROBE_COMMIT_BIT: u32 = 1 << 29;
+
+/// Marks the final nomination confirmation. The controlled peer briefly
+/// lingers after acknowledging this packet so retransmissions are still
+/// answered before the selected socket is handed to the media engine.
+pub const PROBE_FINAL_BIT: u32 = 1 << 28;
+
 /// Minimum probe packet size (magic + version + fields + HMAC).
 pub const PROBE_MIN_SIZE: usize = 64;
 
@@ -94,7 +113,12 @@ pub const PROBE_TOTAL_SIZE: usize = 96;
 /// Builds the pair ID by combining local and remote candidate IDs.
 #[must_use]
 pub fn make_pair_id(local_id: &str, remote_id: &str) -> String {
-    format!("{local_id}:{remote_id}")
+    let (first, second) = if local_id <= remote_id {
+        (local_id, remote_id)
+    } else {
+        (remote_id, local_id)
+    };
+    format!("{}:{first}|{}:{second}", first.len(), second.len())
 }
 
 /// Computes a deterministic 128-bit hash of the pair ID.
@@ -260,7 +284,8 @@ mod tests {
     #[test]
     fn pair_id_combines_both_candidates() {
         let id = make_pair_id("host-1", "srflx-2");
-        assert_eq!(id, "host-1:srflx-2");
+        assert_eq!(id, "6:host-1|7:srflx-2");
+        assert_eq!(id, make_pair_id("srflx-2", "host-1"));
     }
 
     #[test]

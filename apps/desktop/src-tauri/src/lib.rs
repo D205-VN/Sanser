@@ -29,11 +29,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::stop_engine,
             commands::get_engine_status,
             commands::export_diagnostics,
-            commands::p2p_start,
             commands::p2p_stop,
-            commands::p2p_get_state,
-            commands::p2p_get_candidates,
-            commands::p2p_get_metrics,
             commands::p2p_gather,
             commands::p2p_punch
         ])

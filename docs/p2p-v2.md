@@ -1,34 +1,42 @@
 # P2P v2 rollout
 
-Sanser is migrating from the current reachable-IPv4 Native Direct path to one
-authenticated SNV2 UDP component that can be checked across LAN, IPv6, mapped
-ports and STUN-discovered routes. The rollout is intentionally capability-gated:
-the existing LAN path remains available until its replacement passes native
-interoperability and impairment tests.
+Sanser is migrating from the reachable-IPv4 Native Direct path toward one
+authenticated UDP component for discovery, connectivity checks and, eventually,
+the shared SNV2 media wire. Version 2.0.5 integrates the first direct-route
+negotiation path into the desktop shell. That does not yet make the media engine
+an end-to-end SNV2 implementation or guarantee connectivity through every NAT.
 
 The design follows the STUN Binding model in
 [RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) and the candidate/checking
 principles in [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445), without adding
 a second WebRTC media pipeline.
 
-## Implemented foundation
+## Implemented runtime foundation
 
 - `crates/sanser-p2p` provides a bounded candidate schema, deterministic
-  candidate priority, deduplication, verified-route scoring and a strict P2P
-  state machine.
+  candidate and pair priority, deduplication, STUN Binding, authenticated UDP
+  connectivity probes, endpoint locking and a strict P2P state machine.
 - `sanser-network/p2p_v2` exposes those primitives behind an opt-in Cargo
   feature. Legacy route policy remains the default.
-- `native/protocol` contains a bounded STUN Binding wire codec with RFC 5769
-  IPv4/IPv6 vectors. It deliberately performs no socket I/O yet.
-- The authenticated signaling WebSocket accepts `p2p.candidates` and
-  `p2p.gatheringComplete` only for an accepted native session and only between
-  that session's two devices.
+- `native/protocol` contains a separate bounded C++ STUN Binding wire codec with
+  RFC 5769 IPv4/IPv6 vectors. Desktop candidate gathering currently uses the
+  Rust implementation in `sanser-p2p`; the C++ codec is not the owner of the
+  runtime gathering socket.
+- The authenticated signaling WebSocket accepts `p2p.candidates`,
+  `p2p.candidatesAck` and the compatibility `p2p.gatheringComplete` receipt only
+  for an accepted native session and only between that session's two devices.
 - Candidate metadata is validated with the shared crate, bounded to 16 entries
   per message, 64 per peer and 128 per session, retained in memory for at most
   five inactive minutes, and never written to Neon or the durable event log.
-- Native capability probes remain honest: `nativeDirect=true` describes the
-  current three-channel LAN path; `nativeSnv2=false` remains set until the
-  shared SNV2 wire is used end to end.
+- Identical same-generation retries are idempotent and forwarded again without
+  consuming quota. Reusing a candidate ID for a different endpoint or an
+  endpoint under a different ID is rejected.
+- Desktop coordination retries candidate delivery with bounded backoff until a
+  matching-generation receipt arrives. It starts connectivity checks only after
+  it has both remote candidates and acknowledgement of its own batch.
+- Connectivity probes derive their authentication key from the accepted
+  session UUID and opaque session credential, verify the expected peer device,
+  and accept packets only from the endpoint authorized by the candidate pair.
 - Rust and portable C++ now share the fixed 16-byte cumulative ACK plus 64-bit
   SACK-mask contract and golden semantics. It remains a wire primitive only;
   the sidecars do not emit, consume or retry these packets yet.
@@ -62,19 +70,71 @@ Candidate batches use this schema:
 The address above is illustrative. Production gathering supplies the actual
 validated endpoint, while diagnostics mask public addresses by default.
 
-## Socket ownership decision
+Current clients acknowledge a received batch with:
 
-The native sidecar owns the network socket. Tauri manages session lifecycle and
-relays candidate metadata over authenticated local IPC; it must not open a
-separate STUN socket or proxy realtime media. This preserves the NAT mapping
-created for the exact UDP socket that later carries SNV2.
+```json
+{
+  "type": "p2p.candidatesAck",
+  "sessionId": "SESSION_UUID",
+  "targetDeviceId": "DEVICE_UUID",
+  "payload": { "generation": 1 }
+}
+```
 
-During IPv4/IPv6 racing an implementation may temporarily need one socket per
-address family. The invariant is one UDP component and one selected five-tuple,
-not an unsafe assumption that every operating system provides identical
-dual-stack behavior.
+The desktop also sends `p2p.gatheringComplete` with the same generation for
+compatibility with servers deployed before the explicit acknowledgement was
+added. Current servers validate and forward both receipts; acknowledgement
+metadata is not persisted.
 
-## Required gates before runtime STUN and hole punching
+## Socket lifecycle and engine handoff
+
+For one negotiation attempt, the Tauri backend reserves an IPv4 socket and,
+when the OS exposes a usable global address, an IPv6-only socket on the same
+local port. Candidate gathering and authenticated checks reuse those exact
+sockets. Both peers try compatible global IPv6 pairs first, then automatically
+fall back to IPv4 host/STUN/UPnP/manual candidates. A successful check leaves
+the selected socket reserved instead of dropping it immediately.
+
+When `launch_engine` is called, Tauri verifies that the requested engine port is
+the selected socket's port, releases the reservation at the last possible
+moment, and starts the native sidecar so it can bind that same local port. A
+failed or cancelled negotiation calls `p2p_stop` and releases the reservation.
+
+This is a port handoff, not an operating-system socket-handle transfer: the
+sidecar receives the selected endpoint and port, not the Rust socket itself.
+Closing and rebinding the same port narrows the race but cannot prove that every
+OS/NAT will preserve the external mapping. Passing ownership of the live socket
+to the native engine, or moving gathering and checks into that engine, remains a
+production-hardening item.
+
+The Windows host reserves a configurable fixed UDP port (`50000` by default).
+UPnP IGD discovery maps that exact port with a 1.5-second cap. If the router has
+a manual same-port forwarding rule, the coordinator also advertises a bounded
+manual candidate using the STUN-discovered public address and fixed port. PCP
+and NAT-PMP remain disabled until their gateway detection and lease lifecycle
+are production-ready.
+
+## Retry and failure lifecycle
+
+- Candidate exchange has a 20-second overall deadline. Candidate messages are
+  retried with backoff up to two seconds while the peer socket is not ready or a
+  receipt has not arrived.
+- The Windows host waits for `requesterReadyAt` before starting negotiation, so
+  the macOS requester can announce readiness first. Signaling retry covers the
+  remaining WebSocket-registration race.
+- A failed P2P attempt no longer disconnects the already accepted server
+  session. Both peers retry up to three times with a bounded delay, then expose
+  **Retry connection** / **Retry native stream** without entering a tight loop.
+- Each requester retry publishes a new `requesterReadyAt` negotiation generation.
+  Credentials are derived from that generation rather than the original accept
+  time, and the Windows host resets its bounded retry counter when the generation
+  changes. An expired credential is therefore replaced without recreating the
+  accepted session.
+- A manual stop or disconnect still ends the session and stops the native
+  engine. A successful route selection is not reported as a connected media
+  stream until engine launch succeeds.
+
+## Remaining gates before end-to-end SNV2
 
 1. Add explicit start-of-frame or fragment-index/count semantics. A receiver
    must never complete a frame when its first fragment is missing.
@@ -86,16 +146,17 @@ dual-stack behavior.
    video decode cannot block audio, keepalive or input acknowledgements.
 5. Add one native TX scheduler with pacing; capture/audio workers must not burst
    independently onto a shared socket.
-6. Run STUN Binding transactions and connectivity probes from that same native
-   socket, then add nomination, endpoint locking, keepalive and rekey.
+6. Replace the close/rebind port handoff with live native socket ownership, then
+   carry the selected route through keepalive, migration and rekey without
+   falling back to unauthenticated endpoint changes.
 7. Pass Rust/C++ golden vectors, loss/reorder/replay tests, Windows CI and a real
    Windows-to-macOS hardware test before setting `nativeSnv2=true`.
 
 ## No-relay limitation
 
-The target P2P v2 policy does not carry media through the Sanser server and does
-not require Tailscale. PCP, NAT-PMP, UPnP and UDP hole punching can improve
-direct-connect success, but a no-TURN product cannot guarantee a connection
-through every symmetric NAT, CGNAT, double-NAT or restrictive firewall. Failure
-must be explicit, with manual port forwarding offered only through the same
-authenticated session and encrypted SNV2 handshake.
+The P2P v2 path does not carry media through the Sanser server and does not
+require Tailscale. It gathers global IPv6 plus IPv4 host, STUN, UPnP and fixed
+manual-forward candidates. PCP, NAT-PMP and TURN relay are not enabled. Manual
+forwarding can bypass many symmetric-NAT cases when the home router owns a
+public IPv4 address, but cannot bypass ISP CGNAT, blocked UDP or an upstream NAT
+the user cannot configure. Failure remains explicit after bounded retries.

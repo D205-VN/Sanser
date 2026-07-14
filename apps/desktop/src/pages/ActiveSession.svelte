@@ -12,8 +12,13 @@
 
   let { runtime }: { runtime: RuntimeStatus } = $props();
   let localError = $state<string | null>(null);
+  let failedP2pSessionId = $state<string | null>(null);
+  let p2pRetryCount = 0;
+  let p2pRetryAfter = 0;
+  let p2pRetrySessionId: string | null = null;
   let componentActive = false;
   let refreshInFlight = false;
+  let nativePreparationInFlight = $state(false);
 
   const sessionState = $derived($connection.session);
   const metrics = $derived($connection.metrics);
@@ -21,9 +26,7 @@
     sessionState?.status === 'accepted' &&
       runtime.capabilities.clientEngine.state === 'available' &&
       runtime.capabilities.nativeDirect.state === 'available' &&
-      sessionState.address !== undefined &&
-      sessionState.port !== undefined &&
-      sessionState.sessionToken !== undefined &&
+      sessionState.transport === 'native' &&
       sessionState.networkMode !== 'relay'
   );
 
@@ -36,6 +39,10 @@
     }
   }
 
+  function udpEndpoint(address: string, port: number): string {
+    return address.includes(':') ? `[${address}]:${port}` : `${address}:${port}`;
+  }
+
   async function launchNativeClient(target: ConnectionSession): Promise<boolean> {
     if (
       $connection.engineRunning ||
@@ -46,6 +53,12 @@
       !target.port ||
       !target.sessionToken
     ) return false;
+    if (p2pRetrySessionId !== target.id) {
+      p2pRetrySessionId = target.id;
+      p2pRetryCount = 0;
+      p2pRetryAfter = 0;
+      failedP2pSessionId = null;
+    }
     const size = resolutionSize();
     connection.setBusy(true);
     localError = null;
@@ -62,7 +75,8 @@
         target.id,
         localDeviceId,
         peerDeviceId,
-        false // client is controlled
+        false, // client is controlled
+        target.sessionToken
       );
       diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
 
@@ -81,17 +95,24 @@
         inputEnabled: $preferences.host.inputEnabled,
         relativeMouse: $preferences.input.mouseMode === 'relative',
         sessionToken: target.sessionToken,
-        udpConnect: `${p2pResult.remoteAddress}:${p2pResult.remotePort}`
+        udpConnect: udpEndpoint(p2pResult.remoteAddress, p2pResult.remotePort)
       });
       if (!componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') {
         await stopEngine('client').catch(() => undefined);
         return false;
       }
       connection.setEngineRunning(true);
+      failedP2pSessionId = null;
+      p2pRetryCount = 0;
+      p2pRetryAfter = 0;
+      p2pRetrySessionId = target.id;
       diagnostics.add({ level: 'info', category: 'engine', message: 'Native macOS client started' });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unable to start native client';
+      p2pRetryCount += 1;
+      p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
+      failedP2pSessionId = p2pRetryCount >= 3 ? target.id : null;
       localError = message;
       connection.setError(message);
       return false;
@@ -103,15 +124,43 @@
   async function startNativeClient(target = sessionState): Promise<void> {
     const client = session.client();
     const localDeviceId = $presence.deviceId;
-    if (!target || !client || !localDeviceId) return;
+    if (!target || !client || !localDeviceId || nativePreparationInFlight) return;
+    nativePreparationInFlight = true;
     try {
-      await client.markNativeReady(target.id, localDeviceId);
-      diagnostics.add({ level: 'info', category: 'session', message: 'macOS listener is ready for the host' });
+      const ready = await client.markNativeReady(target.id, localDeviceId);
+      const credentials = await client.sessionCredentials(target.id, localDeviceId);
+      connection.authorizeNative(credentials);
+      diagnostics.add({
+        level: 'info',
+        category: 'session',
+        message: 'macOS opened a fresh native negotiation generation',
+        details: { sessionId: target.id, requesterReadyAt: ready.requesterReadyAt ?? null }
+      });
+      await launchNativeClient({
+        ...target,
+        requesterReadyAt: ready.requesterReadyAt,
+        address: credentials.peerRouteAddress,
+        port: credentials.basePort,
+        sessionToken: credentials.sessionToken,
+        credentialExpiresAt: credentials.expiresAt
+      });
     } catch (error) {
-      connection.setError(error instanceof Error ? error.message : 'Unable to announce native listener readiness');
-      return;
+      const message = error instanceof Error ? error.message : 'Unable to prepare a fresh native session';
+      localError = message;
+      connection.setError(message);
+    } finally {
+      nativePreparationInFlight = false;
     }
-    if (!(await launchNativeClient(target))) return;
+  }
+
+  async function retryNativeClient(): Promise<void> {
+    failedP2pSessionId = null;
+    p2pRetryCount = 0;
+    p2pRetryAfter = 0;
+    p2pRetrySessionId = sessionState?.id ?? null;
+    localError = null;
+    connection.setError(null);
+    await startNativeClient();
   }
 
   async function disconnect(): Promise<void> {
@@ -122,6 +171,10 @@
       if ($connection.engineRunning) await stopEngine('client');
       const client = session.client();
       if (client) await client.disconnectSession(sessionState.id);
+      failedP2pSessionId = null;
+      p2pRetryCount = 0;
+      p2pRetryAfter = 0;
+      p2pRetrySessionId = null;
       connection.clear();
       diagnostics.add({ level: 'info', category: 'session', message: 'Session disconnected' });
     } catch (error) {
@@ -178,20 +231,9 @@
         refreshed?.status === 'accepted' &&
         refreshed.transport === 'native' &&
         localDeviceId &&
-        !refreshed.sessionToken
+        failedP2pSessionId !== refreshed.id &&
+        Date.now() >= p2pRetryAfter
       ) {
-        const credentials = await client.sessionCredentials(refreshed.id, localDeviceId);
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-        if (!componentActive || $connection.session?.id !== refreshed.id) return;
-        connection.authorizeNative(credentials);
-        await startNativeClient({
-          ...refreshed,
-          address: credentials.peerRouteAddress,
-          port: credentials.basePort,
-          sessionToken: credentials.sessionToken,
-          credentialExpiresAt: credentials.expiresAt
-        });
-      } else if (refreshed?.status === 'accepted' && refreshed.transport === 'native' && refreshed.sessionToken) {
         await startNativeClient(refreshed);
       }
     } catch (error) {
@@ -223,7 +265,7 @@
     <div class="session-actions">
       <button class="button small" onclick={fullscreen}>Fullscreen</button>
       <button class="button small" disabled title="Runtime audio control is planned">Audio · Planned</button>
-      <button class="button small danger" disabled={!sessionState || $connection.busy} onclick={disconnect}>Disconnect</button>
+      <button class="button small danger" disabled={!sessionState || $connection.busy || nativePreparationInFlight} onclick={disconnect}>Disconnect</button>
     </div>
   </div>
 
@@ -234,9 +276,9 @@
       <div class="native-stage-message">
         <span class="capture-dot waiting"></span>
         <h2>{sessionState.status === 'pending' ? 'Waiting for host approval' : sessionState.status === 'accepted' ? 'Host accepted the session' : `Session ${sessionState.status}`}</h2>
-        <p>{nativeReady ? 'The authenticated native endpoint is ready.' : sessionState.networkMode === 'relay' ? 'Relay requires the planned native WebRTC engine; native direct never runs through TURN.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for a negotiated media endpoint.'}</p>
-        <button class="button primary" disabled={!nativeReady || $connection.busy} onclick={() => startNativeClient()}>Start native stream</button>
-        {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">Media negotiation unavailable in this build</span>{/if}
+        <p>{nativeReady ? 'Ready to create a fresh authenticated native endpoint.' : sessionState.networkMode === 'relay' ? 'Relay requires the planned native WebRTC engine; native direct never runs through TURN.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for a negotiated media endpoint.'}</p>
+        <button class="button primary" disabled={!nativeReady || $connection.busy || nativePreparationInFlight} onclick={retryNativeClient}>{nativePreparationInFlight ? 'Preparing fresh session…' : failedP2pSessionId === sessionState.id ? 'Retry native stream' : 'Start native stream'}</button>
+        {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">Native transport is unavailable on one endpoint</span>{/if}
       </div>
     {:else}
       <div class="native-stage-message"><h2>No active session</h2><p>Choose an online computer from Computers. Sanser will request a route without starting capture early.</p></div>

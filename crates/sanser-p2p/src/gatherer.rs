@@ -5,7 +5,8 @@
 //! mapping tasks in parallel) is added in Phase 3.
 
 use crate::candidate::{
-    CandidateType, MappingProtocol, P2pCandidate, TransportProtocol, candidate_priority,
+    CandidateSet, CandidateType, MappingProtocol, P2pCandidate, TransportProtocol,
+    candidate_priority,
 };
 use crate::error::P2pError;
 use crate::interface::{InterfaceCost, InterfaceFilter, enumerate_interfaces, filter_interface};
@@ -84,7 +85,113 @@ fn is_public_ipv6(address: IpAddr) -> bool {
     }
 }
 
-async fn resolve_stun_server(url: &str) -> Option<SocketAddr> {
+const fn interface_preference(cost: InterfaceCost) -> u16 {
+    match cost {
+        InterfaceCost::Low => u16::MAX,
+        InterfaceCost::Medium => 32_768,
+        InterfaceCost::High => 16_384,
+    }
+}
+
+fn host_candidate(
+    interface: &crate::interface::NetworkInterface,
+    port: u16,
+) -> Result<Option<P2pCandidate>, P2pError> {
+    let candidate_type = if is_public_ipv6(interface.address) {
+        CandidateType::Ipv6Global
+    } else {
+        CandidateType::Host
+    };
+    let clean_ip = interface
+        .address
+        .to_string()
+        .replace('.', "-")
+        .replace(':', "-");
+    let priority = candidate_priority(
+        candidate_type,
+        MappingProtocol::None,
+        interface_preference(interface.cost),
+    )
+    .map_err(|error| P2pError::Internal {
+        reason: format!("failed to compute candidate priority: {error}"),
+    })?;
+    let candidate = P2pCandidate {
+        id: format!("host-{clean_ip}-{port}"),
+        candidate_type,
+        address: interface.address,
+        port,
+        protocol: TransportProtocol::Udp,
+        interface_index: Some(interface.index),
+        mapping_protocol: MappingProtocol::None,
+        priority,
+        foundation: format!("host-{clean_ip}"),
+    };
+    Ok(candidate.validate().is_ok().then_some(candidate))
+}
+
+fn server_reflexive_candidate(
+    binding: &crate::stun::StunBinding,
+    interface_index: Option<u32>,
+    preference: u16,
+) -> Result<Option<P2pCandidate>, P2pError> {
+    let clean_ip = binding
+        .mapped_address
+        .to_string()
+        .replace('.', "-")
+        .replace(':', "-");
+    let priority = candidate_priority(
+        CandidateType::ServerReflexive,
+        MappingProtocol::None,
+        preference,
+    )
+    .map_err(|error| P2pError::Internal {
+        reason: format!("failed to compute server-reflexive priority: {error}"),
+    })?;
+    let candidate = P2pCandidate {
+        id: format!("srflx-{clean_ip}-{}", binding.mapped_port),
+        candidate_type: CandidateType::ServerReflexive,
+        address: binding.mapped_address,
+        port: binding.mapped_port,
+        protocol: TransportProtocol::Udp,
+        interface_index,
+        mapping_protocol: MappingProtocol::None,
+        priority,
+        foundation: format!("srflx-{clean_ip}"),
+    };
+    Ok(candidate.validate().is_ok().then_some(candidate))
+}
+
+fn port_mapped_candidate(
+    external: SocketAddr,
+    interface_index: Option<u32>,
+    preference: u16,
+) -> Result<Option<P2pCandidate>, P2pError> {
+    let clean_ip = external
+        .ip()
+        .to_string()
+        .replace('.', "-")
+        .replace(':', "-");
+    let priority = candidate_priority(CandidateType::PortMapped, MappingProtocol::Upnp, preference)
+        .map_err(|error| P2pError::Internal {
+            reason: format!("failed to compute UPnP candidate priority: {error}"),
+        })?;
+    let candidate = P2pCandidate {
+        id: format!("upnp-{clean_ip}-{}", external.port()),
+        candidate_type: CandidateType::PortMapped,
+        address: external.ip(),
+        port: external.port(),
+        protocol: TransportProtocol::Udp,
+        interface_index,
+        mapping_protocol: MappingProtocol::Upnp,
+        priority,
+        foundation: format!("upnp-{clean_ip}"),
+    };
+    Ok(candidate.validate().is_ok().then_some(candidate))
+}
+
+const MAX_SIGNAL_CANDIDATES: usize = 16;
+
+async fn resolve_stun_server(url: &str, ipv4: bool) -> Option<SocketAddr> {
     let host_port = if let Some(stripped) = url.strip_prefix("stun:") {
         stripped
     } else {
@@ -96,7 +203,7 @@ async fn resolve_stun_server(url: &str) -> Option<SocketAddr> {
         format!("{host_port}:3478")
     };
     if let Ok(mut addrs) = tokio::net::lookup_host(&host_port).await {
-        addrs.next()
+        addrs.find(|address| address.is_ipv4() == ipv4)
     } else {
         None
     }
@@ -157,48 +264,10 @@ pub async fn gather_candidates(
             Err(_) => continue,
         };
 
-        let is_v6_global = is_public_ipv6(iface.address);
-        let cand_type = if is_v6_global {
-            CandidateType::Ipv6Global
-        } else {
-            CandidateType::Host
-        };
-
-        let clean_ip = iface
-            .address
-            .to_string()
-            .replace('.', "-")
-            .replace(':', "-");
-        let id = format!("host-{clean_ip}-{}", local_addr.port());
-        let foundation = format!("host-{clean_ip}");
-        let preference = match iface.cost {
-            InterfaceCost::Low => 65535,
-            InterfaceCost::Medium => 32768,
-            InterfaceCost::High => 16384,
-        };
-
-        let priority =
-            candidate_priority(cand_type, MappingProtocol::None, preference).map_err(|error| {
-                P2pError::Internal {
-                    reason: format!("Failed to compute candidate priority: {error}"),
-                }
-            })?;
-
-        let candidate = P2pCandidate {
-            id,
-            candidate_type: cand_type,
-            address: iface.address,
-            port: local_addr.port(),
-            protocol: TransportProtocol::Udp,
-            interface_index: Some(iface.index),
-            mapping_protocol: MappingProtocol::None,
-            priority,
-            foundation,
-        };
-
-        if candidate.validate().is_err() {
+        let preference = interface_preference(iface.cost);
+        let Some(candidate) = host_candidate(&iface, local_addr.port())? else {
             continue;
-        }
+        };
 
         let _ = tx
             .send(GatheringEvent::CandidateFound(candidate.clone()))
@@ -214,7 +283,12 @@ pub async fn gather_candidates(
     // 4. Resolve STUN servers
     let mut resolved_stun_servers = Vec::new();
     for url in &config.stun_servers {
-        if let Some(addr) = resolve_stun_server(url).await {
+        if let Some(addr) = resolve_stun_server(url, true).await {
+            resolved_stun_servers.push(addr);
+        }
+        if config.ipv6_enabled
+            && let Some(addr) = resolve_stun_server(url, false).await
+        {
             resolved_stun_servers.push(addr);
         }
     }
@@ -224,10 +298,15 @@ pub async fn gather_candidates(
     let mut stun_query_count = 0;
 
     for (socket, iface, preference) in active_sockets {
-        if resolved_stun_servers.is_empty() {
+        let socket_is_ipv4 = socket.local_addr().is_ok_and(|address| address.is_ipv4());
+        let stun_addrs = resolved_stun_servers
+            .iter()
+            .copied()
+            .filter(|address| address.is_ipv4() == socket_is_ipv4)
+            .collect::<Vec<_>>();
+        if stun_addrs.is_empty() {
             continue;
         }
-        let stun_addrs = resolved_stun_servers.clone();
         let cands_tx = cands_tx.clone();
         stun_query_count += 1;
 
@@ -237,34 +316,11 @@ pub async fn gather_candidates(
                     .await
                 {
                     Ok(binding) => {
-                        let clean_ip = binding
-                            .mapped_address
-                            .to_string()
-                            .replace('.', "-")
-                            .replace(':', "-");
-                        let id = format!("srflx-{clean_ip}-{}", binding.mapped_port);
-                        let foundation = format!("srflx-{clean_ip}");
-
-                        if let Ok(priority) = candidate_priority(
-                            CandidateType::ServerReflexive,
-                            MappingProtocol::None,
-                            preference,
-                        ) {
-                            let candidate = P2pCandidate {
-                                id,
-                                candidate_type: CandidateType::ServerReflexive,
-                                address: binding.mapped_address,
-                                port: binding.mapped_port,
-                                protocol: TransportProtocol::Udp,
-                                interface_index: Some(iface.index),
-                                mapping_protocol: MappingProtocol::None,
-                                priority,
-                                foundation,
-                            };
-                            if candidate.validate().is_ok() {
-                                let _ = cands_tx.send(candidate).await;
-                                break;
-                            }
+                        if let Ok(Some(candidate)) =
+                            server_reflexive_candidate(&binding, Some(iface.index), preference)
+                        {
+                            let _ = cands_tx.send(candidate).await;
+                            break;
                         }
                     }
                     Err(_) => {
@@ -329,6 +385,202 @@ pub async fn gather_candidates(
     Ok(result)
 }
 
+/// Gathers same-family host and server-reflexive candidates on an already-bound UDP
+/// socket. The caller retains ownership of that exact socket for connectivity
+/// checks, preserving the NAT mapping created by STUN.
+///
+/// # Errors
+///
+/// Returns an error when the socket is not usable, no matching local
+/// interface can be advertised, or candidate construction fails.
+pub async fn gather_candidates_on_socket(
+    config: GathererConfig,
+    socket: &UdpSocket,
+    tx: mpsc::Sender<GatheringEvent>,
+) -> Result<GatheringResult, P2pError> {
+    if config.generation == 0 {
+        return Err(P2pError::Internal {
+            reason: "candidate generation must be non-zero".into(),
+        });
+    }
+    let started = std::time::Instant::now();
+    let local = socket
+        .local_addr()
+        .map_err(|error| P2pError::SocketBindFailed {
+            reason: error.to_string(),
+        })?;
+    if local.port() == 0 {
+        return Err(P2pError::SocketBindFailed {
+            reason: "P2P v2 requires a bound UDP socket".into(),
+        });
+    }
+
+    let socket_is_ipv4 = local.is_ipv4();
+
+    let mut interfaces = enumerate_interfaces()?
+        .into_iter()
+        .filter(|interface| {
+            interface.address.is_ipv4() == socket_is_ipv4
+                && (socket_is_ipv4 || is_public_ipv6(interface.address))
+                && matches!(filter_interface(interface), InterfaceFilter::Accept)
+        })
+        .collect::<Vec<_>>();
+    interfaces.sort_by_key(|interface| (interface.cost, interface.index, interface.address));
+    if interfaces.is_empty() {
+        return Err(P2pError::NoLocalInterface);
+    }
+
+    let mut result = GatheringResult {
+        generation: config.generation,
+        candidates: Vec::new(),
+        stun_succeeded: false,
+        port_mapping_succeeded: false,
+        duration_ms: 0,
+    };
+    let mut candidate_set = CandidateSet::new(512).map_err(|error| P2pError::Internal {
+        reason: format!("failed to initialize the candidate set: {error}"),
+    })?;
+    for interface in &interfaces {
+        if let Some(candidate) = host_candidate(interface, local.port())? {
+            candidate_set
+                .insert(candidate)
+                .map_err(|error| P2pError::Internal {
+                    reason: format!("failed to collect a host candidate: {error}"),
+                })?;
+        }
+    }
+    if candidate_set.is_empty() {
+        return Err(P2pError::NoCandidateGathered);
+    }
+
+    let stun_servers = async {
+        for url in &config.stun_servers {
+            let Some(server) = resolve_stun_server(url, socket_is_ipv4).await else {
+                continue;
+            };
+            if let Ok(binding) =
+                crate::stun::query_stun(socket, server, Duration::from_millis(750)).await
+            {
+                let preferred = &interfaces[0];
+                if let Some(candidate) = server_reflexive_candidate(
+                    &binding,
+                    Some(preferred.index),
+                    interface_preference(preferred.cost),
+                )? {
+                    return Ok::<Option<P2pCandidate>, P2pError>(Some(candidate));
+                }
+            }
+        }
+        Ok(None)
+    };
+
+    let upnp_mapping = async {
+        if !config.port_mapping_enabled || !socket_is_ipv4 {
+            return None;
+        }
+        let search_options = igd_next::SearchOptions {
+            timeout: Some(Duration::from_millis(1_200)),
+            single_search_timeout: Some(Duration::from_millis(350)),
+            ..Default::default()
+        };
+        let gateway = igd_next::aio::tokio::search_gateway(search_options)
+            .await
+            .ok()?;
+        let route_probe = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+        route_probe.connect(gateway.addr).await.ok()?;
+        let internal_ip = route_probe.local_addr().ok()?.ip();
+        let internal = SocketAddr::new(internal_ip, local.port());
+        let external = gateway
+            .get_any_address(
+                igd_next::PortMappingProtocol::UDP,
+                internal,
+                7_200,
+                "Sanser P2P",
+            )
+            .await
+            .ok()?;
+        Some((external, internal_ip))
+    };
+
+    let (stun_result, upnp_result) = tokio::join!(
+        tokio::time::timeout(config.total_timeout, stun_servers),
+        tokio::time::timeout(Duration::from_millis(1_500), upnp_mapping)
+    );
+    if let Ok(Ok(Some(candidate))) = stun_result {
+        result.stun_succeeded = true;
+        candidate_set
+            .insert(candidate)
+            .map_err(|error| P2pError::Internal {
+                reason: format!("failed to collect a STUN candidate: {error}"),
+            })?;
+    }
+    if let Ok(Some((external, internal_ip))) = upnp_result
+        && let Some(mapped_interface) = interfaces.iter().find(|item| item.address == internal_ip)
+        && let Some(candidate) = port_mapped_candidate(
+            external,
+            Some(mapped_interface.index),
+            interface_preference(mapped_interface.cost),
+        )?
+    {
+        result.port_mapping_succeeded = true;
+        candidate_set
+            .insert(candidate)
+            .map_err(|error| P2pError::Internal {
+                reason: format!("failed to collect a UPnP candidate: {error}"),
+            })?;
+    }
+    let ordered = candidate_set.ordered_by_priority();
+    let external = ordered
+        .iter()
+        .find(|candidate| {
+            matches!(
+                candidate.candidate_type,
+                CandidateType::ServerReflexive | CandidateType::PortMapped
+            )
+        })
+        .map(|candidate| (*candidate).clone());
+    result.candidates = ordered
+        .into_iter()
+        .take(MAX_SIGNAL_CANDIDATES)
+        .cloned()
+        .collect();
+    if let Some(external) = external
+        && !result
+            .candidates
+            .iter()
+            .any(|candidate| candidate.endpoint() == external.endpoint())
+    {
+        if result.candidates.len() == MAX_SIGNAL_CANDIDATES {
+            result.candidates.pop();
+        }
+        result.candidates.push(external);
+        result.candidates.sort_unstable_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    }
+    for candidate in &result.candidates {
+        let _ = tx
+            .send(GatheringEvent::CandidateFound(candidate.clone()))
+            .await;
+    }
+    let _ = tx
+        .send(GatheringEvent::StunComplete {
+            success: result.stun_succeeded,
+        })
+        .await;
+    let _ = tx
+        .send(GatheringEvent::PortMappingComplete {
+            success: result.port_mapping_succeeded,
+        })
+        .await;
+    result.duration_ms = started.elapsed().as_millis() as u64;
+    let _ = tx.send(GatheringEvent::Complete(result.clone())).await;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +627,33 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GatheringEvent::Complete(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn single_socket_gathering_preserves_the_bound_media_port() {
+        let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let config = GathererConfig {
+            stun_servers: vec!["127.0.0.1:9".to_owned()],
+            total_timeout: Duration::from_millis(30),
+            port_mapping_enabled: false,
+            ipv6_enabled: false,
+            generation: 1,
+        };
+        let (tx, mut rx) = mpsc::channel(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let result = gather_candidates_on_socket(config, &socket, tx)
+            .await
+            .unwrap();
+        drain.await.unwrap();
+
+        assert!(!result.candidates.is_empty());
+        assert!(
+            result
+                .candidates
+                .iter()
+                .all(|candidate| candidate.port == port)
+        );
+        assert_eq!(socket.local_addr().unwrap().port(), port);
     }
 }

@@ -200,7 +200,7 @@
         <article class="card card-body settings-card stack">
           <div><h2 class="card-title">Network</h2><p class="card-subtitle">No Tailscale or external VPN is installed or required.</p></div>
           <div class="network-options">
-            {#each [['auto', 'Auto', 'LAN native direct → WebRTC fallback when available.'], ['direct', 'Direct', 'Never use TURN; NAT or firewall may block the route.'], ['relay', 'Relay', 'Require TURN; native direct is disabled.']] as mode}
+            {#each [['auto', 'Auto', 'Global IPv6 → LAN/IPv4 STUN → UPnP/manual forward.'], ['direct', 'Direct', 'Use native UDP only; never send media through TURN.'], ['relay', 'Relay', 'Require TURN; native direct is disabled.']] as mode}
               <button class="network-option" class:active={$preferences.networkMode === mode[0]} disabled={mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available'} title={mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available' ? runtime.capabilities.webRtc.reason ?? 'Native WebRTC relay is unavailable' : undefined} onclick={() => saveRoot({ networkMode: mode[0] as NetworkMode })}><strong>{mode[1]}{mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available' ? ' · Unavailable' : ''}</strong><span>{mode[2]}</span></button>
             {/each}
           </div>
@@ -210,7 +210,33 @@
           <div class="notice warning">Relay is useful only when the server returns valid short-lived TURN credentials. Permanent TURN secrets are never stored in preferences.</div>
         </article>
       {:else if active === 'host'}
-        <article class="card card-body settings-card stack"><div><h2 class="card-title">Host</h2><p class="card-subtitle">Defaults for authenticated Windows host sessions.</p></div><Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="System audio" description="Enable WASAPI loopback on new sessions." onchange={(value) => saveHost({ audioEnabled: value })} /><Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Remote input" description="Open the authenticated control backchannel." onchange={(value) => saveHost({ inputEnabled: value })} /><Toggle checked={false} disabled label="Lock after disconnect" description="Planned: OS session lifecycle integration is not available." onchange={() => undefined} /></article>
+        <article class="card card-body settings-card stack">
+          <div><h2 class="card-title">Host</h2><p class="card-subtitle">Defaults for authenticated Windows host sessions.</p></div>
+          <div class="field">
+            <label for="direct-udp-port">Direct UDP port</label>
+            <input
+              id="direct-udp-port"
+              class="input"
+              type="number"
+              min="1024"
+              max="65535"
+              step="1"
+              value={$preferences.host.directUdpPort}
+              onchange={(event) => saveHost({ directUdpPort: Number((event.currentTarget as HTMLInputElement).value) })}
+            />
+            <small>Keep this port fixed so UPnP or a manual router rule remains valid.</small>
+          </div>
+          <div class="notice">
+            Manual setup: reserve the Windows PC's LAN address, forward external UDP
+            <strong>{$preferences.host.directUdpPort}</strong> to the same internal UDP port, and allow Sanser through Windows Firewall.
+            Do not forward TCP and do not expose the PostgreSQL/Neon connection.
+          </div>
+          <Toggle checked={$preferences.host.autoOnline} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Bring host online automatically" description="Advertise this Windows host after Sanser starts and restores your signed-in account." onchange={(value) => saveHost({ autoOnline: value })} />
+          <Toggle checked={$preferences.host.autoAcceptOwnDevices} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Auto accept trusted devices" description={`Accept only requester identities trusted from Computers on this Windows host (${$preferences.trustedDeviceIds.length}).`} onchange={(value) => saveHost({ autoAcceptOwnDevices: value })} />
+          <Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="System audio" description="Enable WASAPI loopback on new sessions." onchange={(value) => saveHost({ audioEnabled: value })} />
+          <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Remote input" description="Open the authenticated control backchannel." onchange={(value) => saveHost({ inputEnabled: value })} />
+          <Toggle checked={false} disabled label="Lock after disconnect" description="Planned: OS session lifecycle integration is not available." onchange={() => undefined} />
+        </article>
       {:else if active === 'security'}
         <article class="card card-body settings-card stack"><div><h2 class="card-title">Security</h2><p class="card-subtitle">Capabilities remain narrow and native arguments are allowlisted.</p></div><CapabilityNotice title="OS secure storage" capability={runtime.capabilities.secureStorage} /><div class="security-list"><div><strong>Content Security Policy</strong><span>Local scripts only; remote content and frames blocked.</span></div><div><strong>Sidecars</strong><span>Only the native host and client engines for this platform.</span></div><div><strong>Session authentication</strong><span>Session-scoped proof; Relay never falls back to an unauthenticated native route.</span></div></div><form class="password-form" onsubmit={changePassword}><h3>Change password</h3><p>All signed-in sessions are revoked after this change.</p><div class="field"><label for="current-password">Current password</label><input id="current-password" class="input" type="password" bind:value={currentPassword} required minlength="12" maxlength="256" autocomplete="current-password" /></div><div class="grid two"><div class="field"><label for="new-password">New password</label><input id="new-password" class="input" type="password" bind:value={newPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div><div class="field"><label for="confirm-password">Confirm new password</label><input id="confirm-password" class="input" type="password" bind:value={confirmPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div></div><button class="button" type="submit" disabled={securityBusy}>{securityBusy ? 'Updating…' : 'Update password'}</button></form></article>
       {:else if active === 'diagnostics'}
