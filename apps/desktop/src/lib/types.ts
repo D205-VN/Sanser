@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.0.6' as const;
+export const SANSER_VERSION = '2.0.7' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
@@ -241,6 +241,8 @@ export interface LaunchEngineRequest {
   sessionToken?: string;
   udpConnect?: string;
   udpBindPort?: number;
+  /** Use the authenticated local UDP-to-WSS fallback bridge. */
+  relay?: boolean;
 }
 
 export interface DiagnosticsExport {

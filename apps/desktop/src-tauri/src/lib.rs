@@ -2,6 +2,7 @@ mod commands;
 mod engine;
 mod error;
 mod models;
+mod relay;
 mod storage;
 
 use engine::EngineManager;
@@ -17,6 +18,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineManager::default())
         .manage(commands::P2pSessionManager::default())
+        .manage(relay::RelayManager::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_status,
             commands::load_preferences,
@@ -31,7 +33,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::export_diagnostics,
             commands::p2p_stop,
             commands::p2p_gather,
-            commands::p2p_punch
+            commands::p2p_punch,
+            relay::relay_start,
+            relay::relay_stop
         ])
         .run(tauri::generate_context!())?;
     Ok(())

@@ -1,6 +1,6 @@
 [package]
 name = "sanser-desktop"
-version = "2.0.6"
+version = "2.0.7"
 description = "Sanser low-latency remote desktop shell"
 edition.workspace = true
 license.workspace = true
@@ -18,7 +18,10 @@ path = "src/main.rs"
 tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
+chacha20poly1305 = "0.10.1"
+futures-util = "0.3"
 keyring = "3.6.3"
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -30,7 +33,8 @@ thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 sanser-p2p = { path = "../../../crates/sanser-p2p" }
 
 [lints]

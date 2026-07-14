@@ -91,6 +91,31 @@ export async function getLocalRouteAddress(serverUrl: string): Promise<string | 
   return invoke<string | null>('get_local_route_address', { serverUrl });
 }
 
+export interface RelayStartRequest {
+  kind: Extract<EngineKind, 'host' | 'client'>;
+  serverUrl: string;
+  sessionId: string;
+  deviceId: string;
+  peerDeviceId: string;
+  accessToken: string;
+  sessionCredential: string;
+  preferredEnginePort?: number;
+}
+
+export interface RelayStartResult {
+  enginePort: number;
+  proxyPort: number;
+}
+
+export async function startRelay(request: RelayStartRequest): Promise<RelayStartResult> {
+  if (!isTauriRuntime()) throw new Error('Media relay requires the Sanser desktop app');
+  return invoke<RelayStartResult>('relay_start', { request });
+}
+
+export async function stopRelay(kind: Extract<EngineKind, 'host' | 'client'>): Promise<void> {
+  if (isTauriRuntime()) await invoke('relay_stop', { kind });
+}
+
 export async function exportDiagnostics(contents: string): Promise<DiagnosticsExport> {
   if (isTauriRuntime()) return invoke<DiagnosticsExport>('export_diagnostics', { contents });
 

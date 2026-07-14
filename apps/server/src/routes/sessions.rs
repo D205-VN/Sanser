@@ -285,9 +285,10 @@ pub async fn credentials(
     }
     ensure_device_online(&state, &device)?;
     ensure_device_online(&state, &peer)?;
-    let peer_route_address = peer
-        .route_address
-        .ok_or_else(|| AppError::Conflict("peer device has no direct route address".into()))?;
+    // Candidate gathering selects the actual direct endpoint, while relay mode
+    // targets a local loopback bridge. Keep this compatibility field bounded
+    // even when a relay-capable peer has no advertisable LAN address.
+    let peer_route_address = peer.route_address.unwrap_or_else(|| "127.0.0.1".into());
     let credential_epoch = session.requester_ready_at.ok_or_else(|| {
         AppError::Conflict(
             "requester must announce native readiness before credentials are issued".into(),
@@ -355,7 +356,7 @@ pub async fn native_ready(
     let current = fetch_owned(&state, &auth.user_id, &id).await?;
     if current.state != "accepted" || current.selected_transport.as_deref() != Some("native") {
         return Err(AppError::Conflict(
-            "native readiness requires an accepted native direct session".into(),
+            "native readiness requires an accepted native session".into(),
         ));
     }
     if device_id != current.requester_device_id {
@@ -630,12 +631,7 @@ fn select_transport(
 ) -> Result<String, AppError> {
     let selected = requested.map_or_else(
         || {
-            if mode != NetworkMode::Manual
-                && host.native_transport
-                && requester.native_transport
-                && host.route_address.is_some()
-                && requester.route_address.is_some()
-            {
+            if mode != NetworkMode::Manual && host.native_transport && requester.native_transport {
                 "native"
             } else {
                 "webrtc"
@@ -708,7 +704,7 @@ fn parse_network_mode(value: &str) -> Result<NetworkMode, AppError> {
         "auto" => Ok(NetworkMode::Auto),
         "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
         "manual" => Ok(NetworkMode::Manual),
-        "relay" => Ok(NetworkMode::Auto), // Fallback relay to auto
+        "relay" => Ok(NetworkMode::Relay),
         _ => {
             tracing::error!(value, "stored session has an invalid network mode");
             Err(AppError::Internal)
@@ -719,7 +715,8 @@ fn parse_network_mode(value: &str) -> Result<NetworkMode, AppError> {
 const fn network_mode_str(mode: NetworkMode) -> &'static str {
     match mode {
         NetworkMode::Auto => "auto",
-        NetworkMode::DirectOnly => "directonly",
+        NetworkMode::DirectOnly => "direct",
+        NetworkMode::Relay => "relay",
         NetworkMode::Manual => "manual",
     }
 }
@@ -765,6 +762,15 @@ fn default_active_state() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_mode_uses_the_database_and_desktop_wire_value() {
+        assert_eq!(
+            parse_network_mode("direct").expect("direct network mode"),
+            NetworkMode::DirectOnly
+        );
+        assert_eq!(network_mode_str(NetworkMode::DirectOnly), "direct");
+    }
 
     #[test]
     fn native_session_token_is_stable_bound_and_opaque() {

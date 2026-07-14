@@ -200,14 +200,13 @@
         <article class="card card-body settings-card stack">
           <div><h2 class="card-title">Network</h2><p class="card-subtitle">No Tailscale or external VPN is installed or required.</p></div>
           <div class="network-options">
-            {#each [['auto', 'Auto', 'Global IPv6 → LAN/IPv4 STUN → UPnP/manual forward.'], ['direct', 'Direct', 'Use native UDP only; never send media through TURN.'], ['relay', 'Relay', 'Require TURN; native direct is disabled.']] as mode}
-              <button class="network-option" class:active={$preferences.networkMode === mode[0]} disabled={mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available'} title={mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available' ? runtime.capabilities.webRtc.reason ?? 'Native WebRTC relay is unavailable' : undefined} onclick={() => saveRoot({ networkMode: mode[0] as NetworkMode })}><strong>{mode[1]}{mode[0] === 'relay' && runtime.capabilities.webRtc.state !== 'available' ? ' · Unavailable' : ''}</strong><span>{mode[2]}</span></button>
+            {#each [['auto', 'Auto', 'Try direct UDP first, then encrypted WSS relay automatically.'], ['direct', 'Direct', 'Use native UDP only; never relay media.'], ['relay', 'Relay', 'Use the end-to-end encrypted Sanser relay over WSS/443.']] as mode}
+              <button class="network-option" class:active={$preferences.networkMode === mode[0]} onclick={() => saveRoot({ networkMode: mode[0] as NetworkMode })}><strong>{mode[1]}</strong><span>{mode[2]}</span></button>
             {/each}
           </div>
           <CapabilityNotice title="Native direct" capability={runtime.capabilities.nativeDirect} />
           <CapabilityNotice title="SNV2" capability={runtime.capabilities.nativeSnv2} />
-          <CapabilityNotice title="Native WebRTC" capability={runtime.capabilities.webRtc} />
-          <div class="notice warning">Relay is useful only when the server returns valid short-lived TURN credentials. Permanent TURN secrets are never stored in preferences.</div>
+          <div class="notice">Relay packets are encrypted at the desktop endpoints with the ephemeral session credential. The relay forwarding path handles ciphertext only and does not parse video, audio, keyboard or mouse data.</div>
         </article>
       {:else if active === 'host'}
         <article class="card card-body settings-card stack">

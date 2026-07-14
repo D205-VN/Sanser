@@ -1,6 +1,6 @@
 # Sanser macOS client engine
 
-This Objective-C++20 target contains the macOS media/input implementation being migrated into Sanser 2.0.2.
+This Objective-C++20 target contains the macOS media/input implementation used by Sanser 2.0.7.
 
 Implemented native components:
 
@@ -15,14 +15,14 @@ Sanser 2 additions:
 
 - Target name `sanser-client-macos`.
 - Shared, tested `native/protocol` SNV2 header/authentication library.
-- Product/protocol compile-time version `2.0.2` / `2`.
+- Product/protocol compile-time version `2.0.7` / `2`.
 
-The legacy listener loop remains migration reference and is not reported as SNV2-capable until it consumes the shared header, session, replay and priority-lane implementation end-to-end. The Tauri shell keeps that capability unavailable meanwhile.
-
-The sidecar reports `nativeDirect=true` separately. In that mode it listens for
+The sidecar reports `nativeSnv2=true` and `nativeDirect=true` after its probe
+validates the compiled protocol/version and decoder implementation. It listens for
 authenticated/encrypted video on the negotiated base port, control on `base+1`
 and optional audio on `base+2`. It rejects unauthenticated media whenever a
-session credential is present. `nativeSnv2` remains `false`.
+session credential is present. The same UDP interface can target the local
+encrypted relay bridge when Direct UDP is unavailable.
 
 ## Build and probe
 

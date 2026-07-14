@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import StatusPill from '../components/StatusPill.svelte';
-  import { engineStatus, launchEngine, stopEngine } from '../lib/platform';
+  import { engineStatus, launchEngine, startRelay, stopEngine } from '../lib/platform';
   import { coordinateP2pConnection } from '../lib/p2pSignaling';
   import type { ConnectionSession, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
@@ -19,6 +19,7 @@
   let componentActive = false;
   let refreshInFlight = false;
   let nativePreparationInFlight = $state(false);
+  let activeRoute = $state<'direct' | 'relay' | null>(null);
 
   const sessionState = $derived($connection.session);
   const metrics = $derived($connection.metrics);
@@ -26,8 +27,7 @@
     sessionState?.status === 'accepted' &&
       runtime.capabilities.clientEngine.state === 'available' &&
       runtime.capabilities.nativeDirect.state === 'available' &&
-      sessionState.transport === 'native' &&
-      sessionState.networkMode !== 'relay'
+      sessionState.transport === 'native'
   );
 
   function resolutionSize(): { width: number; height: number } {
@@ -70,21 +70,45 @@
       diagnostics.add({ level: 'info', category: 'session', message: 'Starting P2P NAT Traversal...' });
       const client = session.client();
       if (!client) throw new Error('Api client is unavailable');
-      const p2pResult = await coordinateP2pConnection(
-        client,
-        target.id,
-        localDeviceId,
-        peerDeviceId,
-        false, // client is controlled
-        target.sessionToken
-      );
-      diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
+      let p2pResult: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
+      let relayResult: Awaited<ReturnType<typeof startRelay>> | null = null;
+      try {
+        if (target.networkMode === 'relay') throw new Error('Relay-only mode selected');
+        p2pResult = await coordinateP2pConnection(
+          client,
+          target.id,
+          localDeviceId,
+          peerDeviceId,
+          false, // client is controlled
+          target.sessionToken
+        );
+        diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
+      } catch (directError) {
+        if (target.networkMode === 'direct') throw directError;
+        const accessToken = await client.getAccessToken();
+        if (!accessToken) throw new Error('Relay fallback requires an authenticated access token');
+        diagnostics.add({
+          level: 'warn',
+          category: 'network',
+          message: `Direct P2P failed; switching to encrypted Sanser relay: ${directError instanceof Error ? directError.message : String(directError)}`
+        });
+        relayResult = await startRelay({
+          kind: 'client',
+          serverUrl: client.serverUrl,
+          sessionId: target.id,
+          deviceId: localDeviceId,
+          peerDeviceId,
+          accessToken,
+          sessionCredential: target.sessionToken
+        });
+        diagnostics.add({ level: 'info', category: 'network', message: 'Encrypted relay route is ready' });
+      }
 
       await launchEngine({
         kind: 'client',
         sessionId: target.id,
-        address: p2pResult.remoteAddress,
-        port: p2pResult.localPort,
+        address: relayResult ? '127.0.0.1' : p2pResult?.remoteAddress,
+        port: relayResult?.enginePort ?? p2pResult?.localPort,
         codec: $preferences.stream.codec,
         fps: $preferences.stream.fps,
         bitrateKbps: Math.round($preferences.stream.bitrateMbps * 1_000),
@@ -95,13 +119,19 @@
         inputEnabled: $preferences.host.inputEnabled,
         relativeMouse: $preferences.input.mouseMode === 'relative',
         sessionToken: target.sessionToken,
-        udpConnect: udpEndpoint(p2pResult.remoteAddress, p2pResult.remotePort)
+        udpConnect: relayResult
+          ? `127.0.0.1:${relayResult.proxyPort}`
+          : p2pResult
+            ? udpEndpoint(p2pResult.remoteAddress, p2pResult.remotePort)
+            : undefined,
+        relay: relayResult !== null
       });
       if (!componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') {
         await stopEngine('client').catch(() => undefined);
         return false;
       }
       connection.setEngineRunning(true);
+      activeRoute = relayResult ? 'relay' : 'direct';
       failedP2pSessionId = null;
       p2pRetryCount = 0;
       p2pRetryAfter = 0;
@@ -169,6 +199,7 @@
     localError = null;
     try {
       if ($connection.engineRunning) await stopEngine('client');
+      activeRoute = null;
       const client = session.client();
       if (client) await client.disconnectSession(sessionState.id);
       failedP2pSessionId = null;
@@ -208,6 +239,7 @@
         if (!status.running) {
           const message = status.lastError ?? 'The native macOS client stopped unexpectedly';
           connection.setEngineRunning(false);
+          activeRoute = null;
           connection.setError(message);
           await client.disconnectSession(current.id).catch(() => undefined);
           diagnostics.add({ level: 'warn', category: 'engine', message });
@@ -225,6 +257,7 @@
       ) {
         await stopEngine('client').catch(() => undefined);
         connection.setEngineRunning(false);
+        activeRoute = null;
         return;
       }
       if (
@@ -276,7 +309,7 @@
       <div class="native-stage-message">
         <span class="capture-dot waiting"></span>
         <h2>{sessionState.status === 'pending' ? 'Waiting for host approval' : sessionState.status === 'accepted' ? 'Host accepted the session' : `Session ${sessionState.status}`}</h2>
-        <p>{nativeReady ? 'Ready to create a fresh authenticated native endpoint.' : sessionState.networkMode === 'relay' ? 'Relay requires the planned native WebRTC engine; native direct never runs through TURN.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for a negotiated media endpoint.'}</p>
+        <p>{nativeReady ? 'Ready to create a fresh authenticated native endpoint with automatic encrypted relay fallback.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for a negotiated media endpoint.'}</p>
         <button class="button primary" disabled={!nativeReady || $connection.busy || nativePreparationInFlight} onclick={retryNativeClient}>{nativePreparationInFlight ? 'Preparing fresh session…' : failedP2pSessionId === sessionState.id ? 'Retry native stream' : 'Start native stream'}</button>
         {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">Native transport is unavailable on one endpoint</span>{/if}
       </div>
@@ -292,7 +325,7 @@
       <div><span>Loss</span><strong>{metrics ? `${metrics.packetLossPercent.toFixed(2)}%` : '—'}</strong></div>
       <div><span>Input</span><strong>{metrics ? `${metrics.inputLatencyMs} ms` : '—'}</strong></div>
       <div><span>Codec</span><strong>{metrics?.codec === 'hevc' ? 'HEVC' : metrics?.codec === 'h264' ? 'H.264' : metrics?.codec === 'auto' ? 'Auto' : '—'}</strong></div>
-      <div><span>Transport</span><strong>{metrics?.transport ?? (sessionState?.transport === 'native' ? 'Native direct' : sessionState?.transport === 'webrtc' ? 'WebRTC' : '—')}</strong></div>
+      <div><span>Transport</span><strong>{metrics?.transport ?? (activeRoute === 'relay' ? 'Encrypted relay' : activeRoute === 'direct' ? 'Native direct' : sessionState?.transport === 'webrtc' ? 'WebRTC' : '—')}</strong></div>
     </div>
   </div>
 

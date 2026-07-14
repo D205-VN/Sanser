@@ -27,7 +27,7 @@
 | Windows host build | Not verified in this macOS workspace |
 | macOS native media engine | Build and capability probe verified; H.264/HEVC/Metal/audio/input implementations present, full shared SNV2 integration pending |
 | Static updater manifest workflow | Implemented; requires a successful signed multi-platform release before end-to-end verification |
-| TURN relay | Not verified without a TURN test deployment |
+| Encrypted Sanser WSS relay | Unit/local bridge verified; public deployment and two-device hardware test still required |
 | Signing/notarization | Not configured with a real certificate |
 
 The release is not marked complete until CI and the platform/hardware matrix pass. No benchmark numbers are claimed yet; use `docs/sanser-2-performance.md` for the measurement contract.

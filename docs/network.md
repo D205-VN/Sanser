@@ -2,33 +2,33 @@
 
 Sanser 2 exposes only `Auto`, `Direct`, and `Relay`.
 
-The current desktop provides authenticated Native Direct on a reachable IPv4
-route, normally the same LAN. It keeps signed discovery, WebRTC/libdatachannel,
-and shared SNV2 framing disabled until their capability probes report verified
-implementations.
-
-The opt-in `p2p_v2` policy foundation and transient candidate signaling are
-implemented, but they do not yet gather candidates or punch NATs at runtime.
-See `docs/p2p-v2.md`; Native Direct remains the only working media route.
+The desktop gathers IPv4/IPv6, STUN, UPnP and manual-forward candidates and
+runs authenticated UDP connectivity checks. The native sidecar owns media and
+input; WebRTC/libdatachannel is not part of the current media path.
 
 ## Auto
 
-Auto selects Native Direct when both devices advertise a reachable IPv4 route.
-The control plane is ready to select WebRTC as a fallback, but that media engine
-is not linked in the current desktop build.
+Auto tries Native Direct first and falls back to the authenticated Sanser WSS
+relay when no UDP route can be established. Both endpoints make outbound
+connections, so the fallback works through CGNAT and networks that block
+unsolicited inbound traffic.
 
 ## Direct
 
-Direct disables TURN and uses only the authenticated native route. A firewall
-or devices behind different NATs can block the connection.
+Direct uses only the authenticated native UDP route. A firewall or devices
+behind different NATs can block the connection, and no relay is attempted.
 
 ## Relay
 
-Relay requires TURN and WebRTC/libdatachannel, so the UI disables it until that
-native engine is linked. Native Direct has no relay path.
+Relay skips UDP traversal and carries native SNV2 datagrams through the Sanser
+WSS/443 bridge. Frames are encrypted at the two desktop endpoints with the
+ephemeral session credential. The relay forwarding path receives ciphertext
+and never parses or decrypts video, audio or input packets.
 
 ## Discovery
 
 Discovery messages contain a device identity, nonce/timestamp, TTL, sanitized capabilities, and signature. They are rate-limited, never authorize a session, do not treat any address range as a particular VPN, and stop when the application shuts down.
 
-Use HTTPS/WSS and a restrictive origin allowlist outside loopback development. Configure short-lived TURN REST credentials rather than distributing a permanent TURN password.
+Use HTTPS/WSS and a restrictive origin allowlist outside loopback development.
+Run only one relay-capable server instance unless relay session affinity or a
+shared relay backplane is configured.

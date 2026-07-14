@@ -1,6 +1,6 @@
 import { get, writable, type Readable } from 'svelte/store';
 import { deviceIdentity } from '../lib/deviceIdentity';
-import { engineStatus, getLocalRouteAddress, launchEngine, stopEngine } from '../lib/platform';
+import { engineStatus, getLocalRouteAddress, launchEngine, startRelay, stopEngine, stopRelay } from '../lib/platform';
 import { coordinateP2pConnection } from '../lib/p2pSignaling';
 import { trustedPendingSession } from '../lib/trustedDevice';
 import { PROTOCOL_VERSION, SANSER_VERSION, type ConnectionSession, type RuntimeStatus } from '../lib/types';
@@ -121,21 +121,49 @@ function createHostStore(): HostStore {
       const settings = get(preferences);
       const size = resolutionSize();
       if (!request.requesterDeviceId) throw new Error('Missing requester device ID for P2P connection');
-      const route = await coordinateP2pConnection(
-        client,
-        request.id,
-        hostDeviceId,
-        request.requesterDeviceId,
-        true,
-        credentials.sessionToken,
-        settings.host.directUdpPort
-      );
-      if (!get(store).online || get(store).deviceId !== hostDeviceId) return;
+      let route: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
+      let relayRoute: Awaited<ReturnType<typeof startRelay>> | null = null;
+      try {
+        if (request.networkMode === 'relay') throw new Error('Relay-only mode selected');
+        route = await coordinateP2pConnection(
+          client,
+          request.id,
+          hostDeviceId,
+          request.requesterDeviceId,
+          true,
+          credentials.sessionToken,
+          settings.host.directUdpPort
+        );
+      } catch (directError) {
+        if (request.networkMode === 'direct') throw directError;
+        const accessToken = await client.getAccessToken();
+        if (!accessToken) throw new Error('Relay fallback requires an authenticated access token');
+        diagnostics.add({
+          level: 'warn',
+          category: 'network',
+          message: `Direct P2P failed; switching to encrypted Sanser relay: ${directError instanceof Error ? directError.message : String(directError)}`
+        });
+        relayRoute = await startRelay({
+          kind: 'host',
+          serverUrl: client.serverUrl,
+          sessionId: request.id,
+          deviceId: hostDeviceId,
+          peerDeviceId: request.requesterDeviceId,
+          accessToken,
+          sessionCredential: credentials.sessionToken,
+          preferredEnginePort: settings.host.directUdpPort
+        });
+        diagnostics.add({ level: 'info', category: 'network', message: 'Encrypted relay route is ready' });
+      }
+      if (!get(store).online || get(store).deviceId !== hostDeviceId) {
+        if (relayRoute) await stopRelay('host').catch(() => undefined);
+        return;
+      }
       await launchEngine({
         kind: 'host',
         sessionId: request.id,
-        address: route.remoteAddress,
-        port: route.remotePort,
+        address: relayRoute ? '127.0.0.1' : route?.remoteAddress,
+        port: relayRoute?.proxyPort ?? route?.remotePort,
         codec: request.requestedCodec,
         fps: settings.stream.fps,
         bitrateKbps: Math.round(settings.stream.bitrateMbps * 1_000),
@@ -146,7 +174,8 @@ function createHostStore(): HostStore {
         inputEnabled: settings.host.inputEnabled,
         relativeMouse: false,
         sessionToken: credentials.sessionToken,
-        udpBindPort: route.localPort
+        udpBindPort: relayRoute?.enginePort ?? route?.localPort,
+        relay: relayRoute !== null
       });
       retryCounts.delete(request.id);
       retryAfter.delete(request.id);
@@ -355,6 +384,7 @@ function createHostStore(): HostStore {
       autoAcceptRetryAfter.clear();
       store.update((current) => ({ ...current, busy: true }));
       try {
+        await stopEngine('host').catch(() => undefined);
         if (client && current.deviceId && current.online) {
           await client.offlineDevice(current.deviceId);
         }
@@ -400,6 +430,7 @@ function createHostStore(): HostStore {
       store.update((state) => ({ ...state, actionSessionId: sessionId, error: null }));
       try {
         await client.disconnectSession(sessionId);
+        await stopEngine('host').catch(() => undefined);
         retryCounts.delete(sessionId);
         retryAfter.delete(sessionId);
         readyGenerations.delete(sessionId);

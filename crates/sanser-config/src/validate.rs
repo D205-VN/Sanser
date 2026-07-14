@@ -221,7 +221,8 @@ where
 
 fn parse_network_mode(value: &str) -> Result<NetworkMode, ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "auto" | "relay" => Ok(NetworkMode::Auto), // Fallback relay config to auto
+        "auto" => Ok(NetworkMode::Auto),
+        "relay" => Ok(NetworkMode::Relay),
         "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
         "manual" => Ok(NetworkMode::Manual),
         _ => Err(ConfigError::InvalidValue("NETWORK_MODE")),
@@ -329,7 +330,7 @@ mod tests {
 
     fn base() -> Vec<(&'static str, &'static str)> {
         vec![
-            ("SANSER_VERSION", "2.0.6"),
+            ("SANSER_VERSION", "2.0.7"),
             ("SANSER_PROTOCOL_VERSION", "2"),
             (
                 "DATABASE_URL",
@@ -352,7 +353,7 @@ mod tests {
     #[test]
     fn parses_network_mode_correctly() {
         let mut values = base();
-        values.push(("NETWORK_MODE", "directonly"));
+        values.push(("NETWORK_MODE", "direct"));
         let config = AppConfig::from_values(values).unwrap();
         assert_eq!(config.network.mode, NetworkMode::DirectOnly);
 
@@ -364,7 +365,7 @@ mod tests {
         let mut values = base();
         values.push(("NETWORK_MODE", "relay"));
         let config = AppConfig::from_values(values).unwrap();
-        assert_eq!(config.network.mode, NetworkMode::Auto); // Fallback to Auto
+        assert_eq!(config.network.mode, NetworkMode::Relay);
     }
 
     #[test]

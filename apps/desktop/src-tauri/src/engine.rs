@@ -670,6 +670,7 @@ mod tests {
             session_token: Some("a".repeat(32)),
             udp_connect: None,
             udp_bind_port: None,
+            relay: false,
         }
     }
 

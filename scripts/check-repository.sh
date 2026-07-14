@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly expected_version="2.0.6"
+readonly expected_version="2.0.7"
 readonly expected_app_id="com.sanser.desktop"
 
 fail() {

@@ -84,8 +84,11 @@
       device.capabilities.nativeTransport &&
       device.route !== null &&
       $presence.routeAddress !== null;
-    const relayCompatible = runtime.capabilities.webRtc.state === 'available' && device.capabilities.webRtc;
-    if ($preferences.networkMode === 'relay' && !relayCompatible) return 'Relay requires WebRTC on both computers';
+    const relayCompatible =
+      runtime.capabilities.nativeDirect.state === 'available' &&
+      device.capabilities.nativeTransport;
+    if ($preferences.networkMode === 'relay' && !relayCompatible) return 'Relay requires the native SNV2 engine on both computers';
+    if ($preferences.networkMode === 'direct' && !nativeCompatible) return 'Direct mode requires a reachable native route';
     if (!nativeCompatible && !relayCompatible) return 'No verified transport is available on both computers';
     return null;
   }

@@ -1,7 +1,7 @@
 # Sanser server
 
 Axum API, account service, device registry and WebSocket signaling for Sanser
-2.0.6. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
+2.0.7. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
 does not contain a SQLite or local-database fallback.
 
 ## Neon configuration
@@ -73,6 +73,7 @@ POST   /api/v2/sessions/:id/disconnect
 GET    /api/v2/network/ice
 WS     /api/v2/events
 WS     /api/v2/signaling?deviceId=<uuid>
+WS     /api/v2/relay?sessionId=<uuid>&deviceId=<uuid>
 ```
 
 The signaling socket remains backward compatible with the existing WebRTC-style
@@ -81,7 +82,15 @@ message names and accepts the native P2P metadata messages `p2p.candidates`,
 forwarded only when the session is accepted with native transport and the
 authenticated sender and target are that session's two devices. Candidate
 metadata is transient: it is never written to PostgreSQL or the durable event
-log, and media never passes through this WebSocket.
+log, and media never passes through the signaling WebSocket.
+
+The relay socket is a bounded DERP-style fallback for accepted native sessions.
+It pairs only the authenticated requester and host recorded for the session and
+blindly forwards binary frames in memory; frames are never written to
+PostgreSQL or the event log. Desktop peers encrypt every relay frame with
+XChaCha20-Poly1305 using the ephemeral native session credential, so the relay
+forwarding path handles ciphertext only. Frames are capped at 64 KiB, outbound queues are
+bounded, and each sender has a per-second byte ceiling.
 
 `p2p.candidatesAck` is the explicit receipt used by current desktop clients.
 `p2p.gatheringComplete` remains a compatibility receipt for older deployments.
@@ -104,18 +113,19 @@ candidate payloads have a stricter 16 KiB limit.
 
 Access and refresh tokens are random opaque values; only SHA-256 digests are
 stored. Passwords are Argon2id hashes. API queries use bound PostgreSQL
-parameters. CORS uses the explicit `ALLOWED_ORIGINS` list and TURN credentials
-can be generated from a shared secret.
+parameters. CORS and WebSocket origin checks use the explicit
+`ALLOWED_ORIGINS` list. Legacy short-lived TURN credential generation remains
+available for optional WebRTC experiments, but the native fallback uses the
+authenticated WSS relay.
 
 The native credential route is available only while an account-owned session is
 accepted with `selectedTransport=native`. `deviceId` must be one of that session's
 two online, native-capable devices. The response contains the peer route,
-`basePort`, an acceptance-anchored expiry and the same opaque HMAC-SHA256
+`basePort`, a requester-readiness-generation expiry and the same opaque HMAC-SHA256
 `sessionToken` for both peers. Responses are `Cache-Control: no-store`. The
-credential expires after 15–300 configured seconds; create a new session after
-expiry. After the macOS requester binds its listener, it posts `native-ready`;
-only then does the Windows host launch its native process. This secure handoff
-does not advertise the unfinished SNV2 packet engine as available.
+credential expires after 15–300 configured seconds; a fresh `native-ready`
+generation rotates it without recreating the accepted session. The Windows host
+waits for that requester generation before launching its native process.
 
 Before a client exits or signs out, it should call:
 

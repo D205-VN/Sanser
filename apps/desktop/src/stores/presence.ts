@@ -54,13 +54,12 @@ function createPresenceStore() {
         message: error instanceof Error ? error.message : 'Unable to discover this Mac route'
       });
     }
-    if (runtime.capabilities.nativeDirect.state === 'available' && routeAddress === null && runtime.capabilities.webRtc.state !== 'available') {
-      throw new Error('No usable IPv4 route was detected for this Mac. Connect both computers to the same LAN or configure WebRTC/TURN.');
-    }
     if (runtime.capabilities.nativeDirect.state !== 'available' && runtime.capabilities.webRtc.state !== 'available') {
       throw new Error(runtime.capabilities.nativeDirect.reason ?? 'No verified media transport is available on this Mac');
     }
-    const nativeTransport = runtime.capabilities.nativeDirect.state === 'available' && routeAddress !== null;
+    // The native engine is also used behind the local UDP-to-WSS relay bridge,
+    // so lack of an advertisable LAN address must not disable relay sessions.
+    const nativeTransport = runtime.capabilities.nativeDirect.state === 'available';
     const webRtc = runtime.capabilities.webRtc.state === 'available';
     const registered = await client.registerDevice({
       id: deviceId,

@@ -835,7 +835,7 @@ fn validate_candidate(candidate: &P2pCandidate) -> Result<(), SignalError> {
     })
 }
 
-fn validate_origin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+pub(crate) fn validate_origin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
     let Some(origin) = headers.get(header::ORIGIN) else {
         // Native libdatachannel and Tauri sidecars may not send an Origin header.
         return Ok(());

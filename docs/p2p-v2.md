@@ -2,9 +2,9 @@
 
 Sanser is migrating from the reachable-IPv4 Native Direct path toward one
 authenticated UDP component for discovery, connectivity checks and, eventually,
-the shared SNV2 media wire. Version 2.0.6 integrates the first direct-route
-negotiation path into the desktop shell. That does not yet make the media engine
-an end-to-end SNV2 implementation or guarantee connectivity through every NAT.
+the shared SNV2 media wire. Version 2.0.7 adds automatic direct-to-relay
+fallback around the native engine. Direct UDP still cannot be guaranteed
+through every NAT, so Auto switches both peers to an encrypted WSS/443 route.
 
 The design follows the STUN Binding model in
 [RFC 8489](https://www.rfc-editor.org/rfc/rfc8489) and the candidate/checking
@@ -141,7 +141,7 @@ are production-ready.
   engine. A successful route selection is not reported as a connected media
   stream until engine launch succeeds.
 
-## Remaining gates before end-to-end SNV2
+## Remaining native transport hardening
 
 1. Add explicit start-of-frame or fragment-index/count semantics. A receiver
    must never complete a frame when its first fragment is missing.
@@ -156,14 +156,22 @@ are production-ready.
 6. Replace the close/rebind port handoff with live native socket ownership, then
    carry the selected route through keepalive, migration and rekey without
    falling back to unauthenticated endpoint changes.
-7. Pass Rust/C++ golden vectors, loss/reorder/replay tests, Windows CI and a real
-   Windows-to-macOS hardware test before setting `nativeSnv2=true`.
+7. Complete Windows CI plus repeated real Windows-to-macOS hardware tests for
+   direct and relay routes before treating the transport as release-verified.
 
-## No-relay limitation
+## Encrypted relay fallback
 
-The P2P v2 path does not carry media through the Sanser server and does not
-require Tailscale. It gathers global IPv6 plus IPv4 host, STUN, UPnP and fixed
-manual-forward candidates. PCP, NAT-PMP and TURN relay are not enabled. Manual
-forwarding can bypass many symmetric-NAT cases when the home router owns a
-public IPv4 address, but cannot bypass ISP CGNAT, blocked UDP or an upstream NAT
-the user cannot configure. Failure remains explicit after bounded retries.
+The P2P v2 path does not require Tailscale. It first gathers global IPv6 plus
+IPv4 host, STUN, UPnP and fixed manual-forward candidates. In Auto mode, a
+failed direct check opens an outbound WSS/443 connection from both desktops to
+the authenticated Sanser relay. A local Rust bridge moves native UDP datagrams
+through that socket without routing packet payloads through the webview.
+
+Relay frames use XChaCha20-Poly1305 with a key derived from the ephemeral native
+session credential. The session ID and bounded frame header are authenticated
+as additional data, each bridge uses a random 128-bit nonce prefix, and receive
+sequence numbers reject replay. The server authorizes the account, accepted
+session and exact requester/host device pair, then forwards ciphertext only.
+Direct mode never falls back; Relay mode skips direct probing. Auto currently
+switches direct to relay during setup; seamless live route migration after an
+engine has started remains future hardening.

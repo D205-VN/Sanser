@@ -1,4 +1,4 @@
-# Sanser 2.0.2 architecture
+# Sanser 2.0.7 architecture
 
 Sanser 2 is one product with a thin Tauri shell, typed Svelte UI, Rust control plane, and platform-native media engines. Node.js is a development tool only and is not part of a packaged runtime.
 
@@ -17,18 +17,20 @@ The frontend never receives native video frames and is not the primary realtime 
 
 ## Control and media planes
 
-The control plane owns authentication, device presence, consent, session negotiation, SDP/ICE exchange, TURN credentials, and state notifications. PostgreSQL never carries realtime input, video, or audio.
+The control plane owns authentication, device presence, consent, session negotiation, candidate exchange, relay authorization, and state notifications. PostgreSQL never carries realtime input, video, or audio.
 
 The currently shipped media plane selects one route:
 
-1. The authenticated Native Direct compatibility wire for a reachable IPv4 route.
-2. Native WebRTC/libdatachannel for ICE direct or TURN relay.
+1. Authenticated Native Direct over LAN, global IPv6, STUN/UPnP or a fixed
+   manual-forward UDP route.
+2. An authenticated WSS/443 packet relay for CGNAT, blocked UDP and other hard
+   networks; native WebRTC/libdatachannel remains an optional future transport.
 3. A clear failure when neither route is available.
 
-The opt-in P2P v2 target replaces that compatibility wire with one SNV2 UDP
-component. Candidate validation, scoring, state transitions and transient
-signaling are implemented; native socket gathering, hole punching and SNV2
-multiplexing remain capability-gated. See `docs/p2p-v2.md`.
+The P2P v2 coordinator validates and scores transient candidates, performs
+authenticated hole-punch checks on reserved sockets, and hands the selected
+endpoint to the native engine. Auto falls back to a local UDP-to-WSS bridge
+when those checks fail. See `docs/p2p-v2.md`.
 
 Input uses separate bounded lanes: reliable ordered keys/buttons, latest-state-wins mouse/gamepad, audio, video control, video payload, and diagnostics. Media backpressure can drop expired video but cannot block reliable input.
 

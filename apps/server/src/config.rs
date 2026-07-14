@@ -250,9 +250,9 @@ fn parse_network_mode(value: &str) -> Result<NetworkMode, ConfigError> {
         "auto" => Ok(NetworkMode::Auto),
         "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
         "manual" => Ok(NetworkMode::Manual),
-        "relay" => Ok(NetworkMode::Auto), // Fallback relay to auto
+        "relay" => Ok(NetworkMode::Relay),
         _ => Err(ConfigError::Invalid(
-            "NETWORK_MODE must be one of: auto, directonly, manual".into(),
+            "NETWORK_MODE must be one of: auto, direct, relay, manual".into(),
         )),
     }
 }

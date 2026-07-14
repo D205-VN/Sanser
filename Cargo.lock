@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-audio"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3447,7 +3447,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-auth"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-config"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3473,7 +3473,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-core"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3482,9 +3482,12 @@ dependencies = [
 
 [[package]]
 name = "sanser-desktop"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
+ "chacha20poly1305",
+ "futures-util",
  "keyring",
+ "rand 0.8.6",
  "sanser-p2p",
  "serde",
  "serde_json",
@@ -3496,6 +3499,7 @@ dependencies = [
  "tauri-plugin-updater",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "url",
  "uuid",
  "zeroize",
@@ -3503,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-diagnostics"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3514,7 +3518,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-input"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "bitflags 2.13.0",
  "serde",
@@ -3523,7 +3527,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-network"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "hmac",
  "sanser-core",
@@ -3538,7 +3542,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-p2p"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3559,7 +3563,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-protocol"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "bitflags 2.13.0",
  "hex",
@@ -3574,7 +3578,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-server"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3608,7 +3612,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-storage"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "async-trait",
  "serde",
@@ -3623,7 +3627,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-webrtc"
-version = "2.0.6"
+version = "2.0.7"
 dependencies = [
  "sanser-core",
  "serde",
@@ -4942,7 +4946,11 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
 ]
 
@@ -5238,6 +5246,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.4",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
 ]

@@ -7,7 +7,7 @@ use std::{
 use sqlx::PgPool;
 use tokio::sync::{Mutex, broadcast};
 
-use crate::{config::Config, models::EventEnvelope, websocket::SignalHub};
+use crate::{config::Config, models::EventEnvelope, relay::RelayHub, websocket::SignalHub};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -15,6 +15,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub events: broadcast::Sender<EventEnvelope>,
     pub signaling: Arc<SignalHub>,
+    pub relay: Arc<RelayHub>,
     pub general_limiter: RateLimiter,
     pub login_limiter: RateLimiter,
 }
@@ -29,6 +30,7 @@ impl AppState {
             pool,
             events,
             signaling: Arc::new(SignalHub::default()),
+            relay: Arc::new(RelayHub::default()),
             general_limiter: RateLimiter::new(general_limit, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(login_limit, Duration::from_secs(600)),
         }

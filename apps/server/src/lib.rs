@@ -5,6 +5,7 @@ pub mod error;
 mod events;
 mod middleware;
 pub mod models;
+pub mod relay;
 pub mod routes;
 pub mod state;
 mod time;
@@ -122,6 +123,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v2/readiness", get(routes::system::readiness))
         .route("/api/v2/events", get(websocket::events_socket))
         .route("/api/v2/signaling", get(websocket::signaling_socket))
+        .route("/api/v2/relay", get(relay::relay_socket))
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state.clone())

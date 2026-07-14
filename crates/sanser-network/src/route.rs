@@ -12,6 +12,7 @@ pub enum RouteKind {
     UpnpMapped,
     StunHolePunch,
     ManualForward,
+    RelayWss,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -26,7 +27,7 @@ pub struct RoutePlan(Vec<RouteAttempt>);
 impl RoutePlan {
     #[must_use]
     pub fn build(mode: NetworkMode, snv2_available: bool) -> Self {
-        let mut attempts = Vec::with_capacity(8);
+        let mut attempts = Vec::with_capacity(9);
         if !snv2_available {
             return Self(attempts);
         }
@@ -65,6 +66,10 @@ impl RoutePlan {
                     route: RouteKind::ManualForward,
                     transport: TransportKind::Snv2Udp,
                 });
+                attempts.push(RouteAttempt {
+                    route: RouteKind::RelayWss,
+                    transport: TransportKind::Snv2Udp,
+                });
             }
             NetworkMode::DirectOnly => {
                 attempts.push(RouteAttempt {
@@ -77,6 +82,12 @@ impl RoutePlan {
                 });
                 attempts.push(RouteAttempt {
                     route: RouteKind::PublicIpv6,
+                    transport: TransportKind::Snv2Udp,
+                });
+            }
+            NetworkMode::Relay => {
+                attempts.push(RouteAttempt {
+                    route: RouteKind::RelayWss,
                     transport: TransportKind::Snv2Udp,
                 });
             }
@@ -119,6 +130,7 @@ mod tests {
                 RouteKind::UpnpMapped,
                 RouteKind::StunHolePunch,
                 RouteKind::ManualForward,
+                RouteKind::RelayWss,
             ]
         );
     }
@@ -150,5 +162,16 @@ mod tests {
             .map(|attempt| attempt.route)
             .collect();
         assert_eq!(routes, vec![RouteKind::ManualForward]);
+    }
+
+    #[test]
+    fn relay_only_uses_the_authenticated_wss_bridge() {
+        let relay = RoutePlan::build(NetworkMode::Relay, true);
+        let routes: Vec<_> = relay
+            .attempts()
+            .iter()
+            .map(|attempt| attempt.route)
+            .collect();
+        assert_eq!(routes, vec![RouteKind::RelayWss]);
     }
 }

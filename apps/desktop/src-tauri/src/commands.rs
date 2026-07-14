@@ -252,18 +252,32 @@ pub fn launch_engine(
     app: AppHandle,
     engines: State<'_, EngineManager>,
     p2p: State<'_, P2pSessionManager>,
+    relay: State<'_, crate::relay::RelayManager>,
     request: LaunchEngineRequest,
 ) -> Result<(), DesktopError> {
-    let reserved_socket = p2p.take_selected_socket(&request)?;
-    engines.launch(&app, &request, reserved_socket)
+    let reserved_socket = if request.relay {
+        relay.verify_launch(&request)?;
+        None
+    } else {
+        relay.stop_for_engine(request.kind);
+        p2p.take_selected_socket(&request)?
+    };
+    let result = engines.launch(&app, &request, reserved_socket);
+    if result.is_err() && request.relay {
+        relay.stop_for_engine(request.kind);
+    }
+    result
 }
 
 #[tauri::command]
 pub fn stop_engine(
     engines: State<'_, EngineManager>,
+    relay: State<'_, crate::relay::RelayManager>,
     kind: EngineKind,
 ) -> Result<(), DesktopError> {
-    engines.stop(kind)
+    let result = engines.stop(kind);
+    relay.stop_for_engine(kind);
+    result
 }
 
 #[tauri::command]

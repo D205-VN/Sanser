@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 pub enum NetworkMode {
     #[default]
     Auto,
-    #[serde(rename = "directonly")]
+    #[serde(rename = "direct", alias = "directonly")]
     DirectOnly,
+    Relay,
     Manual,
 }
 

@@ -16,8 +16,9 @@ pub enum EngineKind {
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     Auto,
-    #[serde(rename = "directonly")]
+    #[serde(rename = "direct", alias = "directonly")]
     DirectOnly,
+    Relay,
     Manual,
 }
 
@@ -31,7 +32,7 @@ pub enum VideoCodec {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::struct_excessive_bools)]
 pub struct LaunchEngineRequest {
     pub kind: EngineKind,
     pub session_id: Option<String>,
@@ -55,6 +56,8 @@ pub struct LaunchEngineRequest {
     pub udp_connect: Option<String>,
     #[serde(default)]
     pub udp_bind_port: Option<u16>,
+    #[serde(default)]
+    pub relay: bool,
 }
 
 impl Drop for LaunchEngineRequest {
