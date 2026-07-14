@@ -1,6 +1,6 @@
 # Sanser Windows host engine
 
-This C++20 target contains the Windows media/input implementation used by Sanser 2.0.7.
+This C++20 target contains the Windows media/input implementation used by Sanser 2.0.8.
 
 Implemented and retained from the native engine:
 
@@ -15,7 +15,7 @@ Sanser 2 additions:
 
 - Target name `sanser-host-windows`.
 - Shared, tested `native/protocol` SNV2 header/authentication library.
-- Product/protocol compile-time version `2.0.7` / `2`.
+- Product/protocol compile-time version `2.0.8` / `2`.
 
 The sidecar reports `nativeSnv2=true` and `nativeDirect=true` after its probe
 validates the compiled protocol/version and encoder implementation. For a negotiated base port it sends video to the macOS

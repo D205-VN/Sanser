@@ -49,10 +49,14 @@ struct RelayBridge {
 #[derive(Default)]
 pub struct RelayManager {
     bridges: Arc<Mutex<HashMap<EngineKind, RelayBridge>>>,
+    failures: Arc<Mutex<HashMap<EngineKind, String>>>,
 }
 
 impl RelayManager {
     fn stop(&self, kind: EngineKind) {
+        if let Ok(mut failures) = self.failures.lock() {
+            failures.remove(&kind);
+        }
         if let Ok(mut bridges) = self.bridges.lock()
             && let Some(bridge) = bridges.remove(&kind)
         {
@@ -62,6 +66,13 @@ impl RelayManager {
 
     pub fn stop_for_engine(&self, kind: EngineKind) {
         self.stop(kind);
+    }
+
+    pub fn take_failure(&self, kind: EngineKind) -> Option<String> {
+        self.failures
+            .lock()
+            .ok()
+            .and_then(|mut failures| failures.remove(&kind))
     }
 
     pub fn verify_launch(&self, request: &LaunchEngineRequest) -> Result<(), DesktopError> {
@@ -302,15 +313,21 @@ pub async fn relay_start(
         .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?
         .insert(request.kind, bridge);
     let bridges = Arc::clone(&manager.bridges);
+    let failures = Arc::clone(&manager.failures);
     let kind = request.kind;
     tauri::async_runtime::spawn(async move {
-        run_bridge(proxy_socket, engine_endpoint, websocket, cipher, stop_rx).await;
+        let failure = run_bridge(proxy_socket, engine_endpoint, websocket, cipher, stop_rx).await;
         if let Ok(mut active) = bridges.lock()
             && active
                 .get(&kind)
                 .is_some_and(|bridge| bridge.id == bridge_id)
         {
             active.remove(&kind);
+            if let Some(failure) = failure
+                && let Ok(mut recorded) = failures.lock()
+            {
+                recorded.insert(kind, failure);
+            }
         }
     });
     Ok(RelayStartResult {
@@ -365,38 +382,67 @@ async fn run_bridge<S>(
     mut websocket: tokio_tungstenite::WebSocketStream<S>,
     mut cipher: RelayCipher,
     mut stop: oneshot::Receiver<()>,
-) where
+) -> Option<String>
+where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut buffer = vec![0_u8; RELAY_MAX_DATAGRAM_BYTES];
+    let mut consecutive_decrypt_failures = 0_u8;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            _ = &mut stop => break,
+            _ = &mut stop => return None,
             received = socket.recv_from(&mut buffer) => {
-                let Ok((length, source)) = received else { break; };
+                let Ok((length, source)) = received else {
+                    return Some("local relay UDP bridge stopped receiving packets".into());
+                };
                 if source != engine_endpoint { continue; }
-                let Ok(encrypted) = cipher.encrypt(&buffer[..length]) else { break; };
-                if websocket.send(Message::Binary(encrypted.into())).await.is_err() {
-                    break;
+                let Ok(encrypted) = cipher.encrypt(&buffer[..length]) else {
+                    return Some("local relay packet encryption failed".into());
+                };
+                if let Err(error) = websocket.send(Message::Binary(encrypted.into())).await {
+                    return Some(format!("relay stopped while sending media: {error}"));
                 }
             }
             incoming = websocket.next() => {
                 match incoming {
                     Some(Ok(Message::Binary(payload))) => {
-                        let Ok(decrypted) = cipher.decrypt(&payload) else { continue; };
-                        if socket.send_to(&decrypted, engine_endpoint).await.is_err() { break; }
+                        let decrypted = if let Ok(decrypted) = cipher.decrypt(&payload) {
+                            consecutive_decrypt_failures = 0;
+                            decrypted
+                        } else {
+                            consecutive_decrypt_failures = consecutive_decrypt_failures.saturating_add(1);
+                            if consecutive_decrypt_failures >= 32 {
+                                return Some("relay frame authentication repeatedly failed; refresh the accepted session on both devices".into());
+                            }
+                            continue;
+                        };
+                        if socket.send_to(&decrypted, engine_endpoint).await.is_err() {
+                            return Some("local relay UDP bridge could not deliver a packet to the native engine".into());
+                        }
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        if websocket.send(Message::Pong(payload)).await.is_err() { break; }
+                        if websocket.send(Message::Pong(payload)).await.is_err() {
+                            return Some("relay heartbeat response failed".into());
+                        }
                     }
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(Message::Text(message))) if message.as_str().contains("relay.peerOffline") => {
+                        return Some("relay peer went offline; retry the accepted session".into());
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        return Some("relay connection closed; retry the accepted session".into());
+                    }
+                    Some(Err(error)) => {
+                        return Some(format!("relay connection failed: {error}"));
+                    }
                     _ => {}
                 }
             }
             _ = heartbeat.tick() => {
-                if websocket.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
+                if websocket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    return Some("relay heartbeat failed".into());
+                }
             }
         }
     }
@@ -639,6 +685,58 @@ mod tests {
         assert_eq!(&buffer[..length], b"remote packet");
 
         let _ = stop_tx.send(());
-        bridge.await.unwrap();
+        assert_eq!(bridge.await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn relay_bridge_reports_repeated_session_credential_mismatch() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let websocket_address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        });
+        let (client_websocket, _) = connect_async(format!("ws://{websocket_address}"))
+            .await
+            .unwrap();
+        let mut server_websocket = server.await.unwrap();
+
+        let session = uuid::Uuid::new_v4();
+        let left = uuid::Uuid::new_v4();
+        let right = uuid::Uuid::new_v4();
+        let left_cipher =
+            RelayCipher::new(session, left, right, "left-session-credential-1234567890").unwrap();
+        let mut wrong_peer_cipher =
+            RelayCipher::new(session, right, left, "different-session-credential-12345").unwrap();
+        let proxy_socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let engine_socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let (_stop_tx, stop_rx) = oneshot::channel();
+        let bridge = tokio::spawn(run_bridge(
+            proxy_socket,
+            engine_socket.local_addr().unwrap(),
+            client_websocket,
+            left_cipher,
+            stop_rx,
+        ));
+
+        for _ in 0..32 {
+            let frame = wrong_peer_cipher.encrypt(b"credential mismatch").unwrap();
+            server_websocket
+                .send(Message::Binary(frame.into()))
+                .await
+                .unwrap();
+        }
+        let failure = tokio::time::timeout(Duration::from_secs(1), bridge)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(failure.contains("authentication repeatedly failed"));
     }
 }

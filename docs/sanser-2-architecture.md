@@ -1,4 +1,4 @@
-# Sanser 2.0.7 architecture
+# Sanser 2.0.8 architecture
 
 Sanser 2 is one product with a thin Tauri shell, typed Svelte UI, Rust control plane, and platform-native media engines. Node.js is a development tool only and is not part of a packaged runtime.
 

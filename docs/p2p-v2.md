@@ -2,7 +2,7 @@
 
 Sanser is migrating from the reachable-IPv4 Native Direct path toward one
 authenticated UDP component for discovery, connectivity checks and, eventually,
-the shared SNV2 media wire. Version 2.0.7 adds automatic direct-to-relay
+the shared SNV2 media wire. Version 2.0.8 adds automatic direct-to-relay
 fallback around the native engine. Direct UDP still cannot be guaranteed
 through every NAT, so Auto switches both peers to an encrypted WSS/443 route.
 

@@ -1,6 +1,6 @@
 # Sanser macOS client engine
 
-This Objective-C++20 target contains the macOS media/input implementation used by Sanser 2.0.7.
+This Objective-C++20 target contains the macOS media/input implementation used by Sanser 2.0.8.
 
 Implemented native components:
 
@@ -15,7 +15,7 @@ Sanser 2 additions:
 
 - Target name `sanser-client-macos`.
 - Shared, tested `native/protocol` SNV2 header/authentication library.
-- Product/protocol compile-time version `2.0.7` / `2`.
+- Product/protocol compile-time version `2.0.8` / `2`.
 
 The sidecar reports `nativeSnv2=true` and `nativeDirect=true` after its probe
 validates the compiled protocol/version and decoder implementation. It listens for

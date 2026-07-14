@@ -284,9 +284,17 @@ pub fn stop_engine(
 pub fn get_engine_status(
     app: AppHandle,
     engines: State<'_, EngineManager>,
+    relay: State<'_, crate::relay::RelayManager>,
     kind: EngineKind,
 ) -> Result<EngineStatus, DesktopError> {
-    engines.status(&app, kind)
+    let mut status = engines.status(&app, kind)?;
+    if let Some(failure) = relay.take_failure(kind) {
+        let _ = engines.stop(kind);
+        status.running = false;
+        status.process_id = None;
+        status.last_error = Some(failure);
+    }
+    Ok(status)
 }
 
 #[tauri::command]

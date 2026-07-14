@@ -1,7 +1,7 @@
 # Sanser server
 
 Axum API, account service, device registry and WebSocket signaling for Sanser
-2.0.7. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
+2.0.8. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
 does not contain a SQLite or local-database fallback.
 
 ## Neon configuration

@@ -252,24 +252,26 @@ function createHostStore(): HostStore {
           const status = await engineStatus('host');
           if (!status.running) {
             const message = status.lastError ?? 'The native Windows host stopped unexpectedly';
+            await stopEngine('host').catch(() => undefined);
+            retryCounts.set(active.id, 3);
+            retryAfter.delete(active.id);
             store.update((state) => ({
               ...state,
               engineRunning: false,
-              actionSessionId: active.id,
+              launchingSessionId: null,
+              failedP2pSessionId: active.id,
               error: message
             }));
-            await client.disconnectSession(active.id).catch(() => undefined);
-            store.update((state) => ({
-              ...state,
-              sessions: state.sessions.filter((item) => item.id !== active.id),
-              actionSessionId: null
-            }));
-            diagnostics.add({ level: 'warn', category: 'engine', message });
+            diagnostics.add({
+              level: 'warn',
+              category: 'engine',
+              message: `${message}; the accepted session remains available for retry`
+            });
           }
         }
       }
       const ready = get(store).sessions.find((item) => item.status === 'accepted' && item.requesterReadyAt);
-      if (ready?.requesterReadyAt) {
+      if (ready?.requesterReadyAt && !latest.engineRunning) {
         if (readyGenerations.get(ready.id) !== ready.requesterReadyAt) {
           readyGenerations.set(ready.id, ready.requesterReadyAt);
           retryCounts.delete(ready.id);

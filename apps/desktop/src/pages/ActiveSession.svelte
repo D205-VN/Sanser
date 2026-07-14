@@ -154,7 +154,7 @@
   async function startNativeClient(target = sessionState): Promise<void> {
     const client = session.client();
     const localDeviceId = $presence.deviceId;
-    if (!target || !client || !localDeviceId || nativePreparationInFlight) return;
+    if (!target || !client || !localDeviceId || nativePreparationInFlight || $connection.engineRunning) return;
     nativePreparationInFlight = true;
     try {
       const ready = await client.markNativeReady(target.id, localDeviceId);
@@ -238,11 +238,18 @@
         if (!componentActive || $connection.session?.id !== current.id) return;
         if (!status.running) {
           const message = status.lastError ?? 'The native macOS client stopped unexpectedly';
+          await stopEngine('client').catch(() => undefined);
           connection.setEngineRunning(false);
           activeRoute = null;
+          failedP2pSessionId = current.id;
+          p2pRetrySessionId = current.id;
+          p2pRetryCount = Math.max(p2pRetryCount, 3);
           connection.setError(message);
-          await client.disconnectSession(current.id).catch(() => undefined);
-          diagnostics.add({ level: 'warn', category: 'engine', message });
+          diagnostics.add({
+            level: 'warn',
+            category: 'engine',
+            message: `${message}; the accepted session remains available for retry`
+          });
           return;
         }
       }
@@ -264,6 +271,7 @@
         refreshed?.status === 'accepted' &&
         refreshed.transport === 'native' &&
         localDeviceId &&
+        !$connection.engineRunning &&
         failedP2pSessionId !== refreshed.id &&
         Date.now() >= p2pRetryAfter
       ) {

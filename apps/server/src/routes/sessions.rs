@@ -265,7 +265,7 @@ pub async fn credentials(
     }
     if session.selected_transport.as_deref() != Some("native") {
         return Err(AppError::Conflict(
-            "native credentials require the authenticated native direct transport".into(),
+            "native credentials require the authenticated native transport".into(),
         ));
     }
 
@@ -354,9 +354,15 @@ pub async fn native_ready(
     let id = validate_uuid(&id, "id")?;
     let device_id = validate_uuid(&request.device_id, "deviceId")?;
     let current = fetch_owned(&state, &auth.user_id, &id).await?;
-    if current.state != "accepted" || current.selected_transport.as_deref() != Some("native") {
+    if current.state != "accepted" {
+        return Err(AppError::Conflict(format!(
+            "native readiness requires an accepted session; current state is {}",
+            current.state
+        )));
+    }
+    if current.selected_transport.as_deref() != Some("native") {
         return Err(AppError::Conflict(
-            "native readiness requires an accepted native session".into(),
+            "native readiness requires the selected native transport".into(),
         ));
     }
     if device_id != current.requester_device_id {
