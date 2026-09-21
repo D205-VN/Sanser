@@ -6,10 +6,17 @@
   import { connection } from '../stores/connection';
   import { host as hostStore } from '../stores/host';
   import { diagnostics } from '../stores/diagnostics';
+  import { SANSER_VERSION } from '../lib/types';
+
+  let { checking = $bindable(false) }: { checking?: boolean } = $props();
+  let mounted = false;
+  let checked = false;
+  let requested = $state(false);
+  let autoPrompt = $state(false);
 
   let dialog = $state<HTMLDialogElement>();
   let manifest = $state<Update | null>(null);
-  let status = $state<'idle' | 'downloading' | 'installing' | 'done' | 'error'>('idle');
+  let status = $state<'idle' | 'checking' | 'current' | 'unsupported' | 'downloading' | 'installing' | 'done' | 'error'>('idle');
   let progress = $state(0);
   let totalSize = $state(0);
   let downloadedSize = $state(0);
@@ -23,16 +30,8 @@
   );
 
   onMount(() => {
-    if (!isTauri()) return;
-    let mounted = true;
-    const timer = window.setTimeout(() => {
-      void check().then((update) => {
-        if (mounted) manifest = update;
-        else if (update) void update.close();
-      }).catch((caught: unknown) => {
-        diagnostics.add({ level: 'warn', category: 'app', message: caught instanceof Error ? caught.message : 'Unable to check for updates' });
-      });
-    }, 5_000);
+    mounted = true;
+    const timer = window.setTimeout(() => { if (isTauri() && !checked) void checkForUpdates(false); }, 5_000);
     return () => {
       mounted = false;
       window.clearTimeout(timer);
@@ -41,8 +40,32 @@
   });
 
   $effect(() => {
-    if (manifest && dialog && !dialog.open && !activeSession) dialog.showModal();
+    if (dialog && !dialog.open && (requested || (autoPrompt && !activeSession))) dialog.showModal();
   });
+
+  export async function checkForUpdates(manual = true): Promise<void> {
+    if (manual) requested = true;
+    if (checking || updating || manifest) return;
+    checked = true;
+    error = '';
+    if (!isTauri()) { status = 'unsupported'; return; }
+    checking = true;
+    status = 'checking';
+    try {
+      const update = await check();
+      if (!mounted) { if (update) await update.close(); return; }
+      manifest = update;
+      status = update ? 'idle' : 'current';
+      autoPrompt = !manual && update !== null;
+    } catch (caught) {
+      if (!mounted) return;
+      status = 'error';
+      error = 'Unable to check for updates. Check your connection and try again.';
+      diagnostics.add({ level: 'warn', category: 'app', message: caught instanceof Error ? caught.message : error });
+    } finally {
+      checking = false;
+    }
+  }
 
   async function install(): Promise<void> {
     if (!manifest || updating || activeSession) return;
@@ -68,12 +91,15 @@
   }
 
   async function restart(): Promise<void> {
+    if (activeSession || status !== 'done') return;
     try { await relaunch(); }
     catch { error = 'Unable to restart automatically. Quit and reopen Sanser to finish updating.'; }
   }
 
   function dismiss(): void {
-    if (updating) return;
+    if (updating || checking) return;
+    requested = false;
+    autoPrompt = false;
     dialog?.close();
     const update = manifest;
     manifest = null;
@@ -83,7 +109,7 @@
 
 <dialog bind:this={dialog} class="update-dialog" aria-labelledby="update-title" oncancel={(event) => { event.preventDefault(); dismiss(); }}>
   {#if manifest}
-    <div class="update-heading"><span class="section-eyebrow">SANSER UPDATE</span><h2 id="update-title">{status === 'done' ? 'Your update is ready' : 'A better workspace awaits'}</h2><span class="status available">Version {manifest.version}</span></div>
+    <div class="update-heading"><span class="section-eyebrow">SANSER UPDATE</span><h2 id="update-title">{status === 'done' ? 'Your update is ready' : 'Update available'}</h2><span class="status available">Version {manifest.version}</span></div>
     <div aria-live="polite">
       {#if status === 'idle' || status === 'error'}
         <p>Get the latest improvements and fixes. Sanser will ask you to restart when installation is complete.</p>
@@ -100,6 +126,14 @@
       <button class="button ghost" disabled={updating} onclick={dismiss}>{status === 'done' ? 'Restart later' : 'Not now'}</button>
       {#if status === 'done'}<button class="button primary" disabled={activeSession} onclick={restart}>Restart Sanser</button>
       {:else}<button class="button primary" disabled={updating || activeSession} onclick={install}>{updating ? 'Updating…' : status === 'error' ? 'Try again' : 'Install update'}</button>{/if}
+    </div>
+  {:else}
+    <div class="update-heading"><h2 id="update-title">{status === 'checking' ? 'Checking for updates…' : status === 'current' ? 'You’re up to date' : status === 'unsupported' ? 'Open the desktop app to update' : 'Check for updates'}</h2></div>
+    <p aria-live="polite">{status === 'current' ? `Sanser ${SANSER_VERSION} is the latest version available for this computer.` : status === 'unsupported' ? 'Updates can be installed from the Sanser desktop app.' : status === 'checking' ? 'Looking for the latest version of Sanser.' : `Current version: ${SANSER_VERSION}`}</p>
+    {#if error}<div class="notice error" role="alert">{error}</div>{/if}
+    <div class="update-actions">
+      <button class="button ghost" disabled={checking} onclick={dismiss}>Close</button>
+      {#if status === 'error'}<button class="button primary" onclick={() => checkForUpdates()}>Try again</button>{/if}
     </div>
   {/if}
 </dialog>

@@ -81,7 +81,6 @@ jobs:
           if-no-files-found: error
 
   macos-arm64:
-    if: false
     needs: source-policy
     runs-on: macos-14
     env:
@@ -100,19 +99,6 @@ jobs:
       - run: npm ci
       - run: npm run release:validate
       - run: npm run desktop:stage-sidecar
-      - name: Prepare Apple notarization credentials
-        shell: bash
-        env:
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "$APPLE_API_KEY"
-          test -n "$APPLE_API_ISSUER"
-          test -n "$APPLE_API_PRIVATE_KEY"
-          umask 077
-          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
       - name: Reject incomplete native protocol on a production tag
         if: github.event_name == 'push'
         shell: bash
@@ -120,12 +106,10 @@ jobs:
       - name: Build application and DMG
         run: npm --workspace @sanser/desktop run tauri -- build --target aarch64-apple-darwin
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          # Ad-hoc app signing until an Apple Developer certificate is configured.
+          APPLE_SIGNING_IDENTITY: "-"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Name artifacts
         shell: bash
         run: |
@@ -148,7 +132,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [windows-x64]
+    needs: [windows-x64, macos-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -172,5 +156,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "Sanser 2.1.0" --generate-notes
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --draft --title "Sanser 2.1.0" --notes-file docs/releases/v2.1.0.md
           gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
