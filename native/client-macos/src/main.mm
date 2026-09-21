@@ -1,3 +1,4 @@
+#include "engine.h"
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
 #import <CoreAudio/CoreAudio.h>
@@ -7844,6 +7845,9 @@ std::uint16_t defaultAudioPort(std::uint16_t videoPort) {
 
 int main(int argc, char** argv) {
   try {
+    for (int i = 1; i < argc; ++i) {
+      if (std::string_view(argv[i]) == "--snv2") return sanser::desktop::runMac(false, argc, argv);
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--version") {
       std::cout << sanser::kProductName << " " << sanser::kVersion
                 << " protocol=" << static_cast<unsigned>(sanser::kProtocolVersion)
@@ -7854,7 +7858,7 @@ int main(int argc, char** argv) {
       std::cout << "{\"product\":\"Sanser\",\"version\":\"" << sanser::kVersion
                 << "\",\"protocolVersion\":" << static_cast<unsigned>(sanser::kProtocolVersion)
                 << ",\"engine\":\"client-macos\","
-                   "\"nativeSnv2\":true,\"nativeDirect\":true,"
+                   "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,"
                    "\"h264DecoderImplementation\":true,"
                    "\"hevcDecoderImplementation\":true,\"metalImplementation\":true,"
                    "\"audioImplementation\":true,\"inputImplementation\":true,"

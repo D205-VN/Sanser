@@ -55,11 +55,15 @@ export async function coordinateP2pConnection(
   peerDeviceId: string,
   controlling: boolean,
   sessionCredential: string,
-  preferredLocalPort?: number
+  preferredLocalPort?: number,
+  signal?: AbortSignal
 ): Promise<P2pPunchResult> {
+  const cancelled = () => new DOMException('Connection cancelled', 'AbortError');
+  if (signal?.aborted) throw cancelled();
   const attemptId = crypto.randomUUID();
   if (!sessionCredential) throw new Error('P2P session credential is missing');
   const token = await client.getAccessToken();
+  if (signal?.aborted) throw cancelled();
   if (!token) throw new Error('Unauthenticated: Access token is missing');
 
   diagnostics.add({
@@ -83,7 +87,10 @@ export async function coordinateP2pConnection(
       message: `[P2P] STUN configuration is unavailable; trying LAN candidates only: ${error instanceof Error ? error.message : String(error)}`
     });
   }
+  if (signal?.aborted) throw cancelled();
   let localCandidates: Record<string, unknown>[];
+  const stopGather = () => { void invoke('p2p_stop', { attemptId }).catch(() => undefined); };
+  signal?.addEventListener('abort', stopGather, { once: true });
   try {
     const gathered = await invoke<P2pGatherResult>('p2p_gather', {
       sessionId,
@@ -91,6 +98,7 @@ export async function coordinateP2pConnection(
       stunServers,
       preferredLocalPort
     });
+    if (signal?.aborted) { stopGather(); throw cancelled(); }
     localCandidates = gathered.candidates;
     if (localCandidates.length === 0) throw new Error('No local P2P candidate was gathered');
     networkDiagnostics.updateGather(gathered, preferredLocalPort !== undefined);
@@ -107,9 +115,12 @@ export async function coordinateP2pConnection(
       }
     });
   } catch (error) {
+    if (signal?.aborted) throw cancelled();
     const message = error instanceof Error ? error.message : String(error);
     diagnostics.add({ level: 'error', category: 'network', message: `[P2P] Gathering failed: ${message}` });
     throw error;
+  } finally {
+    signal?.removeEventListener('abort', stopGather);
   }
 
   return new Promise<P2pPunchResult>((resolve, reject) => {
@@ -122,7 +133,10 @@ export async function coordinateP2pConnection(
     let retryIndex = 0;
     let retryTimer: number | undefined;
 
+    function onAbort(): void { fail(cancelled()); }
+
     const clearTimers = (): void => {
+      signal?.removeEventListener('abort', onAbort);
       window.clearTimeout(timeoutTimer);
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       retryTimer = undefined;
@@ -217,6 +231,7 @@ export async function coordinateP2pConnection(
         }
       })
         .then((result) => {
+          if (settled) return;
           diagnostics.add({
             level: 'info',
             category: 'network',
@@ -336,5 +351,7 @@ export async function coordinateP2pConnection(
         ));
       }
     };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }

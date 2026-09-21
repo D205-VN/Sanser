@@ -29,6 +29,10 @@ pub struct RegisterDeviceRequest {
     name: String,
     platform: String,
     #[serde(default)]
+    device_role: Option<String>,
+    #[serde(default)]
+    cross_platform: bool,
+    #[serde(default)]
     os_version: String,
     #[serde(default)]
     gpu: String,
@@ -166,6 +170,18 @@ pub async fn register(
     };
     let name = clean_label(&request.name, "name", 120)?;
     let platform = clean_label(&request.platform, "platform", 40)?;
+    let device_role = match request.device_role.as_deref() {
+        Some("host") => "host",
+        Some("client") => "client",
+        None if platform.to_ascii_lowercase().starts_with("windows") => "host",
+        None if platform.to_ascii_lowercase().starts_with("mac") => "client",
+        None => "unknown",
+        _ => {
+            return Err(AppError::Validation(
+                "deviceRole must be host or client".into(),
+            ));
+        }
+    };
     let os_version = optional_label(&request.os_version, "osVersion", 120)?;
     let gpu = optional_label(&request.gpu, "gpu", 240)?;
     let version_prefix = SANSER_VERSION
@@ -211,9 +227,9 @@ pub async fn register(
             "INSERT INTO devices \
              (id, user_id, name, platform, os_version, gpu, sanser_version, protocol_version, \
               online, streaming, pinned, route_address, network_quality, latency_ms, codecs_json, \
-              native_transport, webrtc, audio, gamepad, last_seen_at, created_at, updated_at) \
+              native_transport, webrtc, audio, gamepad, last_seen_at, created_at, updated_at, device_role, cross_platform) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, FALSE, FALSE, $9, NULL, NULL, \
-                     $10, $11, $12, $13, $14, $15, $16, $17)",
+                     $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
         )
         .bind(&id)
         .bind(&auth.user_id)
@@ -232,15 +248,17 @@ pub async fn register(
         .bind(now)
         .bind(now)
         .bind(now)
+        .bind(device_role)
+        .bind(request.cross_platform)
         .execute(&state.pool)
         .await
         .map_err(AppError::from_db)?;
     } else {
         sqlx::query(
-            "UPDATE devices SET name = $1, platform = $2, os_version = $3, gpu = $4, \
+            "UPDATE devices SET name = COALESCE(NULLIF(name, ''), $1), platform = $2, os_version = $3, gpu = $4, \
              sanser_version = $5, protocol_version = $6, online = TRUE, route_address = $7, \
              codecs_json = $8, native_transport = $9, webrtc = $10, audio = $11, gamepad = $12, \
-             last_seen_at = $13, updated_at = $14 WHERE id = $15 AND user_id = $16",
+             last_seen_at = $13, updated_at = $14, device_role = $17, cross_platform = $18 WHERE id = $15 AND user_id = $16",
         )
         .bind(&name)
         .bind(&platform)
@@ -258,6 +276,8 @@ pub async fn register(
         .bind(now)
         .bind(&id)
         .bind(&auth.user_id)
+        .bind(device_role)
+        .bind(request.cross_platform)
         .execute(&state.pool)
         .await
         .map_err(AppError::from_db)?;
@@ -563,6 +583,8 @@ fn row_to_device(row: sqlx::postgres::PgRow) -> Result<Device, AppError> {
         id: row.try_get("id").map_err(AppError::from_db)?,
         name: row.try_get("name").map_err(AppError::from_db)?,
         platform: row.try_get("platform").map_err(AppError::from_db)?,
+        device_role: row.try_get("device_role").map_err(AppError::from_db)?,
+        cross_platform: row.try_get("cross_platform").map_err(AppError::from_db)?,
         os_version: row.try_get("os_version").map_err(AppError::from_db)?,
         gpu: row.try_get("gpu").map_err(AppError::from_db)?,
         sanser_version: row.try_get("sanser_version").map_err(AppError::from_db)?,

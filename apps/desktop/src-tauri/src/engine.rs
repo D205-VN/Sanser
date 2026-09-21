@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
+    io::Write,
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -14,11 +15,18 @@ use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use crate::{
+    engine_output::EngineOutput,
     error::DesktopError,
     models::{EngineKind, EngineStatus, LaunchEngineRequest, VideoCodec},
 };
 
+#[cfg(target_os = "macos")]
+const HOST_SIDECAR: &str = "sanser-host-macos";
+#[cfg(not(target_os = "macos"))]
 const HOST_SIDECAR: &str = "sanser-host-windows";
+#[cfg(target_os = "windows")]
+const CLIENT_SIDECAR: &str = "sanser-client-windows";
+#[cfg(not(target_os = "windows"))]
 const CLIENT_SIDECAR: &str = "sanser-client-macos";
 const SIDECAR_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const ENGINE_STARTUP_STABILIZATION: Duration = Duration::from_millis(250);
@@ -33,9 +41,33 @@ const INHERITED_ENVIRONMENT: [&str; 7] = [
     "USERPROFILE",
 ];
 
+struct EngineChild {
+    process: Child,
+    output: EngineOutput,
+}
+
+impl EngineChild {
+    fn spawn(command: &mut Command, debug_log_path: Option<&Path>) -> std::io::Result<Self> {
+        let mut process = command.spawn()?;
+        let Some(stderr) = process.stderr.take() else {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(std::io::Error::other("native stderr pipe is missing"));
+        };
+        match EngineOutput::start(stderr, debug_log_path.and_then(open_private_log)) {
+            Ok(output) => Ok(Self { process, output }),
+            Err(error) => {
+                let _ = process.kill();
+                let _ = process.wait();
+                Err(error)
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 struct EngineState {
-    children: HashMap<EngineKind, Child>,
+    children: HashMap<EngineKind, EngineChild>,
     last_errors: HashMap<EngineKind, String>,
 }
 
@@ -48,8 +80,7 @@ impl Drop for EngineManager {
     fn drop(&mut self) {
         if let Ok(state) = self.state.get_mut() {
             for child in state.children.values_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = stop_child(child);
             }
         }
     }
@@ -67,16 +98,19 @@ fn sidecar_name(kind: EngineKind) -> &'static str {
 
 fn sidecar_engine_id(kind: EngineKind) -> &'static str {
     match kind {
-        EngineKind::Host => "host-windows",
-        EngineKind::Client => "client-macos",
+        EngineKind::Host => HOST_SIDECAR.strip_prefix("sanser-").unwrap_or(HOST_SIDECAR),
+        EngineKind::Client => CLIENT_SIDECAR
+            .strip_prefix("sanser-")
+            .unwrap_or(CLIENT_SIDECAR),
         EngineKind::LocalServer => "server-disabled",
     }
 }
 
 fn supported_on_platform(kind: EngineKind) -> bool {
     match kind {
-        EngineKind::Host => cfg!(target_os = "windows"),
-        EngineKind::Client => cfg!(target_os = "macos"),
+        EngineKind::Host | EngineKind::Client => {
+            cfg!(any(target_os = "windows", target_os = "macos"))
+        }
         EngineKind::LocalServer => false,
     }
 }
@@ -99,6 +133,8 @@ struct SidecarCapabilities {
     hevc_encoder_implementation: bool,
     #[serde(default)]
     hevc_decoder_implementation: bool,
+    #[serde(default)]
+    cross_platform: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +144,7 @@ pub struct SidecarProbe {
     pub native_snv2: bool,
     pub native_direct: bool,
     pub hevc: bool,
+    pub cross_platform: bool,
     pub reason: Option<String>,
 }
 
@@ -118,6 +155,7 @@ impl SidecarProbe {
             native_snv2: false,
             native_direct: false,
             hevc: false,
+            cross_platform: false,
             reason: Some(reason.into()),
         }
     }
@@ -203,6 +241,7 @@ fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
                 native_snv2: capabilities.native_snv2,
                 native_direct: capabilities.native_direct,
                 hevc,
+                cross_platform: capabilities.cross_platform,
                 reason: (!capabilities.native_direct).then(|| {
                     "Native sidecar does not advertise the authenticated direct transport"
                         .to_owned()
@@ -339,7 +378,25 @@ fn native_codec(codec: VideoCodec) -> &'static str {
     }
 }
 
+fn validate_wire_protocol(request: &LaunchEngineRequest) -> Result<bool, DesktopError> {
+    if let Some(wire) = request.wire_protocol.as_deref()
+        && !matches!(wire, "legacy" | "snv2")
+    {
+        return Err(DesktopError::InvalidRequest(
+            "Unknown native wire protocol".into(),
+        ));
+    }
+    let cross_platform = request.wire_protocol.as_deref() == Some("snv2");
+    if cross_platform && (request.codec == VideoCodec::Hevc || request.relative_mouse) {
+        return Err(DesktopError::Unavailable(
+            "Cross-platform sessions require H.264/Auto and absolute mouse mode".into(),
+        ));
+    }
+    Ok(cross_platform)
+}
+
 fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError> {
+    let cross_platform = validate_wire_protocol(request)?;
     validate_common(request)?;
     if request.kind == EngineKind::LocalServer {
         return Err(DesktopError::Unavailable(
@@ -400,6 +457,9 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 args.push("--udp-bind-port".into());
                 args.push(bind_port.to_string());
             }
+            if cross_platform {
+                args.push("--snv2".into());
+            }
             Ok(args)
         }
         EngineKind::Client => {
@@ -412,12 +472,18 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 "0".into(),
                 "--udp-video".into(),
             ];
+            if !request.input_enabled && cross_platform {
+                args.push("--disable-input".into());
+            }
             if request.relative_mouse {
                 args.push("--relative-mouse".into());
             }
             if let Some(ref conn) = request.udp_connect {
                 args.push("--udp-connect".into());
                 args.push(conn.clone());
+            }
+            if cross_platform {
+                args.push("--snv2".into());
             }
             Ok(args)
         }
@@ -453,24 +519,13 @@ fn open_private_log(path: &Path) -> Option<File> {
     Some(file)
 }
 
-fn sanitized_command(
-    path: &Path,
-    args: &[String],
-    request: &LaunchEngineRequest,
-    debug_log_path: Option<&Path>,
-) -> Command {
+fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest) -> Command {
     let mut command = Command::new(path);
-    command.args(args).stdin(Stdio::null());
-    let debug_files = debug_log_path
-        .and_then(open_private_log)
-        .and_then(|stderr| stderr.try_clone().ok().map(|stdout| (stdout, stderr)));
-    if let Some((stdout, stderr)) = debug_files {
-        command
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
-    } else {
-        command.stdout(Stdio::null()).stderr(Stdio::null());
-    }
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
 
     if request.kind != EngineKind::LocalServer {
         let inherited: Vec<(String, String)> = INHERITED_ENVIRONMENT
@@ -487,16 +542,45 @@ fn sanitized_command(
             command.env("SANSER_NATIVE_SESSION_TOKEN", token);
         }
     }
+    if request.wire_protocol.as_deref() == Some("snv2") {
+        command
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("SANSER_CONTROL_STDIN", "1");
+    }
     command
 }
 
-fn stabilize_child(child: &mut Child) -> Result<(), String> {
+fn stop_child(engine: &mut EngineChild) -> std::io::Result<()> {
+    let child = &mut engine.process;
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    if let Some(mut input) = child.stdin.take() {
+        let _ = input.write_all(b"stop\n");
+        drop(input);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    child.kill()?;
+    child.wait()?;
+    Ok(())
+}
+
+fn stabilize_child(child: &mut EngineChild) -> Result<(), String> {
     let started = Instant::now();
     loop {
-        match child.try_wait() {
+        match child.process.try_wait() {
             Ok(None) => {}
             Ok(Some(status)) => {
-                return Err(format!("process exited during startup with {status}"));
+                return Err(child
+                    .output
+                    .exit_message(format!("process exited during startup with {status}")));
             }
             Err(error) => {
                 return Err(format!("could not inspect process during startup: {error}"));
@@ -545,6 +629,18 @@ impl EngineManager {
                 "native sidecar does not provide the requested HEVC engine".into(),
             ));
         }
+        let requires_snv2 = (cfg!(target_os = "macos") && request.kind == EngineKind::Host)
+            || (cfg!(target_os = "windows") && request.kind == EngineKind::Client);
+        if requires_snv2 && request.wire_protocol.as_deref() != Some("snv2") {
+            return Err(DesktopError::Unavailable(
+                "This direction requires the updated server and SNV2 session negotiation".into(),
+            ));
+        }
+        if request.wire_protocol.as_deref() == Some("snv2") && !probe.cross_platform {
+            return Err(DesktopError::Unavailable(
+                "The installed native engine does not support cross-platform sessions".into(),
+            ));
+        }
         let args = build_args(request)?;
         let mut state = self
             .state
@@ -552,7 +648,7 @@ impl EngineManager {
             .map_err(|_| DesktopError::Process("engine state is unavailable".into()))?;
 
         if let Some(child) = state.children.get_mut(&request.kind) {
-            match child.try_wait() {
+            match child.process.try_wait() {
                 Ok(None) => {
                     return Err(DesktopError::Process(
                         "the requested native engine is already running".into(),
@@ -565,22 +661,23 @@ impl EngineManager {
         }
 
         let debug_log_path = sidecar_debug_log_path(app, request.kind);
-        let mut command = sanitized_command(&path, &args, request, debug_log_path.as_deref());
+        let mut command = sanitized_command(&path, &args, request);
         // Candidate gathering, STUN and connectivity checks all use this
         // socket. Release it only after validation/probing and immediately
         // before the sidecar binds the selected port.
         drop(reserved_socket);
-        let mut child = command.spawn().map_err(|error| {
-            let message = error.to_string();
-            state.last_errors.insert(request.kind, message.clone());
-            DesktopError::Process(message)
-        })?;
+        let mut child =
+            EngineChild::spawn(&mut command, debug_log_path.as_deref()).map_err(|error| {
+                let message = error.to_string();
+                state.last_errors.insert(request.kind, message.clone());
+                DesktopError::Process(message)
+            })?;
         if let Err(message) = stabilize_child(&mut child) {
             // `try_wait` reaps a child that already exited. If inspecting the
             // child failed instead, make a best-effort cleanup so launch never
             // leaves an unmanaged sidecar behind.
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = child.process.kill();
+            let _ = child.process.wait();
             state.last_errors.insert(request.kind, message.clone());
             return Err(DesktopError::Process(message));
         }
@@ -597,12 +694,7 @@ impl EngineManager {
         let Some(mut child) = state.children.remove(&kind) else {
             return Ok(());
         };
-        child
-            .kill()
-            .map_err(|error| DesktopError::Process(error.to_string()))?;
-        child
-            .wait()
-            .map_err(|error| DesktopError::Process(error.to_string()))?;
+        stop_child(&mut child).map_err(|error| DesktopError::Process(error.to_string()))?;
         Ok(())
     }
 
@@ -616,15 +708,16 @@ impl EngineManager {
         let mut process_id = None;
         let mut exited = false;
         if let Some(child) = state.children.get_mut(&kind) {
-            match child.try_wait() {
+            match child.process.try_wait() {
                 Ok(None) => {
                     running = true;
-                    process_id = Some(child.id());
+                    process_id = Some(child.process.id());
                 }
                 Ok(Some(status)) => {
-                    state
-                        .last_errors
-                        .insert(kind, format!("process exited with {status}"));
+                    let message = child
+                        .output
+                        .exit_message(format!("process exited with {status}"));
+                    state.last_errors.insert(kind, message);
                     exited = true;
                 }
                 Err(error) => {
@@ -671,6 +764,7 @@ mod tests {
             udp_connect: None,
             udp_bind_port: None,
             relay: false,
+            wire_protocol: None,
         }
     }
 
@@ -735,10 +829,31 @@ mod tests {
     }
 
     #[test]
+    fn cross_platform_args_require_compatible_media_and_preserve_input_permissions()
+    -> Result<(), DesktopError> {
+        let mut modern = request(EngineKind::Client);
+        modern.wire_protocol = Some("snv2".into());
+        modern.input_enabled = false;
+        let args = build_args(&modern)?;
+        assert!(args.iter().any(|arg| arg == "--snv2"));
+        assert!(args.iter().any(|arg| arg == "--disable-input"));
+        modern.codec = VideoCodec::Hevc;
+        assert!(build_args(&modern).is_err());
+        modern.codec = VideoCodec::Auto;
+        modern.relative_mouse = true;
+        assert!(build_args(&modern).is_err());
+        modern.relative_mouse = false;
+        modern.wire_protocol = Some("unknown".into());
+        assert!(build_args(&modern).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn capability_parser_requires_matching_engine_and_media_implementation() -> Result<(), String> {
         let version = crate::models::SANSER_VERSION;
+        let engine = sidecar_engine_id(EngineKind::Client);
         let valid_json = format!(
-            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"client-macos","nativeSnv2":true,"nativeDirect":true,"h264DecoderImplementation":true,"hevcDecoderImplementation":true}}"#
+            r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"{engine}","nativeSnv2":true,"nativeDirect":true,"h264DecoderImplementation":true,"hevcDecoderImplementation":true}}"#
         );
         let parsed = parse_sidecar_capabilities(valid_json.as_bytes(), EngineKind::Client)?;
         assert!(parsed.native_snv2);

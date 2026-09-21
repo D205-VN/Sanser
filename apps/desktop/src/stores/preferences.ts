@@ -163,6 +163,8 @@ function writeBrowserPreferences(preferences: Preferences): void {
 
 function createPreferencesStore() {
   const store = writable<Preferences>(structuredClone(DEFAULT_PREFERENCES));
+  let pendingSave = Promise.resolve();
+  let persistedValue = get(store);
 
   return {
     subscribe: store.subscribe,
@@ -176,14 +178,25 @@ function createPreferencesStore() {
       loaded ??= readBrowserPreferences();
       const migrated = migratePreferences(loaded);
       store.set(migrated);
+      persistedValue = migrated;
       await this.save(migrated);
       return migrated;
     },
     async save(next?: Preferences): Promise<void> {
       const value = migratePreferences(next ?? get(store));
       store.set(value);
-      writeBrowserPreferences(value);
-      await saveNativePreferences(value);
+      const operation = pendingSave.then(async () => {
+        await saveNativePreferences(value);
+        writeBrowserPreferences(value);
+        persistedValue = value;
+      });
+      pendingSave = operation.catch(() => undefined);
+      try {
+        await operation;
+      } catch (error) {
+        if (get(store) === value) store.set(persistedValue);
+        throw error;
+      }
     },
     async patch(update: Partial<Preferences>): Promise<void> {
       await this.save({ ...get(store), ...update });

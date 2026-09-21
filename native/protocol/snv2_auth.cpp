@@ -99,6 +99,10 @@ bool constantTimeEqual(const AuthTag& left, const AuthTag& right) {
 
 } // namespace
 
+DirectionKey deriveKey(const DirectionKey& key, std::span<const std::uint8_t> context) {
+  return hmacSha256(key, context, {});
+}
+
 AuthTag computeAuthTag(const DirectionKey& key,
                        std::span<const std::uint8_t> authenticatedHeader,
                        std::span<const std::uint8_t> payload) {

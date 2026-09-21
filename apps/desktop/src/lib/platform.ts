@@ -41,7 +41,7 @@ export async function saveNativePreferences(preferences: Preferences): Promise<v
   if (isTauriRuntime()) await invoke('save_preferences', { preferences });
 }
 
-const allowedSecretKeys = new Set(['access_token', 'refresh_token', 'device_identity']);
+const allowedSecretKeys = new Set(['auth_session', 'access_token', 'refresh_token', 'device_identity']);
 
 function assertSecretKey(key: string): void {
   if (!allowedSecretKeys.has(key)) throw new Error('Unsupported secure storage key');

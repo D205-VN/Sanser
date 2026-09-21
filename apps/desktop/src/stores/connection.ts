@@ -7,6 +7,7 @@ export interface ConnectionState {
   session: ConnectionSession | null;
   metrics: SessionMetrics | null;
   engineRunning: boolean;
+  preparing: boolean;
   busy: boolean;
   error: string | null;
 }
@@ -15,6 +16,7 @@ const initial: ConnectionState = {
   session: null,
   metrics: null,
   engineRunning: false,
+  preparing: false,
   busy: false,
   error: null
 };
@@ -47,16 +49,21 @@ function createConnectionStore() {
               address: current.address,
               port: current.port,
               sessionToken: current.sessionToken,
+              wireProtocol: current.wireProtocol,
               credentialExpiresAt: current.credentialExpiresAt
             }
           : refreshed;
         store.update((state) => ({ ...state, session: merged, error: null }));
         return merged;
       } catch (error) {
+        if (get(store).session?.id !== current.id) return null;
         const message = error instanceof Error ? error.message : 'Unable to refresh the session';
         store.update((state) => ({ ...state, error: message }));
         return null;
       }
+    },
+    setPreparing(preparing: boolean): void {
+      store.update((state) => ({ ...state, preparing }));
     },
     setEngineRunning(running: boolean): void {
       store.update((state) => ({ ...state, engineRunning: running, error: null }));
@@ -71,6 +78,7 @@ function createConnectionStore() {
             address: credentials.peerRouteAddress,
             port: credentials.basePort,
             sessionToken: credentials.sessionToken,
+            wireProtocol: credentials.wireProtocol,
             credentialExpiresAt: credentials.expiresAt
           },
           error: null
@@ -87,7 +95,7 @@ function createConnectionStore() {
       store.update((state) => ({ ...state, metrics }));
     },
     clear(): void {
-      store.set(initial);
+      store.set({ ...initial, preparing: get(store).preparing });
     }
   };
 }

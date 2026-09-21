@@ -7,7 +7,6 @@
   import ActiveSession from './pages/ActiveSession.svelte';
   import About from './pages/About.svelte';
   import Computers from './pages/Computers.svelte';
-  import Diagnostics from './pages/Diagnostics.svelte';
   import Host from './pages/Host.svelte';
   import Settings from './pages/Settings.svelte';
   import Welcome from './pages/Welcome.svelte';
@@ -20,8 +19,12 @@
   import Updater from './components/Updater.svelte';
 
   let page = $state<Page>('computers');
+  let pageContainer = $state<HTMLElement>();
   let runtime = $state<RuntimeStatus | null>(null);
   let bootError = $state<string | null>(null);
+  let signOutError = $state<string | null>(null);
+  let signingOut = $state(false);
+  let browserOnline = $state(navigator.onLine);
   let autoOnlineAccountId = $state<string | null>(null);
 
   const pageMeta: Record<Page, { section: string; label: string }> = {
@@ -29,16 +32,17 @@
     host: { section: 'Workspace', label: 'Host' },
     session: { section: 'Workspace', label: 'Active session' },
     settings: { section: 'System', label: 'Settings' },
-    diagnostics: { section: 'System', label: 'Diagnostics' },
+    diagnostics: { section: 'System', label: 'Settings' },
     about: { section: 'System', label: 'About Sanser' }
   };
 
   function navigate(next: Page): void {
     page = next;
+    if (pageContainer) { pageContainer.scrollTop = 0; pageContainer.scrollLeft = 0; }
   }
 
   $effect(() => {
-    if (runtime && $session.mode === 'cloud' && runtime.capabilities.clientEngine.state === 'available') {
+    if (!signingOut && runtime && $session.mode === 'cloud' && runtime.capabilities.clientEngine.state === 'available') {
       void presence.start(runtime);
     } else {
       void presence.stop();
@@ -47,7 +51,7 @@
 
   $effect(() => {
     const accountId = $session.account?.id ?? null;
-    if (accountId === null || !$preferences.host.autoOnline) {
+    if (signingOut || accountId === null || !$preferences.host.autoOnline) {
       autoOnlineAccountId = null;
       return;
     }
@@ -67,15 +71,23 @@
         diagnostics.add({
           level: 'warn',
           category: 'engine',
-          message: error instanceof Error ? error.message : 'Unable to bring the Windows host online automatically'
+          message: error instanceof Error ? error.message : 'Unable to bring the host online automatically'
         });
       });
     }
   });
 
   async function signOut(): Promise<void> {
+    if (signingOut) return;
+    signingOut = true;
+    signOutError = null;
     try {
+      const activeSession = $connection.session;
+      const client = session.client();
       connection.clear();
+      if (activeSession && client) {
+        await client.disconnectSession(activeSession.id).catch(() => undefined);
+      }
       const hostShutdown = $host.online || $host.busy || $host.engineRunning ? host.offline() : Promise.resolve();
       const presenceShutdown = presence.stop();
       if (runtime?.capabilities.desktopShell.state === 'available') {
@@ -95,11 +107,21 @@
       await session.logout();
       page = 'computers';
     } catch (error) {
+      signOutError = error instanceof Error ? error.message : 'Unable to sign out. Please try again.';
       diagnostics.add({ level: 'warn', category: 'auth', message: error instanceof Error ? error.message : 'Sign out failed' });
+    } finally {
+      signingOut = false;
     }
   }
 
+  function checkSessionInactivity(): void {
+    if (!signingOut && session.isInactive()) void signOut();
+  }
+
   onMount(() => {
+    const expiryTimer = window.setInterval(checkSessionInactivity, 60_000);
+    window.addEventListener('focus', checkSessionInactivity);
+    document.addEventListener('visibilitychange', checkSessionInactivity);
     void (async () => {
       try {
         const loadedPreferences = await preferences.initialize();
@@ -111,8 +133,15 @@
         bootError = error instanceof Error ? error.message : 'Unable to initialize Sanser';
       }
     })();
+    return () => {
+      window.clearInterval(expiryTimer);
+      window.removeEventListener('focus', checkSessionInactivity);
+      document.removeEventListener('visibilitychange', checkSessionInactivity);
+    };
   });
 </script>
+
+<svelte:window ononline={() => (browserOnline = true)} onoffline={() => (browserOnline = false)} />
 
 {#if bootError}
   <main class="fatal-screen"><BrandMark size={68} label="Sanser" /><h1>Sanser could not start</h1><p>{bootError}</p><button class="button" onclick={() => window.location.reload()}>Retry</button></main>
@@ -122,26 +151,25 @@
   <Welcome />
 {:else}
   <div class="app-shell">
-    <Sidebar active={page} {runtime} {navigate} />
+    <Sidebar active={page === 'diagnostics' ? 'settings' : page} {navigate} />
     <div class="content-shell">
       <header class="titlebar">
         <div class="title-context">
-          <span>{pageMeta[page].section}</span>
           <strong>{pageMeta[page].label}</strong>
         </div>
         <div class="title-actions">
-          <span class="mode-indicator"><i></i>Sanser connected</span>
           <span class="title-account">{$session.account?.email}</span>
-          <button class="button small ghost" onclick={signOut}>Sign out</button>
+          <button class="button small ghost" disabled={signingOut} onclick={signOut}>{signingOut ? 'Signing out…' : 'Sign out'}</button>
         </div>
       </header>
-      <main class:session-scroll={page === 'session'} class="page-scroll">
+      <main bind:this={pageContainer} class:session-scroll={page === 'session'} class="page-scroll">
+        {#if signOutError}<div class="notice error" role="alert">{signOutError}</div>{/if}
+        {#if !browserOnline}<div class="notice warning" role="status">You are offline. Check your connection; your saved settings are still available.</div>{/if}
+        <div class="persistent-session" hidden={page !== 'session'}><ActiveSession {runtime} {navigate} /></div>
         {#if page === 'computers'}<Computers {runtime} {navigate} />
         {:else if page === 'host'}<Host {runtime} />
-        {:else if page === 'session'}<ActiveSession {runtime} />
-        {:else if page === 'settings'}<Settings {runtime} />
-        {:else if page === 'diagnostics'}<Diagnostics {runtime} />
-        {:else}<About {runtime} />{/if}
+        {:else if page === 'settings' || page === 'diagnostics'}<Settings {runtime} onSignOut={signOut} initialSection={page === 'diagnostics' ? 'diagnostics' : 'stream'} />
+        {:else if page === 'about'}<About />{/if}
       </main>
     </div>
   </div>

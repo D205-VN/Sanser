@@ -28,6 +28,12 @@ export interface Capability {
 }
 
 export interface RuntimeCapabilities {
+  crossPlatformHost?: boolean;
+  crossPlatformClient?: boolean;
+  hostAudio?: boolean;
+  clientAudio?: boolean;
+  hostCodecs?: VideoCodec[];
+  clientCodecs?: VideoCodec[];
   desktopShell: Capability;
   secureStorage: Capability;
   hostEngine: Capability;
@@ -67,7 +73,7 @@ export interface StreamPreferences {
 export interface HostPreferences {
   autoOnline: boolean;
   autoAcceptOwnDevices: boolean;
-  /** Stable UDP port used by the Windows host for UPnP/manual forwarding. */
+  /** Stable UDP port used by the host for UPnP/manual forwarding. */
   directUdpPort: number;
   audioEnabled: boolean;
   inputEnabled: boolean;
@@ -124,6 +130,8 @@ export interface DeviceCapabilities {
 }
 
 export interface Device {
+  deviceRole?: 'host' | 'client' | 'unknown';
+  crossPlatform?: boolean;
   id: string;
   name: string;
   platform: string;
@@ -140,6 +148,8 @@ export interface Device {
 }
 
 export interface DeviceRegistration {
+  deviceRole: 'host' | 'client';
+  crossPlatform: boolean;
   id: string;
   name: string;
   platform: string;
@@ -157,6 +167,7 @@ export interface DeviceRegistration {
 }
 
 export interface ConnectionSession {
+  wireProtocol?: 'legacy' | 'snv2';
   id: string;
   requesterDeviceId: string;
   hostDeviceId: string;
@@ -176,6 +187,7 @@ export interface ConnectionSession {
 }
 
 export interface NativeSessionCredentials {
+  wireProtocol?: 'legacy' | 'snv2';
   sessionId: string;
   deviceId: string;
   peerDeviceId: string;
@@ -224,6 +236,7 @@ export interface SessionMetrics {
 }
 
 export interface LaunchEngineRequest {
+  wireProtocol?: 'legacy' | 'snv2';
   kind: EngineKind;
   sessionId?: string;
   address?: string;

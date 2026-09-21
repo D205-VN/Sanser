@@ -51,17 +51,19 @@ function createPresenceStore() {
       diagnostics.add({
         level: 'warn',
         category: 'network',
-        message: error instanceof Error ? error.message : 'Unable to discover this Mac route'
+        message: error instanceof Error ? error.message : 'Unable to discover this computer route'
       });
     }
     if (runtime.capabilities.nativeDirect.state !== 'available' && runtime.capabilities.webRtc.state !== 'available') {
-      throw new Error(runtime.capabilities.nativeDirect.reason ?? 'No verified media transport is available on this Mac');
+      throw new Error(runtime.capabilities.nativeDirect.reason ?? 'No verified media transport is available on this computer');
     }
     // The native engine is also used behind the local UDP-to-WSS relay bridge,
     // so lack of an advertisable LAN address must not disable relay sessions.
     const nativeTransport = runtime.capabilities.nativeDirect.state === 'available';
     const webRtc = runtime.capabilities.webRtc.state === 'available';
     const registered = await client.registerDevice({
+      deviceRole: 'client',
+      crossPlatform: runtime.capabilities.crossPlatformClient === true,
       id: deviceId,
       name: displayName(runtime.platform),
       platform: runtime.platform,
@@ -69,10 +71,10 @@ function createPresenceStore() {
       gpu: 'Not reported',
       version: SANSER_VERSION,
       protocolVersion: PROTOCOL_VERSION,
-      codecs: ['auto', 'h264', 'hevc'],
+      codecs: runtime.capabilities.clientCodecs ?? ['h264', 'hevc'],
       nativeTransport,
       webRtc,
-      audio: true,
+      audio: runtime.capabilities.clientAudio ?? false,
       gamepad: runtime.capabilities.gamepad.state === 'available',
       routeAddress: routeAddress ?? undefined
     });
@@ -88,7 +90,11 @@ function createPresenceStore() {
       const current = get(store);
       const activeClient = session.client();
       if (!activeClient || !current.online || !current.deviceId) return;
-      void activeClient.heartbeatDevice(current.deviceId, false, current.routeAddress ?? undefined).catch((error: unknown) => {
+      void activeClient.heartbeatDevice(current.deviceId, false, current.routeAddress ?? undefined).then(() => {
+        if (generation !== lifecycleGeneration) return;
+        store.update((state) => ({ ...state, error: null }));
+      }).catch((error: unknown) => {
+        if (generation !== lifecycleGeneration) return;
         const message = error instanceof Error ? error.message : 'Client heartbeat failed';
         store.update((state) => ({ ...state, error: message }));
       });

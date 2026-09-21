@@ -125,8 +125,8 @@ pub fn get_runtime_status(
     let host_probe = probe_sidecar(&app, EngineKind::Host);
     let client_probe = probe_sidecar(&app, EngineKind::Client);
 
-    let host_capability = if !cfg!(target_os = "windows") {
-        Capability::unavailable("Windows host engine is only available on Windows")
+    let host_capability = if !cfg!(any(target_os = "windows", target_os = "macos")) {
+        Capability::unavailable("Native hosting requires Windows or macOS")
     } else if host.installed && host_probe.compatible {
         Capability::available()
     } else if host.installed {
@@ -134,13 +134,13 @@ pub fn get_runtime_status(
             host_probe
                 .reason
                 .clone()
-                .unwrap_or_else(|| "Windows host sidecar capability probe failed".into()),
+                .unwrap_or_else(|| "Host sidecar capability probe failed".into()),
         )
     } else {
-        Capability::unavailable("sanser-host-windows is not bundled")
+        Capability::unavailable("Native host engine is not bundled")
     };
-    let client_capability = if !cfg!(target_os = "macos") {
-        Capability::unavailable("macOS client engine is only available on macOS")
+    let client_capability = if !cfg!(any(target_os = "windows", target_os = "macos")) {
+        Capability::unavailable("Native viewing requires Windows or macOS")
     } else if client.installed && client_probe.compatible {
         Capability::available()
     } else if client.installed {
@@ -148,10 +148,10 @@ pub fn get_runtime_status(
             client_probe
                 .reason
                 .clone()
-                .unwrap_or_else(|| "macOS client sidecar capability probe failed".into()),
+                .unwrap_or_else(|| "Client sidecar capability probe failed".into()),
         )
     } else {
-        Capability::unavailable("sanser-client-macos is not bundled")
+        Capability::unavailable("Native client engine is not bundled")
     };
     let platform_probe = if cfg!(target_os = "windows") {
         &host_probe
@@ -194,6 +194,26 @@ pub fn get_runtime_status(
                 "Permission-gated clipboard transport is not linked yet",
             ),
             p2p_v2: Capability::available(),
+            cross_platform_host: host_probe.compatible && host_probe.cross_platform,
+            cross_platform_client: client_probe.compatible && client_probe.cross_platform,
+            host_audio: false,
+            client_audio: false,
+            host_codecs: if host_probe.hevc {
+                vec![
+                    crate::models::VideoCodec::H264,
+                    crate::models::VideoCodec::Hevc,
+                ]
+            } else {
+                vec![crate::models::VideoCodec::H264]
+            },
+            client_codecs: if client_probe.hevc {
+                vec![
+                    crate::models::VideoCodec::H264,
+                    crate::models::VideoCodec::Hevc,
+                ]
+            } else {
+                vec![crate::models::VideoCodec::H264]
+            },
         },
         engines: vec![host, client, local_server],
     })
@@ -762,7 +782,7 @@ pub async fn p2p_punch(
             .map_err(|_| "Remote candidate metadata is invalid".to_owned())?;
     }
 
-    let mut sockets = {
+    let sockets = {
         let current = manager.lock_transport()?;
         let transport = current
             .as_ref()
@@ -780,13 +800,11 @@ pub async fn p2p_punch(
             .map(|(index, entry)| (index, Arc::clone(&entry.socket), entry.candidates.clone()))
             .collect::<Vec<_>>()
     };
-    // Both peers derive the same family order. A global IPv6 path avoids NAT,
-    // so give it a short first attempt before the longer IPv4 traversal.
-    sockets.sort_by_key(|(_, socket, _)| {
-        socket
-            .local_addr()
-            .map_or(2, |address| i32::from(!address.is_ipv6()))
-    });
+    // Both native media engines currently bind IPv4 sockets. Selecting an IPv6
+    // probe would succeed here and fail at launch, preventing IPv4 fallback.
+    let sockets = sockets
+        .into_iter()
+        .filter(|(_, socket, _)| socket.local_addr().is_ok_and(|address| address.is_ipv4()));
 
     let probe_key = derive_probe_key(session_id, &request.session_credential);
     request.session_credential.zeroize();
@@ -801,7 +819,6 @@ pub async fn p2p_punch(
         if pairs.is_empty() {
             continue;
         }
-        let is_ipv6 = socket.local_addr().is_ok_and(|address| address.is_ipv6());
         match check_connectivity(
             &socket,
             &mut pairs,
@@ -810,7 +827,7 @@ pub async fn p2p_punch(
             device_hash(peer_device_id),
             &probe_key,
             request.controlling,
-            Duration::from_secs(if is_ipv6 { 3 } else { 6 }),
+            Duration::from_secs(6),
         )
         .await
         {
@@ -824,7 +841,7 @@ pub async fn p2p_punch(
     let Some((selected_index, socket, selected)) = selected_route else {
         manager.clear_if_current(session_id, attempt_id);
         return Err(last_error.unwrap_or_else(|| {
-            "No compatible IPv4 or IPv6 candidate pair could be constructed".into()
+            "No compatible IPv4 media candidate pair could be constructed".into()
         }));
     };
     {

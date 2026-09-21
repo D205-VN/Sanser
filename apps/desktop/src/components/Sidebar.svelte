@@ -1,10 +1,11 @@
 <script lang="ts">
-  import type { Page, RuntimeStatus } from '../lib/types';
+  import type { Page } from '../lib/types';
   import BrandMark from './BrandMark.svelte';
   import Icon from './Icon.svelte';
-  import StatusPill from './StatusPill.svelte';
+  import { connection } from '../stores/connection';
+  import { host as hostStore } from '../stores/host';
 
-  let { active, runtime, navigate }: { active: Page; runtime: RuntimeStatus; navigate: (page: Page) => void } = $props();
+  let { active, navigate }: { active: Page; navigate: (page: Page) => void } = $props();
 
   const primary: { page: Page; label: string }[] = [
     { page: 'computers', label: 'Computers' },
@@ -13,41 +14,36 @@
   ];
   const secondary: { page: Page; label: string }[] = [
     { page: 'settings', label: 'Settings' },
-    { page: 'diagnostics', label: 'Diagnostics' },
     { page: 'about', label: 'About' }
   ];
-  const nativeDirectReady = $derived(runtime.capabilities.nativeDirect.state === 'available');
 </script>
 
 <aside class="sidebar">
   <div class="brand">
     <BrandMark size={38} label="Sanser" />
-    <div><strong>Sanser</strong><span>Remote, refined</span></div>
-    <em>2.0</em>
+    <div><strong>Sanser</strong></div>
+
   </div>
 
   <nav aria-label="Main navigation">
     <div class="nav-group">
       <div class="nav-label">Workspace</div>
       {#each primary as item}
-        <button class:active={active === item.page} class="nav-button" aria-current={active === item.page ? 'page' : undefined} onclick={() => navigate(item.page)}>
-          <span class="nav-icon"><Icon name={item.page} /></span>{item.label}
+        <button class:active={active === item.page} class="nav-button" title={item.label} aria-label={item.label} aria-current={active === item.page ? 'page' : undefined} onclick={() => navigate(item.page)}>
+          <span class="nav-icon"><Icon name={item.page} /></span><span class="nav-text">{item.label}</span>
+          {#if item.page === 'session' && $connection.session}<span class="nav-dot" aria-label="Session in progress"></span>{/if}
+          {#if item.page === 'host' && $hostStore.sessions.some((item) => item.status === 'pending')}<span class="nav-dot" aria-label="Pending request"></span>{/if}
         </button>
       {/each}
     </div>
     <div class="nav-group">
       <div class="nav-label">System</div>
       {#each secondary as item}
-        <button class:active={active === item.page} class="nav-button" aria-current={active === item.page ? 'page' : undefined} onclick={() => navigate(item.page)}>
-          <span class="nav-icon"><Icon name={item.page} /></span>{item.label}
+        <button class:active={active === item.page} class="nav-button" title={item.label} aria-label={item.label} aria-current={active === item.page ? 'page' : undefined} onclick={() => navigate(item.page)}>
+          <span class="nav-icon"><Icon name={item.page} /></span><span class="nav-text">{item.label}</span>
         </button>
       {/each}
     </div>
   </nav>
 
-  <div class="sidebar-footer">
-    <span class="footer-label">Runtime</span>
-    <div class="runtime-line"><StatusPill state={runtime.capabilities.desktopShell.state} label={runtime.platform} /></div>
-    <div class="runtime-line">Protocol v{runtime.protocolVersion} · Native {nativeDirectReady ? 'ready' : 'unavailable'}</div>
-  </div>
 </aside>

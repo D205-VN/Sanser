@@ -29,6 +29,8 @@ pub struct Device {
     pub id: String,
     pub name: String,
     pub platform: String,
+    pub device_role: String,
+    pub cross_platform: bool,
     pub os_version: String,
     pub gpu: String,
     pub sanser_version: String,

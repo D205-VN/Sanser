@@ -43,6 +43,50 @@ npm run server:dev
 SQLx applies `apps/server/migrations` on startup. Readiness reports failure
 until PostgreSQL responds and migrations finish.
 
+## Upgrading for Mac hosts and Windows clients
+
+The running API must include `0004_device_roles.sql` and the matching device and
+session routes before these new roles can register. Updating the desktop alone
+cannot add support to an older server; do not bypass role validation by registering
+a Mac host as a client. Deploy the updated server build through the existing
+hosting setup. Startup applies the migration to add roles and cross-platform
+capabilities; no account reset is required.
+
+After deployment, verify both public endpoints:
+
+```bash
+curl --fail https://sanser.onrender.com/api/v2/health
+curl --fail https://sanser.onrender.com/api/v2/readiness
+```
+
+Both now include `features: ["device-roles", "cross-platform-native", "session-idle-7d"]`. Readiness
+must return HTTP 200 and `status: "ready"`. An older build can report version
+`2.0.8` too, so checking only the version or a successful health response does not
+establish role support. Then select **Check again** on the Mac Host page and test
+with matching desktop builds on both devices. Deployment and real-device testing
+are separate from local unit tests.
+
+## Remembered sign-in
+
+The desktop's **Keep me signed in** checkbox is off by default. With it off,
+tokens stay in process memory and reopening requires sign-in. With it on, one
+credential containing tokens, server identity and last activity is stored in
+macOS Keychain or Windows Credential Manager. The password is not saved.
+
+Both access-token authentication and refresh reject an auth session after seven
+days without authenticated activity. Activity refreshes `last_seen_at`, with
+writes limited to once per minute; token TTL and revocation checks still apply.
+The existing 30-day refresh-token TTL is a separate upper bound on each token,
+not permission to keep an idle session for 30 days. Returning users rotate their
+saved refresh token on startup. The idle rule uses existing columns and requires
+deployment of the updated API, but no additional database migration.
+
+The desktop also enforces seven days locally, including against older servers.
+It checks on reopening, once a minute while running and when the window regains
+focus. Login records from older builds without activity metadata require one
+fresh sign-in. Detailed verification is in
+[remembered-sign-in.md](../../docs/remembered-sign-in.md).
+
 ## Main routes
 
 ```text
@@ -149,14 +193,16 @@ Unit tests do not need a database:
 cargo test -p sanser-server --lib
 ```
 
-Database-backed API tests are opt-in and read only `TEST_DATABASE_URL`—never
+Database-backed API tests are explicitly ignored in the default suite. Run them
+with `--ignored` after configuring a test database; they fail if it is missing.
+They read only `TEST_DATABASE_URL`—never
 `DATABASE_URL`. The URL must pass the same Neon/TLS validation. Each test creates
 a random `sanser_test_*` schema, sets it as its connection search path, runs the
 migrations there, and drops it with `CASCADE` at the end:
 
 ```bash
 TEST_DATABASE_URL='postgresql://...neon.tech/TEST_DATABASE?sslmode=require' \
-  cargo test -p sanser-server --test api
+  cargo test -p sanser-server --test api -- --ignored
 ```
 
 Use a dedicated Neon test branch/database even with schema isolation. A process

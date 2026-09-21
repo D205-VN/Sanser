@@ -309,3 +309,34 @@ describe('coordinateP2pConnection', () => {
     expect(invokeMock).toHaveBeenLastCalledWith('p2p_stop', { attemptId });
   });
 });
+
+it('cancels candidate exchange and releases only its reserved attempt', async () => {
+  const { client } = createClient();
+  const controller = new AbortController();
+  const pending = coordinateP2pConnection(client, sessionId, localDeviceId, peerDeviceId, true, sessionCredential, undefined, controller.signal);
+  const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  await flushSetup();
+  const socket = FakeWebSocket.instances[0];
+  if (!socket) throw new Error('Signaling WebSocket was not created');
+  socket.open();
+  controller.abort();
+  await rejected;
+  expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+  expect(invokeMock).toHaveBeenCalledWith('p2p_stop', { attemptId });
+  expect(invokeMock).not.toHaveBeenCalledWith('p2p_punch', expect.anything());
+});
+
+it('does not open signaling when cancelled while gathering candidates', async () => {
+  const { client } = createClient();
+  let finishGather: ((result: typeof gatherResult) => void) | undefined;
+  invokeMock.mockImplementation((command) => command === 'p2p_gather' ? new Promise((resolve) => { finishGather = resolve; }) : Promise.resolve());
+  const controller = new AbortController();
+  const pending = coordinateP2pConnection(client, sessionId, localDeviceId, peerDeviceId, true, sessionCredential, undefined, controller.signal);
+  const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  await flushSetup();
+  controller.abort();
+  finishGather?.(gatherResult);
+  await rejected;
+  expect(FakeWebSocket.instances).toHaveLength(0);
+  expect(invokeMock).toHaveBeenCalledWith('p2p_stop', { attemptId });
+});

@@ -19,7 +19,12 @@ const SERVICE_NAME: &str = "com.sanser.desktop";
 const MAX_PREFERENCES_BYTES: u64 = 64 * 1024;
 const MAX_DIAGNOSTICS_BYTES: usize = 1024 * 1024;
 const MAX_SECRET_BYTES: usize = 16 * 1024;
-const SECRET_KEYS: [&str; 3] = ["access_token", "refresh_token", "device_identity"];
+const SECRET_KEYS: [&str; 4] = [
+    "auth_session",
+    "access_token",
+    "refresh_token",
+    "device_identity",
+];
 
 fn preferences_path(app: &AppHandle) -> Result<PathBuf, DesktopError> {
     app.path()

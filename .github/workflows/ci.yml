@@ -73,6 +73,8 @@ jobs:
       - run: cmake -S native/client-macos -B build/client-macos -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build/client-macos --config Release --parallel
       - run: ./build/client-macos/sanser-client-macos --capabilities-json
+      - run: ./build/client-macos/cross-platform/sanser-host-macos --capabilities-json
+      - run: ctest --test-dir build/client-macos --output-on-failure
 
   windows-host:
     runs-on: windows-latest
@@ -81,3 +83,4 @@ jobs:
       - run: cmake -S native/host-windows -B build/host-windows -A x64 -DBUILD_TESTING=ON
       - run: cmake --build build/host-windows --config Release --parallel
       - run: ctest --test-dir build/host-windows -C Release --output-on-failure
+      - run: ./build/host-windows/cross-platform/Release/sanser-client-windows.exe --capabilities-json

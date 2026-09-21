@@ -66,6 +66,7 @@ pub struct NativeSessionCredentials {
     base_port: u16,
     expires_at: i64,
     session_token: String,
+    wire_protocol: &'static str,
 }
 
 pub async fn list(
@@ -148,6 +149,12 @@ pub async fn create(
         return Err(AppError::Conflict(format!(
             "both devices must support {requested_codec}"
         )));
+    }
+    let wire_protocol = native_wire_protocol(&host, &requester)?;
+    if wire_protocol == "snv2" && requested_codec == "hevc" {
+        return Err(AppError::Conflict(
+            "Cross-platform sessions currently require H.264 or Auto".into(),
+        ));
     }
     // Relay checks removed as TURN is deprecated.
     // Validate the pair now so the UI never creates a request that can only
@@ -288,6 +295,11 @@ pub async fn credentials(
     // Candidate gathering selects the actual direct endpoint, while relay mode
     // targets a local loopback bridge. Keep this compatibility field bounded
     // even when a relay-capable peer has no advertisable LAN address.
+    let wire_protocol = if device_id == session.host_device_id {
+        native_wire_protocol(&device, &peer)?
+    } else {
+        native_wire_protocol(&peer, &device)?
+    };
     let peer_route_address = peer.route_address.unwrap_or_else(|| "127.0.0.1".into());
     let credential_epoch = session.requester_ready_at.ok_or_else(|| {
         AppError::Conflict(
@@ -340,6 +352,7 @@ pub async fn credentials(
             base_port: state.config.native_base_port,
             expires_at,
             session_token,
+            wire_protocol,
         }),
     )
         .into_response())
@@ -614,7 +627,7 @@ async fn most_recent_requester(
     host_id: &str,
 ) -> Result<String, AppError> {
     sqlx::query_scalar::<_, String>(
-        "SELECT id FROM devices WHERE user_id = $1 AND id != $2 AND online = TRUE \
+        "SELECT id FROM devices WHERE user_id = $1 AND id != $2 AND online = TRUE AND device_role = 'client' \
          ORDER BY last_seen_at DESC, id DESC LIMIT 1",
     )
     .bind(user_id)
@@ -629,12 +642,32 @@ async fn most_recent_requester(
     })
 }
 
+fn native_wire_protocol(host: &Device, requester: &Device) -> Result<&'static str, AppError> {
+    if host.device_role != "host" || requester.device_role != "client" {
+        return Err(AppError::Conflict(
+            "The target must be a host and the requester must be a client".into(),
+        ));
+    }
+    if host.platform.to_ascii_lowercase().starts_with("windows")
+        && requester.platform.to_ascii_lowercase().starts_with("mac")
+    {
+        return Ok("legacy");
+    }
+    if host.cross_platform && requester.cross_platform {
+        return Ok("snv2");
+    }
+    Err(AppError::Conflict(
+        "Install the bidirectional Sanser engines on both computers".into(),
+    ))
+}
+
 fn select_transport(
     requested: Option<&str>,
     mode: NetworkMode,
     host: &Device,
     requester: &Device,
 ) -> Result<String, AppError> {
+    native_wire_protocol(host, requester)?;
     let selected = requested.map_or_else(
         || {
             if mode != NetworkMode::Manual && host.native_transport && requester.native_transport {
@@ -768,6 +801,75 @@ fn default_active_state() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn device(platform: &str, role: &str, cross_platform: bool) -> Device {
+        Device {
+            id: "test".into(),
+            name: "test".into(),
+            platform: platform.into(),
+            device_role: role.into(),
+            cross_platform,
+            os_version: String::new(),
+            gpu: String::new(),
+            sanser_version: "2.0.8".into(),
+            protocol_version: 2,
+            online: true,
+            streaming: false,
+            pinned: false,
+            route_address: None,
+            network_quality: None,
+            latency_ms: None,
+            codecs: vec!["h264".into()],
+            native_transport: true,
+            webrtc: false,
+            audio: false,
+            gamepad: false,
+            last_seen_at: Some(1),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn negotiates_all_four_platform_pairs_and_preserves_legacy() {
+        for host_platform in ["Windows", "macOS"] {
+            for client_platform in ["Windows", "macOS"] {
+                let host = device(host_platform, "host", true);
+                let client = device(client_platform, "client", true);
+                let expected = if host_platform == "Windows" && client_platform == "macOS" {
+                    "legacy"
+                } else {
+                    "snv2"
+                };
+                assert_eq!(
+                    native_wire_protocol(&host, &client).expect("compatible pair"),
+                    expected
+                );
+            }
+        }
+        assert_eq!(
+            native_wire_protocol(
+                &device("Windows", "host", false),
+                &device("macOS", "client", false)
+            )
+            .expect("legacy"),
+            "legacy"
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_roles_and_unverified_cross_platform_engines() {
+        let host = device("macOS", "host", true);
+        assert!(native_wire_protocol(&host, &device("Windows", "client", false)).is_err());
+        assert!(native_wire_protocol(&host, &device("Windows", "host", true)).is_err());
+        assert!(
+            native_wire_protocol(
+                &device("macOS", "client", true),
+                &device("Windows", "client", true)
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn direct_mode_uses_the_database_and_desktop_wire_value() {

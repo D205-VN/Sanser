@@ -58,6 +58,8 @@ pub struct LaunchEngineRequest {
     pub udp_bind_port: Option<u16>,
     #[serde(default)]
     pub relay: bool,
+    #[serde(default)]
+    pub wire_protocol: Option<String>,
 }
 
 impl Drop for LaunchEngineRequest {
@@ -108,6 +110,7 @@ impl Capability {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RuntimeCapabilities {
     pub desktop_shell: Capability,
     pub secure_storage: Capability,
@@ -121,6 +124,12 @@ pub struct RuntimeCapabilities {
     pub gamepad: Capability,
     pub clipboard: Capability,
     pub p2p_v2: Capability,
+    pub cross_platform_host: bool,
+    pub cross_platform_client: bool,
+    pub host_audio: bool,
+    pub client_audio: bool,
+    pub host_codecs: Vec<VideoCodec>,
+    pub client_codecs: Vec<VideoCodec>,
 }
 
 #[derive(Debug, Clone, Serialize)]

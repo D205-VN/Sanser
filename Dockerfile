@@ -1,5 +1,6 @@
 # ── Build stage ──────────────────────────────────────────────
-FROM rust:latest AS builder
+# Match the runtime distro so the server does not require a newer glibc.
+FROM rust:bookworm AS builder
 
 WORKDIR /app
 
@@ -18,7 +19,7 @@ RUN mkdir -p apps/server/src && \
     touch apps/desktop/src-tauri/src/lib.rs
 
 # Build dependencies only (cached layer)
-RUN cargo build --release -p sanser-server 2>/dev/null || true
+RUN cargo build --locked --release -p sanser-server 2>/dev/null || true
 
 # Copy actual server source and rebuild
 COPY apps/server/ apps/server/
@@ -26,7 +27,7 @@ COPY apps/server/ apps/server/
 # Touch source files so cargo detects the change
 RUN touch apps/server/src/main.rs apps/server/src/lib.rs
 
-RUN cargo build --release -p sanser-server
+RUN cargo build --locked --release -p sanser-server
 
 # ── Runtime stage ────────────────────────────────────────────
 FROM debian:bookworm-slim

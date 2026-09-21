@@ -63,6 +63,7 @@ jobs:
           New-Item -ItemType Directory -Force build/portable | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/sanser.exe build/portable/sanser.exe
           Copy-Item apps/desktop/src-tauri/binaries/sanser-host-windows-x86_64-pc-windows-msvc.exe build/portable/sanser-host-windows.exe
+          Copy-Item apps/desktop/src-tauri/binaries/sanser-client-windows-x86_64-pc-windows-msvc.exe build/portable/sanser-client-windows.exe
           7z a -t7z -mx=9 build/sanser-portable.7z ./build/portable/*
           @'
           ;!@Install@!UTF-8!

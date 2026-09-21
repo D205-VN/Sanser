@@ -55,7 +55,6 @@ target_compile_definitions(sanser-client-macos PRIVATE
 target_include_directories(sanser-client-macos PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
 target_link_libraries(sanser-client-macos PRIVATE
-  sanser-snv2
   ${AUDIOTOOLBOX_FRAMEWORK}
   ${COCOA_FRAMEWORK}
   ${COREAUDIO_FRAMEWORK}
@@ -75,3 +74,6 @@ target_compile_options(sanser-client-macos PRIVATE
   -Wall
   -Wextra
 )
+
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../desktop ${CMAKE_BINARY_DIR}/cross-platform)
+target_link_libraries(sanser-client-macos PRIVATE sanser-desktop-native)

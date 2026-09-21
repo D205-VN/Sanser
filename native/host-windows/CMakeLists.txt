@@ -36,7 +36,6 @@ if(BUILD_TESTING)
 endif()
 
 target_link_libraries(sanser-host-windows PRIVATE
-  sanser-snv2
   avrt
   bcrypt
   d3d11
@@ -54,3 +53,6 @@ target_link_libraries(sanser-host-windows PRIVATE
 if (MSVC)
   target_compile_options(sanser-host-windows PRIVATE /W4 /permissive-)
 endif()
+
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../desktop ${CMAKE_BINARY_DIR}/cross-platform)
+target_link_libraries(sanser-host-windows PRIVATE sanser-desktop-native)

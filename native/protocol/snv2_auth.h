@@ -10,6 +10,8 @@ namespace sanser::snv2 {
 
 using DirectionKey = std::array<std::uint8_t, 32>;
 
+DirectionKey deriveKey(const DirectionKey& key, std::span<const std::uint8_t> context);
+
 AuthTag computeAuthTag(const DirectionKey& key,
                        std::span<const std::uint8_t> authenticatedHeader,
                        std::span<const std::uint8_t> payload);

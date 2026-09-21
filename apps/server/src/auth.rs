@@ -19,6 +19,11 @@ use crate::{
 
 const ACCESS_PREFIX: &str = "sn2_a_";
 const REFRESH_PREFIX: &str = "sn2_r_";
+pub const SESSION_IDLE_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+fn session_is_active(last_seen_at: i64, now: i64) -> bool {
+    last_seen_at <= now && now.saturating_sub(last_seen_at) < SESSION_IDLE_SECONDS
+}
 
 #[derive(Clone, Debug)]
 pub struct AuthContext {
@@ -59,7 +64,7 @@ pub async fn authenticate_access_token(
     let digest = token_digest(token);
     let now = now_unix();
     let row = sqlx::query(
-        "SELECT s.user_id, a.auth_session_id \
+        "SELECT s.user_id, a.auth_session_id, s.last_seen_at \
          FROM access_tokens a \
          JOIN auth_sessions s ON s.id = a.auth_session_id \
          WHERE a.digest = $1 AND a.revoked_at IS NULL AND a.expires_at > $2 \
@@ -73,9 +78,24 @@ pub async fn authenticate_access_token(
     .map_err(AppError::from_db)?
     .ok_or(AppError::Unauthorized)?;
 
+    let last_seen_at: i64 = row.try_get("last_seen_at").map_err(AppError::from_db)?;
+    if !session_is_active(last_seen_at, now) {
+        return Err(AppError::Unauthorized);
+    }
+    let auth_session_id: String = row.try_get("auth_session_id").map_err(AppError::from_db)?;
+    // Bound writes from frequent presence/session polling to once a minute.
+    if now - last_seen_at >= 60 {
+        sqlx::query("UPDATE auth_sessions SET last_seen_at = $1 WHERE id = $2 AND last_seen_at < $1 AND revoked_at IS NULL")
+            .bind(now)
+            .bind(&auth_session_id)
+            .execute(&state.pool)
+            .await
+            .map_err(AppError::from_db)?;
+    }
+
     Ok(AuthContext {
         user_id: row.try_get("user_id").map_err(AppError::from_db)?,
-        auth_session_id: row.try_get("auth_session_id").map_err(AppError::from_db)?,
+        auth_session_id,
         access_digest: digest,
     })
 }
@@ -254,7 +274,7 @@ pub async fn rotate_refresh_token(
     let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
     let row = sqlx::query(
         "SELECT r.auth_session_id, r.expires_at, r.revoked_at, r.rotated_at, \
-                s.user_id, s.revoked_at AS session_revoked_at, s.expires_at AS session_expires_at, \
+                s.user_id, s.revoked_at AS session_revoked_at, s.expires_at AS session_expires_at, s.last_seen_at, \
                 u.email, u.display_name, u.created_at \
          FROM refresh_tokens r \
          JOIN auth_sessions s ON s.id = r.auth_session_id \
@@ -285,7 +305,12 @@ pub async fn rotate_refresh_token(
         tracing::warn!(auth_session_id = %auth_session_id, "refresh token reuse detected; session revoked");
         return Err(AppError::Unauthorized);
     }
-    if token_expiry <= now || session_revoked.is_some() || session_expiry <= now {
+    let last_seen_at: i64 = row.try_get("last_seen_at").map_err(AppError::from_db)?;
+    if token_expiry <= now
+        || session_revoked.is_some()
+        || session_expiry <= now
+        || !session_is_active(last_seen_at, now)
+    {
         return Err(AppError::Unauthorized);
     }
 
@@ -581,4 +606,29 @@ async fn revoke_session_in_transaction(
     .await
     .map_err(AppError::from_db)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod session_idle_tests {
+    use super::{SESSION_IDLE_SECONDS, session_is_active};
+
+    #[test]
+    fn expires_at_seven_days_not_seven_days_after_initial_login() {
+        let last_used = 1_000_000;
+        assert!(session_is_active(
+            last_used,
+            last_used + SESSION_IDLE_SECONDS - 1
+        ));
+        assert!(!session_is_active(
+            last_used,
+            last_used + SESSION_IDLE_SECONDS
+        ));
+        assert!(!session_is_active(
+            last_used,
+            last_used + SESSION_IDLE_SECONDS + 1
+        ));
+        let used_again = last_used + 6 * 24 * 60 * 60;
+        assert!(session_is_active(used_again, last_used + 10 * 24 * 60 * 60));
+        assert!(!session_is_active(last_used + 1, last_used));
+    }
 }

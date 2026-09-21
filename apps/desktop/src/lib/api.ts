@@ -94,6 +94,8 @@ function normalizeDevice(raw: RawDevice): Device {
   return {
     id: raw.id ?? '',
     name: raw.name ?? 'Unnamed computer',
+    deviceRole: raw.deviceRole,
+    crossPlatform: raw.crossPlatform === true,
     platform: raw.platform ?? raw.osVersion ?? 'Unknown',
     gpu: raw.gpu || null,
     online: raw.online === true,
@@ -143,7 +145,9 @@ export class ApiClient {
   constructor(
     serverUrl: string,
     private readonly tokenProvider: TokenProvider = () => Promise.resolve(null),
-    private readonly timeoutMs = 12_000
+    private readonly timeoutMs = 12_000,
+    private readonly renewAuthentication?: () => Promise<boolean>,
+    private readonly authenticatedActivity?: () => Promise<void>
   ) {
     this.baseUrl = normalizeServerUrl(serverUrl);
   }
@@ -224,7 +228,28 @@ export class ApiClient {
   }
 
   async registerDevice(device: DeviceRegistration): Promise<Device> {
-    return normalizeDevice(await this.request<RawDevice>('/api/v2/devices/register', { method: 'POST', body: device }));
+    try {
+      return normalizeDevice(await this.request<RawDevice>('/api/v2/devices/register', { method: 'POST', body: device }));
+    } catch (error) {
+      // Older servers reject these additions before registering the device. Only
+      // retry a confirmed schema rejection; never retry auth or network failures.
+      if (!(error instanceof ApiError) || ![400, 422].includes(error.status) ||
+          !/unknown field [`'"](?:deviceRole|crossPlatform)[`'"]/.test(error.message)) throw error;
+
+      const platform = device.platform.toLowerCase();
+      const legacyRole = (device.deviceRole === 'client' && platform.startsWith('mac')) ||
+        (device.deviceRole === 'host' && platform.startsWith('windows'));
+      if (!legacyRole) {
+        throw new ApiError(
+          'This server needs an update to support Mac hosting and Windows clients. Update the Sanser server before enabling this role.',
+          error.status, 'server_upgrade_required', error.requestId
+        );
+      }
+      const legacyDevice: Partial<DeviceRegistration> = { ...device };
+      delete legacyDevice.deviceRole;
+      delete legacyDevice.crossPlatform;
+      return normalizeDevice(await this.request<RawDevice>('/api/v2/devices/register', { method: 'POST', body: legacyDevice }));
+    }
   }
 
   async heartbeatDevice(id: string, streaming: boolean, routeAddress?: string): Promise<void> {
@@ -324,7 +349,8 @@ export class ApiClient {
       method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
       body?: unknown;
       authenticated?: boolean;
-    } = {}
+    } = {},
+    retried = false
   ): Promise<T> {
     const requestId = crypto.randomUUID();
     const token = options.authenticated === false ? null : await this.tokenProvider();
@@ -345,7 +371,12 @@ export class ApiClient {
         cache: 'no-store'
       });
 
+      if (response.status === 401 && options.authenticated !== false && !retried && this.renewAuthentication) {
+        window.clearTimeout(timeout);
+        if (await this.renewAuthentication()) return await this.request<T>(path, options, true);
+      }
       const responseRequestId = response.headers.get('x-request-id');
+      if (response.ok && token && options.authenticated !== false) await this.authenticatedActivity?.();
       if (response.status === 204) return undefined as T;
 
       const payload = (await response.json().catch(() => ({}))) as ErrorEnvelope & { data?: T };

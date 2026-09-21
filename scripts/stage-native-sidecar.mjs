@@ -77,6 +77,11 @@ function stageMacOS() {
   const destination = resolve(binaries, `sanser-client-macos-${target}`);
   copyFileSync(source, destination);
   chmodSync(destination, 0o755);
+  const hostSource = resolve(build, 'cross-platform/sanser-host-macos');
+  if (!existsSync(hostSource)) throw new Error('macOS host was not produced');
+  const hostDestination = resolve(binaries, `sanser-host-macos-${target}`);
+  copyFileSync(hostSource, hostDestination);
+  chmodSync(hostDestination, 0o755);
 }
 
 function stageWindows() {
@@ -95,6 +100,9 @@ function stageWindows() {
   if (!existsSync(source)) throw new Error('Windows native host was not produced');
   cleanStaged('sanser-host-windows-');
   copyFileSync(source, resolve(binaries, `sanser-host-windows-${target}.exe`));
+  const clientSource = resolve(build, 'cross-platform/Release/sanser-client-windows.exe');
+  if (!existsSync(clientSource)) throw new Error('Windows client was not produced');
+  copyFileSync(clientSource, resolve(binaries, `sanser-client-windows-${target}.exe`));
 }
 
 if (platform === 'darwin') stageMacOS();

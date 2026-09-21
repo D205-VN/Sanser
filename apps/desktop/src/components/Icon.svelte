@@ -1,10 +1,28 @@
 <script lang="ts">
-  let { name }: { name: 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' } = $props();
+  let { name }: { name: 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' | 'laptop' | 'windows' | 'refresh' | 'arrow' | 'link' | 'grid' | 'list' | 'pin' | 'more' } = $props();
 </script>
 
 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   {#if name === 'computers'}
     <rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>
+  {:else if name === 'laptop'}
+    <rect x="4" y="3" width="16" height="12" rx="2"/><path d="m4 15-2 5h20l-2-5M9 18h6"/>
+  {:else if name === 'windows'}
+    <path d="M3 4h7v7H3zM14 4h7v7h-7zM3 15h7v6H3zM14 15h7v6h-7z"/>
+  {:else if name === 'refresh'}
+    <path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5"/>
+  {:else if name === 'arrow'}
+    <path d="M5 12h14m-5-5 5 5-5 5"/>
+  {:else if name === 'link'}
+    <path d="m10 14 4-4m-6 6-2 2a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m4 2 2-2a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(1 -1)"/>
+  {:else if name === 'grid'}
+    <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+  {:else if name === 'list'}
+    <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>
+  {:else if name === 'pin'}
+    <path d="m8 3 8 0-1 7 3 3v2H6v-2l3-3-1-7Zm4 12v6"/>
+  {:else if name === 'more'}
+    <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
   {:else if name === 'host'}
     <rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/>
   {:else if name === 'session'}

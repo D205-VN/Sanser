@@ -1,0 +1,612 @@
+{
+  "recordedAt": "2026-09-20T08:09:30.276159+00:00",
+  "scope": "Synthetic new SNV2 transport on one Mac only. No Windows, physical LAN/WAN, WSS relay, H.264 encoding/decoding, OS injection or display timing in these network measurements.",
+  "before": {
+    "scope": "SIMULATED new SNV2 transport only; not Windows or real LAN/WAN",
+    "platform": "macOS-27.0-arm64-arm-64bit",
+    "payload_mbps": 20,
+    "target_fps": 60,
+    "mouse_hz": 120,
+    "keyboard_events_per_second": 20,
+    "runs": [
+      {
+        "scenario": {
+          "name": "lan_emulated",
+          "delay_ms": 1,
+          "jitter_ms": 0.25,
+          "loss": 0,
+          "mbps": 100
+        },
+        "seed": 1000,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.002,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 59.988,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 1.164,
+            "p95_ms": 1.43,
+            "max_ms": 1.542
+          },
+          "moves": {
+            "received": 960,
+            "p50_ms": 1.235,
+            "p95_ms": 1.53,
+            "max_ms": 1.645
+          },
+          "frames": {
+            "received": 480,
+            "p50_ms": 5.629,
+            "p95_ms": 5.934,
+            "max_ms": 9.422
+          }
+        },
+        "traffic": {
+          "packets": 21482,
+          "bytes": 22565984,
+          "random_drops": 0,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 20
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_emulated",
+          "delay_ms": 25,
+          "jitter_ms": 8,
+          "loss": 0.005,
+          "mbps": 40
+        },
+        "seed": 1100,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.001,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 11.748,
+          "stale_moves": 101,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 24.698,
+            "p95_ms": 32.41,
+            "max_ms": 106.434
+          },
+          "moves": {
+            "received": 956,
+            "p50_ms": 25.53,
+            "p95_ms": 32.482,
+            "max_ms": 40.807
+          },
+          "frames": {
+            "received": 94,
+            "p50_ms": 41.248,
+            "p95_ms": 43.169,
+            "max_ms": 63.818
+          }
+        },
+        "traffic": {
+          "packets": 21514,
+          "bytes": 22569568,
+          "random_drops": 112,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 164
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_congested_emulated",
+          "delay_ms": 60,
+          "jitter_ms": 20,
+          "loss": 0.02,
+          "mbps": 15
+        },
+        "seed": 1200,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.002,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 0.0,
+          "stale_moves": 373,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 61.005,
+            "p95_ms": 78.598,
+            "max_ms": 162.511
+          },
+          "moves": {
+            "received": 940,
+            "p50_ms": 60.907,
+            "p95_ms": 78.552,
+            "max_ms": 81.312
+          },
+          "frames": {
+            "received": 0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0
+          }
+        },
+        "traffic": {
+          "packets": 22152,
+          "bytes": 22641024,
+          "random_drops": 465,
+          "queue_drops": 6208,
+          "send_errors": 0,
+          "peak_queued": 283
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      }
+    ]
+  },
+  "after": {
+    "scope": "SIMULATED new SNV2 transport only; not Windows or real LAN/WAN",
+    "platform": "macOS-27.0-arm64-arm-64bit",
+    "payload_mbps": 20,
+    "target_fps": 60,
+    "mouse_hz": 120,
+    "keyboard_events_per_second": 20,
+    "runs": [
+      {
+        "scenario": {
+          "name": "lan_emulated",
+          "delay_ms": 1,
+          "jitter_ms": 0.25,
+          "loss": 0,
+          "mbps": 100
+        },
+        "seed": 1000,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.001,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 59.994,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 1.166,
+            "p95_ms": 1.419,
+            "max_ms": 1.491
+          },
+          "moves": {
+            "received": 960,
+            "p50_ms": 1.232,
+            "p95_ms": 1.512,
+            "max_ms": 1.59
+          },
+          "frames": {
+            "received": 480,
+            "p50_ms": 5.727,
+            "p95_ms": 6.107,
+            "max_ms": 7.672
+          }
+        },
+        "traffic": {
+          "packets": 21482,
+          "bytes": 22565984,
+          "random_drops": 0,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 23
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "lan_emulated",
+          "delay_ms": 1,
+          "jitter_ms": 0.25,
+          "loss": 0,
+          "mbps": 100
+        },
+        "seed": 1001,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.002,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 59.988,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 1.178,
+            "p95_ms": 1.407,
+            "max_ms": 1.461
+          },
+          "moves": {
+            "received": 960,
+            "p50_ms": 1.222,
+            "p95_ms": 1.511,
+            "max_ms": 1.633
+          },
+          "frames": {
+            "received": 480,
+            "p50_ms": 5.662,
+            "p95_ms": 5.902,
+            "max_ms": 7.401
+          }
+        },
+        "traffic": {
+          "packets": 21482,
+          "bytes": 22565984,
+          "random_drops": 0,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 24
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "lan_emulated",
+          "delay_ms": 1,
+          "jitter_ms": 0.25,
+          "loss": 0,
+          "mbps": 100
+        },
+        "seed": 1002,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.002,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 59.988,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 1.21,
+            "p95_ms": 1.431,
+            "max_ms": 1.463
+          },
+          "moves": {
+            "received": 958,
+            "p50_ms": 1.217,
+            "p95_ms": 1.524,
+            "max_ms": 1.627
+          },
+          "frames": {
+            "received": 480,
+            "p50_ms": 5.717,
+            "p95_ms": 6.076,
+            "max_ms": 33.5
+          }
+        },
+        "traffic": {
+          "packets": 21482,
+          "bytes": 22565984,
+          "random_drops": 0,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 26
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_emulated",
+          "delay_ms": 25,
+          "jitter_ms": 8,
+          "loss": 0.005,
+          "mbps": 40
+        },
+        "seed": 1100,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.001,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 11.624,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 24.809,
+            "p95_ms": 32.288,
+            "max_ms": 33.11
+          },
+          "moves": {
+            "received": 856,
+            "p50_ms": 24.572,
+            "p95_ms": 32.242,
+            "max_ms": 34.69
+          },
+          "frames": {
+            "received": 93,
+            "p50_ms": 40.915,
+            "p95_ms": 42.332,
+            "max_ms": 52.721
+          }
+        },
+        "traffic": {
+          "packets": 21511,
+          "bytes": 22569232,
+          "random_drops": 112,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 125
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_emulated",
+          "delay_ms": 25,
+          "jitter_ms": 8,
+          "loss": 0.005,
+          "mbps": 40
+        },
+        "seed": 1101,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.0,
+          "keys_sent": 160,
+          "moves_sent": 961,
+          "frames_sent": 480,
+          "delivered_fps": 14.625,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 25.73,
+            "p95_ms": 32.571,
+            "max_ms": 33.111
+          },
+          "moves": {
+            "received": 843,
+            "p50_ms": 23.988,
+            "p95_ms": 32.002,
+            "max_ms": 33.258
+          },
+          "frames": {
+            "received": 117,
+            "p50_ms": 41.312,
+            "p95_ms": 42.537,
+            "max_ms": 43.011
+          }
+        },
+        "traffic": {
+          "packets": 21510,
+          "bytes": 22569120,
+          "random_drops": 97,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 102
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_emulated",
+          "delay_ms": 25,
+          "jitter_ms": 8,
+          "loss": 0.005,
+          "mbps": 40
+        },
+        "seed": 1102,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.003,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 18.618,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 24.942,
+            "p95_ms": 32.357,
+            "max_ms": 33.165
+          },
+          "moves": {
+            "received": 846,
+            "p50_ms": 24.064,
+            "p95_ms": 31.895,
+            "max_ms": 33.207
+          },
+          "frames": {
+            "received": 149,
+            "p50_ms": 41.321,
+            "p95_ms": 42.836,
+            "max_ms": 43.453
+          }
+        },
+        "traffic": {
+          "packets": 21510,
+          "bytes": 22569120,
+          "random_drops": 114,
+          "queue_drops": 0,
+          "send_errors": 0,
+          "peak_queued": 102
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_congested_emulated",
+          "delay_ms": 60,
+          "jitter_ms": 20,
+          "loss": 0.02,
+          "mbps": 15
+        },
+        "seed": 1200,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.002,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 0.0,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 59.424,
+            "p95_ms": 79.343,
+            "max_ms": 130.944
+          },
+          "moves": {
+            "received": 563,
+            "p50_ms": 51.901,
+            "p95_ms": 70.008,
+            "max_ms": 78.791
+          },
+          "frames": {
+            "received": 0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0
+          }
+        },
+        "traffic": {
+          "packets": 22143,
+          "bytes": 22640016,
+          "random_drops": 458,
+          "queue_drops": 6193,
+          "send_errors": 0,
+          "peak_queued": 293
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_congested_emulated",
+          "delay_ms": 60,
+          "jitter_ms": 20,
+          "loss": 0.02,
+          "mbps": 15
+        },
+        "seed": 1201,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.003,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 0.25,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 60.117,
+            "p95_ms": 77.945,
+            "max_ms": 129.054
+          },
+          "moves": {
+            "received": 591,
+            "p50_ms": 53.532,
+            "p95_ms": 72.585,
+            "max_ms": 80.021
+          },
+          "frames": {
+            "received": 2,
+            "p50_ms": 98.539,
+            "p95_ms": 98.539,
+            "max_ms": 108.787
+          }
+        },
+        "traffic": {
+          "packets": 22145,
+          "bytes": 22640240,
+          "random_drops": 449,
+          "queue_drops": 6205,
+          "send_errors": 0,
+          "peak_queued": 283
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      },
+      {
+        "scenario": {
+          "name": "wan_congested_emulated",
+          "delay_ms": 60,
+          "jitter_ms": 20,
+          "loss": 0.02,
+          "mbps": 15
+        },
+        "seed": 1202,
+        "seconds": 8,
+        "result": {
+          "survived": true,
+          "active_seconds": 8.0,
+          "keys_sent": 160,
+          "moves_sent": 960,
+          "frames_sent": 480,
+          "delivered_fps": 0.25,
+          "stale_moves": 0,
+          "key_order_errors": 0,
+          "keys": {
+            "received": 160,
+            "p50_ms": 59.708,
+            "p95_ms": 79.571,
+            "max_ms": 160.148
+          },
+          "moves": {
+            "received": 565,
+            "p50_ms": 52.585,
+            "p95_ms": 70.686,
+            "max_ms": 79.071
+          },
+          "frames": {
+            "received": 2,
+            "p50_ms": 103.818,
+            "p95_ms": 103.818,
+            "max_ms": 147.4
+          }
+        },
+        "traffic": {
+          "packets": 22144,
+          "bytes": 22640128,
+          "random_drops": 408,
+          "queue_drops": 6257,
+          "send_errors": 0,
+          "peak_queued": 284
+        },
+        "exit_code": 0,
+        "stderr_bytes": 0
+      }
+    ]
+  }
+}

@@ -37,7 +37,8 @@ impl TestServer {
             .with_max_level(tracing::Level::TRACE)
             .try_init();
         // The suite is opt-in and intentionally never reads production DATABASE_URL.
-        let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("set TEST_DATABASE_URL to a dedicated Neon test database before running ignored API tests");
         static DATABASE_LOCK: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let database_permit = DATABASE_LOCK
             .get_or_init(|| Arc::new(Semaphore::new(1)))
@@ -162,6 +163,56 @@ fn without_channel_binding(database_url: &str) -> String {
 }
 
 #[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn authentication_expires_after_seven_idle_days_and_activity_renews_it() {
+    let Some(server) = TestServer::new().await else {
+        return;
+    };
+    let login = server.register("idle-session@example.test").await;
+    let id = login["sessionId"].as_str().expect("session ID");
+    let access = login["accessToken"].as_str().expect("access token");
+    let refresh = login["refreshToken"].as_str().expect("refresh token");
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE auth_sessions SET last_seen_at = $1 WHERE id = $2")
+        .bind(now - 6 * 24 * 60 * 60)
+        .bind(id)
+        .execute(&server.state.pool)
+        .await
+        .expect("set last activity");
+    let (status, _, _) = server
+        .request(Method::GET, "/api/v2/account", None, Some(access))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let last_seen: i64 = sqlx::query_scalar("SELECT last_seen_at FROM auth_sessions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&server.state.pool)
+        .await
+        .expect("last activity");
+    assert!(last_seen >= now);
+    sqlx::query("UPDATE auth_sessions SET last_seen_at = $1 WHERE id = $2")
+        .bind(now - sanser_server::auth::SESSION_IDLE_SECONDS)
+        .bind(id)
+        .execute(&server.state.pool)
+        .await
+        .expect("expire idle session");
+    let (status, _, _) = server
+        .request(Method::GET, "/api/v2/account", None, Some(access))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/auth/refresh",
+            Some(json!({"refreshToken": refresh})),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
 async fn auth_tokens_are_hashed_rotated_expired_and_revoked() {
     let Some(server) = TestServer::new().await else {
         return;
@@ -252,6 +303,7 @@ async fn auth_tokens_are_hashed_rotated_expired_and_revoked() {
 }
 
 #[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
 async fn devices_and_session_state_machine_enforce_ownership() {
     let Some(server) = TestServer::new().await else {
         return;
@@ -586,6 +638,7 @@ async fn devices_and_session_state_machine_enforce_ownership() {
 }
 
 #[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
 async fn ice_uses_authenticated_short_lived_turn_credentials() {
     let Some(server) = TestServer::with_config(|config| {
         config.network_mode = NetworkMode::Auto;
@@ -625,6 +678,7 @@ async fn ice_uses_authenticated_short_lived_turn_credentials() {
 }
 
 #[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
 async fn request_guards_return_structured_errors_and_request_ids() {
     let Some(server) = TestServer::new().await else {
         return;
@@ -677,6 +731,7 @@ async fn request_guards_return_structured_errors_and_request_ids() {
 }
 
 #[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
 async fn migration_and_cleanup_work_on_neon_postgres() {
     let Some(server) = TestServer::new().await else {
         return;
