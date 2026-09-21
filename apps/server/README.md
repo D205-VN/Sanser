@@ -1,7 +1,7 @@
 # Sanser server
 
 Axum API, account service, device registry and WebSocket signaling for Sanser
-2.0.8. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
+2.1.0. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
 does not contain a SQLite or local-database fallback.
 
 ## Neon configuration
@@ -60,10 +60,10 @@ curl --fail https://sanser.onrender.com/api/v2/readiness
 ```
 
 Both now include `features: ["device-roles", "cross-platform-native", "session-idle-7d"]`. Readiness
-must return HTTP 200 and `status: "ready"`. An older build can report version
-`2.0.8` too, so checking only the version or a successful health response does not
-establish role support. Then select **Check again** on the Mac Host page and test
-with matching desktop builds on both devices. Deployment and real-device testing
+must return HTTP 200 and `status: "ready"`, with version `2.1.0`. Older `2.0.8`
+builds may not support these roles; verify the feature list as well as the version.
+Then select **Check again** on the Mac Host page and test with matching desktop
+builds on both devices. Deployment and real-device testing
 are separate from local unit tests.
 
 ## Remembered sign-in
