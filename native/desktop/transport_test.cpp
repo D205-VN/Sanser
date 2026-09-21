@@ -16,6 +16,24 @@ int main() {
   try {
     const std::string token(48,'a'); PacketCodec host(token,true),client(token,false),wrong(std::string(48,'b'),false);
     snv2::Header h; h.sequence=1; h.keyId=42;
+    // Control packets have no plaintext; also exercise PKCS#7 block boundaries
+    // in both directions on CommonCrypto (Mac) and BCrypt (Windows).
+    for (const std::size_t length : {0U, 1U, 15U, 16U, 17U, 31U, 32U, 1000U}) {
+      Bytes payload(length, 0x5a);
+      try {
+        for (const bool fromHost : {true, false}) {
+          auto wire = (fromHost ? host : client).seal(h, payload);
+          auto decoded = snv2::decodePacket(wire);
+          require(decoded && decoded.payload.size() == 16 + (length / 16 + 1) * 16,
+                  "IV and PKCS#7 ciphertext size");
+          auto result = (fromHost ? client : host).open(wire);
+          require(result && result->second == payload, "AES block boundary round trip");
+          ++h.sequence;
+        }
+      } catch (const std::exception& error) {
+        throw std::runtime_error("AES payload length " + std::to_string(length) + ": " + error.what());
+      }
+    }
     const Bytes secret{1,2,3,4,5,6,7,8,9,10};
     auto packet=host.seal(h,secret); auto opened=client.open(packet);
     require(opened && opened->second==secret,"encrypted payload round trip");

@@ -38,17 +38,30 @@ Bytes crypt(const snv2::DirectionKey& key, const std::uint8_t* iv, const Bytes& 
   BCRYPT_ALG_HANDLE alg = nullptr;
   BCRYPT_KEY_HANDLE handle = nullptr;
   if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, nullptr, 0) < 0) throw std::runtime_error("AES unavailable");
+  const char* stage = "BCryptSetProperty(CBC)";
   auto status = BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_CBC)), sizeof(BCRYPT_CHAIN_MODE_CBC), 0);
-  if (status >= 0) status = BCryptGenerateSymmetricKey(alg, &handle, nullptr, 0, const_cast<PUCHAR>(key.data()), static_cast<ULONG>(key.size()), 0);
+  if (status >= 0) {
+    stage = "BCryptGenerateSymmetricKey";
+    status = BCryptGenerateSymmetricKey(alg, &handle, nullptr, 0, const_cast<PUCHAR>(key.data()), static_cast<ULONG>(key.size()), 0);
+  }
   std::array<std::uint8_t, 16> mutableIv{}; std::copy_n(iv, 16, mutableIv.begin());
   ULONG size = 0;
   if (status >= 0) {
     const auto operation = encrypt ? BCryptEncrypt : BCryptDecrypt;
-    status = operation(handle, const_cast<PUCHAR>(input.data()), static_cast<ULONG>(input.size()), nullptr, mutableIv.data(), 16, out.data(), static_cast<ULONG>(out.size()), &size, BCRYPT_BLOCK_PADDING);
+    stage = encrypt ? "BCryptEncrypt" : "BCryptDecrypt";
+    // CNG rejects a null input pointer even when cbInput is zero. Empty control
+    // packets still need the CBC padding block; the sentinel is not plaintext.
+    std::uint8_t emptyInput = 0;
+    auto* data = input.empty() ? &emptyInput : const_cast<PUCHAR>(input.data());
+    status = operation(handle, data, static_cast<ULONG>(input.size()), nullptr, mutableIv.data(), 16, out.data(), static_cast<ULONG>(out.size()), &size, BCRYPT_BLOCK_PADDING);
   }
   if (handle) BCryptDestroyKey(handle);
   BCryptCloseAlgorithmProvider(alg, 0);
-  if (status < 0) throw std::runtime_error("AES operation failed");
+  if (status < 0) {
+    char error[128];
+    std::snprintf(error, sizeof(error), "%s failed (NTSTATUS 0x%08lX)", stage, static_cast<unsigned long>(status));
+    throw std::runtime_error(error);
+  }
 #else
   std::size_t size = 0;
   if (CCCrypt(encrypt ? kCCEncrypt : kCCDecrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding,
