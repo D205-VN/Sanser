@@ -84,3 +84,17 @@ jobs:
       - run: cmake --build build/host-windows --config Release --parallel
       - run: ctest --test-dir build/host-windows -C Release --output-on-failure
       - run: ./build/host-windows/cross-platform/Release/sanser-client-windows.exe --capabilities-json
+
+  windows-relay:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - run: npm run desktop:stage-sidecar
+      - run: cargo test --locked -p sanser-desktop relay::tests -- --nocapture

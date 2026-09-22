@@ -390,14 +390,27 @@ where
     let mut consecutive_decrypt_failures = 0_u8;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The WebSocket can receive media before the sidecar has bound its UDP port.
+    // Windows reports that earlier ICMP Port Unreachable on the next recv_from.
+    let mut engine_ready = false;
+    let startup_deadline = tokio::time::Instant::now() + RELAY_CONNECT_TIMEOUT;
+    let engine_startup = tokio::time::sleep_until(startup_deadline);
+    tokio::pin!(engine_startup);
     loop {
         tokio::select! {
             _ = &mut stop => return None,
+            () = &mut engine_startup, if !engine_ready => {
+                return Some("local native engine did not start sending UDP packets within 25 seconds; retry the session".into());
+            }
             received = socket.recv_from(&mut buffer) => {
-                let Ok((length, source)) = received else {
-                    return Some("local relay UDP bridge stopped receiving packets".into());
+                let (length, source) = match received {
+                    Ok(packet) => packet,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error) => continue,
+                    Err(error) => return Some(format!("local relay UDP bridge stopped receiving packets: {error}")),
                 };
                 if source != engine_endpoint { continue; }
+                engine_ready = true;
                 let Ok(encrypted) = cipher.encrypt(&buffer[..length]) else {
                     return Some("local relay packet encryption failed".into());
                 };
@@ -418,8 +431,9 @@ where
                             }
                             continue;
                         };
-                        if socket.send_to(&decrypted, engine_endpoint).await.is_err() {
-                            return Some("local relay UDP bridge could not deliver a packet to the native engine".into());
+                        if let Err(error) = socket.send_to(&decrypted, engine_endpoint).await {
+                            if tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error) { continue; }
+                            return Some(format!("local relay UDP bridge could not deliver a packet to the native engine: {error}"));
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
@@ -446,6 +460,13 @@ where
             }
         }
     }
+}
+
+fn udp_port_not_ready(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
+    )
 }
 
 struct RelayCipher {
@@ -684,6 +705,106 @@ mod tests {
         assert_eq!(source, proxy_address);
         assert_eq!(&buffer[..length], b"remote packet");
 
+        let _ = stop_tx.send(());
+        assert_eq!(bridge.await.unwrap(), None);
+    }
+
+    #[test]
+    fn relay_retries_only_udp_port_startup_errors() {
+        use std::io::{Error, ErrorKind};
+        assert!(udp_port_not_ready(&Error::from(ErrorKind::ConnectionReset)));
+        assert!(udp_port_not_ready(&Error::from(
+            ErrorKind::ConnectionRefused
+        )));
+        assert!(!udp_port_not_ready(&Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        assert!(!udp_port_not_ready(&Error::from(ErrorKind::InvalidInput)));
+        #[cfg(windows)]
+        assert!(udp_port_not_ready(&Error::from_raw_os_error(10054)));
+    }
+
+    #[tokio::test]
+    async fn local_udp_bridge_survives_packets_before_engine_binds() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(stream).await.unwrap()
+        });
+        let (websocket, _) = connect_async(format!("ws://{address}")).await.unwrap();
+        let mut remote = server.await.unwrap();
+        let session = uuid::Uuid::new_v4();
+        let local_device = uuid::Uuid::new_v4();
+        let remote_device = uuid::Uuid::new_v4();
+        let credential = "a-secure-session-credential-123456";
+        let cipher = RelayCipher::new(session, local_device, remote_device, credential).unwrap();
+        let mut remote_cipher =
+            RelayCipher::new(session, remote_device, local_device, credential).unwrap();
+        let socket = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let proxy = socket.local_addr().unwrap();
+        let reservation = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let engine_address = reservation.local_addr().unwrap();
+        drop(reservation);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let bridge = tokio::spawn(run_bridge(
+            socket,
+            engine_address,
+            websocket,
+            cipher,
+            stop_rx,
+        ));
+
+        // Simulate the other computer sending while the local sidecar starts.
+        // Sending to this closed port generates WSAECONNRESET on Windows.
+        for _ in 0..3 {
+            let frame = remote_cipher.encrypt(b"early remote keepalive").unwrap();
+            remote.send(Message::Binary(frame.into())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            !bridge.is_finished(),
+            "relay must survive the native startup window"
+        );
+        let engine = tokio::net::UdpSocket::bind(engine_address).await.unwrap();
+        engine.send_to(b"engine ready", proxy).await.unwrap();
+        let packet = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match remote.next().await {
+                    Some(Ok(Message::Binary(frame))) => break frame,
+                    Some(Ok(Message::Ping(payload))) => {
+                        remote.send(Message::Pong(payload)).await.unwrap();
+                    }
+                    other => panic!("expected native packet, got {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(remote_cipher.decrypt(&packet).unwrap(), b"engine ready");
+        remote
+            .send(Message::Binary(
+                remote_cipher
+                    .encrypt(b"remote after startup")
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let mut buffer = [0; 64];
+        let (length, source) =
+            tokio::time::timeout(Duration::from_secs(3), engine.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(source, proxy);
+        assert_eq!(&buffer[..length], b"remote after startup");
         let _ = stop_tx.send(());
         assert_eq!(bridge.await.unwrap(), None);
     }
