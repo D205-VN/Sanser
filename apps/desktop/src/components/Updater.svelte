@@ -8,11 +8,9 @@
   import { diagnostics } from '../stores/diagnostics';
   import { SANSER_VERSION } from '../lib/types';
 
-  let { checking = $bindable(false) }: { checking?: boolean } = $props();
+  let { checking = $bindable(false), onAvailabilityChange = () => undefined }: { checking?: boolean; onAvailabilityChange?: (available: boolean) => void } = $props();
   let mounted = false;
-  let checked = false;
   let requested = $state(false);
-  let autoPrompt = $state(false);
 
   let dialog = $state<HTMLDialogElement>();
   let manifest = $state<Update | null>(null);
@@ -31,22 +29,28 @@
 
   onMount(() => {
     mounted = true;
-    const timer = window.setTimeout(() => { if (isTauri() && !checked) void checkForUpdates(false); }, 5_000);
+    const checkInBackground = () => { if (isTauri()) void checkForUpdates(false); };
+    const timer = window.setTimeout(checkInBackground, 5_000);
+    const interval = window.setInterval(checkInBackground, 15 * 60_000);
+    window.addEventListener('online', checkInBackground);
     return () => {
       mounted = false;
       window.clearTimeout(timer);
+      window.clearInterval(interval);
+      window.removeEventListener('online', checkInBackground);
       if (manifest) void manifest.close().catch(() => undefined);
     };
   });
 
   $effect(() => {
-    if (dialog && !dialog.open && (requested || (autoPrompt && !activeSession))) dialog.showModal();
+    if (dialog && !dialog.open && requested) dialog.showModal();
   });
+
+  $effect(() => { onAvailabilityChange(manifest !== null && status !== 'done'); });
 
   export async function checkForUpdates(manual = true): Promise<void> {
     if (manual) requested = true;
-    if (checking || updating || manifest) return;
-    checked = true;
+    if (checking || updating || manifest || status === 'done') return;
     error = '';
     if (!isTauri()) { status = 'unsupported'; return; }
     checking = true;
@@ -56,7 +60,6 @@
       if (!mounted) { if (update) await update.close(); return; }
       manifest = update;
       status = update ? 'idle' : 'current';
-      autoPrompt = !manual && update !== null;
     } catch (caught) {
       if (!mounted) return;
       status = 'error';
@@ -99,11 +102,12 @@
   function dismiss(): void {
     if (updating || checking) return;
     requested = false;
-    autoPrompt = false;
     dialog?.close();
-    const update = manifest;
-    manifest = null;
-    if (update) void update.close().catch(() => undefined);
+    if (status === 'done') {
+      const update = manifest;
+      manifest = null;
+      if (update) void update.close().catch(() => undefined);
+    }
   }
 </script>
 

@@ -95,14 +95,8 @@ it('provides a list layout without changing the device list', async () => {
 });
 
 
-it('shows Update in the top-right title actions and opens its status dialog', async () => {
-  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
-  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
-  const { container } = render(App);
+it('hides Update until an available update has been confirmed', async () => {
+  render(App);
   await screen.findByRole('heading', { name: 'Your computers' });
-  const actions = container.querySelector('.title-actions');
-  if (!actions) throw new Error('Title actions are missing');
-  const button = within(actions as HTMLElement).getByRole('button', { name: 'Update' });
-  await fireEvent.click(button);
-  expect(await screen.findByRole('dialog')).toHaveTextContent('Open the desktop app to update');
+  expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
 });

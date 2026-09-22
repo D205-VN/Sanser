@@ -20,6 +20,7 @@
 
   let updater = $state<{ checkForUpdates: (manual?: boolean) => Promise<void> }>();
   let updateChecking = $state(false);
+  let updateAvailable = $state(false);
   let page = $state<Page>('computers');
   let pageContainer = $state<HTMLElement>();
   let runtime = $state<RuntimeStatus | null>(null);
@@ -150,7 +151,7 @@
 {:else if !runtime || !$session.ready}
   <main class="boot-screen"><BrandMark size={68} label="Sanser" /><span>Starting Sanser…</span></main>
 {:else if $session.mode === 'signedOut'}
-  <div class="welcome-update"><button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button></div>
+  {#if updateAvailable}<div class="welcome-update"><button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button></div>{/if}
   <Welcome />
 {:else}
   <div class="app-shell">
@@ -163,7 +164,7 @@
         <div class="title-actions">
           <span class="title-account">{$session.account?.email}</span>
           <button class="button small ghost" disabled={signingOut} onclick={signOut}>{signingOut ? 'Signing out…' : 'Sign out'}</button>
-          <button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button>
+          {#if updateAvailable}<button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button>{/if}
         </div>
       </header>
       <main bind:this={pageContainer} class:session-scroll={page === 'session'} class="page-scroll">
@@ -179,7 +180,7 @@
   </div>
 {/if}
 
-<Updater bind:this={updater} bind:checking={updateChecking} />
+<Updater bind:this={updater} bind:checking={updateChecking} onAvailabilityChange={(available: boolean) => { updateAvailable = available; }} />
 
 <style>
   .welcome-update { position: fixed; top: 16px; right: 20px; z-index: 10; }
