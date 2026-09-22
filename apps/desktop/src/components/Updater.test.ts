@@ -25,7 +25,7 @@ it('checks manually and reports that the current version is up to date', async (
   const component = renderUpdater();
   await component.checkForUpdates();
   expect(await screen.findByRole('heading', { name: 'You’re up to date' })).toBeInTheDocument();
-  expect(screen.getByRole('dialog')).toHaveTextContent('Sanser 2.1.1');
+  expect(screen.getByRole('dialog')).toHaveTextContent('Sanser 2.1.2');
   await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });
