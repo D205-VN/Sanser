@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.1.5' as const;
+export const SANSER_VERSION = '2.1.6' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
@@ -130,6 +130,7 @@ export interface DeviceCapabilities {
 }
 
 export interface Device {
+  computerId?: string;
   deviceRole?: 'host' | 'client' | 'unknown';
   crossPlatform?: boolean;
   id: string;
@@ -148,6 +149,7 @@ export interface Device {
 }
 
 export interface DeviceRegistration {
+  computerId?: string;
   deviceRole: 'host' | 'client';
   crossPlatform: boolean;
   id: string;

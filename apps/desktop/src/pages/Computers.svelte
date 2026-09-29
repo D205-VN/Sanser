@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { groupComputers, isOlderRegistration, type Computer } from '../lib/computers';
   import { nativeCompatibilityReason } from '../lib/nativeCompatibility';
   import { SvelteSet } from 'svelte/reactivity';
   import { onMount } from 'svelte';
@@ -37,11 +38,14 @@
     if (!Number.isFinite(date.getTime())) return 'Not reported';
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
-  const remoteDevices = $derived(devices.filter((device) => device.id !== $presence.deviceId && device.id !== $hostStore.deviceId));
+  const remoteDevices = $derived(groupComputers(devices, [$presence.deviceId, $hostStore.deviceId]));
+  let showOlder = $state(false);
+  const olderCount = $derived(remoteDevices.filter((device) => isOlderRegistration(device)).length);
   const onlineCount = $derived(remoteDevices.filter((device) => device.online).length);
   const pinnedCount = $derived(remoteDevices.filter((device) => device.pinned).length);
   const visibleDevices = $derived(
     remoteDevices
+      .filter((device) => showOlder || filter !== 'all' || !isOlderRegistration(device))
       .filter((device) => filter === 'all' || (filter === 'pinned' ? device.pinned : filter === 'online' ? device.online : !device.online))
       .filter((device) => `${device.name} ${device.platform} ${device.gpu ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()))
       .sort((left, right) => Number(right.pinned) - Number(left.pinned) || Number(right.online) - Number(left.online) || left.name.localeCompare(right.name))
@@ -133,22 +137,26 @@
     return null;
   }
 
-  async function togglePin(device: Device): Promise<void> {
+  async function togglePin(device: Computer): Promise<void> {
     const client = session.client();
     if (!client || actionId) return;
     actionId = device.id;
     revision += 1;
     error = null;
     try {
-      const updated = await client.pinDevice(device.id, !device.pinned);
-      devices = devices.map((item) => (item.id === device.id ? updated : item));
+      for (const id of device.memberIds) {
+        const updated = await client.pinDevice(id, !device.pinned);
+        devices = devices.map((item) => item.id === id ? updated : item);
+      }
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Unable to update pin';
     } finally { actionId = null; revision += 1; }
   }
 
-  async function toggleTrust(device: Device): Promise<void> {
-    const trusted = $preferences.trustedDeviceIds.includes(device.id);
+  async function toggleTrust(device: Computer): Promise<void> {
+    const requesterId = device.requesterId;
+    if (!requesterId) return;
+    const trusted = $preferences.trustedDeviceIds.includes(requesterId);
     if (
       !trusted &&
       !window.confirm(
@@ -157,8 +165,8 @@
     ) return;
     try {
       const trustedDeviceIds = trusted
-        ? $preferences.trustedDeviceIds.filter((id) => id !== device.id)
-        : [...new Set([...$preferences.trustedDeviceIds, device.id])];
+        ? $preferences.trustedDeviceIds.filter((id) => id !== requesterId)
+        : [...new Set([...$preferences.trustedDeviceIds, requesterId])];
       await preferences.save({ ...$preferences, trustedDeviceIds });
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Unable to update unattended-access trust';
@@ -170,7 +178,7 @@
     editingName = device.name;
   }
 
-  async function saveRename(device: Device): Promise<void> {
+  async function saveRename(device: Computer): Promise<void> {
     const client = session.client();
     const name = editingName.trim();
     if (!client || actionId) return;
@@ -179,15 +187,17 @@
     revision += 1;
     error = null;
     try {
-      const updated = await client.renameDevice(device.id, name);
-      devices = devices.map((item) => (item.id === device.id ? updated : item));
+      for (const id of device.memberIds) {
+        const updated = await client.renameDevice(id, name);
+        devices = devices.map((item) => item.id === id ? updated : item);
+      }
       editingId = null;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Unable to rename computer';
     } finally { actionId = null; revision += 1; }
   }
 
-  async function remove(device: Device): Promise<void> {
+  async function remove(device: Computer): Promise<void> {
     const client = session.client();
     if (!client || !window.confirm(`Remove “${device.name}” from your account?`)) return;
     if (actionId) return;
@@ -195,8 +205,10 @@
     revision += 1;
     error = null;
     try {
-      await client.removeDevice(device.id);
-      devices = devices.filter((item) => item.id !== device.id);
+      for (const id of device.memberIds) {
+        await client.removeDevice(id);
+        devices = devices.filter((item) => item.id !== id);
+      }
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Unable to remove computer';
     } finally { actionId = null; revision += 1; }
@@ -267,7 +279,7 @@
                   <button class="button small ghost" type="button" onclick={() => (editingId = null)}>Cancel</button>
                 </form>
               {:else}
-                <div><h2>{device.pinned ? '★ ' : ''}{device.name}</h2><p>{platformLabel(device.platform)} · {device.deviceRole === 'client' ? 'Sharing is off' : 'Remote computer'}</p></div>
+                <div><h2>{device.pinned ? '★ ' : ''}{device.name}</h2><p>{platformLabel(device.platform)} · {(device.computerId ?? device.id).slice(0, 6).toUpperCase()} · {device.deviceRole === 'client' ? 'Sharing is off' : 'Remote computer'}</p></div>
               {/if}
             </div>
             <StatusPill state={device.online ? 'online' : 'offline'} label={device.streaming ? 'Streaming' : device.online ? 'Online' : 'Offline'} />
@@ -281,7 +293,7 @@
               <div class="device-menu-items">
                 <button disabled={actionId !== null} onclick={() => beginRename(device)}>Rename computer</button>
                 <button onclick={() => inspect(device)}>View diagnostics</button>
-                {#if runtime.capabilities.hostEngine.state === 'available' && (device.deviceRole === 'client' || (!device.deviceRole && device.platform.toLowerCase().includes('mac')) || $preferences.trustedDeviceIds.includes(device.id))}<button disabled={actionId !== null} onclick={() => toggleTrust(device)}>{$preferences.trustedDeviceIds.includes(device.id) ? 'Revoke trust' : 'Trust device'}</button>{/if}
+                {#if runtime.capabilities.hostEngine.state === 'available' && device.requesterId}<button disabled={actionId !== null} onclick={() => toggleTrust(device)}>{$preferences.trustedDeviceIds.includes(device.requesterId) ? 'Revoke trust' : 'Trust device'}</button>{/if}
                 <button class="danger-text" disabled={actionId !== null || device.streaming} onclick={() => remove(device)}>Remove computer</button>
               </div>
             </details>
@@ -291,6 +303,12 @@
         </article>
       {/each}
     </div>
+  {/if}
+  {#if olderCount > 0 && filter === 'all'}
+    <details class="card card-body" bind:open={showOlder}>
+      <summary>Older offline registrations ({olderCount})</summary>
+      <p>These entries were saved by earlier versions. They cannot be identified reliably until those computers reconnect. Use Rename or Remove computer to organize them.</p>
+    </details>
   {/if}
   <footer class="workspace-footer"><span role="status">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Waiting for server'}</span></footer>
 </section>

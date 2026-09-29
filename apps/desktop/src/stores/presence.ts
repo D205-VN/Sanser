@@ -16,12 +16,6 @@ export interface PresenceState {
 const initial: PresenceState = { deviceId: null, online: false, busy: false, routeAddress: null, error: null };
 const HEARTBEAT_INTERVAL_MS = 6_000;
 
-function displayName(platform: string): string {
-  if (platform.toLowerCase().includes('mac')) return 'This Mac';
-  if (platform.toLowerCase().includes('windows')) return 'This Windows PC';
-  return 'This computer';
-}
-
 function createPresenceStore() {
   const store = writable<PresenceState>(initial);
   let heartbeatTimer: number | null = null;
@@ -42,7 +36,9 @@ function createPresenceStore() {
 
     const accountId = get(session).account?.id;
     if (!accountId) throw new Error('The signed-in account is unavailable');
-    let deviceId = deviceIdentity(accountId, 'client');
+    const identity = await deviceIdentity(accountId, 'client', runtime.platform);
+    if (generation !== lifecycleGeneration) return;
+    let deviceId = identity.id;
 
     let routeAddress: string | null = null;
     try {
@@ -65,7 +61,8 @@ function createPresenceStore() {
       deviceRole: 'client',
       crossPlatform: runtime.capabilities.crossPlatformClient === true,
       id: deviceId,
-      name: displayName(runtime.platform),
+      name: identity.name,
+      computerId: identity.computerId,
       platform: runtime.platform,
       osVersion: runtime.platform,
       gpu: 'Not reported',

@@ -1,4 +1,5 @@
 mod commands;
+mod device_identity;
 mod engine;
 mod engine_output;
 mod error;
@@ -22,6 +23,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .manage(relay::RelayManager::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_status,
+            device_identity::get_device_identity,
             commands::load_preferences,
             commands::save_preferences,
             commands::secure_get,

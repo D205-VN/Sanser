@@ -27,6 +27,8 @@ pub struct AuthTokens {
 #[serde(rename_all = "camelCase")]
 pub struct Device {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub computer_id: Option<String>,
     pub name: String,
     pub platform: String,
     pub device_role: String,

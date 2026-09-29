@@ -93,6 +93,7 @@ function normalizeDevice(raw: RawDevice): Device {
     .filter((item): item is 'auto' | 'h264' | 'hevc' => item === 'auto' || item === 'h264' || item === 'hevc');
   return {
     id: raw.id ?? '',
+    computerId: raw.computerId,
     name: raw.name ?? 'Unnamed computer',
     deviceRole: raw.deviceRole,
     crossPlatform: raw.crossPlatform === true,
@@ -233,6 +234,12 @@ export class ApiClient {
     } catch (error) {
       // Older servers reject these additions before registering the device. Only
       // retry a confirmed schema rejection; never retry auth or network failures.
+      if (device.computerId && error instanceof ApiError && [400, 422].includes(error.status) &&
+          /unknown field [`'"]computerId[`'"]/.test(error.message)) {
+        const compatible = { ...device };
+        delete compatible.computerId;
+        return this.registerDevice(compatible);
+      }
       if (!(error instanceof ApiError) || ![400, 422].includes(error.status) ||
           !/unknown field [`'"](?:deviceRole|crossPlatform)[`'"]/.test(error.message)) throw error;
 
@@ -248,6 +255,7 @@ export class ApiClient {
       const legacyDevice: Partial<DeviceRegistration> = { ...device };
       delete legacyDevice.deviceRole;
       delete legacyDevice.crossPlatform;
+      delete legacyDevice.computerId;
       return normalizeDevice(await this.request<RawDevice>('/api/v2/devices/register', { method: 'POST', body: legacyDevice }));
     }
   }

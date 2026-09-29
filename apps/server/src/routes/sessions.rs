@@ -804,6 +804,7 @@ mod tests {
 
     fn device(platform: &str, role: &str, cross_platform: bool) -> Device {
         Device {
+            computer_id: None,
             id: "test".into(),
             name: "test".into(),
             platform: platform.into(),
@@ -811,7 +812,7 @@ mod tests {
             cross_platform,
             os_version: String::new(),
             gpu: String::new(),
-            sanser_version: "2.1.5".into(),
+            sanser_version: "2.1.6".into(),
             protocol_version: 2,
             online: true,
             streaming: false,

@@ -100,3 +100,23 @@ it('hides Update until an available update has been confirmed', async () => {
   await screen.findByRole('heading', { name: 'Your computers' });
   expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
 });
+
+it('shows one named computer for both roles and keeps older registrations available', async () => {
+  const common = {
+    name: 'Studio PC', platform: 'Windows', gpu: null, online: true,
+    streaming: false, pinned: false, latencyMs: null, networkQuality: 'unknown', route: null,
+    capabilities: { codecs: ['h264'], nativeTransport: true, webRtc: false, audio: false, gamepad: false }
+  };
+  api.devices.mockResolvedValue({ items: [
+    { ...common, id: 'host-id', computerId: 'abcdef00-1234-4567-8901-123456789012', deviceRole: 'host' },
+    { ...common, id: 'client-id', computerId: 'abcdef00-1234-4567-8901-123456789012', deviceRole: 'client' },
+    { ...common, id: 'old-id', name: 'Sanser Host', online: false }
+  ] });
+  render(App);
+  await screen.findByRole('heading', { name: 'Studio PC' });
+  expect(screen.getAllByRole('heading', { name: 'Studio PC' })).toHaveLength(1);
+  expect(screen.getByText(/ABCDEF/)).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Sanser Host' })).not.toBeInTheDocument();
+  await fireEvent.click(screen.getByText('Older offline registrations (1)'));
+  expect(await screen.findByRole('heading', { name: 'Sanser Host' })).toBeInTheDocument();
+});

@@ -150,6 +150,17 @@ describe('device registration compatibility', () => {
     expect(device.crossPlatform).toBe(true);
   });
 
+  it('keeps the stable role ID when an older server does not yet support computer grouping', async () => {
+    const current = { ...registration, computerId: 'saved-computer-id' };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(schemaError('computerId'))
+      .mockResolvedValueOnce(json(registration));
+    vi.stubGlobal('fetch', fetchMock);
+    const device = await client().registerDevice(current);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe(JSON.stringify(registration));
+    expect(device.id).toBe(registration.id);
+  });
+
   it.each(['deviceRole', 'crossPlatform'])('retries a rejected %s field with the same identity and legacy fields', async (field) => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(schemaError(field))

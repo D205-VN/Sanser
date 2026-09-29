@@ -365,7 +365,9 @@ export function createHostStore(): HostStore {
       runtimeForHost = runtime;
       const accountId = get(session).account?.id;
       if (!accountId) throw new Error('The signed-in account is unavailable');
-      let deviceId = deviceIdentity(accountId, 'host');
+      const identity = await deviceIdentity(accountId, 'host', runtime.platform);
+      if (generation !== lifecycleGeneration) return;
+      let deviceId = identity.id;
       let routeAddress: string | null = null;
       try {
         routeAddress = await getLocalRouteAddress(client.serverUrl);
@@ -384,7 +386,8 @@ export function createHostStore(): HostStore {
         deviceRole: 'host',
         crossPlatform: runtime.capabilities.crossPlatformHost === true,
         id: deviceId,
-        name: 'Sanser Host',
+        name: identity.name,
+        computerId: identity.computerId,
         platform: runtime.platform,
         osVersion: runtime.platform,
         gpu: 'Not reported by desktop shell',

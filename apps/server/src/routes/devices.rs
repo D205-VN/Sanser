@@ -26,6 +26,8 @@ use crate::{
 pub struct RegisterDeviceRequest {
     #[serde(default)]
     id: Option<String>,
+    #[serde(default)]
+    computer_id: Option<String>,
     name: String,
     platform: String,
     #[serde(default)]
@@ -164,7 +166,7 @@ pub async fn register(
     auth: AuthContext,
     ApiJson(request): ApiJson<RegisterDeviceRequest>,
 ) -> Result<Response, AppError> {
-    let id = match request.id {
+    let mut id = match request.id {
         Some(id) => validate_uuid(&id, "id")?,
         None => Uuid::new_v4().to_string(),
     };
@@ -206,10 +208,24 @@ pub async fn register(
     }
     let codecs = normalize_codecs(request.codecs)?;
     let route_address = normalize_route(request.route_address)?;
-    let existing_owner =
+    let computer_id = request
+        .computer_id
+        .as_deref()
+        .map(|value| validate_uuid(value, "computerId"))
+        .transpose()?;
+    let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
+    if let Some(computer) = &computer_id {
+        // Serialize concurrent role registrations for this account/installation.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("{}:{computer}", auth.user_id))
+            .execute(&mut *transaction)
+            .await
+            .map_err(AppError::from_db)?;
+    }
+    let mut existing_owner =
         sqlx::query_scalar::<_, String>("SELECT user_id FROM devices WHERE id = $1")
             .bind(&id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(AppError::from_db)?;
     if existing_owner
@@ -217,6 +233,22 @@ pub async fn register(
         .is_some_and(|owner| owner != auth.user_id)
     {
         return Err(AppError::Conflict("device id is already registered".into()));
+    }
+
+    if let Some(computer) = &computer_id {
+        if let Some(canonical_id) = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM devices WHERE user_id = $1 AND computer_id = $2 AND device_role = $3",
+        )
+        .bind(&auth.user_id)
+        .bind(computer)
+        .bind(device_role)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AppError::from_db)?
+        {
+            id = canonical_id;
+            existing_owner = Some(auth.user_id.clone());
+        }
     }
 
     let now = now_unix();
@@ -227,9 +259,9 @@ pub async fn register(
             "INSERT INTO devices \
              (id, user_id, name, platform, os_version, gpu, sanser_version, protocol_version, \
               online, streaming, pinned, route_address, network_quality, latency_ms, codecs_json, \
-              native_transport, webrtc, audio, gamepad, last_seen_at, created_at, updated_at, device_role, cross_platform) \
+              native_transport, webrtc, audio, gamepad, last_seen_at, created_at, updated_at, device_role, cross_platform, computer_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, FALSE, FALSE, $9, NULL, NULL, \
-                     $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+                     $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
         )
         .bind(&id)
         .bind(&auth.user_id)
@@ -250,15 +282,16 @@ pub async fn register(
         .bind(now)
         .bind(device_role)
         .bind(request.cross_platform)
-        .execute(&state.pool)
+        .bind(&computer_id)
+        .execute(&mut *transaction)
         .await
         .map_err(AppError::from_db)?;
     } else {
         sqlx::query(
-            "UPDATE devices SET name = COALESCE(NULLIF(name, ''), $1), platform = $2, os_version = $3, gpu = $4, \
+            "UPDATE devices SET name = CASE WHEN name IN ('', 'Sanser Host', 'This Mac', 'This Windows PC', 'This computer') THEN $1 ELSE name END, platform = $2, os_version = $3, gpu = $4, \
              sanser_version = $5, protocol_version = $6, online = TRUE, route_address = $7, \
              codecs_json = $8, native_transport = $9, webrtc = $10, audio = $11, gamepad = $12, \
-             last_seen_at = $13, updated_at = $14, device_role = $17, cross_platform = $18 WHERE id = $15 AND user_id = $16",
+             last_seen_at = $13, updated_at = $14, device_role = $17, cross_platform = $18, computer_id = COALESCE(computer_id, $19) WHERE id = $15 AND user_id = $16",
         )
         .bind(&name)
         .bind(&platform)
@@ -278,10 +311,12 @@ pub async fn register(
         .bind(&auth.user_id)
         .bind(device_role)
         .bind(request.cross_platform)
-        .execute(&state.pool)
+        .bind(&computer_id)
+        .execute(&mut *transaction)
         .await
         .map_err(AppError::from_db)?;
     }
+    transaction.commit().await.map_err(AppError::from_db)?;
     let device = fetch_owned(&state, &auth.user_id, &id).await?;
     events::publish(
         &state,
@@ -581,6 +616,7 @@ fn row_to_device(row: sqlx::postgres::PgRow) -> Result<Device, AppError> {
     })?;
     Ok(Device {
         id: row.try_get("id").map_err(AppError::from_db)?,
+        computer_id: row.try_get("computer_id").map_err(AppError::from_db)?,
         name: row.try_get("name").map_err(AppError::from_db)?,
         platform: row.try_get("platform").map_err(AppError::from_db)?,
         device_role: row.try_get("device_role").map_err(AppError::from_db)?,

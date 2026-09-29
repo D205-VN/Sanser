@@ -26,6 +26,80 @@ struct TestServer {
     _database_permit: OwnedSemaphorePermit,
 }
 
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn computer_registration_is_stable_per_account_and_role() {
+    let server = TestServer::new().await.expect("test server");
+    let auth = server.register("computer-identity@example.test").await;
+    let access = auth["accessToken"].as_str().expect("access token");
+    let computer = Uuid::new_v4().to_string();
+    let body = |role: &str| {
+        json!({ "id": Uuid::new_v4().to_string(), "computerId": computer,
+        "deviceRole": role, "platform": "windows-x86_64", "name": "Studio PC" })
+    };
+    let (first, second) = tokio::join!(
+        server.request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(body("host")),
+            Some(access)
+        ),
+        server.request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(body("host")),
+            Some(access)
+        )
+    );
+    assert!(first.0.is_success(), "{}", first.1);
+    assert!(second.0.is_success(), "{}", second.1);
+    assert_eq!(first.1["id"], second.1["id"]);
+    let id = first.1["id"].as_str().expect("host ID");
+    let renamed = server
+        .request(
+            Method::PATCH,
+            &format!("/api/v2/devices/{id}"),
+            Some(json!({"name":"My office desktop"})),
+            Some(access),
+        )
+        .await;
+    assert!(renamed.0.is_success(), "{}", renamed.1);
+    let again = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(body("host")),
+            Some(access),
+        )
+        .await;
+    assert_eq!(again.1["id"], id);
+    assert_eq!(again.1["name"], "My office desktop");
+    let client = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(body("client")),
+            Some(access),
+        )
+        .await;
+    assert!(client.0.is_success(), "{}", client.1);
+    assert_ne!(client.1["id"], id);
+    assert_eq!(client.1["computerId"], computer);
+    let other = server.register("other-computer-account@example.test").await;
+    let other_access = other["accessToken"].as_str().expect("other token");
+    let foreign = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(body("host")),
+            Some(other_access),
+        )
+        .await;
+    assert!(foreign.0.is_success(), "{}", foreign.1);
+    assert_ne!(foreign.1["id"], id);
+    server.close().await;
+}
+
 impl TestServer {
     async fn new() -> Option<Self> {
         Self::with_config(|_| {}).await

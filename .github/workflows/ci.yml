@@ -97,4 +97,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: npm run desktop:stage-sidecar
-      - run: cargo test --locked -p sanser-desktop relay::tests -- --nocapture
+      - run: cargo test --locked -p sanser-desktop --lib -- --nocapture
