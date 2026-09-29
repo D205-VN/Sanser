@@ -5447,21 +5447,25 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
   auto makePacketEncoder = [&](VideoPacketEncodeOptions& requestedOptions,
                                const char* reason) {
-    try {
-      return std::make_unique<MfVideoPacketEncoder>(streamDimensions.width,
-                                                    streamDimensions.height,
-                                                    requestedOptions);
-    } catch (const std::exception& error) {
-      if (requestedOptions.codec == VideoCodec::Hevc) {
-        std::cerr << "SNV1_CODEC_FALLBACK requested=hevc fallback=h264 reason="
-                  << (reason ? reason : "encoder-create")
-                  << " error=\"" << error.what() << "\"\n";
-        requestedOptions.codec = VideoCodec::H264;
+    for (;;) {
+      try {
         return std::make_unique<MfVideoPacketEncoder>(streamDimensions.width,
                                                       streamDimensions.height,
                                                       requestedOptions);
+      } catch (const std::exception& error) {
+        if (requestedOptions.hardware && requestedOptions.encoderPreference != "software") {
+          std::cerr << "SNV1_ENCODER_FALLBACK fallback=software reason=" << reason
+                    << " error=\"" << error.what() << "\"\n";
+          requestedOptions.hardware = false;
+          requestedOptions.encoderPreference = "software";
+        } else if (requestedOptions.codec == VideoCodec::Hevc) {
+          std::cerr << "SNV1_CODEC_FALLBACK requested=hevc fallback=h264 reason=" << reason
+                    << " error=\"" << error.what() << "\"\n";
+          requestedOptions.codec = VideoCodec::H264;
+        } else {
+          throw;
+        }
       }
-      throw;
     }
   };
 
@@ -6069,7 +6073,24 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
 	    const auto encodeSendStartedAt = std::chrono::steady_clock::now();
 	    const auto encodeStartedAt = encodeSendStartedAt;
-	    auto packets = encoder->encodeFrame(frame);
+	    std::vector<EncodedVideoPacket> packets;
+    try {
+      packets = encoder->encodeFrame(frame);
+    } catch (const std::exception& error) {
+      if (!encoder->usingHardware()) throw;
+      std::cerr << "SNV1_ENCODER_RUNTIME_FALLBACK backend=" << encoder->encoderBackend()
+                << " fallback=software error=\"" << error.what() << "\"\n";
+      // Keep transport/control alive and preserve the monotonic stream timeline.
+      // Subsequent restarts must not select the failed hardware again.
+      encodeOptions.bitrate = currentAdaptiveBitrate;
+      encodeOptions.hardware = false;
+      encodeOptions.encoderPreference = "software";
+      encoder.reset();
+      encoder = makePacketEncoder(encodeOptions, "hardware-runtime-failure");
+      lastEncoderRestartAt = std::chrono::steady_clock::now();
+      encoder->requestKeyframe();
+      packets = encoder->encodeFrame(frame);
+    }
 	    const auto encodeFinishedAt = std::chrono::steady_clock::now();
 	    std::uint64_t framePacketizeMicros = 0;
 	    std::uint64_t frameSendMicros = 0;

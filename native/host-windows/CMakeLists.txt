@@ -33,6 +33,13 @@ if(BUILD_TESTING)
   add_executable(sanser-wheel-delta-test ../common/wheel_delta_test.cpp)
   target_include_directories(sanser-wheel-delta-test PRIVATE ../common)
   add_test(NAME sanser-wheel-delta-test COMMAND sanser-wheel-delta-test)
+  add_executable(sanser-mf-encoder-test
+    src/mf_encoder_test.cpp src/mf_video_packet_encoder.cpp
+    src/mf_video_encoder.cpp src/desktop_duplication.cpp)
+  target_compile_definitions(sanser-mf-encoder-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_link_libraries(sanser-mf-encoder-test PRIVATE mfplat mfreadwrite mfuuid ole32 strmiids wmcodecdspuuid d3d11 dxgi user32)
+  add_test(NAME sanser-mf-encoder-test COMMAND sanser-mf-encoder-test)
+  set_tests_properties(sanser-mf-encoder-test PROPERTIES TIMEOUT 30)
 endif()
 
 target_link_libraries(sanser-host-windows PRIVATE

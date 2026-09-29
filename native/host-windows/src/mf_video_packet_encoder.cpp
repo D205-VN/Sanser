@@ -1,4 +1,5 @@
 #include "mf_video_packet_encoder.h"
+#include "mf_encoder_events.h"
 
 #include <codecapi.h>
 #include <mfapi.h>
@@ -775,6 +776,14 @@ struct MfVideoPacketEncoder::Impl {
   bool providesOutputSamples = false;
   std::uint32_t consecutiveStreamChanges = 0;
   BgraScalePlan scalePlan;
+  MfEncoderEvents events;
+
+  ~Impl() {
+    // Shut down async workers before releasing MF/COM runtime state.
+    ComPtr<IMFShutdown> shutdown;
+    if (transform && SUCCEEDED(transform.As(&shutdown))) shutdown->Shutdown();
+  }
+
 
   void refreshOutputStreamInfo() {
     MFT_OUTPUT_STREAM_INFO nextInfo{};
@@ -848,6 +857,7 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   EncoderSelection encoderSelection;
   auto activation = createEncoderTransform(impl_->options.codec, impl_->options, encoderSelection);
   impl_->transform = activation.transform;
+  impl_->events.initialize(activation.eventGenerator.Get());
   impl_->usingHardware = encoderSelection.hardware;
   impl_->encoderName = encoderSelection.name;
   impl_->encoderBackend = encoderSelection.backend;
@@ -988,9 +998,20 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(const FrameBgr
   checkHr(sample->SetSampleTime(sampleTime), "Set input sample time");
   checkHr(sample->SetSampleDuration(duration), "Set input sample duration");
 
-  HRESULT inputHr = impl_->transform->ProcessInput(0, sample.Get(), 0);
   std::vector<EncodedVideoPacket> packets;
-  if (inputHr == MF_E_NOTACCEPTING) {
+  if (impl_->events.asynchronous()) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    for (;;) {
+      auto ready = drain(); // Output must be consumed to avoid encoder backpressure.
+      packets.insert(packets.end(), std::make_move_iterator(ready.begin()), std::make_move_iterator(ready.end()));
+      if (impl_->events.inputReady()) break;
+      if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Timed out waiting for encoder METransformNeedInput");
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    impl_->events.consumeInput();
+  }
+  HRESULT inputHr = impl_->transform->ProcessInput(0, sample.Get(), 0);
+  if (inputHr == MF_E_NOTACCEPTING && !impl_->events.asynchronous()) {
     packets = drain();
     inputHr = impl_->transform->ProcessInput(0, sample.Get(), 0);
   }
@@ -1009,6 +1030,8 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::drain() {
   constexpr std::uint32_t maxConsecutiveStreamChanges = 4;
 
   while (true) {
+    impl_->events.collect();
+    if (!impl_->events.takeOutput()) break;
     ComPtr<IMFSample> sample;
     const bool transformProvidesOutputSamples = impl_->providesOutputSamples;
     if (!transformProvidesOutputSamples) {
@@ -1110,7 +1133,17 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::drain() {
 }
 
 std::vector<EncodedVideoPacket> MfVideoPacketEncoder::finish() {
-  impl_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
-  impl_->transform->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
-  return drain();
+  impl_->events.beginDrain();
+  checkHr(impl_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0), "Encoder end stream");
+  checkHr(impl_->transform->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0), "Encoder drain");
+  if (!impl_->events.asynchronous()) return drain();
+  std::vector<EncodedVideoPacket> packets;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  for (;;) {
+    auto ready = drain();
+    packets.insert(packets.end(), std::make_move_iterator(ready.begin()), std::make_move_iterator(ready.end()));
+    if (impl_->events.drained()) return packets;
+    if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Timed out waiting for encoder METransformDrainComplete");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
