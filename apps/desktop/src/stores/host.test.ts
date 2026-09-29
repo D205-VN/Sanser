@@ -63,6 +63,16 @@ beforeEach(() => {
 });
 afterEach(async () => { await host.offline(); vi.useRealTimers(); });
 
+it('launches Auto Windows capture with room for native 16:10 text and higher motion bitrate', async () => {
+  mocks.credentials.mockResolvedValue({ sessionToken: 'test-token', wireProtocol: 'legacy' });
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, qualityProfile: 'auto' }] });
+  await host.online(runtime);
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({
+    wireProtocol: 'legacy', width: 1920, height: 1200, fps: 60, bitrateKbps: 25000
+  }));
+});
+
 it('keeps unsupported Mac hosting offline and exposes a server upgrade reason', async () => {
   mocks.register.mockRejectedValueOnce(new ApiError('Server update required', 422, 'server_upgrade_required', 'test'));
   await expect(host.online(runtime)).rejects.toMatchObject({ code: 'server_upgrade_required' });

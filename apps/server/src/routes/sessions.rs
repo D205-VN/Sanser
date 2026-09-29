@@ -811,7 +811,7 @@ mod tests {
             cross_platform,
             os_version: String::new(),
             gpu: String::new(),
-            sanser_version: "2.1.3".into(),
+            sanser_version: "2.1.4".into(),
             protocol_version: 2,
             online: true,
             streaming: false,

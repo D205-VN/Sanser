@@ -3,7 +3,7 @@ import { deviceIdentity } from '../lib/deviceIdentity';
 import { ApiError } from '../lib/api';
 import { engineStatus, getLocalRouteAddress, launchEngine, startRelay, stopEngine, stopRelay } from '../lib/platform';
 import { coordinateP2pConnection } from '../lib/p2pSignaling';
-import { resolveStreamProfile } from '../lib/streamProfile';
+import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
 import { trustedPendingSession } from '../lib/trustedDevice';
 import { PROTOCOL_VERSION, SANSER_VERSION, type ConnectionSession, type RuntimeStatus } from '../lib/types';
 import { diagnostics } from './diagnostics';
@@ -103,15 +103,6 @@ export function createHostStore(): HostStore {
     }
   }
 
-  function resolutionSize(resolution: string): { width: number; height: number } {
-    switch (resolution) {
-      case '720p': return { width: 1280, height: 720 };
-      case '1440p': return { width: 2560, height: 1440 };
-      case '2160p': return { width: 3840, height: 2160 };
-      default: return { width: 1920, height: 1080 };
-    }
-  }
-
   function startAcceptedSession(request: ConnectionSession, force = false): Promise<void> {
     if (launchTask) return launchTask;
     const controller = new AbortController();
@@ -150,7 +141,7 @@ export function createHostStore(): HostStore {
       if (cancelled()) return;
       const settings = get(preferences);
       const stream = resolveStreamProfile(settings.stream, request.qualityProfile);
-      const size = resolutionSize(stream.resolution);
+      const size = resolveStreamSize(stream.resolution, credentials.wireProtocol);
       if (!request.requesterDeviceId) throw new Error('Missing requester device ID for P2P connection');
       let route: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
       let relayRoute: Awaited<ReturnType<typeof startRelay>> | null = null;

@@ -72,6 +72,7 @@ int main() {
         auto encoded = encoder.encodeFrame(frame);
         packets.insert(packets.end(), std::make_move_iterator(encoded.begin()), std::make_move_iterator(encoded.end()));
       }
+      require(!packets.empty(), "live H264 output must be available before end-of-stream drain");
       auto tail = encoder.finish();
       packets.insert(packets.end(), std::make_move_iterator(tail.begin()), std::make_move_iterator(tail.end()));
       require(!packets.empty(), "software H264 must produce packets without a GPU");

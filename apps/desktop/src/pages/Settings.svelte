@@ -179,7 +179,7 @@
           <div><h2 class="card-title">Quality</h2><p class="card-subtitle">Choose the default quality for new connections.</p></div>
           <div class="profile-grid">
             {#each [
-              ['auto', 'Auto', '1080p at 60 FPS · 20 Mb/s.'],
+              ['auto', 'Auto', 'Up to 1920 × 1200 at 60 FPS · 25 Mb/s.'],
               ['competitive', 'Competitive', '720p at 120 FPS · 12 Mb/s.'],
               ['balanced', 'Balanced', '1080p at 60 FPS · 20 Mb/s.'],
               ['quality', 'Quality', '1440p at 60 FPS · 40 Mb/s.'],

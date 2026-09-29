@@ -3,7 +3,7 @@
   import Icon from '../components/Icon.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay } from '../lib/platform';
-  import { resolveStreamProfile } from '../lib/streamProfile';
+  import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
   import { coordinateP2pConnection } from '../lib/p2pSignaling';
   import type { ConnectionSession, Page, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
@@ -36,15 +36,6 @@
       sessionState.transport === 'native'
   );
 
-  function resolutionSize(resolution: string): { width: number; height: number } {
-    switch (resolution) {
-      case '720p': return { width: 1280, height: 720 };
-      case '1440p': return { width: 2560, height: 1440 };
-      case '2160p': return { width: 3840, height: 2160 };
-      default: return { width: 1920, height: 1080 };
-    }
-  }
-
   function isAborted(signal: AbortSignal): boolean { return signal.aborted; }
 
   function udpEndpoint(address: string, port: number): string {
@@ -68,7 +59,7 @@
       failedP2pSessionId = null;
     }
     const stream = resolveStreamProfile($preferences.stream, target.qualityProfile);
-    const size = resolutionSize(stream.resolution);
+    const size = resolveStreamSize(stream.resolution, target.wireProtocol);
     connection.setBusy(true);
     localError = null;
     try {

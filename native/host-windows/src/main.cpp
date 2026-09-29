@@ -673,6 +673,7 @@ std::uint32_t readUintArg(int argc, char** argv, int& i, const char* name) {
 
 Options parseOptions(int argc, char** argv) {
   Options options;
+  bool intervalProvided = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--output-dir") {
@@ -704,6 +705,7 @@ Options parseOptions(int argc, char** argv) {
       options.framesProvided = true;
     } else if (arg == "--interval-ms") {
       options.intervalMs = readUintArg(argc, argv, i, "--interval-ms");
+      intervalProvided = true;
     } else if (arg == "--adapter") {
       options.adapterIndex = readUintArg(argc, argv, i, "--adapter");
     } else if (arg == "--output") {
@@ -759,6 +761,7 @@ Options parseOptions(int argc, char** argv) {
         << "  --output N       DXGI output/monitor index, default 0\n"
         << "  --pipe           Write BGRA frames to stdout with SNF1 headers\n"
         << "  --fps N          Target FPS in pipe/encode mode, default 30\n"
+        << "  --interval-ms N  Capture delay; encoded streaming defaults to FPS pacing (0)\n"
         << "  --encode CODEC   Encode captured frames with Media Foundation: h264, hevc, av1\n"
         << "  --encode-pipe CODEC Encode H.264/H.265 packets to stdout or --packet-file with SNV1 headers\n"
         << "  --bitrate N      Target encode bitrate, default 28000000\n"
@@ -787,6 +790,9 @@ Options parseOptions(int argc, char** argv) {
       throw std::runtime_error("Unknown argument: " + arg);
     }
   }
+  // The 250 ms screenshot interval must not throttle interactive streaming
+  // or disable its adaptive frame pacing and startup bitrate control.
+  if (options.encodePipe && !intervalProvided) options.intervalMs = 0;
   return options;
 }
 

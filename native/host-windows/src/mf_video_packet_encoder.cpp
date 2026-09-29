@@ -432,10 +432,13 @@ void configureLowLatencyEncoder(IMFTransform* transform, const VideoPacketEncode
   setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncCommonMaxBitRate, options.bitrate, "max-bitrate");
   setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncMPVGOPSize, gopFrames, "gop");
   setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0, "b-frames");
-  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncCommonQualityVsSpeed, 100, "speed");
+  // CodecAPI defines 0 as fastest and 100 as highest quality / slowest.
+  // 33 retains the software H.264 encoder's low-complexity range while
+  // allowing better compression than the absolute-fastest setting.
+  setCodecApiUInt32(codecApi.Get(), CODECAPI_AVEncCommonQualityVsSpeed, 33, "quality-vs-speed");
 
   std::cerr << "SNV1 encoder low-latency requested: cbr=yes gopFrames="
-            << gopFrames << " bFrames=0 speed=100\n";
+            << gopFrames << " bFrames=0 qualityVsSpeed=33 (prefer-speed)\n";
 }
 
 void releaseActivates(IMFActivate** activates, UINT32 count) {

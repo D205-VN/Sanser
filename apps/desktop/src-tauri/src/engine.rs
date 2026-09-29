@@ -459,6 +459,10 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             }
             if cross_platform {
                 args.push("--snv2".into());
+            } else {
+                // Legacy Windows capture otherwise defaults to a 250 ms
+                // screenshot interval, overriding the requested stream FPS.
+                args.extend(["--interval-ms".into(), "0".into()]);
             }
             Ok(args)
         }
@@ -796,6 +800,21 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--control-connect" || arg == "--audio-udp-connect")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn host_stream_uses_fps_pacing_without_screenshot_delay() -> Result<(), DesktopError> {
+        let mut host = request(EngineKind::Host);
+        let args = build_args(&host)?;
+        assert!(args.windows(2).any(|pair| pair == ["--interval-ms", "0"]));
+        assert!(args.windows(2).any(|pair| pair == ["--fps", "60"]));
+
+        // SNV2 has its own FPS loop and rejects legacy-only arguments.
+        host.wire_protocol = Some("snv2".into());
+        let args = build_args(&host)?;
+        assert!(args.iter().any(|arg| arg == "--snv2"));
+        assert!(!args.iter().any(|arg| arg == "--interval-ms"));
         Ok(())
     }
 
