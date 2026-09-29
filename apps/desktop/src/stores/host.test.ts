@@ -6,7 +6,7 @@ import type { ConnectionSession, RuntimeStatus } from '../lib/types';
 const mocks = vi.hoisted(() => ({
   register: vi.fn(), offline: vi.fn(), sessions: vi.fn(), heartbeat: vi.fn(),
   credentials: vi.fn(), disconnect: vi.fn(), accept: vi.fn(), reject: vi.fn(),
-  punch: vi.fn(), launch: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), status: vi.fn()
+  punch: vi.fn(), launch: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), status: vi.fn(), savePreferences: vi.fn()
 }));
 vi.mock('./session', async () => {
   const { writable } = await import('svelte/store');
@@ -24,10 +24,11 @@ vi.mock('./session', async () => {
 vi.mock('../lib/platform', () => ({
   getLocalRouteAddress: vi.fn().mockResolvedValue('192.0.2.2'),
   launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay,
-  stopRelay: mocks.stopRelay, engineStatus: mocks.status
+  stopRelay: mocks.stopRelay, engineStatus: mocks.status, saveNativePreferences: mocks.savePreferences
 }));
 vi.mock('../lib/p2pSignaling', () => ({ coordinateP2pConnection: mocks.punch }));
 import { createHostStore, type HostStore } from './host';
+import { DEFAULT_PREFERENCES, preferences } from './preferences';
 
 const runtime = { platform: 'macOS', capabilities: {
   hostEngine: { state: 'available' }, nativeDirect: { state: 'available' },
@@ -45,7 +46,7 @@ function deferred<T>() {
 }
 async function settle() { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }
 let host: HostStore;
-beforeEach(() => {
+beforeEach(async () => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   host = createHostStore();
@@ -60,8 +61,29 @@ beforeEach(() => {
   mocks.stopRelay.mockResolvedValue(undefined);
   mocks.disconnect.mockResolvedValue(undefined);
   mocks.status.mockResolvedValue({ running: true });
+  mocks.savePreferences.mockResolvedValue(undefined);
+  await preferences.save(structuredClone(DEFAULT_PREFERENCES));
 });
 afterEach(async () => { await host.offline(); vi.useRealTimers(); });
+
+it.each([
+  { enabled: true, trusted: true, accepts: true },
+  { enabled: true, trusted: false, accepts: false },
+  { enabled: false, trusted: true, accepts: false }
+])('auto acceptance follows the switch and remembered device: %j', async ({ enabled, trusted, accepts }) => {
+  const requesterDeviceId = '22222222-2222-4222-8222-222222222222';
+  const pending: ConnectionSession = { ...target, requesterDeviceId, status: 'pending', requesterReadyAt: undefined };
+  const settings = structuredClone(DEFAULT_PREFERENCES);
+  settings.host.autoAcceptOwnDevices = enabled;
+  settings.trustedDeviceIds = trusted ? [requesterDeviceId] : [];
+  await preferences.save(settings);
+  mocks.sessions.mockResolvedValue({ items: [pending] });
+  mocks.accept.mockResolvedValue({ ...pending, status: 'accepted' });
+  await host.online(runtime);
+  await settle();
+  expect(mocks.accept).toHaveBeenCalledTimes(accepts ? 1 : 0);
+  if (accepts) expect(get(host).sessions[0]?.status).toBe('accepted');
+});
 
 it('launches Auto Windows capture with room for native 16:10 text and higher motion bitrate', async () => {
   mocks.credentials.mockResolvedValue({ sessionToken: 'test-token', wireProtocol: 'legacy' });

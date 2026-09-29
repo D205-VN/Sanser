@@ -42,10 +42,20 @@
     catch (error) { actionError = error instanceof Error ? error.message : 'Unable to save host settings'; }
   }
 
-  async function acceptRequest(request: ConnectionSession): Promise<void> {
+  async function acceptRequest(request: ConnectionSession, trust = false): Promise<void> {
     actionError = null;
     try {
-      await host.accept(request.id);
+      const accepted = await host.accept(request.id);
+      if (trust) {
+        try {
+          await preferences.save({
+            ...$preferences,
+            trustedDeviceIds: [...new Set([...$preferences.trustedDeviceIds, accepted.requesterDeviceId])]
+          });
+        } catch {
+          actionError = 'Connection accepted, but this computer could not be saved as trusted. Please try again from Computers.';
+        }
+      }
     } catch (error) {
       actionError = error instanceof Error ? error.message : 'Unable to accept the connection request';
     }
@@ -110,17 +120,20 @@
         checked={$preferences.host.autoAcceptOwnDevices}
         disabled={!canHost}
         label="Auto accept trusted devices"
-        description={`${$preferences.trustedDeviceIds.length} trusted device(s). Manage trust from Computers on this host.`}
+        description={$preferences.trustedDeviceIds.length > 0 ? `${$preferences.trustedDeviceIds.length} trusted computer(s) can connect without asking. Other computers need approval.` : 'No trusted computers yet. Choose Accept & trust on a request to allow automatic connections next time.'}
         onchange={(value) => updateHost('autoAcceptOwnDevices', value)}
       />
       {#if pendingSessions.length === 0}
-        <div class="notice">{$host.online ? 'Listening for connection requests. You can approve each device here.' : 'Go online to receive connection requests from your other computers.'}</div>
+        <div class="notice">{$host.online ? $preferences.host.autoAcceptOwnDevices && $preferences.trustedDeviceIds.length > 0 ? 'Trusted computers will be accepted automatically.' : 'Waiting for a connection request. Approve once with Accept & trust to remember that computer.' : 'Go online to receive connection requests from your other computers.'}</div>
       {:else}
         <div class="security-list">
           {#each pendingSessions as request (request.id)}
             <div>
               <span><strong>Client {request.requesterDeviceId.slice(0, 8)}</strong><span>{$preferences.trustedDeviceIds.includes(request.requesterDeviceId) ? 'Trusted · ' : ''}{request.qualityProfile} · {request.requestedCodec === 'hevc' ? 'HEVC' : request.requestedCodec === 'h264' ? 'H.264' : 'Auto codec'}</span></span>
               <span class="button-row">
+                {#if $preferences.host.autoAcceptOwnDevices && !$preferences.trustedDeviceIds.includes(request.requesterDeviceId)}
+                  <button class="button small primary" disabled={$host.actionSessionId !== null} onclick={() => acceptRequest(request, true)}>Accept &amp; trust</button>
+                {/if}
                 <button class="button small primary" disabled={$host.actionSessionId !== null} onclick={() => acceptRequest(request)}>{$host.actionSessionId === request.id ? 'Accepting…' : 'Accept'}</button>
                 <button class="button small danger" disabled={$host.actionSessionId !== null} onclick={() => rejectRequest(request)}>Reject</button>
               </span>

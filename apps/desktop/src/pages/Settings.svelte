@@ -247,7 +247,7 @@
           </div>
           </details>
           <Toggle checked={$preferences.host.autoOnline} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Bring host online automatically" description="Allow connection requests when you open Sanser." onchange={(value) => saveHost({ autoOnline: value })} />
-          <Toggle checked={$preferences.host.autoAcceptOwnDevices} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Auto accept trusted devices" description={`Accept only requester identities trusted from Computers on this host (${$preferences.trustedDeviceIds.length}).`} onchange={(value) => saveHost({ autoAcceptOwnDevices: value })} />
+          <Toggle checked={$preferences.host.autoAcceptOwnDevices} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Auto accept trusted devices" description={$preferences.trustedDeviceIds.length > 0 ? `${$preferences.trustedDeviceIds.length} trusted computer(s) can connect without asking.` : 'No trusted computers yet. Choose Accept & trust on a request in Host to remember that computer.'} onchange={(value) => saveHost({ autoAcceptOwnDevices: value })} />
           {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} label="System audio" description="Share sound from this computer." onchange={(value) => saveHost({ audioEnabled: value })} />{/if}
           <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Remote input" description="Allow remote keyboard and mouse control." onchange={(value) => saveHost({ inputEnabled: value })} />
         </article>
