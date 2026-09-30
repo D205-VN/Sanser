@@ -253,6 +253,19 @@ pub fn export_diagnostics(
     }
     let mut value: serde_json::Value = serde_json::from_str(contents)
         .map_err(|_| DesktopError::InvalidRequest("diagnostics must be valid JSON".into()))?;
+    if let Some(object) = value.as_object_mut() {
+        let reports = app
+            .path()
+            .app_log_dir()
+            .ok()
+            .map_or_else(Vec::new, |directory| {
+                crate::connection_report::recent(&directory.join("connections"))
+            });
+        object.insert(
+            "connectionReports".into(),
+            serde_json::Value::Array(reports),
+        );
+    }
     sanitize_json(&mut value);
     let serialized = serde_json::to_vec_pretty(&value)
         .map_err(|error| DesktopError::Storage(error.to_string()))?;

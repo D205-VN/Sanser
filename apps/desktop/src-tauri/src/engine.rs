@@ -47,14 +47,29 @@ struct EngineChild {
 }
 
 impl EngineChild {
-    fn spawn(command: &mut Command, debug_log_path: Option<&Path>) -> std::io::Result<Self> {
+    fn spawn(
+        command: &mut Command,
+        debug_log_path: Option<&Path>,
+        metrics: Option<std::sync::mpsc::SyncSender<crate::connection_report::Sample>>,
+    ) -> std::io::Result<Self> {
         let mut process = command.spawn()?;
         let Some(stderr) = process.stderr.take() else {
             let _ = process.kill();
             let _ = process.wait();
             return Err(std::io::Error::other("native stderr pipe is missing"));
         };
-        match EngineOutput::start(stderr, debug_log_path.and_then(open_private_log)) {
+        if let Some(stdout) = process.stdout.take()
+            && let Err(error) = EngineOutput::start_recording(stdout, None, metrics.clone())
+        {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(error);
+        }
+        match EngineOutput::start_recording(
+            stderr,
+            debug_log_path.and_then(open_private_log),
+            metrics,
+        ) {
             Ok(output) => Ok(Self { process, output }),
             Err(error) => {
                 let _ = process.kill();
@@ -528,7 +543,7 @@ fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest
     command
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     if request.kind != EngineKind::LocalServer {
@@ -542,6 +557,7 @@ fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest
             .collect();
         command.env_clear();
         command.envs(inherited);
+        command.env("SANSER_TELEMETRY", "1");
         if let Some(token) = request.session_token.as_deref() {
             command.env("SANSER_NATIVE_SESSION_TOKEN", token);
         }
@@ -665,13 +681,26 @@ impl EngineManager {
         }
 
         let debug_log_path = sidecar_debug_log_path(app, request.kind);
+        let report =
+            app.path().app_log_dir().ok().and_then(
+                |directory| match crate::connection_report::start(
+                    &directory.join("connections"),
+                    request,
+                ) {
+                    Ok(report) => Some(report),
+                    Err(error) => {
+                        eprintln!("Unable to save automatic connection report: {error}");
+                        None
+                    }
+                },
+            );
         let mut command = sanitized_command(&path, &args, request);
         // Candidate gathering, STUN and connectivity checks all use this
         // socket. Release it only after validation/probing and immediately
         // before the sidecar binds the selected port.
         drop(reserved_socket);
-        let mut child =
-            EngineChild::spawn(&mut command, debug_log_path.as_deref()).map_err(|error| {
+        let mut child = EngineChild::spawn(&mut command, debug_log_path.as_deref(), report)
+            .map_err(|error| {
                 let message = error.to_string();
                 state.last_errors.insert(request.kind, message.clone());
                 DesktopError::Process(message)
@@ -751,6 +780,7 @@ mod tests {
 
     fn request(kind: EngineKind) -> LaunchEngineRequest {
         LaunchEngineRequest {
+            direct_check: None,
             kind,
             session_id: Some("018f4d89-5e8b-7a80-bd1e-cb7cb9f43189".into()),
             address: Some("192.0.2.10".into()),

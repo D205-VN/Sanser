@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from './api';
-import { coordinateP2pConnection } from './p2pSignaling';
+import { coordinateP2pConnection, directCheckFailure } from './p2pSignaling';
 import { diagnostics } from '../stores/diagnostics';
 
 type Invoke = (command: string, args?: unknown) => Promise<unknown>;
@@ -339,4 +339,14 @@ it('does not open signaling when cancelled while gathering candidates', async ()
   await rejected;
   expect(FakeWebSocket.instances).toHaveLength(0);
   expect(invokeMock).toHaveBeenCalledWith('p2p_stop', { attemptId });
+});
+
+
+it('records only fixed connection-check categories, without raw credentials', () => {
+  expect(directCheckFailure(new Error('P2P connectivity check failed: no direct route could be established'))).toBe('no-direct-route');
+  expect(directCheckFailure(new Error('signaling timed out'))).toBe('timeout');
+  expect(directCheckFailure(new Error('Unable to reserve fixed host UDP port'))).toBe('gather-failed');
+  expect(directCheckFailure(new Error('WebSocket connection failed'))).toBe('signaling-failed');
+  expect(directCheckFailure(new Error('secret=never-persist'))).toBe('failed');
+  expect(directCheckFailure(new Error('anything'), true)).toBe('relay-selected');
 });

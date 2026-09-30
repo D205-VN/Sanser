@@ -224,52 +224,68 @@ async fn run_relay_socket(
         return;
     };
     let (mut writer, mut reader) = socket.split();
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut byte_window_started = Instant::now();
-    let mut byte_window_total = 0_usize;
-
-    loop {
-        tokio::select! {
-            outgoing = outbound.recv() => {
-                let result = match outgoing {
-                    Some(RelayOutbound::Binary(payload)) => writer.send(Message::Binary(payload.into())).await,
-                    Some(RelayOutbound::PeerReady) => writer.send(Message::Text("{\"type\":\"relay.peerReady\"}".into())).await,
-                    Some(RelayOutbound::PeerOffline) => writer.send(Message::Text("{\"type\":\"relay.peerOffline\"}".into())).await,
+    let (control_tx, mut control_rx) = mpsc::channel(8);
+    // Do not await a slow client's video writes inside the input-reading loop.
+    let sending = async {
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let message = tokio::select! {
+                outgoing = outbound.recv() => match outgoing {
+                    Some(RelayOutbound::Binary(payload)) => Message::Binary(payload.into()),
+                    Some(RelayOutbound::PeerReady) => Message::Text("{\"type\":\"relay.peerReady\"}".into()),
+                    Some(RelayOutbound::PeerOffline) => Message::Text("{\"type\":\"relay.peerOffline\"}".into()),
                     None => break,
-                };
-                if result.is_err() { break; }
-            }
-            incoming = reader.next() => {
-                match incoming {
-                    Some(Ok(Message::Binary(payload))) => {
-                        let now = Instant::now();
-                        if now.duration_since(byte_window_started) >= Duration::from_secs(1) {
-                            byte_window_started = now;
-                            byte_window_total = 0;
-                        }
-                        byte_window_total = byte_window_total.saturating_add(payload.len());
-                        if byte_window_total > MAX_RELAY_BYTES_PER_SECOND {
-                            break;
-                        }
-                        match state.relay.forward(&key, &device_id, connection_id, payload.to_vec()).await {
-                            Ok(()) => {}
-                            Err("connection_replaced") => break,
-                            Err(_) => continue,
-                        }
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        if writer.send(Message::Pong(payload)).await.is_err() { break; }
-                    }
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-                    Some(Ok(Message::Text(_))) => break,
-                    _ => {}
+                },
+                control = control_rx.recv() => {
+                    let Some(message) = control else { break; };
+                    message
                 }
-            }
-            _ = heartbeat.tick() => {
-                if writer.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
+                _ = heartbeat.tick() => Message::Ping(Vec::new().into()),
+            };
+            if writer.send(message).await.is_err() {
+                break;
             }
         }
+    };
+    let receiving = async {
+        let mut byte_window_started = Instant::now();
+        let mut byte_window_total = 0_usize;
+        while let Some(incoming) = reader.next().await {
+            match incoming {
+                Ok(Message::Binary(payload)) => {
+                    let now = Instant::now();
+                    if now.duration_since(byte_window_started) >= Duration::from_secs(1) {
+                        byte_window_started = now;
+                        byte_window_total = 0;
+                    }
+                    byte_window_total = byte_window_total.saturating_add(payload.len());
+                    if byte_window_total > MAX_RELAY_BYTES_PER_SECOND {
+                        break;
+                    }
+                    match state
+                        .relay
+                        .forward(&key, &device_id, connection_id, payload.to_vec())
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err("connection_replaced") => break,
+                        Err(_) => continue,
+                    }
+                }
+                Ok(Message::Ping(payload)) => {
+                    if control_tx.try_send(Message::Pong(payload)).is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Close(_) | Message::Text(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    };
+    tokio::select! {
+        () = sending => {},
+        () = receiving => {},
     }
     state.relay.remove(&key, &device_id, connection_id).await;
 }

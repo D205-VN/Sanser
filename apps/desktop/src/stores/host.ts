@@ -2,7 +2,7 @@ import { get, writable, type Readable } from 'svelte/store';
 import { deviceIdentity } from '../lib/deviceIdentity';
 import { ApiError } from '../lib/api';
 import { engineStatus, getLocalRouteAddress, launchEngine, startRelay, stopEngine, stopRelay } from '../lib/platform';
-import { coordinateP2pConnection } from '../lib/p2pSignaling';
+import { coordinateP2pConnection, directCheckFailure } from '../lib/p2pSignaling';
 import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
 import { trustedPendingSession } from '../lib/trustedDevice';
 import { PROTOCOL_VERSION, SANSER_VERSION, type ConnectionSession, type RuntimeStatus } from '../lib/types';
@@ -144,6 +144,7 @@ export function createHostStore(): HostStore {
       const size = resolveStreamSize(stream.resolution, credentials.wireProtocol);
       if (!request.requesterDeviceId) throw new Error('Missing requester device ID for P2P connection');
       let route: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
+      let directCheck: import('../lib/types').LaunchEngineRequest['directCheck'] = 'passed';
       let relayRoute: Awaited<ReturnType<typeof startRelay>> | null = null;
       try {
         if (request.networkMode === 'relay') throw new Error('Relay-only mode selected');
@@ -158,6 +159,7 @@ export function createHostStore(): HostStore {
           signal
         );
       } catch (directError) {
+        directCheck = directCheckFailure(directError, request.networkMode === 'relay');
         if (cancelled()) return;
         if (request.networkMode === 'direct') throw directError;
         const accessToken = await client.getAccessToken();
@@ -185,6 +187,7 @@ export function createHostStore(): HostStore {
         return;
       }
       await launchEngine({
+        directCheck,
         kind: 'host',
         wireProtocol: credentials.wireProtocol,
         sessionId: request.id,

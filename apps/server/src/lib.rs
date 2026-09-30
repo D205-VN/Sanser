@@ -20,6 +20,7 @@ use axum::{
     middleware as axum_middleware,
     response::IntoResponse,
     routing::{delete, get, patch, post},
+    serve::ListenerExt,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -168,7 +169,11 @@ pub async fn serve(config: Config) -> Result<(), ServerError> {
     tracing::info!(address = %listener.local_addr().unwrap_or(address), "Sanser API server listening");
 
     let result = axum::serve(
-        listener,
+        listener.tap_io(|stream| {
+            if let Err(error) = stream.set_nodelay(true) {
+                tracing::warn!(%error, "Could not disable TCP buffering for relay input");
+            }
+        }),
         build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal(cancellation.clone()))

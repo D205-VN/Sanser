@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 use tokio::sync::oneshot;
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_with_config,
     tungstenite::{
         Message,
         client::IntoClientRequest,
@@ -247,13 +247,15 @@ pub async fn relay_start(
         }),
     );
 
-    let (mut websocket, response) =
-        tokio::time::timeout(RELAY_CONNECT_TIMEOUT, connect_async(websocket_request))
-            .await
-            .map_err(|_| DesktopError::Process("relay WebSocket connection timed out".into()))?
-            .map_err(|error| {
-                DesktopError::Process(format!("relay WebSocket connection failed: {error}"))
-            })?;
+    let (mut websocket, response) = tokio::time::timeout(
+        RELAY_CONNECT_TIMEOUT,
+        connect_async_with_config(websocket_request, None, true),
+    )
+    .await
+    .map_err(|_| DesktopError::Process("relay WebSocket connection timed out".into()))?
+    .map_err(|error| {
+        DesktopError::Process(format!("relay WebSocket connection failed: {error}"))
+    })?;
     if response
         .headers()
         .get(header::SEC_WEBSOCKET_PROTOCOL)
@@ -379,86 +381,113 @@ fn relay_endpoint(
 async fn run_bridge<S>(
     socket: tokio::net::UdpSocket,
     engine_endpoint: SocketAddr,
-    mut websocket: tokio_tungstenite::WebSocketStream<S>,
-    mut cipher: RelayCipher,
+    websocket: tokio_tungstenite::WebSocketStream<S>,
+    cipher: RelayCipher,
     mut stop: oneshot::Receiver<()>,
 ) -> Option<String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut buffer = vec![0_u8; RELAY_MAX_DATAGRAM_BYTES];
-    let mut consecutive_decrypt_failures = 0_u8;
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The WebSocket can receive media before the sidecar has bound its UDP port.
-    // Windows reports that earlier ICMP Port Unreachable on the next recv_from.
-    let mut engine_ready = false;
+    // Poll both directions independently: a congested video upload must not
+    // prevent mouse/key packets arriving, or prevent the user disconnecting.
+    let (mut writer, mut reader) = websocket.split();
+    let cipher = Mutex::new(cipher);
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(8);
     let startup_deadline = tokio::time::Instant::now() + RELAY_CONNECT_TIMEOUT;
-    let engine_startup = tokio::time::sleep_until(startup_deadline);
-    tokio::pin!(engine_startup);
-    loop {
-        tokio::select! {
-            _ = &mut stop => return None,
-            () = &mut engine_startup, if !engine_ready => {
-                return Some("local native engine did not start sending UDP packets within 25 seconds; retry the session".into());
-            }
-            received = socket.recv_from(&mut buffer) => {
-                let (length, source) = match received {
-                    Ok(packet) => packet,
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(error) if tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error) => continue,
-                    Err(error) => return Some(format!("local relay UDP bridge stopped receiving packets: {error}")),
-                };
-                if source != engine_endpoint { continue; }
-                engine_ready = true;
-                let Ok(encrypted) = cipher.encrypt(&buffer[..length]) else {
-                    return Some("local relay packet encryption failed".into());
-                };
-                if let Err(error) = websocket.send(Message::Binary(encrypted.into())).await {
-                    return Some(format!("relay stopped while sending media: {error}"));
+    let sending = async {
+        let mut buffer = vec![0_u8; RELAY_MAX_DATAGRAM_BYTES];
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            Duration::from_secs(15),
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut engine_ready = false;
+        let engine_startup = tokio::time::sleep_until(startup_deadline);
+        tokio::pin!(engine_startup);
+        loop {
+            let message = tokio::select! {
+                () = &mut engine_startup, if !engine_ready => {
+                    return Some("local native engine did not start sending UDP packets within 25 seconds; retry the session".into());
                 }
-            }
-            incoming = websocket.next() => {
-                match incoming {
-                    Some(Ok(Message::Binary(payload))) => {
-                        let decrypted = if let Ok(decrypted) = cipher.decrypt(&payload) {
-                            consecutive_decrypt_failures = 0;
-                            decrypted
-                        } else {
-                            consecutive_decrypt_failures = consecutive_decrypt_failures.saturating_add(1);
-                            if consecutive_decrypt_failures >= 32 {
-                                return Some("relay frame authentication repeatedly failed; refresh the accepted session on both devices".into());
-                            }
-                            continue;
-                        };
-                        if let Err(error) = socket.send_to(&decrypted, engine_endpoint).await {
-                            if tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error) { continue; }
-                            return Some(format!("local relay UDP bridge could not deliver a packet to the native engine: {error}"));
-                        }
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        if websocket.send(Message::Pong(payload)).await.is_err() {
-                            return Some("relay heartbeat response failed".into());
-                        }
-                    }
-                    Some(Ok(Message::Text(message))) if message.as_str().contains("relay.peerOffline") => {
-                        return Some("relay peer went offline; retry the accepted session".into());
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        return Some("relay connection closed; retry the accepted session".into());
-                    }
-                    Some(Err(error)) => {
-                        return Some(format!("relay connection failed: {error}"));
-                    }
-                    _ => {}
+                message = control_rx.recv() => {
+                    message?
                 }
-            }
-            _ = heartbeat.tick() => {
-                if websocket.send(Message::Ping(Vec::new().into())).await.is_err() {
-                    return Some("relay heartbeat failed".into());
+                received = socket.recv_from(&mut buffer) => {
+                    let (length, source) = match received {
+                        Ok(packet) => packet,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) if tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error) => continue,
+                        Err(error) => return Some(format!("local relay UDP bridge stopped receiving packets: {error}")),
+                    };
+                    if source != engine_endpoint { continue; }
+                    engine_ready = true;
+                    let encrypted = {
+                        let Ok(mut cipher) = cipher.lock() else { return Some("relay cipher lock failed".into()); };
+                        cipher.encrypt(&buffer[..length])
+                    };
+                    let Ok(encrypted) = encrypted else { return Some("local relay packet encryption failed".into()); };
+                    Message::Binary(encrypted.into())
                 }
+                _ = heartbeat.tick() => Message::Ping(Vec::new().into()),
+            };
+            if let Err(error) = writer.send(message).await {
+                return Some(format!("relay stopped while sending media: {error}"));
             }
         }
+    };
+    let receiving = async {
+        let mut consecutive_decrypt_failures = 0_u8;
+        while let Some(incoming) = reader.next().await {
+            match incoming {
+                Ok(Message::Binary(payload)) => {
+                    let decrypted = {
+                        let Ok(mut cipher) = cipher.lock() else {
+                            return Some("relay cipher lock failed".into());
+                        };
+                        cipher.decrypt(&payload)
+                    };
+                    let decrypted = if let Ok(decrypted) = decrypted {
+                        consecutive_decrypt_failures = 0;
+                        decrypted
+                    } else {
+                        consecutive_decrypt_failures =
+                            consecutive_decrypt_failures.saturating_add(1);
+                        if consecutive_decrypt_failures >= 32 {
+                            return Some("relay frame authentication repeatedly failed; refresh the accepted session on both devices".into());
+                        }
+                        continue;
+                    };
+                    if let Err(error) = socket.send_to(&decrypted, engine_endpoint).await {
+                        if tokio::time::Instant::now() < startup_deadline
+                            && udp_port_not_ready(&error)
+                        {
+                            continue;
+                        }
+                        return Some(format!(
+                            "local relay UDP bridge could not deliver a packet to the native engine: {error}"
+                        ));
+                    }
+                }
+                Ok(Message::Ping(payload)) => {
+                    // The bounded control queue must not stall incoming input.
+                    if control_tx.try_send(Message::Pong(payload)).is_err() {
+                        return Some("relay heartbeat response is congested".into());
+                    }
+                }
+                Ok(Message::Text(message)) if message.as_str().contains("relay.peerOffline") => {
+                    return Some("relay peer went offline; retry the accepted session".into());
+                }
+                Ok(Message::Close(_)) => break,
+                Err(error) => return Some(format!("relay connection failed: {error}")),
+                _ => {}
+            }
+        }
+        Some("relay connection closed; retry the accepted session".into())
+    };
+    tokio::select! {
+        _ = &mut stop => None,
+        result = sending => result,
+        result = receiving => result,
     }
 }
 
@@ -605,6 +634,63 @@ fn relay_aad(header: &[u8; RELAY_HEADER_BYTES], session_id: [u8; 16]) -> [u8; 60
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use tokio_tungstenite::connect_async;
+
+    #[tokio::test]
+    async fn congested_video_upload_does_not_block_incoming_input_or_stop() {
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+        // A full duplex transport whose outgoing video cannot fit until the
+        // peer reads it. The peer deliberately stops reading that direction.
+        let (local, mut remote) = tokio::io::duplex(1_024);
+        let websocket = WebSocketStream::from_raw_socket(local, Role::Client, None).await;
+        let session = uuid::Uuid::new_v4();
+        let left = uuid::Uuid::new_v4();
+        let right = uuid::Uuid::new_v4();
+        let credential = "relay-congestion-test-credential";
+        let cipher = RelayCipher::new(session, left, right, credential).unwrap();
+        let mut peer_cipher = RelayCipher::new(session, right, left, credential).unwrap();
+        let proxy = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let engine = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let bridge = tokio::spawn(run_bridge(
+            proxy,
+            engine.local_addr().unwrap(),
+            websocket,
+            cipher,
+            stop_rx,
+        ));
+        engine.send_to(&[42; 8_192], proxy_address).await.unwrap();
+        // Seeing the first binary-frame byte proves the video write has begun.
+        tokio::time::timeout(Duration::from_secs(1), remote.read_u8())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut peer = WebSocketStream::from_raw_socket(remote, Role::Server, None).await;
+        let input = peer_cipher.encrypt(b"mouse-button-release").unwrap();
+        peer.send(Message::Binary(input.into())).await.unwrap();
+        let mut buffer = [0; 64];
+        let (length, _) =
+            tokio::time::timeout(Duration::from_millis(500), engine.recv_from(&mut buffer))
+                .await
+                .expect("incoming input must not wait for the blocked video upload")
+                .unwrap();
+        assert_eq!(&buffer[..length], b"mouse-button-release");
+        stop_tx.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(500), bridge)
+                .await
+                .unwrap()
+                .unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn relay_endpoint_uses_wss_and_bounded_identity_parameters() {

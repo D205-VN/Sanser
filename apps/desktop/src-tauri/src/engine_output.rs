@@ -17,9 +17,18 @@ pub(crate) struct EngineOutput {
 }
 
 impl EngineOutput {
+    #[cfg(test)]
     pub(crate) fn start(
         reader: impl Read + Send + 'static,
         log: Option<File>,
+    ) -> std::io::Result<Self> {
+        Self::start_recording(reader, log, None)
+    }
+
+    pub(crate) fn start_recording(
+        reader: impl Read + Send + 'static,
+        log: Option<File>,
+        metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
     ) -> std::io::Result<Self> {
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_BYTES)));
         let worker_tail = Arc::clone(&tail);
@@ -27,7 +36,7 @@ impl EngineOutput {
         thread::Builder::new()
             .name("sanser-engine-output".into())
             .spawn(move || {
-                drain(reader, log, &worker_tail);
+                drain(reader, log, &worker_tail, metrics.as_ref());
                 let _ = complete.send(());
             })?;
         Ok(Self { tail, completed })
@@ -52,9 +61,16 @@ impl EngineOutput {
     }
 }
 
-fn drain(mut reader: impl Read, mut log: Option<File>, tail: &Mutex<VecDeque<u8>>) {
+fn drain(
+    mut reader: impl Read,
+    mut log: Option<File>,
+    tail: &Mutex<VecDeque<u8>>,
+    metrics: Option<&mpsc::SyncSender<crate::connection_report::Sample>>,
+) {
     let mut buffer = [0_u8; 4096];
     let mut written = 0;
+    let mut line = Vec::with_capacity(4096);
+    let mut oversized = false;
     loop {
         let length = match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -66,6 +82,24 @@ fn drain(mut reader: impl Read, mut log: Option<File>, tail: &Mutex<VecDeque<u8>
             let excess = (tail.len() + length).saturating_sub(TAIL_BYTES);
             tail.drain(..excess);
             tail.extend(&buffer[..length]);
+        }
+        if let Some(metrics) = &metrics {
+            for byte in &buffer[..length] {
+                if *byte == b'\n' {
+                    if !oversized
+                        && let Some(sample) = crate::connection_report::parse_sample(&line)
+                    {
+                        // Disk writing occurs in another worker; never block the native engine.
+                        let _ = metrics.try_send(sample);
+                    }
+                    line.clear();
+                    oversized = false;
+                } else if line.len() < 4096 {
+                    line.push(*byte);
+                } else {
+                    oversized = true;
+                }
+            }
         }
         if let Some(file) = log.as_mut() {
             let count = length.min(DEBUG_FILE_BYTES.saturating_sub(written));
@@ -83,6 +117,20 @@ fn drain(mut reader: impl Read, mut log: Option<File>, tail: &Mutex<VecDeque<u8>
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn a_full_report_queue_does_not_block_output_draining() -> std::io::Result<()> {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let bytes = b"SNINPUT_RTT rttMs=150\n".repeat(200_000);
+        let output = EngineOutput::start_recording(Cursor::new(bytes), None, Some(sender))?;
+        assert!(
+            output
+                .completed
+                .recv_timeout(Duration::from_secs(5))
+                .is_ok()
+        );
+        Ok(())
+    }
 
     #[test]
     fn noisy_output_retains_only_bounded_tail_and_final_error() -> std::io::Result<()> {

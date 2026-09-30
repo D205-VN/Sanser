@@ -7844,6 +7844,7 @@ std::uint16_t defaultAudioPort(std::uint16_t videoPort) {
 } // namespace
 
 int main(int argc, char** argv) {
+  if (std::getenv("SANSER_TELEMETRY")) std::cout.setf(std::ios::unitbuf);
   try {
     for (int i = 1; i < argc; ++i) {
       if (std::string_view(argv[i]) == "--snv2") return sanser::desktop::runMac(false, argc, argv);

@@ -60,6 +60,8 @@ pub struct LaunchEngineRequest {
     pub relay: bool,
     #[serde(default)]
     pub wire_protocol: Option<String>,
+    #[serde(default)]
+    pub direct_check: Option<String>,
 }
 
 impl Drop for LaunchEngineRequest {

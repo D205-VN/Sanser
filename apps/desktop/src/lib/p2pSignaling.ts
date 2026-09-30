@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ApiClient } from './api';
+import type { LaunchEngineRequest } from './types';
 import { diagnostics, networkDiagnostics } from '../stores/diagnostics';
 
 export interface P2pPunchResult {
@@ -39,6 +40,17 @@ const TRANSIENT_SIGNAL_ERRORS = new Set([
   'target_offline',
   'target_backpressure'
 ]);
+
+/** Persist a fixed failure category, never a raw error carrying credentials or addresses. */
+export function directCheckFailure(error: unknown, relaySelected = false): LaunchEngineRequest['directCheck'] {
+  if (relaySelected) return 'relay-selected';
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (/timed out|timeout/.test(message)) return 'timeout';
+  if (/no direct route|connectivity check failed|hole punch failed/.test(message)) return 'no-direct-route';
+  if (/gather|reserve|bind|local network interface/.test(message)) return 'gather-failed';
+  if (/signaling|websocket|candidate exchange|target_offline/.test(message)) return 'signaling-failed';
+  return 'failed';
+}
 
 function websocketUrl(serverUrl: string, deviceId: string): string {
   const url = new URL(serverUrl);

@@ -74,7 +74,7 @@ fn load_or_create(
     result
 }
 
-fn computer_name() -> String {
+pub(crate) fn computer_name() -> String {
     #[cfg(target_os = "macos")]
     if let Ok(output) = std::process::Command::new("/usr/sbin/scutil")
         .args(["--get", "ComputerName"])

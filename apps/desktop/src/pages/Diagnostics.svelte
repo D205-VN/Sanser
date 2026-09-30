@@ -36,6 +36,7 @@
     <button class="button" disabled={runtimeBusy} onclick={refreshRuntime}>{runtimeBusy ? 'Refreshing…' : 'Refresh status'}</button>
   </header>
   {#if message}<div class="notice">{message}</div>{/if}
+  <p class="muted">Connection checks run automatically. The latest 20 native connection reports are saved on this computer and included in Export diagnostics. Reports contain measured performance and the Direct/Relay route, without screen content or credentials. Missing measurements are not treated as a healthy connection.</p>
 
   <div class="diagnostic-summary grid three">
     <article class="card metric-card"><span>Connection</span><strong>{$connection.engineRunning ? 'Window open' : $connection.session?.status ?? 'Idle'}</strong><small>{$connection.session?.transport?.toUpperCase() ?? 'No transport'}</small></article>

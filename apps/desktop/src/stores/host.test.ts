@@ -26,7 +26,7 @@ vi.mock('../lib/platform', () => ({
   launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay,
   stopRelay: mocks.stopRelay, engineStatus: mocks.status, saveNativePreferences: mocks.savePreferences
 }));
-vi.mock('../lib/p2pSignaling', () => ({ coordinateP2pConnection: mocks.punch }));
+vi.mock('../lib/p2pSignaling', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/p2pSignaling')>(), coordinateP2pConnection: mocks.punch }));
 import { createHostStore, type HostStore } from './host';
 import { DEFAULT_PREFERENCES, preferences } from './preferences';
 

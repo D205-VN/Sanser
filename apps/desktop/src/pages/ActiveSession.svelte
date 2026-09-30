@@ -4,7 +4,7 @@
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
-  import { coordinateP2pConnection } from '../lib/p2pSignaling';
+  import { coordinateP2pConnection, directCheckFailure } from '../lib/p2pSignaling';
   import type { ConnectionSession, Page, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
   import { diagnostics } from '../stores/diagnostics';
@@ -71,6 +71,7 @@
       const client = session.client();
       if (!client) throw new Error('Api client is unavailable');
       let p2pResult: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
+      let directCheck: import('../lib/types').LaunchEngineRequest['directCheck'] = 'passed';
       let relayResult: Awaited<ReturnType<typeof startRelay>> | null = null;
       try {
         phase = 'direct';
@@ -87,6 +88,7 @@
         );
         diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
       } catch (directError) {
+        directCheck = directCheckFailure(directError, target.networkMode === 'relay');
         if (signal.aborted || target.networkMode === 'direct') throw directError;
         phase = 'relay';
         const accessToken = await client.getAccessToken();
@@ -115,6 +117,7 @@
       }
       phase = 'launching';
       await launchEngine({
+        directCheck,
         kind: 'client',
         wireProtocol: target.wireProtocol,
         sessionId: target.id,

@@ -17,7 +17,7 @@ vi.mock('../stores/presence', async () => {
   return { presence: writable({ deviceId: 'local-client', online: true }) };
 });
 vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, engineStatus: vi.fn() }));
-vi.mock('../lib/p2pSignaling', () => ({ coordinateP2pConnection: mocks.punch }));
+vi.mock('../lib/p2pSignaling', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/p2pSignaling')>(), coordinateP2pConnection: mocks.punch }));
 import ActiveSession from './ActiveSession.svelte';
 const runtime = { platform: 'macOS', capabilities: { clientEngine: { state: 'available' }, nativeDirect: { state: 'available' }, desktopShell: { state: 'available' } } } as RuntimeStatus;
 const target = { id: 'test-session', hostDeviceId: 'remote-host', requesterDeviceId: 'local-client', status: 'accepted', transport: 'native', networkMode: 'auto', qualityProfile: 'balanced', requestedCodec: 'auto' } as ConnectionSession;
