@@ -797,6 +797,7 @@ struct MfVideoPacketEncoder::Impl {
   BgraScalePlan scalePlan;
   MfEncoderEvents events;
   std::unique_ptr<GpuVideoProcessor> gpu;
+  std::uint64_t skippedCaptures = 0;
   std::chrono::steady_clock::time_point lastProgress = std::chrono::steady_clock::now();
 
   ~Impl() {
@@ -939,6 +940,7 @@ bool MfVideoPacketEncoder::usingHardware() const {
 }
 
 bool MfVideoPacketEncoder::usingGpuInput() const { return impl_->gpu != nullptr; }
+std::uint64_t MfVideoPacketEncoder::skippedCaptures() const { return impl_->skippedCaptures; }
 
 VideoCodec MfVideoPacketEncoder::codec() const {
   return impl_->options.codec;
@@ -1024,6 +1026,7 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(
           throw std::runtime_error("Hardware encoder stopped making progress");
         // Drop only this unencoded capture. Never wait seconds or discard
         // encoded reference frames; send already available output immediately.
+        ++impl_->skippedCaptures;
         return packets;
       }
       if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Timed out waiting for encoder METransformNeedInput");
@@ -1038,6 +1041,7 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(
     if (!sample) {
       if (std::chrono::steady_clock::now() - impl_->lastProgress > std::chrono::seconds(3))
         throw std::runtime_error("Hardware encoder stopped releasing GPU surfaces");
+      ++impl_->skippedCaptures;
       return packets;
     }
   } else {
@@ -1073,7 +1077,10 @@ std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(
     auto ready = drain();
     packets.insert(packets.end(), std::make_move_iterator(ready.begin()), std::make_move_iterator(ready.end()));
     inputHr = impl_->transform->ProcessInput(0, sample.Get(), 0);
-    if (inputHr == MF_E_NOTACCEPTING && impl_->options.live) return packets;
+    if (inputHr == MF_E_NOTACCEPTING && impl_->options.live) {
+      ++impl_->skippedCaptures;
+      return packets;
+    }
   }
   checkHr(inputHr, "ProcessInput");
   impl_->lastProgress = std::chrono::steady_clock::now();

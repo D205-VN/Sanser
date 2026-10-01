@@ -5579,7 +5579,6 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
   std::uint64_t capturedFrames = 0;
   const auto mediaClockStart = std::chrono::steady_clock::now();
-  auto lastFrameSubmittedAt = mediaClockStart;
 	  std::uint64_t sequence = 0;
 	  std::uint64_t lastStreamTimestampMicros = 0;
   std::uint64_t pendingTimelineSkipMicros = 0;
@@ -5939,6 +5938,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     }
 		    FrameBgra frame;
 	    bool cursorOnlyFrame = false;
+    bool drainOnly = false;
 	    const auto captureStartedAt = std::chrono::steady_clock::now();
 	    const bool capturedFreshFrame = duplicator.captureFrame(frame, adaptiveCaptureTimeoutMs);
 	    const auto captureFinishedAt = std::chrono::steady_clock::now();
@@ -5954,12 +5954,11 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       } else if (hasLastCleanFrame && cursorChanged) {
         frame = lastCleanFrame;
         cursorOnlyFrame = true;
-      } else if (hasLastCleanFrame && hasNetworkVideo &&
-                 captureFinishedAt - lastFrameSubmittedAt >= std::chrono::milliseconds(50)) {
-        // Pump asynchronous encoder output even after the desktop stops
-        // changing, so the final captured image cannot sit waiting indefinitely.
+      } else if (hasLastCleanFrame && hasNetworkVideo) {
+        // Drain on every idle iteration without submitting duplicate captures.
+        // The final asynchronous output must not wait for a screen change.
         frame = lastCleanFrame;
-        ++statsRefreshFrames;
+        drainOnly = true;
       } else
 #endif
       {
@@ -6031,7 +6030,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    if (cursorOnlyFrame) {
 	      ++statsCursorFrames;
 	    }
-	    drawSoftwareCursor(frame, duplicator);
+    if (!drainOnly) drawSoftwareCursor(frame, duplicator);
 	    POINT currentCursor{};
 	    if (GetCursorPos(&currentCursor)) {
 	      lastCursor = currentCursor;
@@ -6120,7 +6119,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       : std::nullopt;
     for (;;) {
       try {
-        packets = encoder->encodeFrame(frame, captureTimestamp);
+        packets = drainOnly ? encoder->drain() : encoder->encodeFrame(frame, captureTimestamp);
         break;
       } catch (const std::exception& error) {
         if (!encoder->usingHardware()) throw;
@@ -6137,11 +6136,15 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
         encoder.reset();
         encoder = makePacketEncoder(encodeOptions, "runtime-failure");
         duplicator.setGpuCapture(false);
+        drainOnly = false;
         lastEncoderRestartAt = std::chrono::steady_clock::now();
         encoder->requestKeyframe();
       }
     }
-    lastFrameSubmittedAt = std::chrono::steady_clock::now();
+    if (drainOnly && packets.empty()) {
+      std::this_thread::sleep_until(frameStartedAt + adaptiveFrameDelay);
+      continue;
+    }
 	    const auto encodeFinishedAt = std::chrono::steady_clock::now();
 	    std::uint64_t framePacketizeMicros = 0;
 	    std::uint64_t frameSendMicros = 0;
@@ -6482,6 +6485,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	#endif
 	                << "\n";
 	      std::cerr << "SNV1_STAGE_PROFILE bottleneck=" << hostBottleneck
+                    << " gpuInput=" << (encoder->usingGpuInput() ? 1 : 0)
+                    << " encoderSkipped=" << encoder->skippedCaptures()
 	                << " bottleneckMs=" << hostBottleneckMs
 	                << " budgetMs=" << hostBudgetMs
 	                << " controlAvgMs=" << controlAvgMs

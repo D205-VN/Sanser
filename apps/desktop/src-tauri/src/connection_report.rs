@@ -25,6 +25,8 @@ const SOURCES: &[&str] = &[
     "SNU1_STATS",
 ];
 const FIELDS: &[&str] = &[
+    "gpuInput",
+    "encoderSkipped",
     "fps",
     "targetFps",
     "mbps",

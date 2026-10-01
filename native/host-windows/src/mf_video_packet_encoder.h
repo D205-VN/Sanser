@@ -49,6 +49,7 @@ public:
   VideoCodec codec() const;
   bool usingHardware() const;
   bool usingGpuInput() const;
+  std::uint64_t skippedCaptures() const;
   std::string encoderName() const;
   std::string encoderBackend() const;
 
