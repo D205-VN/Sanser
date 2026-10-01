@@ -13,6 +13,7 @@ const label = 'com.sanser.self-host';
 const domain = `gui/${process.getuid?.()}`;
 const plist = join(homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
 const binary = join(directory, 'sanser-server');
+const installationFile = join(directory, 'installation.json');
 const port = 5174;
 const origin = `http://127.0.0.1:${port}`;
 const action = process.argv[2] ?? 'status';
@@ -46,6 +47,8 @@ function rotateLog(name) {
 async function run() {
   if (await healthy(origin)) throw new Error(`A server is already using ${origin}; leave it running and stop this duplicate.`);
   if (!existsSync(binary)) throw new Error('Run npm run server:selfhost -- install first.');
+  const installedVersion = JSON.parse(readFileSync(installationFile, 'utf8')).version;
+  if (!/^\d+\.\d+\.\d+$/.test(installedVersion)) throw new Error('Invalid installed server version; reinstall the service.');
   const children = [];
   let stopped = false;
   let publicUrl = null;
@@ -71,13 +74,14 @@ async function run() {
     }
     children.push(child);
     child.on('error', () => { console.error(`${name} could not start; check its installation.`); stop(1); });
-    child.on('exit', () => { closeSync(fd); if (!stopped) { console.error(`${name} stopped; see data/self-host/${name}.log`); stop(1); } });
+    child.once('close', () => closeSync(fd));
+    child.on('exit', () => { if (!stopped) { console.error(`${name} stopped; see data/self-host/${name}.log`); stop(1); } });
     return child;
   }
   rmSync(statusFile, { force: true });
   launch('server', binary, [], {
     ...process.env, SERVER_HOST: '127.0.0.1', SERVER_PORT: String(port),
-    SANSER_VERSION: version, SANSER_PROTOCOL_VERSION: '2', NETWORK_MODE: 'auto',
+    SANSER_VERSION: installedVersion, SANSER_PROTOCOL_VERSION: '2', NETWORK_MODE: 'auto',
     RUST_LOG: 'sanser_server=info,tower_http=warn',
   });
   let ready = false;
@@ -86,18 +90,19 @@ async function run() {
     await delay(1000);
   }
   if (!ready || stopped) { stop(1); return; }
-  writeStatus({ localUrl: origin, publicUrl, startedAt: new Date().toISOString(), version });
+  writeStatus({ localUrl: origin, publicUrl, startedAt: new Date().toISOString(), version: installedVersion });
   console.log(`Sanser server ready at ${origin}`);
   // Quick Tunnel is temporary. A named tunnel can later point at the same origin.
   const tunnel = launch('tunnel', 'cloudflared', ['tunnel', '--no-autoupdate', '--url', origin], process.env, true);
   let tail = '';
   tunnel.stderr.on('data', (chunk) => {
+    if (stopped) return;
     // Keep only a small rolling buffer; cloudflared stderr can grow indefinitely.
     tail = (tail + chunk.toString()).slice(-8192);
     const found = tail.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com\b/);
-    if (found && found[0] !== publicUrl) {
+    if (found && found[0] !== 'https://api.trycloudflare.com' && found[0] !== publicUrl) {
       publicUrl = found[0];
-      writeStatus({ localUrl: origin, publicUrl, startedAt: new Date().toISOString(), version });
+      writeStatus({ localUrl: origin, publicUrl, startedAt: new Date().toISOString(), version: installedVersion });
       console.log(`Temporary public server: ${publicUrl}`);
       console.log('Use this same HTTPS URL on both computers. It changes when the tunnel restarts.');
     }
@@ -115,8 +120,10 @@ try {
     execute('cargo', ['build', '-p', 'sanser-server', '--release'], { cwd: workspaceRoot, env });
     // Stop only our own service, never an unrelated server or tunnel.
     spawnSync('launchctl', ['bootout', `${domain}/${label}`], { stdio: 'ignore' });
-    copyFileSync(join(env.CARGO_TARGET_DIR, 'release', 'sanser-server'), binary);
-    chmodSync(binary, 0o700);
+    copyFileSync(join(env.CARGO_TARGET_DIR, 'release', 'sanser-server'), `${binary}.next`);
+    chmodSync(`${binary}.next`, 0o700);
+    renameSync(`${binary}.next`, binary);
+    writeFileSync(installationFile, JSON.stringify({ version }) + '\n', { mode: 0o600 });
     const args = [process.execPath, join(workspaceRoot, 'scripts', 'self-host.mjs'), 'run'];
     const path = `${join(process.execPath, '..')}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
     mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
