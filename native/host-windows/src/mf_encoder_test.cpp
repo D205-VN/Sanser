@@ -1,5 +1,8 @@
 #include "mf_video_packet_encoder.h"
 #include "mf_encoder_events.h"
+#include "gpu_video_processor.h"
+#include <d3d11.h>
+#include <algorithm>
 #include <wrl.h>
 #include <iostream>
 #include <stdexcept>
@@ -67,9 +70,14 @@ int main() {
       require(!encoder.usingHardware(), "software fallback must select software");
       FrameBgra frame{320, 240, 320 * 4, std::vector<std::uint8_t>(320 * 240 * 4, 128)};
       std::vector<EncodedVideoPacket> packets;
+      std::vector<std::uint64_t> captureTimes;
       for (unsigned i = 0; i < 10; ++i) {
         frame.pixels[0] = static_cast<std::uint8_t>(i);
-        auto encoded = encoder.encodeFrame(frame);
+        // An idle desktop and an encoder running slower than requested FPS
+        // must retain wall-clock capture spacing, not i * nominal duration.
+        const std::uint64_t capturedAt = 1000 + i * 50000 + (i >= 5 ? 1000000 : 0);
+        captureTimes.push_back(capturedAt);
+        auto encoded = encoder.encodeFrame(frame, capturedAt);
         packets.insert(packets.end(), std::make_move_iterator(encoded.begin()), std::make_move_iterator(encoded.end()));
       }
       require(!packets.empty(), "live H264 output must be available before end-of-stream drain");
@@ -82,6 +90,36 @@ int main() {
       for (const auto& packet : packets) {
         require(!packet.payload.empty(), "software encoder payload must not be empty");
       }
+      require(std::any_of(packets.begin(), packets.end(), [](const auto& packet) {
+        return packet.timestampMicros >= 1251000;
+      }), "capture idle gap must survive hardware API output timestamps");
+      for (const auto& packet : packets) {
+        if (packet.timestampMicros == 0) continue; // codec configuration sample
+        require(std::find(captureTimes.begin(), captureTimes.end(), packet.timestampMicros) != captureTimes.end(),
+          "encoded frame must keep its submitted capture timestamp");
+      }
+    }
+    {
+      // WARP exercises GPU ownership/readback on CI without requiring a GPU.
+      ComPtr<ID3D11Device> device;
+      require(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+        nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)), "create test D3D11 device");
+      std::vector<std::uint8_t> pixels(32 * 32 * 4, 128);
+      D3D11_TEXTURE2D_DESC desc{};
+      desc.Width = 32; desc.Height = 32; desc.MipLevels = 1; desc.ArraySize = 1;
+      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+      D3D11_SUBRESOURCE_DATA initial{pixels.data(), 32 * 4, 0};
+      ComPtr<ID3D11Texture2D> texture;
+      require(SUCCEEDED(device->CreateTexture2D(&desc, &initial, &texture)), "create owned capture texture");
+      FrameBgra gpu;
+      gpu.width = 32; gpu.height = 32; gpu.stride = 128;
+      gpu.texture = std::shared_ptr<ID3D11Texture2D>(texture.Detach(), [](auto* value) { value->Release(); });
+      auto restored = readbackGpuFrame(gpu);
+      require(restored.pixels == pixels && !restored.texture, "GPU fallback must preserve capture pixels");
+      gpu.cursorVisible = true; gpu.cursorX = 4; gpu.cursorY = 4;
+      auto cursor = readbackGpuFrame(gpu);
+      require(cursor.pixels[(4 * 32 + 4) * 4] == 255, "GPU fallback must preserve visible cursor");
+      require(readbackGpuFrame(FrameBgra{32, 32, 128, pixels}).pixels == pixels, "CPU fallback remains compatible");
     }
     MFShutdown();
     CoUninitialize();

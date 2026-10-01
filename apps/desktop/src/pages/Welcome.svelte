@@ -1,7 +1,7 @@
 <script lang="ts">
   import BrandMark from '../components/BrandMark.svelte';
   import { normalizeServerUrl } from '../lib/api';
-  import { CONFIGURED_SERVER_URL, SERVER_ENDPOINT_LOCKED, preferences } from '../stores/preferences';
+  import { CONFIGURED_SERVER_URL, preferences } from '../stores/preferences';
   import { session } from '../stores/session';
 
   let mode = $state<'login' | 'register'>('login');
@@ -34,10 +34,10 @@
   }
 
   async function persistServerUrl(): Promise<string> {
-    const normalized = normalizeServerUrl(SERVER_ENDPOINT_LOCKED ? CONFIGURED_SERVER_URL : serverUrl);
+    const normalized = normalizeServerUrl(serverUrl);
     serverUrl = normalized;
     if (normalized !== $preferences.serverUrl) await session.logout();
-    await preferences.save({ ...$preferences, serverUrl: normalized });
+    await preferences.save({ ...$preferences, serverUrl: normalized, customServer: normalized !== CONFIGURED_SERVER_URL });
     return normalized;
   }
 
@@ -95,16 +95,15 @@
       {#if mode === 'register'}
         <div class="field"><label for="confirm-signup-password">Confirm password</label><input id="confirm-signup-password" class="input" type={showPassword ? 'text' : 'password'} bind:value={confirmPassword} required minlength="12" maxlength="256" autocomplete="new-password" placeholder="Enter your password again" /></div>
       {/if}
-      {#if !SERVER_ENDPOINT_LOCKED}
         <details class="advanced-auth" open={!serverUrl.trim()}>
           <summary><span>Server settings</span><small>{serverUrl.trim() ? 'Configured' : 'Required'}</small></summary>
           <div class="field">
             <label for="server-url">Sanser server URL</label>
             <input id="server-url" class="input" type="url" bind:value={serverUrl} required spellcheck="false" autocomplete="url" placeholder="https://api.example.com" />
-            <small>Enter the address provided by your administrator.</small>
+            <small>Use the same server on both computers. Only sign in to a server you trust.</small>
+            {#if CONFIGURED_SERVER_URL}<button type="button" class="text-button" onclick={() => { serverUrl = CONFIGURED_SERVER_URL; }}>Use default server</button>{/if}
           </div>
         </details>
-      {/if}
 
       {#if formError ?? $session.error}<div class="notice error" role="alert">{formError ?? $session.error}</div>{/if}
 

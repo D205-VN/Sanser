@@ -2,6 +2,7 @@ add_library(sanser-native-windows STATIC
   backend.cpp
   ../../host-windows/src/desktop_duplication.cpp
   ../../host-windows/src/mf_video_packet_encoder.cpp
+  ../../host-windows/src/gpu_video_processor.cpp
   ../../host-windows/src/mf_video_encoder.cpp
 )
 add_library(sanser-desktop-native ALIAS sanser-native-windows)
@@ -11,4 +12,4 @@ target_compile_definitions(sanser-native-windows PRIVATE NOMINMAX WIN32_LEAN_AND
 if(MSVC)
   target_compile_options(sanser-native-windows PRIVATE /utf-8 /W4)
 endif()
-target_link_libraries(sanser-native-windows PUBLIC d3d11 dxgi mfplat mfreadwrite mfuuid ole32 wmcodecdspuuid user32 gdi32 strmiids)
+target_link_libraries(sanser-native-windows PUBLIC d3d11 d3dcompiler dxgi mfplat mfreadwrite mfuuid ole32 wmcodecdspuuid user32 gdi32 strmiids)

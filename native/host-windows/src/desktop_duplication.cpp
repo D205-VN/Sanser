@@ -1,6 +1,7 @@
 #include "desktop_duplication.h"
 
 #include <d3d11.h>
+#include <d3d10.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 
@@ -35,6 +36,7 @@ struct DesktopDuplicator::Impl {
   ComPtr<ID3D11DeviceContext> context;
   ComPtr<IDXGIOutputDuplication> duplication;
   ComPtr<ID3D11Texture2D> staging;
+  std::vector<std::shared_ptr<ID3D11Texture2D>> gpuFrames;
   bool recoveryPending = false;
   std::chrono::steady_clock::time_point nextRecoveryAttempt{};
   std::uint32_t recoveryFailures = 0;
@@ -43,6 +45,8 @@ struct DesktopDuplicator::Impl {
 DesktopDuplicator::DesktopDuplicator() : impl_(std::make_unique<Impl>()) {}
 
 DesktopDuplicator::~DesktopDuplicator() = default;
+
+ID3D11Device* DesktopDuplicator::gpuDevice() const { return impl_->device.Get(); }
 
 void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t outputIndex) {
   auto next = std::make_unique<Impl>();
@@ -65,7 +69,7 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
             adapter.Get(),
             D3D_DRIVER_TYPE_UNKNOWN,
             nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
             featureLevels,
             static_cast<UINT>(std::size(featureLevels)),
             D3D11_SDK_VERSION,
@@ -73,6 +77,8 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
             &chosenLevel,
             next->context.GetAddressOf()),
           "D3D11CreateDevice");
+  ComPtr<ID3D10Multithread> multithread;
+  if (SUCCEEDED(next->context.As(&multithread))) multithread->SetMultithreadProtected(TRUE);
 
   ComPtr<IDXGIOutput> output;
   checkHr(adapter->EnumOutputs(outputIndex, output.GetAddressOf()), "EnumOutputs");
@@ -191,6 +197,31 @@ bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) 
       impl_->nextRecoveryAttempt = std::chrono::steady_clock::now();
       return false;
     }
+    if (gpuCapture_ && !swapsAxes && rotation != DXGI_MODE_ROTATION_ROTATE180) {
+      std::shared_ptr<ID3D11Texture2D> owned;
+      for (const auto& candidate : impl_->gpuFrames) {
+        if (candidate.use_count() == 1) { owned = candidate; break; }
+      }
+      if (!owned && impl_->gpuFrames.size() < 3) {
+        auto description = textureDesc;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.CPUAccessFlags = 0;
+        description.MiscFlags = 0;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> next;
+        checkHr(impl_->device->CreateTexture2D(&description, nullptr, &next), "Create GPU capture texture");
+        owned = std::shared_ptr<ID3D11Texture2D>(next.Detach(), [](ID3D11Texture2D* value) { value->Release(); });
+        impl_->gpuFrames.push_back(owned);
+      }
+      if (owned) {
+        impl_->context->CopyResource(owned.get(), desktopTexture.Get());
+        frame = FrameBgra{};
+        frame.width = width_; frame.height = height_; frame.stride = width_ * 4;
+        frame.texture = std::move(owned);
+        return SUCCEEDED(releaseFrame());
+      }
+    }
+    frame.texture.reset();
     impl_->context->CopyResource(impl_->staging.Get(), desktopTexture.Get());
 
     D3D11_MAPPED_SUBRESOURCE mapped{};

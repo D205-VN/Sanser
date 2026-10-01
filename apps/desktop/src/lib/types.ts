@@ -90,6 +90,7 @@ export interface InputPreferences {
 export interface Preferences {
   schemaVersion: 2;
   serverUrl: string;
+  customServer?: boolean;
   networkMode: NetworkMode;
   stream: StreamPreferences;
   host: HostPreferences;

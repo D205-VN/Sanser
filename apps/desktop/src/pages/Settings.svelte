@@ -6,7 +6,7 @@
   import type { LoginSession, NetworkMode, Preferences, QualityProfile, RuntimeStatus, SettingsSection, VideoCodec } from '../lib/types';
   import { exportDiagnostics } from '../lib/platform';
   import { diagnostics } from '../stores/diagnostics';
-  import { SERVER_ENDPOINT_LOCKED, preferences } from '../stores/preferences';
+  import { CONFIGURED_SERVER_URL, preferences } from '../stores/preferences';
   import { session } from '../stores/session';
   import Diagnostics from './Diagnostics.svelte';
 
@@ -56,11 +56,10 @@
   }
 
   async function saveServer(): Promise<void> {
-    if (SERVER_ENDPOINT_LOCKED) return;
     try {
       const normalized = normalizeServerUrl(serverUrl);
       serverUrl = normalized;
-      await saveRoot({ serverUrl: normalized });
+      await saveRoot({ serverUrl: normalized, customServer: normalized !== CONFIGURED_SERVER_URL });
       if (!saveError) {
         await onSignOut();
         await session.initialize(normalized);
@@ -219,9 +218,7 @@
               <button class="network-option" class:active={$preferences.networkMode === mode[0]} onclick={() => saveRoot({ networkMode: mode[0] as NetworkMode })}><strong>{mode[1]}</strong><span>{mode[2]}</span></button>
             {/each}
           </div>
-          {#if !SERVER_ENDPOINT_LOCKED}
-            <details class="sharing-help"><summary>Server settings</summary><div class="field"><label for="general-server">Server URL</label><div class="inline-field"><input id="general-server" class="input" type="url" bind:value={serverUrl} spellcheck="false" /><button class="button" onclick={saveServer}>Save</button></div><small>Changing the server signs you out.</small></div></details>
-          {/if}
+          <details class="sharing-help"><summary>Server settings</summary><div class="field"><label for="general-server">Server URL</label><div class="inline-field"><input id="general-server" class="input" type="url" bind:value={serverUrl} spellcheck="false" /><button class="button" disabled={saving} onclick={saveServer}>Save</button></div><small>Use the same server on both computers. Changing the server signs you out.</small>{#if CONFIGURED_SERVER_URL}<button class="text-button" disabled={saving} onclick={() => { serverUrl = CONFIGURED_SERVER_URL; void saveServer(); }}>Use default server</button>{/if}</div></details>
         </article>
       {:else if active === 'host'}
         <article class="card card-body settings-card stack">

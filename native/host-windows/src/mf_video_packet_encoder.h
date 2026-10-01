@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,8 @@ struct VideoPacketEncodeOptions {
   std::uint32_t keyframeIntervalSeconds = 1;
   bool hardware = true;
   bool lowLatency = true;
+  bool live = false;
+  ID3D11Device* gpuDevice = nullptr;
 };
 
 struct EncodedVideoPacket {
@@ -35,7 +38,8 @@ public:
   MfVideoPacketEncoder(const MfVideoPacketEncoder&) = delete;
   MfVideoPacketEncoder& operator=(const MfVideoPacketEncoder&) = delete;
 
-  std::vector<EncodedVideoPacket> encodeFrame(const FrameBgra& frame);
+  std::vector<EncodedVideoPacket> encodeFrame(const FrameBgra& frame,
+      std::optional<std::uint64_t> timestampMicros = std::nullopt);
   std::vector<EncodedVideoPacket> drain();
   std::vector<EncodedVideoPacket> finish();
 
@@ -44,6 +48,7 @@ public:
   std::uint32_t bitrate() const;
   VideoCodec codec() const;
   bool usingHardware() const;
+  bool usingGpuInput() const;
   std::string encoderName() const;
   std::string encoderBackend() const;
 

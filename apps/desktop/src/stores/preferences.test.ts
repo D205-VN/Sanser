@@ -38,4 +38,17 @@ describe('migratePreferences', () => {
     });
     expect(migrated.trustedDeviceIds).toEqual([trusted]);
   });
+
+  it('preserves an explicit self-hosted endpoint across saves and upgrades', () => {
+    const value = { serverUrl: 'https://my-mac.example/', customServer: true };
+    const migrated = migratePreferences(value, 'https://default.example');
+    expect(migrated.serverUrl).toBe('https://my-mac.example');
+    expect(migratePreferences(migrated, 'https://new-default.example').serverUrl).toBe('https://my-mac.example');
+  });
+
+  it.each(['http://192.168.1.2', 'https://user:password@example.test', 'invalid'])('rejects unsafe custom server %s', (serverUrl) => {
+    const migrated = migratePreferences({ serverUrl, customServer: true }, 'https://default.example');
+    expect(migrated.serverUrl).toBe('https://default.example');
+    expect(migrated.customServer).toBe(false);
+  });
 });

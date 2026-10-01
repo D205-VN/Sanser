@@ -22,6 +22,7 @@
     "desktop:lint": "npm --workspace @sanser/desktop run lint",
     "desktop:test": "npm --workspace @sanser/desktop run test",
     "server:dev": "node scripts/run-cargo.mjs run -p sanser-server",
+    "server:selfhost": "node scripts/self-host.mjs",
     "server:test": "node scripts/run-cargo.mjs test -p sanser-server",
     "secrets:init": "node scripts/ensure-local-secrets.mjs",
     "clean:duplicates": "node scripts/remove-conflict-copies.mjs",

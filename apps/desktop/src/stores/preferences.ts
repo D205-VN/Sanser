@@ -1,15 +1,16 @@
 import { get, writable } from 'svelte/store';
 import { loadNativePreferences, saveNativePreferences } from '../lib/platform';
+import { normalizeServerUrl } from '../lib/api';
 import type { NetworkMode, Preferences, QualityProfile, VideoCodec } from '../lib/types';
 
 const STORAGE_KEY = 'sanser.preferences.v2';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export const CONFIGURED_SERVER_URL = (import.meta.env.VITE_SANSER_SERVER_URL as string | undefined)?.trim() ?? '';
-export const SERVER_ENDPOINT_LOCKED = CONFIGURED_SERVER_URL.length > 0;
 
 export const DEFAULT_PREFERENCES: Preferences = {
   schemaVersion: 2,
   serverUrl: CONFIGURED_SERVER_URL,
+  customServer: false,
   networkMode: 'auto',
   stream: {
     profile: 'auto',
@@ -84,10 +85,15 @@ export function migratePreferences(
   value: unknown,
   configuredServerUrl = CONFIGURED_SERVER_URL
 ): Preferences {
-  const lockedServerUrl = configuredServerUrl.trim();
+  const defaultServerUrl = configuredServerUrl.trim();
   const defaults = structuredClone(DEFAULT_PREFERENCES);
-  defaults.serverUrl = lockedServerUrl;
+  defaults.serverUrl = defaultServerUrl;
   if (!isRecord(value)) return defaults;
+  let customServerUrl = '';
+  if (value.customServer === true) {
+    try { customServerUrl = normalizeServerUrl(pickString(value.serverUrl, '')); }
+    catch { /* Invalid overrides fall back to the application default. */ }
+  }
 
   const stream = isRecord(value.stream) ? value.stream : value;
   const host = isRecord(value.host) ? value.host : {};
@@ -99,10 +105,10 @@ export function migratePreferences(
 
   return {
     schemaVersion: 2,
-    // A release endpoint is part of the signed application configuration. Never
-    // let a stale local preference override it. An editable endpoint only exists
-    // in developer builds where VITE_SANSER_SERVER_URL is intentionally absent.
-    serverUrl: lockedServerUrl || pickString(value.serverUrl ?? value.server_url, defaults.serverUrl),
+    // Only an explicit user selection overrides the packaged default. Old
+    // preferences must not silently switch an account to a different server.
+    serverUrl: customServerUrl || defaultServerUrl || pickString(value.serverUrl ?? value.server_url, defaults.serverUrl),
+    customServer: customServerUrl.length > 0,
     networkMode: networkMode(oldNetwork),
     stream: {
       profile: qualityProfile(oldQuality),

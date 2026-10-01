@@ -234,6 +234,8 @@ pub enum Locale {
 pub struct Preferences {
     pub schema_version: u8,
     pub server_url: String,
+    #[serde(default)]
+    pub custom_server: bool,
     pub network_mode: NetworkMode,
     pub stream: StreamPreferences,
     pub host: HostPreferences,

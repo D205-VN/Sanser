@@ -5,11 +5,19 @@
 #include <string>
 #include <vector>
 
+struct ID3D11Device;
+struct ID3D11Texture2D;
+
 struct FrameBgra {
   std::uint32_t width = 0;
   std::uint32_t height = 0;
   std::uint32_t stride = 0;
   std::vector<std::uint8_t> pixels;
+  // Owned GPU texture; never retain the DXGI acquired resource after ReleaseFrame.
+  std::shared_ptr<ID3D11Texture2D> texture;
+  bool cursorVisible = false;
+  int cursorX = 0;
+  int cursorY = 0;
 };
 
 class DesktopDuplicator {
@@ -22,6 +30,8 @@ public:
 
   void initialize(std::uint32_t adapterIndex = 0, std::uint32_t outputIndex = 0);
   bool captureFrame(FrameBgra& frame, std::uint32_t timeoutMs = 1000);
+  void setGpuCapture(bool enabled) { gpuCapture_ = enabled; }
+  ID3D11Device* gpuDevice() const;
 
   std::uint32_t width() const { return width_; }
   std::uint32_t height() const { return height_; }
@@ -40,6 +50,7 @@ private:
   unsigned int rotation_ = 0;
   long left_ = 0;
   long top_ = 0;
+  bool gpuCapture_ = false;
 };
 
 std::string hresultMessage(long hr);

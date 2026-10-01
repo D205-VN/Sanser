@@ -80,6 +80,7 @@ pub async fn check_connectivity(
     const NOMINATION_TRANSACTION_ID: u32 = u32::MAX;
     const NOMINATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
     const CONTROLLED_LINGER: Duration = Duration::from_millis(300);
+    const PROBE_RETRY_INTERVAL_MS: u64 = 500;
     // Sort pairs by priority descending (highest priority first)
     pairs.sort_by(|a, b| b.priority.cmp(&a.priority));
 
@@ -166,8 +167,15 @@ pub async fn check_connectivity(
                         let attempt = &mut attempts[idx];
                         let next_probe_idx = attempt.probes_sent as usize;
 
-                        if next_probe_idx < PUNCH_SCHEDULE.len() {
-                            let scheduled_delay = PUNCH_SCHEDULE[next_probe_idx].delay_ms;
+                        // The initial burst is not the connectivity deadline. A
+                        // peer may still be gathering candidates when it arrives.
+                        // Continue bounded checks throughout the caller's budget.
+                        {
+                            let scheduled_delay = PUNCH_SCHEDULE.get(next_probe_idx).map_or_else(
+                                || PUNCH_SCHEDULE.last().expect("nonempty punch schedule").delay_ms
+                                    + (next_probe_idx - PUNCH_SCHEDULE.len() + 1) as u64 * PROBE_RETRY_INTERVAL_MS,
+                                |probe| probe.delay_ms,
+                            );
                             if elapsed_ms >= scheduled_delay {
                                 attempt.state = PunchState::Punching;
                                 let fields = ProbeFields {
@@ -184,19 +192,14 @@ pub async fn check_connectivity(
                                 };
 
                                 if let Ok(packet) = build_probe_packet(&fields, hmac_key) {
+                                    // Count attempts even on send failure to avoid
+                                    // retrying an unreachable address every tick.
+                                    attempt.probes_sent += 1;
                                     if socket.send_to(&packet, pair.remote).await.is_ok() {
-                                        attempt.probes_sent += 1;
                                         pair.state = PairState::InProgress;
                                     }
                                 }
                             }
-                        } else if attempt.probes_sent as usize >= PUNCH_SCHEDULE.len()
-                            && attempt.state == PunchState::Punching
-                            && !(peer_verified.contains_key(&pair.pair_id)
-                                && local_verified.contains_key(&pair.pair_id))
-                        {
-                            attempt.state = PunchState::Exhausted;
-                            pair.state = PairState::Failed;
                         }
                     }
                 }
@@ -364,6 +367,67 @@ mod tests {
         .await;
 
         assert!(matches!(res, Err(P2pError::NoDirectRoute)));
+    }
+
+    #[tokio::test]
+    async fn direct_check_recovers_when_peer_misses_the_initial_probe_burst() {
+        let left = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let right = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let pair_id = crate::connectivity::make_pair_id("left", "right");
+        let mut left_pairs = vec![CandidatePair {
+            pair_id: pair_id.clone(),
+            local: left.local_addr().unwrap(),
+            remote: right.local_addr().unwrap(),
+            local_candidate_id: "left".into(),
+            remote_candidate_id: "right".into(),
+            priority: 100,
+            state: PairState::Waiting,
+        }];
+        let mut right_pairs = vec![CandidatePair {
+            pair_id,
+            local: right.local_addr().unwrap(),
+            remote: left.local_addr().unwrap(),
+            local_candidate_id: "right".into(),
+            remote_candidate_id: "left".into(),
+            priority: 100,
+            state: PairState::Waiting,
+        }];
+        let session = uuid::Uuid::new_v4();
+        let (a, b) = tokio::join!(
+            check_connectivity(
+                &left,
+                &mut left_pairs,
+                session,
+                1,
+                2,
+                b"late-peer",
+                true,
+                Duration::from_secs(5)
+            ),
+            async {
+                // Gathering/signaling may consume or miss probes before the
+                // peer begins its authenticated connectivity check.
+                tokio::time::sleep(Duration::from_millis(2_200)).await;
+                let mut discard = [0; 1024];
+                while right.try_recv_from(&mut discard).is_ok() {}
+                check_connectivity(
+                    &right,
+                    &mut right_pairs,
+                    session,
+                    2,
+                    1,
+                    b"late-peer",
+                    false,
+                    Duration::from_secs(3),
+                )
+                .await
+            }
+        );
+        assert!(
+            a.is_ok(),
+            "controlling peer prematurely abandoned direct UDP: {a:?}"
+        );
+        assert!(b.is_ok(), "controlled peer failed to join: {b:?}");
     }
 
     #[tokio::test]

@@ -4233,9 +4233,12 @@ public:
     const MediaCryptoSnapshot crypto = mediaCrypto_ ? mediaCrypto_->snapshot() : MediaCryptoSnapshot{};
     syncRetransmitCacheGeneration(crypto);
     const std::uint64_t packetId = nextPacketId_++;
-    packetCache_[packetId] = PacketCacheEntry{packetBytes, crypto.enabled ? crypto.generation : 0};
+    packetCache_[packetId] = PacketCacheEntry{packetBytes, crypto.enabled ? crypto.generation : 0,
+      std::chrono::steady_clock::now()};
+    packetCacheBytes_ += packetBytes.size();
     packetCacheOrder_.push_back(packetId);
-    while (packetCacheOrder_.size() > maxPacketCache_) {
+    while (packetCacheOrder_.size() > maxPacketCache_ || packetCacheBytes_ > 16 * 1024 * 1024) {
+      packetCacheBytes_ -= packetCache_.at(packetCacheOrder_.front()).bytes.size();
       packetCache_.erase(packetCacheOrder_.front());
       packetCacheOrder_.pop_front();
     }
@@ -4255,7 +4258,8 @@ public:
       return result;
     }
     const auto found = packetCache_.find(packetId);
-    if (found == packetCache_.end() || found->second.mediaGeneration != currentGeneration) {
+    if (found == packetCache_.end() || found->second.mediaGeneration != currentGeneration ||
+        std::chrono::steady_clock::now() - found->second.sentAt > std::chrono::milliseconds(120)) {
       return result;
     }
 
@@ -4297,6 +4301,7 @@ private:
   struct PacketCacheEntry {
     std::vector<std::uint8_t> bytes;
     std::uint64_t mediaGeneration = 0;
+    std::chrono::steady_clock::time_point sentAt;
   };
 
   std::uint32_t sendPacketWithId(std::uint64_t packetId,
@@ -4410,6 +4415,7 @@ private:
 
     const std::size_t dropped = packetCache_.size();
     packetCache_.clear();
+    packetCacheBytes_ = 0;
     packetCacheOrder_.clear();
     windowCacheResets_ += 1;
     windowCacheDroppedPackets_ += dropped;
@@ -4495,7 +4501,8 @@ private:
   std::uint64_t nextPacketId_ = 1;
   std::map<std::uint64_t, PacketCacheEntry> packetCache_;
   std::deque<std::uint64_t> packetCacheOrder_;
-  static constexpr std::size_t maxPacketCache_ = 600;
+  std::size_t packetCacheBytes_ = 0;
+  static constexpr std::size_t maxPacketCache_ = 32;
   std::uint64_t retransmittedPackets_ = 0;
   std::uint64_t packetCacheGeneration_ = 0;
   std::uint64_t windowCacheResets_ = 0;
@@ -5297,6 +5304,12 @@ void drawSoftwareCursor(FrameBgra& frame, const DesktopDuplicator& duplicator) {
 
   const int originX = cursorInfo.ptScreenPos.x - static_cast<int>(duplicator.left());
   const int originY = cursorInfo.ptScreenPos.y - static_cast<int>(duplicator.top());
+  if (frame.texture) {
+    frame.cursorVisible = true;
+    frame.cursorX = originX;
+    frame.cursorY = originY;
+    return;
+  }
   if (originX < -24 || originY < -24 ||
       originX >= static_cast<int>(frame.width) ||
       originY >= static_cast<int>(frame.height)) {
@@ -5450,6 +5463,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   encodeOptions.hardware = options.hardwareEncoder;
   encodeOptions.lowLatency = options.lowLatencyEncoder;
   encodeOptions.keyframeIntervalSeconds = options.keyframeIntervalSeconds;
+  encodeOptions.live = hasNetworkVideo;
+  encodeOptions.gpuDevice = hasNetworkVideo && options.hardwareEncoder ? duplicator.gpuDevice() : nullptr;
 
   auto makePacketEncoder = [&](VideoPacketEncodeOptions& requestedOptions,
                                const char* reason) {
@@ -5459,7 +5474,10 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                                                       streamDimensions.height,
                                                       requestedOptions);
       } catch (const std::exception& error) {
-        if (requestedOptions.hardware && requestedOptions.encoderPreference != "software") {
+        if (requestedOptions.gpuDevice) {
+          std::cerr << "SNV1_GPU_FALLBACK reason=" << reason << " error=\"" << error.what() << "\"\n";
+          requestedOptions.gpuDevice = nullptr;
+        } else if (requestedOptions.hardware && requestedOptions.encoderPreference != "software") {
           std::cerr << "SNV1_ENCODER_FALLBACK fallback=software reason=" << reason
                     << " error=\"" << error.what() << "\"\n";
           requestedOptions.hardware = false;
@@ -5476,6 +5494,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   };
 
   auto encoder = makePacketEncoder(encodeOptions, "initial");
+  duplicator.setGpuCapture(encoder->usingGpuInput());
   auto restartEncoder = [&](std::uint32_t bitrate, const char* reason) -> bool {
     auto nextOptions = encodeOptions;
     nextOptions.bitrate = bitrate;
@@ -5483,6 +5502,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       auto replacement = makePacketEncoder(nextOptions, reason);
       encoder = std::move(replacement);
       encodeOptions = nextOptions;
+      duplicator.setGpuCapture(encoder->usingGpuInput());
       std::cerr << "SNV1_ENCODER_RESTART reason=" << reason
                 << " bitrate=" << bitrate
                 << " hardware=" << (encoder->usingHardware() ? "yes" : "no")
@@ -5558,6 +5578,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     : options.frames;
 
   std::uint64_t capturedFrames = 0;
+  const auto mediaClockStart = std::chrono::steady_clock::now();
+  auto lastFrameSubmittedAt = mediaClockStart;
 	  std::uint64_t sequence = 0;
 	  std::uint64_t lastStreamTimestampMicros = 0;
   std::uint64_t pendingTimelineSkipMicros = 0;
@@ -5573,9 +5595,14 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     const std::uint64_t appliedTimelineSkipMicros = hasLastStreamTimestamp
       ? pendingTimelineSkipMicros
       : 0;
-	    if (hasLastStreamTimestamp) {
-	      adjustedTimestamp = lastStreamTimestampMicros + safeDurationMicros + appliedTimelineSkipMicros;
-	    }
+    if (hasLastStreamTimestamp) {
+      // Live input timestamps follow actual capture time through the encoder,
+      // including idle periods, adaptation and encoder restarts. Synthesizing
+      // one nominal interval per packet falsely makes slow captures look late.
+      adjustedTimestamp = hasNetworkVideo
+        ? std::max(packet.timestampMicros, lastStreamTimestampMicros + 1)
+        : lastStreamTimestampMicros + safeDurationMicros + appliedTimelineSkipMicros;
+    }
     if (pendingTimelineSkipMicros > 0) {
       if (appliedTimelineSkipMicros > 0) {
         std::cerr << "SNV1_HOST_TIMELINE_SKIP_APPLY skippedMs=" << std::fixed << std::setprecision(1)
@@ -5697,12 +5724,12 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	  };
 	  std::deque<PendingUdpRetransmit> pendingUdpRetransmits;
 	  auto lastUdpNackApplyLogAt = std::chrono::steady_clock::time_point{};
-	  constexpr std::size_t maxPendingUdpRetransmits = 512;
+	  constexpr std::size_t maxPendingUdpRetransmits = 32;
 	  constexpr std::size_t maxNackRequestsDrainedPerFrame = 8;
 	  constexpr std::uint32_t maxRetransmitFragmentsPerFrame = 24;
 	  constexpr std::uint32_t maxRetransmitFragmentsPerChunk = 6;
 	  constexpr auto retransmitFrameBudget = std::chrono::microseconds(2200);
-	  constexpr auto retransmitMaxAge = std::chrono::milliseconds(500);
+	  constexpr auto retransmitMaxAge = std::chrono::milliseconds(80);
 		#endif
 
   if (hasNetworkVideo && latestKeyframeRequest().sequence == 0) {
@@ -5927,6 +5954,12 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       } else if (hasLastCleanFrame && cursorChanged) {
         frame = lastCleanFrame;
         cursorOnlyFrame = true;
+      } else if (hasLastCleanFrame && hasNetworkVideo &&
+                 captureFinishedAt - lastFrameSubmittedAt >= std::chrono::milliseconds(50)) {
+        // Pump asynchronous encoder output even after the desktop stops
+        // changing, so the final captured image cannot sit waiting indefinitely.
+        frame = lastCleanFrame;
+        ++statsRefreshFrames;
       } else
 #endif
       {
@@ -5935,6 +5968,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
           lastTimeoutLogAt = now;
           std::cerr << "SNV1 waiting for changed frame.\n";
         }
+        std::this_thread::sleep_until(frameStartedAt + adaptiveFrameDelay);
         continue;
       }
 	    } else {
@@ -6080,23 +6114,34 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    const auto encodeSendStartedAt = std::chrono::steady_clock::now();
 	    const auto encodeStartedAt = encodeSendStartedAt;
 	    std::vector<EncodedVideoPacket> packets;
-    try {
-      packets = encoder->encodeFrame(frame);
-    } catch (const std::exception& error) {
-      if (!encoder->usingHardware()) throw;
-      std::cerr << "SNV1_ENCODER_RUNTIME_FALLBACK backend=" << encoder->encoderBackend()
-                << " fallback=software error=\"" << error.what() << "\"\n";
-      // Keep transport/control alive and preserve the monotonic stream timeline.
-      // Subsequent restarts must not select the failed hardware again.
-      encodeOptions.bitrate = currentAdaptiveBitrate;
-      encodeOptions.hardware = false;
-      encodeOptions.encoderPreference = "software";
-      encoder.reset();
-      encoder = makePacketEncoder(encodeOptions, "hardware-runtime-failure");
-      lastEncoderRestartAt = std::chrono::steady_clock::now();
-      encoder->requestKeyframe();
-      packets = encoder->encodeFrame(frame);
+    const auto captureTimestamp = hasNetworkVideo
+      ? std::optional<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+          captureFinishedAt - mediaClockStart).count() + 1)
+      : std::nullopt;
+    for (;;) {
+      try {
+        packets = encoder->encodeFrame(frame, captureTimestamp);
+        break;
+      } catch (const std::exception& error) {
+        if (!encoder->usingHardware()) throw;
+        const bool wasGpuInput = encoder->usingGpuInput();
+        std::cerr << "SNV1_ENCODER_RUNTIME_FALLBACK backend=" << encoder->encoderBackend()
+                  << " fallback=" << (wasGpuInput ? "cpu-input" : "software")
+                  << " error=\"" << error.what() << "\"\n";
+        encodeOptions.bitrate = currentAdaptiveBitrate;
+        encodeOptions.gpuDevice = nullptr;
+        if (!wasGpuInput) {
+          encodeOptions.hardware = false;
+          encodeOptions.encoderPreference = "software";
+        }
+        encoder.reset();
+        encoder = makePacketEncoder(encodeOptions, "runtime-failure");
+        duplicator.setGpuCapture(false);
+        lastEncoderRestartAt = std::chrono::steady_clock::now();
+        encoder->requestKeyframe();
+      }
     }
+    lastFrameSubmittedAt = std::chrono::steady_clock::now();
 	    const auto encodeFinishedAt = std::chrono::steady_clock::now();
 	    std::uint64_t framePacketizeMicros = 0;
 	    std::uint64_t frameSendMicros = 0;

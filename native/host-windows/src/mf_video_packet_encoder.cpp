@@ -1,5 +1,8 @@
 #include "mf_video_packet_encoder.h"
 #include "mf_encoder_events.h"
+#include "gpu_video_processor.h"
+#include <d3d11.h>
+#include <dxgi.h>
 
 #include <codecapi.h>
 #include <mfapi.h>
@@ -713,6 +716,19 @@ EncoderActivation createEncoderTransform(VideoCodec codec,
                     std::make_move_iterator(softwareCandidates.end()));
 
   std::vector<EncoderCandidate> preferred = sortCandidates(candidates, preference);
+  if (options.gpuDevice && preference == "auto") {
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC description{};
+    if (SUCCEEDED(options.gpuDevice->QueryInterface(IID_PPV_ARGS(&dxgi))) &&
+        SUCCEEDED(dxgi->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&description))) {
+      const std::string sameVendor = description.VendorId == 0x8086 ? "QuickSync"
+        : description.VendorId == 0x10de ? "NVENC" : description.VendorId == 0x1002 ? "AMF" : "";
+      std::stable_sort(preferred.begin(), preferred.end(), [&](const auto& a, const auto& b) {
+        return (a.hardware && a.backend == sameVendor) > (b.hardware && b.backend == sameVendor);
+      });
+    }
+  }
   if (preferred.empty() && preference != "auto" && preference != "software") {
     std::cerr << "SNV1_ENCODER_PREFERENCE_MISS preference=" << preference
               << " fallback=auto\n";
@@ -780,6 +796,8 @@ struct MfVideoPacketEncoder::Impl {
   std::uint32_t consecutiveStreamChanges = 0;
   BgraScalePlan scalePlan;
   MfEncoderEvents events;
+  std::unique_ptr<GpuVideoProcessor> gpu;
+  std::chrono::steady_clock::time_point lastProgress = std::chrono::steady_clock::now();
 
   ~Impl() {
     // Shut down async workers before releasing MF/COM runtime state.
@@ -864,10 +882,21 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   impl_->usingHardware = encoderSelection.hardware;
   impl_->encoderName = encoderSelection.name;
   impl_->encoderBackend = encoderSelection.backend;
+  if (options.gpuDevice) {
+    ComPtr<IMFAttributes> attributes;
+    UINT32 aware = FALSE;
+    checkHr(impl_->transform->GetAttributes(&attributes), "GPU encoder attributes");
+    attributes->GetUINT32(MF_SA_D3D11_AWARE, &aware);
+    if (!impl_->usingHardware || !aware) throw std::runtime_error("Selected encoder does not accept D3D11 surfaces");
+    impl_->gpu = std::make_unique<GpuVideoProcessor>(options.gpuDevice, width, height);
+    checkHr(impl_->transform->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+      reinterpret_cast<ULONG_PTR>(impl_->gpu->manager())), "Encoder bind capture GPU");
+  }
   std::cerr << "SNV1_ENCODER_SELECTED preference="
             << normalizeEncoderPreference(impl_->options.encoderPreference)
             << " backend=" << impl_->encoderBackend
             << " hardware=" << (impl_->usingHardware ? "yes" : "no")
+            << " gpuInput=" << (impl_->gpu ? "yes" : "no")
             << " name=\"" << logValue(impl_->encoderName) << "\"\n";
 
   ComPtr<IMFMediaType> outputType;
@@ -876,6 +905,10 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   checkHr(outputType->SetGUID(MF_MT_SUBTYPE, codecSubtype(impl_->options.codec)), "Set output subtype");
   checkHr(outputType->SetUINT32(MF_MT_AVG_BITRATE, impl_->options.bitrate), "Set output bitrate");
   setVideoTypeCommon(outputType.Get(), width, height, impl_->fps);
+  if (impl_->gpu) {
+    checkHr(outputType->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709), "GPU output matrix");
+    checkHr(outputType->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235), "GPU output range");
+  }
   checkHr(impl_->transform->SetOutputType(0, outputType.Get(), 0), "Set encoder output type");
 
   ComPtr<IMFMediaType> inputType;
@@ -884,6 +917,10 @@ MfVideoPacketEncoder::MfVideoPacketEncoder(std::uint32_t width,
   checkHr(inputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12), "Set input subtype");
   checkHr(inputType->SetUINT32(MF_MT_DEFAULT_STRIDE, width), "Set input stride");
   setVideoTypeCommon(inputType.Get(), width, height, impl_->fps);
+  if (impl_->gpu) {
+    checkHr(inputType->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709), "GPU input matrix");
+    checkHr(inputType->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235), "GPU input range");
+  }
   checkHr(impl_->transform->SetInputType(0, inputType.Get(), 0), "Set encoder input type");
 
   configureLowLatencyEncoder(impl_->transform.Get(), impl_->options);
@@ -900,6 +937,8 @@ MfVideoPacketEncoder::~MfVideoPacketEncoder() = default;
 bool MfVideoPacketEncoder::usingHardware() const {
   return impl_->usingHardware;
 }
+
+bool MfVideoPacketEncoder::usingGpuInput() const { return impl_->gpu != nullptr; }
 
 VideoCodec MfVideoPacketEncoder::codec() const {
   return impl_->options.codec;
@@ -970,61 +1009,77 @@ bool MfVideoPacketEncoder::requestKeyframe() {
   return true;
 }
 
-std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(const FrameBgra& frame) {
-  const FrameNv12 nv12 = convertBgraToNv12Scaled(frame,
-                                                 impl_->width,
-                                                 impl_->height,
-                                                 impl_->scalePlan);
-  if (nv12.pixels.size() > std::numeric_limits<DWORD>::max()) {
-    throw std::runtime_error("NV12 encoder input exceeds Media Foundation buffer limits.");
-  }
-  const DWORD bufferSize = static_cast<DWORD>(nv12.pixels.size());
-
-  ComPtr<IMFMediaBuffer> buffer;
-  checkHr(MFCreateMemoryBuffer(bufferSize, buffer.GetAddressOf()), "MFCreateMemoryBuffer");
-
-  BYTE* destination = nullptr;
-  DWORD maxLength = 0;
-  DWORD currentLength = 0;
-  checkHr(buffer->Lock(&destination, &maxLength, &currentLength), "Lock encoder input buffer");
-  std::memcpy(destination, nv12.pixels.data(), std::min<std::size_t>(maxLength, nv12.pixels.size()));
-  checkHr(buffer->Unlock(), "Unlock encoder input buffer");
-  checkHr(buffer->SetCurrentLength(bufferSize), "Set encoder input length");
-
-  ComPtr<IMFSample> sample;
-  checkHr(MFCreateSample(sample.GetAddressOf()), "MFCreateSample input");
-  checkHr(sample->AddBuffer(buffer.Get()), "Add input buffer");
-
-  constexpr LONGLONG oneSecond = 10000000;
-  const LONGLONG duration = oneSecond / static_cast<LONGLONG>(impl_->fps);
-  const LONGLONG sampleTime = static_cast<LONGLONG>(impl_->frameIndex) * duration;
-  checkHr(sample->SetSampleTime(sampleTime), "Set input sample time");
-  checkHr(sample->SetSampleDuration(duration), "Set input sample duration");
-
+std::vector<EncodedVideoPacket> MfVideoPacketEncoder::encodeFrame(
+    const FrameBgra& frame, std::optional<std::uint64_t> timestampMicros) {
   std::vector<EncodedVideoPacket> packets;
   if (impl_->events.asynchronous()) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     for (;;) {
-      auto ready = drain(); // Output must be consumed to avoid encoder backpressure.
+      auto ready = drain();
+      if (!ready.empty()) impl_->lastProgress = std::chrono::steady_clock::now();
       packets.insert(packets.end(), std::make_move_iterator(ready.begin()), std::make_move_iterator(ready.end()));
       if (impl_->events.inputReady()) break;
+      if (impl_->options.live) {
+        if (std::chrono::steady_clock::now() - impl_->lastProgress > std::chrono::seconds(3))
+          throw std::runtime_error("Hardware encoder stopped making progress");
+        // Drop only this unencoded capture. Never wait seconds or discard
+        // encoded reference frames; send already available output immediately.
+        return packets;
+      }
       if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Timed out waiting for encoder METransformNeedInput");
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    impl_->events.consumeInput();
   }
+
+  ComPtr<IMFMediaBuffer> buffer;
+  ComPtr<IMFSample> sample;
+  if (impl_->gpu) {
+    sample = impl_->gpu->convert(frame);
+    if (!sample) {
+      if (std::chrono::steady_clock::now() - impl_->lastProgress > std::chrono::seconds(3))
+        throw std::runtime_error("Hardware encoder stopped releasing GPU surfaces");
+      return packets;
+    }
+  } else {
+    const FrameBgra* source = &frame;
+    FrameBgra fallback;
+    if (frame.texture) { fallback = readbackGpuFrame(frame); source = &fallback; }
+    const FrameNv12 nv12 = convertBgraToNv12Scaled(*source, impl_->width, impl_->height, impl_->scalePlan);
+    if (nv12.pixels.size() > std::numeric_limits<DWORD>::max())
+      throw std::runtime_error("NV12 encoder input exceeds Media Foundation buffer limits.");
+    const DWORD bufferSize = static_cast<DWORD>(nv12.pixels.size());
+    checkHr(MFCreateMemoryBuffer(bufferSize, &buffer), "MFCreateMemoryBuffer");
+    BYTE* destination = nullptr;
+    DWORD maxLength = 0;
+    checkHr(buffer->Lock(&destination, &maxLength, nullptr), "Lock encoder input buffer");
+    std::memcpy(destination, nv12.pixels.data(), std::min<std::size_t>(maxLength, nv12.pixels.size()));
+    checkHr(buffer->Unlock(), "Unlock encoder input buffer");
+    checkHr(buffer->SetCurrentLength(bufferSize), "Set encoder input length");
+    checkHr(MFCreateSample(&sample), "MFCreateSample input");
+    checkHr(sample->AddBuffer(buffer.Get()), "Add input buffer");
+  }
+  constexpr LONGLONG oneSecond = 10000000;
+  const LONGLONG duration = oneSecond / static_cast<LONGLONG>(impl_->fps);
+  if (timestampMicros && *timestampMicros > static_cast<std::uint64_t>(std::numeric_limits<LONGLONG>::max() / 10))
+    throw std::runtime_error("Capture timestamp exceeds Media Foundation limits");
+  const LONGLONG sampleTime = timestampMicros
+    ? static_cast<LONGLONG>(*timestampMicros) * 10
+    : static_cast<LONGLONG>(impl_->frameIndex) * duration;
+  checkHr(sample->SetSampleTime(sampleTime), "Set input sample time");
+  checkHr(sample->SetSampleDuration(duration), "Set input sample duration");
+  if (impl_->events.asynchronous()) impl_->events.consumeInput();
   HRESULT inputHr = impl_->transform->ProcessInput(0, sample.Get(), 0);
   if (inputHr == MF_E_NOTACCEPTING && !impl_->events.asynchronous()) {
-    packets = drain();
+    auto ready = drain();
+    packets.insert(packets.end(), std::make_move_iterator(ready.begin()), std::make_move_iterator(ready.end()));
     inputHr = impl_->transform->ProcessInput(0, sample.Get(), 0);
+    if (inputHr == MF_E_NOTACCEPTING && impl_->options.live) return packets;
   }
   checkHr(inputHr, "ProcessInput");
+  impl_->lastProgress = std::chrono::steady_clock::now();
   ++impl_->frameIndex;
-
   auto morePackets = drain();
-  packets.insert(packets.end(),
-                 std::make_move_iterator(morePackets.begin()),
-                 std::make_move_iterator(morePackets.end()));
+  packets.insert(packets.end(), std::make_move_iterator(morePackets.begin()), std::make_move_iterator(morePackets.end()));
   return packets;
 }
 
