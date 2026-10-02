@@ -190,6 +190,8 @@ int runWindows(bool host,int argc,char** argv) {
       if(peer.ready()) {
         if(force.exchange(false)) encoder.requestKeyframe();
         const bool captured=display.captureFrame(frame, options.ultraLowLatency ? 2 : 16);
+        if(captured && options.ultraLowLatency && !frame.texture)
+          throw std::runtime_error("Ultra Low Latency requires GPU capture. The display is using CPU capture; choose Balanced.");
         const auto timestamp=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-mediaStart).count())+1;
         auto packets=captured ? encoder.encodeFrame(frame,timestamp) : encoder.drain();
         for(auto& packet:packets) peer.video(Frame{std::move(packet.payload),options.width,options.height,packet.keyframe});

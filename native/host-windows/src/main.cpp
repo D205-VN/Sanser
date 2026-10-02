@@ -6052,7 +6052,11 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    if (cursorOnlyFrame) {
 	      ++statsCursorFrames;
 	    }
-    if (!drainOnly) drawSoftwareCursor(frame, duplicator);
+    if (!drainOnly) {
+      drawSoftwareCursor(frame, duplicator);
+      // Rotated-display capture can use CPU pixels even with a GPU encoder.
+      gGpuInput = encoder->usingGpuInput() && frame.texture ? 1 : 0;
+    }
 	    POINT currentCursor{};
 	    if (GetCursorPos(&currentCursor)) {
 	      lastCursor = currentCursor;
@@ -6509,7 +6513,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	#endif
 	                << "\n";
 	      std::cerr << "SNV1_STAGE_PROFILE bottleneck=" << hostBottleneck
-                    << " gpuInput=" << (encoder->usingGpuInput() ? 1 : 0)
+                    << " gpuInput=" << gGpuInput.load()
                     << " encoderSkipped=" << encoder->skippedCaptures()
 	                << " bottleneckMs=" << hostBottleneckMs
 	                << " budgetMs=" << hostBudgetMs
