@@ -104,6 +104,13 @@ int main() {
       requireLatency(!fragment(2, 0) && !fragment(2, 2) && fragment(2, 1), "reordering before deadline completes normally");
       repair.pollRepairs(repairStats, start + milliseconds(10));
       requireLatency(repairStats.newNackPacketIds.empty(), "completed reordering must not request repair");
+      requireLatency(!fragment(3, 0), "missing tail stays incomplete on an idle desktop");
+      const auto idle = steady_clock::now() + milliseconds(51);
+      repair.pollRepairs(repairStats, idle);
+      repair.pollRepairs(repairStats, idle + milliseconds(3));
+      requireLatency(repairStats.newNackPacketIds == std::vector<std::uint64_t>{3}, "idle missing tail must request repair without another video packet");
+      repair.pollRepairs(repairStats, idle + seconds(1));
+      requireLatency(repairStats.droppedAssemblies == 1, "partial frames must expire during receive silence");
       requireLatency(gLatencyPolicy.presentAt(10000, 1000000, 90000) == 14000, "future sender timeline cannot add latency");
       requireLatency(gLatencyPolicy.presentAt(10000, 0, 0) == 10000, "zero base render hold");
 

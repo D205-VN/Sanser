@@ -4016,6 +4016,7 @@ struct UdpPacketAssembly {
   std::vector<std::uint8_t> data;
   std::vector<std::uint8_t> received;
   std::chrono::steady_clock::time_point createdAt;
+  std::chrono::steady_clock::time_point lastFragmentAt;
   std::uint32_t receivedBytes = 0;
   std::uint16_t receivedFragments = 0;
   std::uint16_t fragmentCount = 0;
@@ -4034,10 +4035,13 @@ public:
   void pollRepairs(UdpVideoStats& stats,
                    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
     if (!gLatencyPolicy.ultra) return;
+    prune(stats, now);
     for (auto& [key, assembly] : assemblies_) {
       const auto highest = highestPacketIdByEpoch_.find(key.mediaEpoch);
       const bool laterFrame = highest != highestPacketIdByEpoch_.end() && highest->second > key.packetId;
-      if (assembly.nackNotified || (!laterFrame && !assembly.lastFragmentSeen)) continue;
+      const bool stalled = now - assembly.lastFragmentAt >= std::chrono::milliseconds(
+        gLatencyPolicy.jitterHoldMs(gLiveLatency.jitter.load(), gLiveLatency.rtt.load()));
+      if (assembly.nackNotified || (!laterFrame && !assembly.lastFragmentSeen && !stalled)) continue;
       if (assembly.gapDetectedAt.time_since_epoch().count() == 0) assembly.gapDetectedAt = now;
       if (now - assembly.gapDetectedAt >= std::chrono::milliseconds(3)) {
         recordNackPacket(stats, key.packetId);
@@ -4232,6 +4236,7 @@ public:
     assembly.received[header.fragmentIndex] = 1;
     assembly.receivedBytes += header.payloadSize;
     assembly.receivedFragments += 1;
+    assembly.lastFragmentAt = std::chrono::steady_clock::now();
     if (header.fragmentIndex + 1 == header.fragmentCount) assembly.lastFragmentSeen = true;
 
     if (assembly.receivedFragments == assembly.fragmentCount &&
@@ -4297,8 +4302,8 @@ private:
     stats.newNackPacketIds.push_back(packetId);
   }
 
-  void prune(UdpVideoStats& stats) {
-    const auto now = std::chrono::steady_clock::now();
+  void prune(UdpVideoStats& stats,
+             std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
     for (auto it = assemblies_.begin(); it != assemblies_.end();) {
       if (now - it->second.createdAt > std::chrono::milliseconds(gLatencyPolicy.ultra ? 80 : 850)) {
         recordNackPacket(stats, it->first.packetId);
