@@ -101,7 +101,7 @@ impl BoundedLogBuffer {
         Ok(dropped)
     }
 
-    #[must_use]
+    #[must_use = "iterate over the buffered events to inspect them"]
     pub fn events(&self) -> impl ExactSizeIterator<Item = &LogEvent> {
         self.events.iter().map(|(_, event)| event)
     }

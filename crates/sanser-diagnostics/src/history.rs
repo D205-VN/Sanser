@@ -59,7 +59,7 @@ impl DiagnosticsHistory {
         evicted
     }
 
-    #[must_use]
+    #[must_use = "iterate over the session samples to inspect them"]
     pub fn samples(&self) -> impl ExactSizeIterator<Item = &SessionMetrics> {
         self.samples.iter()
     }
