@@ -1187,7 +1187,10 @@ mod tests {
             .await;
         assert!(retry.is_ok());
         if let Ok(retry) = retry {
-            assert!(retry.candidates.is_empty());
+            assert_eq!(
+                retry.candidates,
+                Vec::<(String, CandidateFingerprint)>::new()
+            );
         }
     }
 

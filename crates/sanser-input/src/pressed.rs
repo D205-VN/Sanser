@@ -113,6 +113,6 @@ mod tests {
         let releases = state.release_all(3);
         assert_eq!(releases.len(), 2);
         assert!(state.is_empty());
-        assert!(state.release_all(4).is_empty());
+        assert_eq!(state.release_all(4), Vec::<InputEvent>::new());
     }
 }
