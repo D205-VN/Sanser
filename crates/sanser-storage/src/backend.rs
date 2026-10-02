@@ -158,6 +158,8 @@ impl Storage {
     }
 }
 
+// async_trait adds #[must_use] to its boxed futures, which already carry that attribute.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PreferenceStore: Send + Sync {
     async fn set_preference(

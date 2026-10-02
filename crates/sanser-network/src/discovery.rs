@@ -349,7 +349,7 @@ impl PeerTable {
         expired
     }
 
-    #[must_use]
+    #[must_use = "iterate over the discovered peers to inspect them"]
     pub fn peers(&self) -> impl ExactSizeIterator<Item = &PeerRecord> {
         self.peers.values()
     }
@@ -439,7 +439,7 @@ impl UdpDiscovery {
         Ok(sent)
     }
 
-    #[must_use]
+    #[must_use = "iterate over the discovery sockets to use them"]
     pub fn sockets(&self) -> impl ExactSizeIterator<Item = &UdpSocket> {
         self.sockets.iter().map(|(socket, _)| socket)
     }
