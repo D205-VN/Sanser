@@ -14,6 +14,21 @@ Bytes fragment(const Bytes& bytes,unsigned index) {
 }
 int main() {
   try {
+    TxScheduler scheduler;
+    const auto now=Clock::now();
+    require(scheduler.push(TxScheduler::Video, {Bytes(1024, 1), now, 1}), "queue video");
+    require(scheduler.push(TxScheduler::Audio, {{2}, now, 0}), "queue audio separately");
+    scheduler.latestInput({{3}, now, 0}); scheduler.latestInput({{4}, now, 0});
+    require(scheduler.push(TxScheduler::InputLane, {{5}, now, 0}), "queue reliable input");
+    require(scheduler.push(TxScheduler::Control, {{6}, now, 0}), "queue control");
+    for (const auto expected : {6,5,4,2}) {
+      auto next=scheduler.pop(false);
+      require(next && next->bytes.front()==expected, "pacing video must not hold priority lanes");
+    }
+    require(!scheduler.pop(false), "video pacing remains respected");
+    require(scheduler.pop(true)->frame==1, "video resumes after priority traffic");
+    require(!scheduler.push(TxScheduler::Video, {Bytes(6*1024*1024),now,2}), "video lane memory bounded");
+    require(scheduler.push(TxScheduler::InputLane, {{7},now,0}), "video overflow cannot consume key-up capacity");
     const std::string token(48,'a'); PacketCodec host(token,true),client(token,false),wrong(std::string(48,'b'),false);
     snv2::Header h; h.sequence=1; h.keyId=42;
     // Control packets have no plaintext; also exercise PKCS#7 block boundaries

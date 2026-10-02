@@ -26,6 +26,11 @@ const SOURCES: &[&str] = &[
 ];
 const FIELDS: &[&str] = &[
     "gpuInput",
+    "avgRenderAgeMs",
+    "maxRenderAgeMs",
+    "renderGpuMs",
+    "targetDelayMs",
+    "adaptiveDelayMs",
     "encoderSkipped",
     "fps",
     "targetFps",
@@ -121,6 +126,7 @@ struct Report {
     direct_check: &'static str,
     requested_fps: u16,
     requested_bitrate_kbps: u32,
+    ultra_low_latency: bool,
     started_at_ms: u64,
     updated_at_ms: u64,
     ended: bool,
@@ -156,6 +162,7 @@ impl Report {
             route: if request.relay { "relay" } else { "direct" },
             requested_fps: request.fps,
             requested_bitrate_kbps: request.bitrate_kbps,
+            ultra_low_latency: request.ultra_low_latency,
             started_at_ms: now_ms(),
             updated_at_ms: now_ms(),
             ended: false,
@@ -171,7 +178,12 @@ impl Report {
         // RTT and local processing durations use one machine's monotonic clock.
         // Cross-machine wall-clock frame ages are deliberately excluded.
         let delayed = sample.values.iter().any(|(key, value)| match key.as_str() {
-            "rttMs" | "avgRttMs" | "maxRttMs" => *value >= 100.0,
+            "rttMs" | "avgRttMs" | "maxRttMs" => {
+                *value >= if self.ultra_low_latency { 15.0 } else { 100.0 }
+            }
+            "avgRenderAgeMs" | "renderGpuMs" => {
+                *value >= if self.ultra_low_latency { 4.0 } else { 50.0 }
+            }
             "decodeAvgMs" | "encodeAvgMs" | "captureAvgMs" | "sendAvgMs" | "hostAvgWorkMs" => {
                 *value >= 50.0
             }
@@ -328,6 +340,24 @@ mod tests {
                 .contains("never-store-this-token")
         );
     }
+    #[test]
+    fn ultra_report_tracks_frame_queue_budget_without_inventing_missing_samples() {
+        let mut value = request();
+        value.ultra_low_latency = true;
+        let mut report = Report::new(&value);
+        assert_eq!(report.status, "awaiting-measurements");
+        report.observe(
+            parse_sample(b"SNV1_RENDER_STATS avgRenderAgeMs=9.1 renderGpuMs=1.0").unwrap(),
+        );
+        assert_eq!(report.delay_sample_count, 1);
+        assert_eq!(report.status, "delay-observed");
+        assert_eq!(
+            report.maxima.get("SNV1_RENDER_STATS.avgRenderAgeMs"),
+            Some(&9.1)
+        );
+        assert!(!report.maxima.contains_key("SNINPUT_RTT.rttMs"));
+    }
+
     #[test]
     fn reports_survive_end_of_session_and_export_without_credentials() -> std::io::Result<()> {
         let directory =

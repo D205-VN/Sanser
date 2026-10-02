@@ -117,6 +117,7 @@
       }
       phase = 'launching';
       await launchEngine({
+        ultraLowLatency: stream.profile === 'competitive',
         directCheck,
         kind: 'client',
         wireProtocol: target.wireProtocol,

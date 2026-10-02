@@ -1,6 +1,8 @@
 #pragma once
 #include "snv2.h"
 #include "snv2_auth.h"
+#include "tx_scheduler.h"
+#include <condition_variable>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -18,6 +20,7 @@ using Bytes = std::vector<std::uint8_t>;
 using Clock = std::chrono::steady_clock;
 struct Options {
   bool host = false;
+  bool ultraLowLatency = false;
   bool input = true;
   std::string peer;
   std::uint16_t port = 0;
@@ -79,6 +82,8 @@ public:
   std::function<void()> onStopped;
 private:
   void loop();
+  void sendLoop();
+  void acknowledgeInput();
   void transmit(snv2::PacketType type, const Bytes& payload, std::uint32_t stream = 0,
                 std::uint64_t frame = 0, std::uint16_t flags = 0, bool reliable = false);
   void datagram(const Bytes& bytes);
@@ -87,14 +92,18 @@ private:
   PacketCodec codec_;
   std::intptr_t socket_ = -1;
   std::thread worker_;
+  std::thread sender_;
   std::atomic<bool> running_{false}, ready_{false};
   std::mutex sendMutex_, videoMutex_;
+  std::condition_variable sendReady_;
+  TxScheduler tx_;
+  std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
   std::uint32_t generation_ = 0, peerGeneration_ = 0;
   std::set<std::uint32_t> previousGenerations_;
   std::uint64_t lastVideo_ = 0, lastMouse_ = 0;
   std::uint64_t sequences_[3]{}, frame_ = 0, deliveredInput_ = 0;
   ReplayWindow replay_[3];
-  struct Pending { Bytes bytes; Clock::time_point sent; unsigned attempts; };
+  struct Pending { Bytes bytes; Clock::time_point sent, created; unsigned attempts; bool sacked = false; };
   std::map<std::uint64_t, Pending> pending_;
   std::map<std::uint64_t, Input> receivedInputs_;
   Reassembler reassembler_;

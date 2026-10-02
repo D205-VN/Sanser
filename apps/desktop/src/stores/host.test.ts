@@ -102,6 +102,15 @@ it('keeps unsupported Mac hosting offline and exposes a server upgrade reason', 
   expect(mocks.punch).not.toHaveBeenCalled();
 });
 
+it('uses the requested Ultra Low Latency profile rather than the host local preset', async () => {
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, qualityProfile: 'competitive' }] });
+  await host.online(runtime);
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({
+    ultraLowLatency: true, fps: 120, width: 1280, height: 720, bitrateKbps: 12000
+  }));
+});
+
 it('cancels host negotiation on going offline without relay fallback or a late engine launch', async () => {
   let signal: AbortSignal | undefined;
   mocks.punch.mockImplementation((...args: unknown[]) => {

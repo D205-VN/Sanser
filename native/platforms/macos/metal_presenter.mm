@@ -43,7 +43,7 @@ void renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> tex
     _context=[CIContext contextWithMTLDevice:device options:@{kCIContextCacheIntermediates:@NO}];
     if(!_commands || !_context) throw std::runtime_error("Unable to initialize Metal presentation");
     _colorSpace=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    _inFlight=dispatch_semaphore_create(2);
+    _inFlight=dispatch_semaphore_create(1);
     self.colorPixelFormat=MTLPixelFormatBGRA8Unorm;
     self.colorspace=_colorSpace;
     self.framebufferOnly=NO;

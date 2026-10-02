@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.1.8' as const;
+export const SANSER_VERSION = '2.1.9' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
@@ -239,6 +239,7 @@ export interface SessionMetrics {
 }
 
 export interface LaunchEngineRequest {
+  ultraLowLatency?: boolean;
   directCheck?: 'passed' | 'relay-selected' | 'timeout' | 'no-direct-route' | 'gather-failed' | 'signaling-failed' | 'failed';
   wireProtocol?: 'legacy' | 'snv2';
   kind: EngineKind;

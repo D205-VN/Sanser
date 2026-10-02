@@ -490,6 +490,11 @@ void makeProcessDpiAware() {
 #endif
 }
 
+// Only the control thread serializes these capture-thread measurements.
+std::atomic<double> gCaptureMs{-1}, gEncodeMs{-1}, gSendMs{-1};
+std::atomic<int> gGpuInput{-1};
+bool gUltraLowLatency = false;
+
 struct Options {
   std::filesystem::path outputDir = "captures";
   std::filesystem::path outputFile = "captures/capture_h264.mp4";
@@ -516,6 +521,7 @@ struct Options {
   bool framesProvided = false;
   bool hardwareEncoder = true;
   bool lowLatencyEncoder = true;
+  bool ultraLowLatency = false;
   bool udpPacing = true;
   bool listEncoders = false;
   bool remoteInputEnabled = true;
@@ -723,6 +729,9 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--encoder") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --encoder");
       options.encoderPreference = argv[++i];
+    } else if (arg == "--ultra-low-latency") {
+      options.ultraLowLatency = true;
+      gUltraLowLatency = true;
     } else if (arg == "--low-latency-encoder") {
       options.lowLatencyEncoder = true;
     } else if (arg == "--no-low-latency-encoder") {
@@ -2631,7 +2640,7 @@ int resetAllGamepadSlots(const char* reason) {
 }
 
 int releaseStaleGamepadSlotsIfNeeded(const char* stage) {
-  constexpr auto kGamepadWatchdogTimeout = std::chrono::milliseconds(1800);
+  const auto kGamepadWatchdogTimeout = std::chrono::milliseconds(gUltraLowLatency ? 300 : 1800);
   const std::vector<GamepadStaleSlot> staleSlots = takeStaleGamepadSlots(kGamepadWatchdogTimeout);
   int released = 0;
   for (const GamepadStaleSlot& slot : staleSlots) {
@@ -3829,6 +3838,10 @@ private:
           }
           hello
                 << ",\"hostUnixMicros\":" << unixMicros()
+               << ",\"captureMs\":" << gCaptureMs.load()
+               << ",\"encodeMs\":" << gEncodeMs.load()
+               << ",\"sendMs\":" << gSendMs.load()
+               << ",\"gpuInput\":" << gGpuInput.load()
                 << "}";
           sendControlJson(hello.str());
           sessionVerified_ = sessionToken_.empty() || canPacketAuth;
@@ -3853,6 +3866,10 @@ private:
           pong << "{\"type\":\"control-pong\""
                << ",\"sentSteadyMicros\":" << jsonUint64Value(payload, "sentSteadyMicros")
                << ",\"hostUnixMicros\":" << unixMicros()
+               << ",\"captureMs\":" << gCaptureMs.load()
+               << ",\"encodeMs\":" << gEncodeMs.load()
+               << ",\"sendMs\":" << gSendMs.load()
+               << ",\"gpuInput\":" << gGpuInput.load()
                << "}";
           sendControlJson(pong.str());
           flushGamepadRumbleEvents("control-ping");
@@ -4259,7 +4276,7 @@ public:
     }
     const auto found = packetCache_.find(packetId);
     if (found == packetCache_.end() || found->second.mediaGeneration != currentGeneration ||
-        std::chrono::steady_clock::now() - found->second.sentAt > std::chrono::milliseconds(120)) {
+        std::chrono::steady_clock::now() - found->second.sentAt > std::chrono::milliseconds(gUltraLowLatency ? 12 : 120)) {
       return result;
     }
 
@@ -5494,7 +5511,11 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   };
 
   auto encoder = makePacketEncoder(encodeOptions, "initial");
+  if (options.ultraLowLatency && !encoder->usingGpuInput()) {
+    std::cerr << "SNV1_GAME_MODE_WARNING GPU capture/encoding is unavailable; CPU fallback increases latency.\n";
+  }
   duplicator.setGpuCapture(encoder->usingGpuInput());
+  gGpuInput = encoder->usingGpuInput() ? 1 : 0;
   auto restartEncoder = [&](std::uint32_t bitrate, const char* reason) -> bool {
     auto nextOptions = encodeOptions;
     nextOptions.bitrate = bitrate;
@@ -5503,6 +5524,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
       encoder = std::move(replacement);
       encodeOptions = nextOptions;
       duplicator.setGpuCapture(encoder->usingGpuInput());
+      gGpuInput = encoder->usingGpuInput() ? 1 : 0;
       std::cerr << "SNV1_ENCODER_RESTART reason=" << reason
                 << " bitrate=" << bitrate
                 << " hardware=" << (encoder->usingHardware() ? "yes" : "no")
@@ -6136,6 +6158,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
         encoder.reset();
         encoder = makePacketEncoder(encodeOptions, "runtime-failure");
         duplicator.setGpuCapture(false);
+        gGpuInput = 0;
         drainOnly = false;
         lastEncoderRestartAt = std::chrono::steady_clock::now();
         encoder->requestKeyframe();
@@ -6433,6 +6456,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      const double encodeAvgMs = avgStageMs(statsEncodeMicros);
 	      const double packetizeAvgMs = avgStageMs(statsPacketizeMicros);
 	      const double sendAvgMs = avgStageMs(statsSendMicros);
+          gCaptureMs = captureAvgMs; gEncodeMs = encodeAvgMs; gSendMs = sendAvgMs;
 	      const double udpPacedAvgMs = statsFrames > 0
 	        ? statsUdpPacedMs / static_cast<double>(statsFrames)
 	        : 0.0;

@@ -187,6 +187,7 @@ export function createHostStore(): HostStore {
         return;
       }
       await launchEngine({
+        ultraLowLatency: stream.profile === 'competitive',
         directCheck,
         kind: 'host',
         wireProtocol: credentials.wireProtocol,

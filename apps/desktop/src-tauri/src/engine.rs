@@ -479,6 +479,9 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 // screenshot interval, overriding the requested stream FPS.
                 args.extend(["--interval-ms".into(), "0".into()]);
             }
+            if request.ultra_low_latency {
+                args.push("--ultra-low-latency".into());
+            }
             Ok(args)
         }
         EngineKind::Client => {
@@ -503,6 +506,9 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             }
             if cross_platform {
                 args.push("--snv2".into());
+            }
+            if request.ultra_low_latency {
+                args.push("--ultra-low-latency".into());
             }
             Ok(args)
         }
@@ -780,6 +786,7 @@ mod tests {
 
     fn request(kind: EngineKind) -> LaunchEngineRequest {
         LaunchEngineRequest {
+            ultra_low_latency: false,
             direct_check: None,
             kind,
             session_id: Some("018f4d89-5e8b-7a80-bd1e-cb7cb9f43189".into()),
@@ -800,6 +807,26 @@ mod tests {
             relay: false,
             wire_protocol: None,
         }
+    }
+
+    #[test]
+    fn ultra_latency_reaches_both_engines_without_reenabling_tcp_input() -> Result<(), DesktopError>
+    {
+        for kind in [EngineKind::Host, EngineKind::Client] {
+            let mut value = request(kind);
+            assert!(!build_args(&value)?.contains(&"--ultra-low-latency".into()));
+            value.ultra_low_latency = true;
+            for protocol in ["legacy", "snv2"] {
+                value.wire_protocol = Some(protocol.into());
+                let args = build_args(&value)?;
+                assert!(args.contains(&"--ultra-low-latency".into()));
+                if kind == EngineKind::Client {
+                    assert!(args.windows(2).any(|pair| pair == ["--control-port", "0"]));
+                    assert!(args.contains(&"--udp-video".into()));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

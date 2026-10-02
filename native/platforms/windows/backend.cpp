@@ -175,10 +175,27 @@ int runWindows(bool host,int argc,char** argv) {
   if(host) {
     DesktopDuplicator display; display.initialize(); Peer peer(options); Injector injector(display);
     VideoPacketEncodeOptions encoding; encoding.fps=options.fps; encoding.bitrate=options.bitrate; encoding.codec=VideoCodec::H264;
-    MfVideoPacketEncoder encoder(options.width,options.height,encoding); std::atomic<bool> force{true};
+    encoding.live=options.ultraLowLatency;
+    encoding.gpuDevice=options.ultraLowLatency ? display.gpuDevice() : nullptr;
+    MfVideoPacketEncoder encoder(options.width,options.height,encoding);
+    display.setGpuCapture(encoder.usingGpuInput());
+    if(options.ultraLowLatency && !encoder.usingGpuInput())
+      throw std::runtime_error("Ultra Low Latency requires GPU capture and hardware encoding on Windows. Choose Balanced if the GPU path is unavailable.");
+    std::atomic<bool> force{true};
     peer.onInput=[&](Input event) { injector.apply(event); }; peer.onKeyframe=[&] { force=true; }; PeerStop shutdown{peer}; peer.start();
     FrameBgra frame;
-    while(peer.running()) { const auto began=Clock::now(); if(peer.ready() && display.captureFrame(frame,100)) { if(force.exchange(false)) encoder.requestKeyframe(); for(auto& packet:encoder.encodeFrame(frame)) peer.video(Frame{std::move(packet.payload),options.width,options.height,packet.keyframe}); } std::this_thread::sleep_until(began+std::chrono::microseconds(1000000/options.fps)); }
+    const auto mediaStart=Clock::now();
+    while(peer.running()) {
+      const auto began=Clock::now();
+      if(peer.ready()) {
+        if(force.exchange(false)) encoder.requestKeyframe();
+        const bool captured=display.captureFrame(frame, options.ultraLowLatency ? 2 : 16);
+        const auto timestamp=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-mediaStart).count())+1;
+        auto packets=captured ? encoder.encodeFrame(frame,timestamp) : encoder.drain();
+        for(auto& packet:packets) peer.video(Frame{std::move(packet.payload),options.width,options.height,packet.keyframe});
+      }
+      std::this_thread::sleep_until(began+std::chrono::microseconds(1000000/options.fps));
+    }
     peer.stop(); return 0;
   }
   Peer peer(options); WindowState state; state.peer=&peer;

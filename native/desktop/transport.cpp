@@ -101,7 +101,8 @@ Options parseOptions(bool host, int argc, char** argv) {
     auto value = [&]() -> std::string { if (++i >= argc) throw std::runtime_error("Missing engine argument"); return argv[i]; };
     auto number = [&]() -> std::uint32_t { const auto v = value(); std::size_t used = 0; const auto n = std::stoul(v, &used); if (used != v.size() || n > std::numeric_limits<std::uint32_t>::max()) throw std::runtime_error("Invalid numeric engine argument"); return static_cast<std::uint32_t>(n); };
     if (arg == "--snv2" || arg == "--udp-video" || arg == "--low-latency-encoder" || arg == "--udp-pacing") continue;
-    if (arg == "--disable-input") o.input = false;
+    if (arg == "--ultra-low-latency") o.ultraLowLatency = true;
+    else if (arg == "--disable-input") o.input = false;
     else if (arg == "--disable-audio") continue;
     else if (arg == "--relative-mouse") throw std::runtime_error("SNV2 currently supports absolute mouse mode; select Auto or Absolute");
     else if (arg == "--encode-pipe") { if (value() != "h264") throw std::runtime_error("Cross-platform sessions require H.264"); }
@@ -194,9 +195,11 @@ Peer::Peer(const Options& o) : options_(o), codec_(o.token, o.host) {
   sockaddr_in local{}; local.sin_family = AF_INET; local.sin_port = htons(o.port); local.sin_addr.s_addr = htonl(INADDR_ANY);
   if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 || ::connect(fd, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) != 0) { closeSocket(fd); socket_=-1; throw std::runtime_error("Unable to bind/connect native UDP socket"); }
 #ifdef _WIN32
-  DWORD timeout=100; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+  DWORD timeout=2; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+  setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
 #else
-  timeval timeout{0,100000}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+  timeval timeout{0,2000}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+  setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
 #endif
   int buffer = 4*1024*1024; setsockopt(fd,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&buffer),sizeof(buffer));
 }
@@ -205,19 +208,33 @@ Peer::~Peer() { stop(); if (socket_ != -1) closeSocket(static_cast<Socket>(socke
   WSACleanup();
 #endif
 }
-void Peer::start() { if (running_.exchange(true)) return; lastReceived_=Clock::now(); worker_=std::thread([this] { loop(); }); }
-void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; if (worker_.joinable()) worker_.join(); }
+void Peer::start() { if (running_.exchange(true)) return; lastReceived_=Clock::now(); sender_=std::thread([this] { sendLoop(); }); worker_=std::thread([this] { loop(); }); }
+void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); }
 void Peer::datagram(const Bytes& b) { ::send(static_cast<Socket>(socket_), reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()), 0); }
 void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable) {
   std::lock_guard lock(sendMutex_);
   if (stream > 2 || (reliable && pending_.size() >= 64)) { running_=false; return; }
   snv2::Header h; h.packetType=type; h.streamId=stream; h.sequence=++sequences_[stream]; h.frameId=frame; h.flags=flags; h.keyId=generation_;
-  auto b=codec_.seal(h,body); datagram(b);
-  if (reliable) pending_.emplace(h.sequence, Pending{std::move(b),Clock::now(),1});
+  auto b=codec_.seal(h,body);
+  const auto now = Clock::now();
+  if (type == snv2::PacketType::Disconnect) { datagram(b); return; }
+  const auto lane = type == snv2::PacketType::Video ? TxScheduler::Video
+    : reliable ? TxScheduler::InputLane
+    : type == snv2::PacketType::Audio ? TxScheduler::Audio : TxScheduler::Control;
+  if (type == snv2::PacketType::MouseMove) tx_.latestInput({b, now, 0});
+  else if (!tx_.push(lane, {b, now, frame})) {
+    if (lane == TxScheduler::Video) { tx_.clearVideo(); outgoingNeedsKeyframe_ = true; }
+    else running_ = false; // Stop/reset rather than silently losing key-up.
+    return;
+  }
+  if (reliable) pending_.emplace(h.sequence, Pending{std::move(b),now,now,1,false});
+  sendReady_.notify_one();
 }
 void Peer::video(const Frame& frame) {
   std::lock_guard lock(videoMutex_);
   if (!ready_ || !running_) return;
+  if (outgoingNeedsKeyframe_ && !frame.keyframe) { if (onKeyframe) onKeyframe(); return; }
+  if (frame.keyframe) outgoingNeedsKeyframe_ = false;
   Bytes bytes; u32(bytes,frame.width); u32(bytes,frame.height); bytes.insert(bytes.end(),frame.data.begin(),frame.data.end());
   if (bytes.size()>maxFrame) return;
   const auto id=++frame_; const auto count=(bytes.size()+chunkSize-1)/chunkSize;
@@ -225,7 +242,7 @@ void Peer::video(const Frame& frame) {
     Bytes fragment; u16(fragment,static_cast<std::uint16_t>(i)); u16(fragment,static_cast<std::uint16_t>(count)); u32(fragment,static_cast<std::uint32_t>(bytes.size()));
     const auto offset=i*chunkSize; fragment.insert(fragment.end(),bytes.begin()+static_cast<std::ptrdiff_t>(offset),bytes.begin()+static_cast<std::ptrdiff_t>(std::min(offset+chunkSize,bytes.size())));
     transmit(snv2::PacketType::Video,fragment,1,id,frame.keyframe ? snv2::kFlagKeyFrame : 0);
-    if (i%8==7) std::this_thread::sleep_for(std::chrono::microseconds(150));
+    if (outgoingNeedsKeyframe_) { if (onKeyframe) onKeyframe(); break; }
   }
 }
 void Peer::input(const Input& input) {
@@ -234,7 +251,7 @@ void Peer::input(const Input& input) {
   transmit(reliable ? snv2::PacketType::Keyboard : snv2::PacketType::MouseMove,encodeInput(input),reliable ? 2 : 0,0,reliable ? snv2::kFlagAcknowledgementRequired : 0,reliable);
 }
 void Peer::requestKeyframe() {
-  const auto now=Clock::now(); if (now-lastKeyframe_<std::chrono::milliseconds(300)) return;
+  const auto now=Clock::now(); if (now-lastKeyframe_<std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 300)) return;
   lastKeyframe_=now; transmit(snv2::PacketType::KeyframeRequest,{});
 }
 void Peer::process(const Bytes& bytes) {
@@ -244,15 +261,28 @@ void Peer::process(const Bytes& bytes) {
     if(previousGenerations_.contains(h.keyId)) return;
     if(previousGenerations_.size()>=16) { running_=false; return; }
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
-    peerGeneration_=h.keyId; for(auto& window:replay_) window=ReplayWindow{};
+    peerGeneration_=h.keyId; peerSack_=false; for(auto& window:replay_) window=ReplayWindow{};
     reassembler_=Reassembler{}; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
     if(options_.host && onInput) onInput(Input{});
   }
-  if (h.streamId==2 && h.sequence<=deliveredInput_) { Bytes ack; for(int i=7;i>=0;--i) ack.push_back(static_cast<std::uint8_t>(deliveredInput_>>(i*8))); transmit(snv2::PacketType::NetworkFeedback,ack); return; }
-  if (!replay_[h.streamId].accept(h.sequence)) return;
+  if (h.streamId==2 && h.sequence<=deliveredInput_) { acknowledgeInput(); return; }
+  if (!replay_[h.streamId].accept(h.sequence)) { if (h.streamId==2) acknowledgeInput(); return; }
   lastReceived_=Clock::now(); ready_=true;
+  if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
   if (h.packetType==snv2::PacketType::Disconnect) { running_=false; return; }
-  if (h.packetType==snv2::PacketType::NetworkFeedback && b.size()==8) { std::uint64_t ack=0; for(auto n:b) ack=(ack<<8)|n; std::lock_guard lock(sendMutex_); pending_.erase(pending_.begin(),pending_.upper_bound(ack)); return; }
+  if (h.packetType==snv2::PacketType::NetworkFeedback && (b.size()==8 || b.size()==16)) {
+    std::uint64_t ack=0, mask=0;
+    for (std::size_t i=0;i<8;++i) ack=(ack<<8)|b[i];
+    for (std::size_t i=8;i<b.size();++i) mask=(mask<<8)|b[i];
+    std::lock_guard lock(sendMutex_);
+    if (ack > sequences_[2]) return;
+    pending_.erase(pending_.begin(),pending_.upper_bound(ack));
+    for (auto& [sequence,p] : pending_) {
+      const auto offset=sequence-ack-1;
+      if (offset<64 && (mask & (std::uint64_t{1}<<offset))) p.sacked=true;
+    }
+    return;
+  }
   if (h.packetType==snv2::PacketType::KeyframeRequest && options_.host) { if(onKeyframe) onKeyframe(); return; }
   if (h.packetType==snv2::PacketType::Video && !options_.host && h.streamId==1) {
     auto frame=reassembler_.push(h,b);
@@ -269,26 +299,85 @@ void Peer::process(const Bytes& bytes) {
       if(h.sequence>deliveredInput_+64) { running_=false; return; }
       receivedInputs_.emplace(h.sequence,*event);
       while(receivedInputs_.contains(deliveredInput_+1)) { const auto next=receivedInputs_.at(++deliveredInput_); if(onInput) onInput(next); receivedInputs_.erase(deliveredInput_); }
-      Bytes ack; for(int i=7;i>=0;--i) ack.push_back(static_cast<std::uint8_t>(deliveredInput_>>(i*8))); transmit(snv2::PacketType::NetworkFeedback,ack);
+      acknowledgeInput();
     } else if(event->kind==Input::Move && h.sequence>lastMouse_) {
       lastMouse_=h.sequence;
       if(onInput) onInput(*event);
     }
   }
 }
+void Peer::acknowledgeInput() {
+  Bytes ack;
+  for(int i=7;i>=0;--i) ack.push_back(static_cast<std::uint8_t>(deliveredInput_>>(i*8)));
+  if (peerSack_) {
+    std::uint64_t mask=0;
+    for (const auto& [sequence,event] : receivedInputs_) {
+      (void)event;
+      const auto offset=sequence-deliveredInput_-1;
+      if(offset<64) mask|=std::uint64_t{1}<<offset;
+    }
+    for(int i=7;i>=0;--i) ack.push_back(static_cast<std::uint8_t>(mask>>(i*8)));
+  }
+  transmit(snv2::PacketType::NetworkFeedback,ack);
+}
+void Peer::sendLoop() {
+  auto creditAt=Clock::now();
+  constexpr double maxBurstBytes=8*1500;
+  double credit=maxBurstBytes;
+  // Bitrate describes encoded video. Budget framing overhead separately.
+  const double bytesPerSecond=static_cast<double>(options_.bitrate)*1.2/8.0;
+  try {
+    while(running_) {
+      std::optional<TxScheduler::Packet> packet;
+      {
+        std::unique_lock lock(sendMutex_);
+        const auto now=Clock::now();
+        credit=std::min(maxBurstBytes, credit+std::chrono::duration<double>(now-creditAt).count()*bytesPerSecond);
+        creditAt=now;
+        const auto videoBytes=tx_.nextVideoBytes();
+        packet=tx_.pop(credit>=static_cast<double>(videoBytes));
+        if(!packet) {
+          const auto nextVideo=now+std::chrono::microseconds(static_cast<std::uint64_t>(
+            std::max(1.0,(static_cast<double>(videoBytes)-credit)*1000000.0/bytesPerSecond)));
+          sendReady_.wait_until(lock, tx_.hasVideo() ? nextVideo : now+std::chrono::milliseconds(20),
+            [&] { return !running_ || tx_.hasPriority() || (tx_.hasVideo() && Clock::now()>=nextVideo); });
+          continue;
+        }
+        if (packet->frame && now-packet->queued>std::chrono::milliseconds(options_.ultraLowLatency ? 40 : 100)) {
+          tx_.clearVideo(); outgoingNeedsKeyframe_=true; continue;
+        }
+      }
+      datagram(packet->bytes);
+      if (packet->frame) {
+        credit-=static_cast<double>(packet->bytes.size());
+      }
+    }
+  } catch (...) { running_=false; }
+}
 void Peer::loop() {
   auto lastHello=Clock::time_point{};
   try {
     while(running_ && !stopRequested) {
       const auto now=Clock::now();
-      if(now-lastHello>std::chrono::milliseconds(500)) { transmit(snv2::PacketType::Keepalive,{}); lastHello=now; }
-      if(now-lastReceived_>std::chrono::seconds(15)) { running_=false; break; }
-      { std::lock_guard lock(sendMutex_); for(auto& [seq,p]:pending_) { (void)seq; if(now-p.sent>std::chrono::milliseconds(80)) { if(++p.attempts>20) { running_=false; break; } datagram(p.bytes); p.sent=now; } } }
+      if(now-lastHello>std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 500)) { transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'}); lastHello=now; }
+      if(now-lastReceived_>std::chrono::milliseconds(options_.ultraLowLatency ? 1000 : 15000)) { running_=false; break; }
+      { std::lock_guard lock(sendMutex_);
+        for(auto& [seq,p]:pending_) {
+          (void)seq;
+          const auto deadline=std::chrono::milliseconds(options_.ultraLowLatency ? 120 : 1600);
+          if(now-p.created>deadline) { running_=false; break; }
+          if(!p.sacked && now-p.sent>std::chrono::milliseconds(options_.ultraLowLatency ? 12 : 80)) {
+            if (!tx_.push(TxScheduler::InputLane, {p.bytes, now, 0})) { running_=false; break; }
+            ++p.attempts; p.sent=now; sendReady_.notify_one();
+          }
+        }
+      }
       std::array<char,1500> buffer{}; const auto received=recv(static_cast<Socket>(socket_),buffer.data(),static_cast<int>(buffer.size()),0);
       if(received>0) process(Bytes(buffer.begin(),buffer.begin()+received));
     }
   } catch (...) { running_=false; }
-  running_=false; ready_=false;
+  try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {}
+  running_=false; ready_=false; sendReady_.notify_all();
   if(options_.host && onInput) onInput(Input{});
   if(onStopped) onStopped();
 }

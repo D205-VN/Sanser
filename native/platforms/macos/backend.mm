@@ -264,7 +264,7 @@ int runMac(bool host,int argc,char** argv) {
         peer.onInput=[&](Input event) { injector.apply(event); }; peer.onKeyframe=[&] { encoder.keyframe(); };
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
-        SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=3; config.showsCursor=YES; config.pixelFormat=kCVPixelFormatType_32BGRA;
+        SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3; config.showsCursor=YES; config.pixelFormat=kCVPixelFormatType_32BGRA;
         SCStream* stream=[[SCStream alloc] initWithFilter:filter configuration:config delegate:capture];
         dispatch_queue_t queue=dispatch_queue_create("sanser.capture",DISPATCH_QUEUE_SERIAL);
         CaptureStop captureStop{stream,capture,queue};
@@ -285,6 +285,7 @@ int runMac(bool host,int argc,char** argv) {
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO; window.title=@"Sanser · Remote desktop · Control+Option+Escape releases input";
     SanserRemoteView* view=[[SanserRemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+    if (options.ultraLowLatency) { ((CAMetalLayer*)view.layer).displaySyncEnabled=NO; }
     window.contentView=view; window.acceptsMouseMovedEvents=YES; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];
     Peer* peerPointer=&peer;
     id observer=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { peerPointer->input(Input{}); view.released=YES; }];
@@ -292,7 +293,7 @@ int runMac(bool host,int argc,char** argv) {
     peer.start();
     while(window.visible && peer.running() && decodeFailures<10) {
       @autoreleasepool {
-        NSEvent* event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.008] inMode:NSDefaultRunLoopMode dequeue:YES]; if(event) [NSApp sendEvent:event];
+        NSEvent* event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:options.ultraLowLatency ? 0.001 : 0.008] inMode:NSDefaultRunLoopMode dequeue:YES]; if(event) [NSApp sendEvent:event];
         auto pixels=decoder.take(); if(pixels) { [view presentPixels:pixels]; CVPixelBufferRelease(pixels); }
         [window displayIfNeeded];
       }

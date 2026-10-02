@@ -34,6 +34,8 @@ pub enum VideoCodec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[allow(dead_code, clippy::struct_excessive_bools)]
 pub struct LaunchEngineRequest {
+    #[serde(default)]
+    pub ultra_low_latency: bool,
     pub kind: EngineKind,
     pub session_id: Option<String>,
     pub address: Option<String>,

@@ -179,7 +179,7 @@
           <div class="profile-grid">
             {#each [
               ['auto', 'Auto', 'Up to 1920 × 1200 at 60 FPS · 25 Mb/s.'],
-              ['competitive', 'Competitive', '720p at 120 FPS · 12 Mb/s.'],
+              ['competitive', 'Ultra Low Latency', '720p at 120 FPS · 12 Mb/s. Latest frame, short recovery deadlines.'],
               ['balanced', 'Balanced', '1080p at 60 FPS · 20 Mb/s.'],
               ['quality', 'Quality', '1440p at 60 FPS · 40 Mb/s.'],
               ['custom', 'Custom', 'Use Video settings. The host controls custom capture quality.']

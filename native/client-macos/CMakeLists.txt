@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_client_macos VERSION 2.1.8 LANGUAGES CXX OBJCXX)
+project(sanser_client_macos VERSION 2.1.9 LANGUAGES CXX OBJCXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -77,3 +77,12 @@ target_compile_options(sanser-client-macos PRIVATE
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../desktop ${CMAKE_BINARY_DIR}/cross-platform)
 target_link_libraries(sanser-client-macos PRIVATE sanser-desktop-native)
+
+if(BUILD_TESTING)
+  add_executable(sanser-client-latency-test latency_test.mm)
+  get_target_property(client_libraries sanser-client-macos LINK_LIBRARIES)
+  target_link_libraries(sanser-client-latency-test PRIVATE ${client_libraries})
+  target_include_directories(sanser-client-latency-test PRIVATE ../common)
+  target_compile_options(sanser-client-latency-test PRIVATE -fobjc-arc)
+  add_test(NAME sanser-client-latency-test COMMAND sanser-client-latency-test)
+endif()

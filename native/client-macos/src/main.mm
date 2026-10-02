@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "latency_policy.h"
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
 #import <CoreAudio/CoreAudio.h>
@@ -53,6 +54,17 @@
 #include <unistd.h>
 
 namespace {
+
+sanser::LatencyPolicy gLatencyPolicy;
+std::atomic<bool> gShowLatencyOverlay{false};
+bool gOverlayShortcutDown = false;
+struct LiveLatency {
+  std::atomic<double> capture{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1};
+  std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
+  std::atomic<int> gpuInput{-1};
+  std::atomic<std::uint64_t> hostUpdated{0}, inputUpdated{0}, decodeUpdated{0};
+} gLiveLatency;
+
 
 constexpr std::uint32_t kSnvCodecH264 = 1;
 constexpr std::uint32_t kSnvCodecHevc = 2;
@@ -144,6 +156,7 @@ void printHelp() {
     << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
     << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
     << "  --listen-render-snv P Listen over TCP, render with Metal, send native input back\n"
+    << "  --ultra-low-latency Latest decoded frame, zero base pacing, 12 ms UDP gap deadline\n"
     << "  --udp-video      Listen for SNU1/SNU2 UDP video instead of TCP video\n"
     << "  --session-token T Require host control proof and HMAC-authenticated control packets\n"
     << "  --control-port P  Dedicated native input/stats TCP port; defaults to render port + 1, 0 disables\n"
@@ -657,6 +670,19 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if ((fd_ < 0 && (!isUdp_ || udpFd_ < 0)) || stopped_) return false;
     if (authRequired_ && !controlAuthenticated_ && !isAllowedBeforeAuth(json)) return false;
+    if (gLatencyPolicy.ultra && inputTypeName(json) == "gamepad-state") {
+      const auto slot = jsonIntField(json, "index");
+      for (auto it = queue_.begin(); it != queue_.end();) {
+        if (inputTypeName(*it) == "gamepad-state" && jsonIntField(*it, "index") == slot) it = queue_.erase(it);
+        else ++it;
+      }
+      if (jsonBoolField(json, "connected")) {
+        queue_.push_back(json);
+        condition_.notify_one();
+        return true;
+      }
+      // Disconnect is reliable; clear the old snapshot before queueing it.
+    }
     if (isPriorityInput(json)) {
       const MoveFlushResult flush = flushPointerMovesToUrgentLocked();
       trimUrgentQueueLocked();
@@ -959,7 +985,7 @@ private:
   }
 
   static bool isBatchable(const std::string& json) {
-    return !isControlPing(json) && !isStreamStats(json) && !isUdpRepairStats(json) && !isRenderStats(json) &&
+    return !(gLatencyPolicy.ultra && ((inputTypeName(json) == "gamepad-state" && jsonBoolField(json, "connected")) || inputTypeName(json) == "input-reset")) && !isControlPing(json) && !isStreamStats(json) && !isUdpRepairStats(json) && !isRenderStats(json) &&
            !isKeyframeRequest(json) && !isVideoNack(json) && !isControlHello(json);
   }
 
@@ -1184,7 +1210,7 @@ private:
       UdpEndpoint hostEndpoint{};
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait_for(lock, retryPollInterval_, [&] {
+        condition_.wait_for(lock, std::chrono::milliseconds(gLatencyPolicy.ultra ? 2 : 20), [&] {
           const auto now = std::chrono::steady_clock::now();
           return stopped_ || ((fd_ >= 0 || (isUdp_ && udpFd_ >= 0)) && (!urgentQueue_.empty() || !queue_.empty() || hasRetryWorkLocked(now)));
         });
@@ -1308,7 +1334,7 @@ private:
   bool hasRetryWorkLocked(std::chrono::steady_clock::time_point now) const {
     if (!canRetryPendingLocked()) return false;
     for (const auto& entry : pendingBatches_) {
-      if (now - entry.second.lastSentAt >= retryDelay_) return true;
+      if (now - entry.second.lastSentAt >= retryDelay()) return true;
     }
     return false;
   }
@@ -1326,7 +1352,7 @@ private:
     for (const auto& entry : pendingBatches_) {
       const double ageMs = std::chrono::duration<double, std::milli>(now - entry.second.lastSentAt).count();
       oldestMs = std::max(oldestMs, ageMs);
-      if (ageMs >= static_cast<double>(retryDelay_.count())) {
+      if (ageMs >= static_cast<double>(retryDelay().count())) {
         retryReady += 1;
       }
       if (entry.second.priority) {
@@ -1381,11 +1407,19 @@ private:
                           bool& priority) {
     if (!canRetryPendingLocked()) return false;
     for (auto it = pendingBatches_.begin(); it != pendingBatches_.end();) {
-      if (now - it->second.lastSentAt < retryDelay_) {
+      if (now - it->second.lastSentAt < retryDelay()) {
         ++it;
         continue;
       }
       if (it->second.attempts >= maxBatchRetryAttempts_) {
+        if (gLatencyPolicy.ultra) {
+          // A key-up that missed every ACK must not leave a held key behind.
+          urgentQueue_.clear(); queue_.clear(); pendingBatches_.clear();
+          urgentQueue_.push_front("{\"type\":\"input-reset\",\"reason\":\"retry-deadline\"}");
+          condition_.notify_one();
+          std::cerr << "SNINPUT_RESET reason=reliable-input-deadline\n";
+          return false;
+        }
         std::cout << "SNINPUT_RETRY_DROP sequence=" << it->first
                   << " attempts=" << it->second.attempts
                   << " events=" << it->second.events
@@ -1542,8 +1576,7 @@ private:
   static constexpr std::uint32_t maxBatchRetryAttempts_ = 4;
   static constexpr auto backpressurePriorityAge_ = std::chrono::milliseconds(160);
   static constexpr auto backpressurePendingAge_ = std::chrono::milliseconds(450);
-  static constexpr auto retryDelay_ = std::chrono::milliseconds(85);
-  static constexpr auto retryPollInterval_ = std::chrono::milliseconds(20);
+  static std::chrono::milliseconds retryDelay() { return std::chrono::milliseconds(gLatencyPolicy.ultra ? 12 : 85); }
 };
 
 class MediaReplayWindow {
@@ -2350,7 +2383,7 @@ void pollAndSendGamepadState() {
     }
 
     const bool changed = !hadSnapshot || gamepadSnapshotChanged(snapshot, previous);
-    const bool heartbeat = snapshot.connected && now - lastSentAts[index] >= std::chrono::milliseconds(500);
+    const bool heartbeat = snapshot.connected && now - lastSentAts[index] >= std::chrono::milliseconds(gLatencyPolicy.ultra ? 50 : 500);
     const bool disconnectNotice = hadSnapshot && previous.connected && !snapshot.connected;
     if (!changed && !heartbeat && !disconnectNotice) continue;
 
@@ -2534,6 +2567,7 @@ bool sendKeyframeRequest(const std::string& reason,
                          std::uint64_t decodeErrors,
                          std::chrono::milliseconds cooldown = std::chrono::milliseconds(500),
                          bool* suppressedOut = nullptr) {
+  if (gLatencyPolicy.ultra) cooldown = std::min(cooldown, std::chrono::milliseconds(100));
   static std::mutex mutex;
   static auto lastSentAt = std::chrono::steady_clock::time_point{};
   static std::uint64_t requestSequence = 0;
@@ -2764,6 +2798,12 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
   const double rttMs = static_cast<double>(steadyMicros() - sentSteadyMicros) / 1000.0;
   recordControlRtt(rttMs);
   if (payload.find("\"type\":\"control-pong\"") != std::string::npos) {
+    gLiveLatency.rtt = rttMs;
+    gLiveLatency.capture = jsonDoubleValue(payload, "captureMs", -1);
+    gLiveLatency.encode = jsonDoubleValue(payload, "encodeMs", -1);
+    gLiveLatency.send = jsonDoubleValue(payload, "sendMs", -1);
+    gLiveLatency.gpuInput = static_cast<int>(jsonDoubleValue(payload, "gpuInput", -1));
+    gLiveLatency.hostUpdated = steadyMicros();
     std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
     return HostControlEvent::Pong;
   }
@@ -2773,6 +2813,8 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
     const std::uint64_t events = jsonUint64Value(payload, "events");
     const std::uint64_t processedMicros = jsonUint64Value(payload, "processedMicros");
     const double hostProcessMs = static_cast<double>(processedMicros) / 1000.0;
+    gLiveLatency.inputRtt = rttMs;
+    gLiveLatency.inputUpdated = steadyMicros();
     const bool duplicate = jsonBoolValue(payload, "duplicate");
     const bool stale = jsonBoolValue(payload, "stale");
     const bool sessionMismatch = jsonBoolValue(payload, "sessionMismatch");
@@ -3574,6 +3616,7 @@ struct ClientStreamStats {
       const std::uint64_t missed = packet.sequence - lastSequence - 1;
       windowDropped += missed;
       totalDropped += missed;
+      if (gLatencyPolicy.ultra) waitingForLatencyKeyframe = true;
     }
     lastSequence = packet.sequence;
     hasLastSequence = true;
@@ -3584,6 +3627,7 @@ struct ClientStreamStats {
       const double expectedMs = static_cast<double>(packet.durationMicros) / 1000.0;
       const double sampleJitter = std::abs(actualMs - expectedMs);
       jitterMs = jitterMs == 0.0 ? sampleJitter : (jitterMs * 0.85 + sampleJitter * 0.15);
+      gLiveLatency.jitter = jitterMs;
     }
     lastArrivalMicros = arrival;
 
@@ -3628,11 +3672,16 @@ struct ClientStreamStats {
       packet.durationMicros > 0 ? packet.durationMicros : 16667,
       4000,
       50000);
-    const std::uint64_t maxLateMicros = std::clamp<std::uint64_t>(
+    const std::uint64_t maxLateMicros = gLatencyPolicy.ultra ? 15000 : std::clamp<std::uint64_t>(
       durationMicros * 7,
       70000,
       180000);
 
+    if (gLatencyPolicy.ultra && waitingForLatencyKeyframe && !keyframe) {
+      ++keyframeWaitDropped;
+      reason = "waiting-for-keyframe";
+      return true;
+    }
     if (!hasLatencyBase || packet.timestampMicros == 0 ||
         packet.timestampMicros + maxLateMicros < latencyBaseMediaMicros ||
         keyframe) {
@@ -4211,7 +4260,7 @@ private:
   void prune(UdpVideoStats& stats) {
     const auto now = std::chrono::steady_clock::now();
     for (auto it = assemblies_.begin(); it != assemblies_.end();) {
-      if (now - it->second.createdAt > std::chrono::milliseconds(850)) {
+      if (now - it->second.createdAt > std::chrono::milliseconds(gLatencyPolicy.ultra ? 80 : 850)) {
         recordNackPacket(stats, it->first.packetId);
         it = assemblies_.erase(it);
         stats.droppedAssemblies += 1;
@@ -4284,7 +4333,7 @@ public:
       const bool neverSent = missing.sendCount == 0;
       const bool retryDue = missing.sendCount < maxRetries_ &&
         now - missing.lastSentAt >= std::chrono::milliseconds(55);
-      if (neverSent || retryDue) {
+      if ((neverSent || retryDue) && now - missing.firstSeenAt < std::chrono::milliseconds(gLatencyPolicy.repairDeadlineMs())) {
         packetIds.push_back(item.first);
         if (packetIds.size() >= maxBatchPackets_) break;
       }
@@ -4311,7 +4360,8 @@ public:
     bool needsKeyframe = pending_.size() >= maxPendingPackets_;
     for (const auto& item : pending_) {
       const MissingPacket& missing = item.second;
-      if ((missing.sendCount >= maxRetries_ &&
+      if ((gLatencyPolicy.ultra && now - missing.firstSeenAt >= std::chrono::milliseconds(gLatencyPolicy.repairDeadlineMs())) ||
+          (missing.sendCount >= maxRetries_ &&
            now - missing.firstSeenAt >= std::chrono::milliseconds(450)) ||
           now - missing.firstSeenAt >= std::chrono::milliseconds(1100)) {
         needsKeyframe = true;
@@ -4406,8 +4456,8 @@ public:
     return true;
   }
 
-  bool push(SnvPacket&& packet, std::uint64_t mediaEpoch, bool rekeyGrace) {
-    const auto now = std::chrono::steady_clock::now();
+  bool push(SnvPacket&& packet, std::uint64_t mediaEpoch, bool rekeyGrace,
+            std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
     if (hasActiveMediaEpoch_ && mediaEpoch < activeMediaEpoch_) {
       windowEpochStaleDrops_ += 1;
       return false;
@@ -4437,7 +4487,8 @@ public:
     return true;
   }
 
-  bool popReady(SnvPacket& packet) {
+  bool popReady(SnvPacket& packet,
+                std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
     if (packets_.empty()) return false;
     dropStaleEpochPackets();
     if (packets_.empty()) return false;
@@ -4459,9 +4510,8 @@ public:
       return true;
     }
 
-    const auto now = std::chrono::steady_clock::now();
     auto oldest = packets_.begin();
-    const bool holdExpired = now - oldest->second.arrivedAt >= holdDuration_;
+    const bool holdExpired = now - oldest->second.arrivedAt >= std::chrono::milliseconds(gLatencyPolicy.jitterHoldMs());
     const bool bufferFull = packets_.size() >= maxBufferedPackets_;
     if (!holdExpired && !bufferFull) {
       windowHeldTicks_ += 1;
@@ -4554,7 +4604,7 @@ private:
   std::uint64_t activeMediaEpoch_ = 0;
   bool hasActiveMediaEpoch_ = false;
   static constexpr std::size_t maxBufferedPackets_ = 90;
-  static constexpr auto holdDuration_ = std::chrono::milliseconds(70);
+
 };
 
 struct UdpAudioStats {
@@ -5817,11 +5867,18 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)keyDown:(NSEvent*)event {
+  if ([event keyCode] == 100 && ([event modifierFlags] & NSEventModifierFlagControl) &&
+      ([event modifierFlags] & NSEventModifierFlagOption)) {
+    gOverlayShortcutDown = true;
+    if (![event isARepeat]) gShowLatencyOverlay = !gShowLatencyOverlay.load();
+    return;
+  }
   if (sendCommandShortcut(event)) return;
   logKeyEvent("key-down", event);
 }
 
 - (void)keyUp:(NSEvent*)event {
+  if ([event keyCode] == 100 && gOverlayShortcutDown) { gOverlayShortcutDown = false; return; }
   logKeyEvent("key-up", event);
 }
 
@@ -5995,12 +6052,12 @@ std::uint64_t normalizedVideoDurationMicros(std::uint64_t durationMicros) {
 
 std::uint64_t videoPacingTargetDelayMicros(std::uint64_t durationMicros) {
   const std::uint64_t normalized = normalizedVideoDurationMicros(durationMicros);
-  return std::clamp<std::uint64_t>(normalized / 2, 6000, 18000);
+  return gLatencyPolicy.baseDelay(normalized);
 }
 
 std::uint64_t videoPacingAdaptiveDelayMaxMicros(std::uint64_t durationMicros) {
   const std::uint64_t normalized = normalizedVideoDurationMicros(durationMicros);
-  return std::clamp<std::uint64_t>(normalized * 2, 12000, 24000);
+  return gLatencyPolicy.adaptiveLimit(normalized);
 }
 
 std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
@@ -6011,6 +6068,11 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 @interface SanserVideoRenderer : NSObject <MTKViewDelegate>
 - (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view;
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer metadata:(const DecodedVideoFrameMetadata*)metadata;
+#ifdef SANSER_LATENCY_TEST
+- (instancetype)initForQueueTest;
+- (std::size_t)testQueueSize;
+- (std::uint64_t)testQueuedSequence;
+#endif
 @end
 
 @implementation SanserVideoRenderer {
@@ -6022,6 +6084,10 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   std::uint64_t _currentQueuedAtMicros;
   std::deque<QueuedVideoFrame> _frameQueue;
   NSLock* _lock;
+  NSTextField* _latencyOverlay;
+  __weak MTKView* _renderView;
+  dispatch_semaphore_t _renderSlot;
+  bool _drawScheduled;
   std::uint64_t _submittedBuffers;
   std::uint64_t _renderedBuffers;
   std::uint64_t _drawCalls;
@@ -6041,6 +6107,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   std::uint64_t _pacingBaseSteadyMicros;
   std::uint64_t _lastSubmittedMediaMicros;
   std::uint64_t _lastSubmittedPacketSequence;
+  std::uint64_t _lastDecodedSubmissionMicros;
   double _renderAgeSumMs;
   double _renderAgeMaxMs;
   std::uint64_t _renderAgeSamples;
@@ -6051,6 +6118,16 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   std::chrono::steady_clock::time_point _statsStartedAt;
 }
 
+#ifdef SANSER_LATENCY_TEST
+- (instancetype)initForQueueTest {
+  self = [super init];
+  if (self) { _lock = [[NSLock alloc] init]; _drawScheduled = true; }
+  return self;
+}
+- (std::size_t)testQueueSize { return _frameQueue.size(); }
+- (std::uint64_t)testQueuedSequence { return _frameQueue.empty() ? 0 : _frameQueue.front().packetSequence; }
+#endif
+
 - (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view {
   self = [super init];
   if (!self) return nil;
@@ -6060,6 +6137,17 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   _lock = [[NSLock alloc] init];
   _statsStartedAt = std::chrono::steady_clock::now();
   _lastTargetDelayMicros = videoPacingTargetDelayMicros(16667);
+  _renderView = view;
+  _renderSlot = dispatch_semaphore_create(1);
+  _latencyOverlay = [NSTextField labelWithString:@"Waiting for latency measurements…"];
+  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 310, 365, 292);
+  _latencyOverlay.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
+  _latencyOverlay.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightMedium];
+  _latencyOverlay.textColor = NSColor.whiteColor;
+  _latencyOverlay.backgroundColor = [NSColor colorWithWhite:0.05 alpha:0.88];
+  _latencyOverlay.drawsBackground = YES;
+  _latencyOverlay.hidden = !gShowLatencyOverlay.load();
+  [view addSubview:_latencyOverlay];
 
   CVReturn cacheResult = CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device, nullptr, &_textureCache);
   if (cacheResult != kCVReturnSuccess || !_textureCache) {
@@ -6109,7 +6197,9 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     return nil;
   }
 
-  std::cout << "SNV1_PACING_CONFIG mode=media-timeline minDelayMs=6.0 maxDelayMs=18.0 adaptiveMaxMs=24.0 maxQueue=5 maxLateFrames=3\n";
+  std::cout << (gLatencyPolicy.ultra
+    ? "SNV1_PACING_CONFIG mode=ultra-low-latency baseDelayMs=0 adaptiveMaxMs=4 maxQueue=1\n"
+    : "SNV1_PACING_CONFIG mode=media-timeline minDelayMs=6 maxDelayMs=18 adaptiveMaxMs=24 maxQueue=5\n");
   return self;
 }
 
@@ -6143,9 +6233,23 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     frame.hostUnixMicros = metadata->hostUnixMicros;
     frame.decodeSubmittedAtMicros = metadata->decodeSubmittedAtMicros;
   }
+  if (frame.decodeSubmittedAtMicros > 0 && frame.queuedAtMicros >= frame.decodeSubmittedAtMicros) {
+    const double sample = (frame.queuedAtMicros - frame.decodeSubmittedAtMicros) / 1000.0;
+    const double previous = gLiveLatency.decode.load();
+    gLiveLatency.decode = previous < 0 ? sample : previous * 0.8 + sample * 0.2;
+    gLiveLatency.decodeUpdated = frame.queuedAtMicros;
+  }
   frame.durationMicros = normalizedVideoDurationMicros(frame.durationMicros);
   [_lock lock];
   frame.sequence = ++_submittedBuffers;
+  if (gLatencyPolicy.ultra && frame.decodeSubmittedAtMicros > 0 &&
+      frame.decodeSubmittedAtMicros <= _lastDecodedSubmissionMicros) {
+    CVPixelBufferRelease(frame.pixelBuffer);
+    ++_droppedLateFrames;
+    [_lock unlock];
+    return;
+  }
+  _lastDecodedSubmissionMicros = frame.decodeSubmittedAtMicros;
   const std::uint64_t baseTargetDelayMicros = videoPacingTargetDelayMicros(frame.durationMicros);
   const std::uint64_t targetDelayMicros = baseTargetDelayMicros +
     std::min<std::uint64_t>(_adaptiveDelayMicros, videoPacingAdaptiveDelayMaxMicros(frame.durationMicros));
@@ -6181,6 +6285,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     frame.presentAtMicros = frame.queuedAtMicros + targetDelayMicros;
   }
 
+  frame.presentAtMicros = gLatencyPolicy.presentAt(frame.queuedAtMicros, frame.presentAtMicros, _adaptiveDelayMicros);
   _lastTargetDelayMicros = targetDelayMicros;
 	  if (frame.mediaTimestampMicros > 0) _lastSubmittedMediaMicros = frame.mediaTimestampMicros;
 	  if (frame.packetSequence > 0) _lastSubmittedPacketSequence = frame.packetSequence;
@@ -6188,6 +6293,9 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   std::uint64_t queuePressureCoalesced = 0;
   bool queuePressureReset = false;
 	  auto frameIsNewerThan = [&](const QueuedVideoFrame& queued) {
+    if (frame.decodeSubmittedAtMicros > 0 && queued.decodeSubmittedAtMicros > 0) {
+      return frame.decodeSubmittedAtMicros > queued.decodeSubmittedAtMicros;
+    }
 	    if (frame.packetSequence > 0 && queued.packetSequence > 0) {
 	      return frame.packetSequence > queued.packetSequence;
     }
@@ -6202,7 +6310,15 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 	    _coalescedFrames += 1;
     queuePressureCoalesced += 1;
 	  };
-  constexpr std::size_t lowLatencyQueueDepth = 2;
+  // Decode callbacks may complete out of order. Do not replace a newer image
+  // with an older one. Local decode submission order survives sender restarts.
+  if (gLatencyPolicy.ultra && !_frameQueue.empty() && !frameIsNewerThan(_frameQueue.back())) {
+    CVPixelBufferRelease(frame.pixelBuffer);
+    _droppedLateFrames += 1;
+    [_lock unlock];
+    return;
+  }
+  const std::size_t lowLatencyQueueDepth = gLatencyPolicy.ultra ? 1 : 2;
   while (!_frameQueue.empty() && frameIsNewerThan(_frameQueue.front())) {
     const bool queueIsDeep = _frameQueue.size() >= lowLatencyQueueDepth;
     const bool frontIsAlreadyLate = frame.queuedAtMicros > _frameQueue.front().presentAtMicros &&
@@ -6249,13 +6365,21 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   }
 
 	  _frameQueue.push_back(frame);
-  constexpr std::size_t maxQueueDepth = 5;
+  const std::size_t maxQueueDepth = gLatencyPolicy.ultra ? 1 : 5;
   while (_frameQueue.size() > maxQueueDepth) {
     if (_frameQueue.front().pixelBuffer) CVPixelBufferRelease(_frameQueue.front().pixelBuffer);
     _frameQueue.pop_front();
     _droppedQueueFrames += 1;
   }
+  const bool scheduleDraw = gLatencyPolicy.ultra && !_drawScheduled;
+  if (scheduleDraw) _drawScheduled = true;
   [_lock unlock];
+  if (scheduleDraw) dispatch_async(dispatch_get_main_queue(), ^{
+    [self->_lock lock];
+    self->_drawScheduled = false;
+    [self->_lock unlock];
+    [self->_renderView draw];
+  });
 }
 
 - (void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size {
@@ -6264,9 +6388,10 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 }
 
 - (void)drawInMTKView:(MTKView*)view {
+  if (dispatch_semaphore_wait(_renderSlot, DISPATCH_TIME_NOW) != 0) return;
   MTLRenderPassDescriptor* pass = [view currentRenderPassDescriptor];
   id<CAMetalDrawable> drawable = [view currentDrawable];
-  if (!pass || !drawable) return;
+  if (!pass || !drawable) { dispatch_semaphore_signal(_renderSlot); return; }
 
   CVPixelBufferRef pixelBuffer = nullptr;
   [_lock lock];
@@ -6313,6 +6438,11 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   [_lock unlock];
 
   id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
+  if (!commandBuffer) {
+    if (pixelBuffer) CVPixelBufferRelease(pixelBuffer);
+    dispatch_semaphore_signal(_renderSlot);
+    return;
+  }
   id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
 
   if (pixelBuffer && CVPixelBufferGetPlaneCount(pixelBuffer) >= 2) {
@@ -6355,11 +6485,16 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 
   [encoder endEncoding];
   [commandBuffer presentDrawable:drawable];
+  const auto renderSlot = _renderSlot;
+  [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+    if (pixelBuffer) CVPixelBufferRelease(pixelBuffer);
+    dispatch_semaphore_signal(renderSlot);
+    if (completed.status == MTLCommandBufferStatusCompleted && completed.GPUEndTime >= completed.GPUStartTime) {
+      gLiveLatency.renderGpu = (completed.GPUEndTime - completed.GPUStartTime) * 1000.0;
+    }
+  }];
   [commandBuffer commit];
 
-  if (pixelBuffer) {
-    CVPixelBufferRelease(pixelBuffer);
-  }
 
   const auto statsNow = std::chrono::steady_clock::now();
   const double statsSeconds = std::chrono::duration<double>(statsNow - _statsStartedAt).count();
@@ -6421,9 +6556,9 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
       maxPresentLateMs < 12.0 &&
       maxRenderAgeMs < 55.0;
     const std::uint64_t oldAdaptiveDelayMicros = _adaptiveDelayMicros;
-    if (renderCongested) {
+    if (renderCongested && !gLatencyPolicy.ultra) {
       _adaptiveClearWindows = 0;
-      _adaptiveDelayMicros = std::min<std::uint64_t>(_adaptiveDelayMicros + 2000, 24000);
+      _adaptiveDelayMicros = std::min<std::uint64_t>(_adaptiveDelayMicros + 2000, gLatencyPolicy.ultra ? 4000 : 24000);
       if (_adaptiveDelayMicros != oldAdaptiveDelayMicros) {
         _adaptiveIncreases += 1;
       }
@@ -6490,11 +6625,42 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
               << " adaptiveDelayMs=" << adaptiveDelayMs
               << " adaptiveUp=" << adaptiveUp
               << " adaptiveDown=" << adaptiveDown
+              << " renderGpuMs=" << gLiveLatency.renderGpu.load()
               << " avgRenderAgeMs=" << avgRenderAgeMs
               << " maxRenderAgeMs=" << maxRenderAgeMs
               << " avgPresentLateMs=" << avgPresentLateMs
               << " maxPresentLateMs=" << maxPresentLateMs
               << "\n";
+
+    _latencyOverlay.hidden = !gShowLatencyOverlay.load();
+    const auto now = steadyMicros();
+    const bool hostFresh = now - gLiveLatency.hostUpdated.load() < 3000000;
+    const bool decodeFresh = now - gLiveLatency.decodeUpdated.load() < 3000000;
+    NSMutableAttributedString* overlay = [[NSMutableAttributedString alloc] initWithString:
+      gLatencyPolicy.ultra ? @"ULTRA LOW LATENCY · Ctrl+Opt+F8\n" : @"LATENCY · Ctrl+Opt+F8\n"];
+    auto row = [&](NSString* name, double value, double budget) {
+      NSString* text = value >= 0 && std::isfinite(value)
+        ? [NSString stringWithFormat:@"%-16s %6.1f ms\n", name.UTF8String, value]
+        : [NSString stringWithFormat:@"%-16s      —\n", name.UTF8String];
+      [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:text attributes:
+        @{NSForegroundColorAttributeName: value > budget ? NSColor.systemRedColor : NSColor.whiteColor}]];
+    };
+    row(@"Capture", hostFresh ? gLiveLatency.capture.load() : -1, 5);
+    row(@"Encode", hostFresh ? gLiveLatency.encode.load() : -1, 5);
+    row(@"Send / pacing", hostFresh ? gLiveLatency.send.load() : -1, 5);
+    row(@"Network RTT", hostFresh ? gLiveLatency.rtt.load() : -1, 15);
+    row(@"Arrival jitter", decodeFresh ? gLiveLatency.jitter.load() : -1, 4);
+    row(@"Decode", decodeFresh ? gLiveLatency.decode.load() : -1, 5);
+    row(@"Frame queue", avgRenderAgeMs, 4);
+    row(@"Render GPU", decodeFresh ? gLiveLatency.renderGpu.load() : -1, 4);
+    row(@"Input ACK RTT", now - gLiveLatency.inputUpdated.load() < 3000000 ? gLiveLatency.inputRtt.load() : -1, 15);
+    if (gLatencyPolicy.ultra && hostFresh && gLiveLatency.gpuInput.load() == 0) {
+      [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"⚠ CPU FALLBACK — higher latency\n" attributes:
+        @{NSForegroundColorAttributeName:NSColor.systemOrangeColor, NSFontAttributeName:[NSFont boldSystemFontOfSize:15]}]];
+      _latencyOverlay.hidden = NO;
+    }
+    [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"Local timings; excludes display scan-out"]];
+    _latencyOverlay.attributedStringValue = overlay;
 
     const ControlRttWindow controlRtt = takeControlRttWindow();
     std::ostringstream feedback;
@@ -7496,6 +7662,8 @@ int runVideoRenderTcp(std::uint16_t port,
                       bool hideCursor,
                       bool relativeMouse,
                       const std::string& udpConnect = "") {
+  if (gLatencyPolicy.ultra && (!udpVideo || controlPort != 0))
+    throw std::runtime_error("Ultra Low Latency requires multiplexed UDP video and input (--udp-video --control-port 0)");
   @autoreleasepool {
     id<MTLDevice> device = defaultMetalDevice();
     if (!device) {
@@ -7525,6 +7693,11 @@ int runVideoRenderTcp(std::uint16_t port,
     [view setPaused:NO];
     [view setEnableSetNeedsDisplay:NO];
 
+    if (gLatencyPolicy.ultra) {
+      CAMetalLayer* layer = (CAMetalLayer*)view.layer;
+      layer.maximumDrawableCount = 2;
+      layer.displaySyncEnabled = NO;
+    }
     SanserVideoRenderer* renderer = [[SanserVideoRenderer alloc] initWithDevice:device view:view];
     if (!renderer) {
       throw std::runtime_error("Failed to create video Metal renderer.");
@@ -7751,7 +7924,12 @@ Options parseOptions(int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "--probe") {
+    if (arg == "--ultra-low-latency") {
+      gLatencyPolicy.ultra = true;
+      gShowLatencyOverlay = true;
+    } else if (arg == "--stats-overlay") {
+      gShowLatencyOverlay = true;
+    } else if (arg == "--probe") {
       options.probe = true;
     } else if (arg == "--decode-snv") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --decode-snv");
@@ -7843,6 +8021,7 @@ std::uint16_t defaultAudioPort(std::uint16_t videoPort) {
 
 } // namespace
 
+#ifndef SANSER_LATENCY_TEST
 int main(int argc, char** argv) {
   if (std::getenv("SANSER_TELEMETRY")) std::cout.setf(std::ios::unitbuf);
   try {
@@ -7924,3 +8103,5 @@ int main(int argc, char** argv) {
     return 1;
   }
 }
+
+#endif
