@@ -553,6 +553,9 @@ void chacha20Xor(std::uint8_t* data,
 }
 
 class NativeInputSender {
+#ifdef SANSER_LATENCY_TEST
+  friend struct NativeInputPolicyTest;
+#endif
 public:
   NativeInputSender() : inputSessionId_(randomHex(8)), worker_(&NativeInputSender::workerLoop, this) {}
 
@@ -985,7 +988,7 @@ private:
   }
 
   static bool isBatchable(const std::string& json) {
-    return !(gLatencyPolicy.ultra && ((inputTypeName(json) == "gamepad-state" && jsonBoolField(json, "connected")) || inputTypeName(json) == "input-reset")) && !isControlPing(json) && !isStreamStats(json) && !isUdpRepairStats(json) && !isRenderStats(json) &&
+    return !(gLatencyPolicy.ultra && inputTypeName(json) == "gamepad-state" && jsonBoolField(json, "connected")) && !isControlPing(json) && !isStreamStats(json) && !isUdpRepairStats(json) && !isRenderStats(json) &&
            !isKeyframeRequest(json) && !isVideoNack(json) && !isControlHello(json);
   }
 
@@ -1414,6 +1417,7 @@ private:
       if (it->second.attempts >= maxBatchRetryAttempts_) {
         if (gLatencyPolicy.ultra) {
           // A key-up that missed every ACK must not leave a held key behind.
+          // The reset is itself acknowledged/retried; never send it only once.
           urgentQueue_.clear(); queue_.clear(); pendingBatches_.clear();
           urgentQueue_.push_front("{\"type\":\"input-reset\",\"reason\":\"retry-deadline\"}");
           condition_.notify_one();

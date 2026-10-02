@@ -2,6 +2,12 @@
 #define SANSER_LATENCY_TEST 1
 #include "src/main.mm"
 
+namespace {
+struct NativeInputPolicyTest {
+  static bool acknowledged(const std::string& event) { return NativeInputSender::isBatchable(event); }
+};
+}
+
 void requireLatency(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
 }
@@ -20,6 +26,12 @@ int main() {
       const auto start = steady_clock::now();
       SnvPacket packet;
       gLatencyPolicy.ultra = true;
+      requireLatency(NativeInputPolicyTest::acknowledged("{\"type\":\"input-reset\"}"),
+        "recovery reset must itself be acknowledged/retried");
+      requireLatency(!NativeInputPolicyTest::acknowledged("{\"type\":\"gamepad-state\",\"connected\":true}"),
+        "connected gamepad snapshots must not enter reliable backlog");
+      requireLatency(NativeInputPolicyTest::acknowledged("{\"type\":\"gamepad-state\",\"connected\":false}"),
+        "gamepad disconnect must remain reliable");
       UdpVideoPacketJitterBuffer jitter;
       jitter.resetForMediaGeneration(1);
       jitter.push(testPacket(1, true), 1, false, start);
