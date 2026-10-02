@@ -5,6 +5,7 @@
 #include "mf_video_packet_encoder.h"
 #include "sanser_version.h"
 #include "wheel_delta.h"
+#include "latency_policy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -525,6 +526,7 @@ struct Options {
   bool udpPacing = true;
   bool listEncoders = false;
   bool remoteInputEnabled = true;
+  bool streamCursor = true;
   std::uint16_t udpBindPort = 0;
 };
 
@@ -732,6 +734,8 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--ultra-low-latency") {
       options.ultraLowLatency = true;
       gUltraLowLatency = true;
+    } else if (arg == "--no-stream-cursor") {
+      options.streamCursor = false;
     } else if (arg == "--low-latency-encoder") {
       options.lowLatencyEncoder = true;
     } else if (arg == "--no-low-latency-encoder") {
@@ -790,6 +794,7 @@ Options parseOptions(int argc, char** argv) {
         << "  --udp-bind-port PORT Bind the UDP video socket to a specific local port\n"
         << "  --control-connect H:P Connect a dedicated TCP native input/stats backchannel\n"
         << "  --disable-input  Keep authenticated control/stats but reject remote input events\n"
+        << "  --no-stream-cursor Omit the added cursor from video; use the client cursor\n"
         << "  --audio-udp-connect H:P Send loopback audio as SNA1/SNA2 float32 or negotiated SNA3/SNA4 PCM16\n"
         << "  --session-token T Enable native session proof and HMAC-authenticated control packets\n"
         << "  --list-encoders  List Media Foundation hardware encoders\n"
@@ -4276,7 +4281,7 @@ public:
     }
     const auto found = packetCache_.find(packetId);
     if (found == packetCache_.end() || found->second.mediaGeneration != currentGeneration ||
-        std::chrono::steady_clock::now() - found->second.sentAt > std::chrono::milliseconds(gUltraLowLatency ? 12 : 120)) {
+        std::chrono::steady_clock::now() - found->second.sentAt > std::chrono::milliseconds(sanser::LatencyPolicy{gUltraLowLatency}.retransmitCacheMs())) {
       return result;
     }
 
@@ -4511,7 +4516,9 @@ private:
       static_cast<double>(std::max<std::uint32_t>(bitrate_, 1000000));
     const auto spacing = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
       std::chrono::duration<double>(datagramSeconds));
-    nextSendAt_ = std::max(nextSendAt_, std::chrono::steady_clock::now()) + spacing;
+    // Preserve the bounded burst credit in Ultra instead of adding another
+    // sleep after every datagram (Windows timer granularity can amplify it).
+    nextSendAt_ = (gUltraLowLatency ? nextSendAt_ : std::max(nextSendAt_, std::chrono::steady_clock::now())) + spacing;
   }
 
   SOCKET socket_ = INVALID_SOCKET;
@@ -5968,7 +5975,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	#ifdef _WIN32
 	      POINT cursor{};
 	      const bool cursorOk = GetCursorPos(&cursor) != 0;
-      const bool cursorChanged = cursorOk
+      const bool cursorChanged = options.streamCursor && cursorOk
         && (!hasLastCursor || cursor.x != lastCursor.x || cursor.y != lastCursor.y);
       if (hasLastCleanFrame && (hasPendingKeyframeRequest || hasPendingKeyframeRetry || hasPendingMediaEpochKeyframe)) {
         frame = lastCleanFrame;
@@ -6053,7 +6060,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      ++statsCursorFrames;
 	    }
     if (!drainOnly) {
-      drawSoftwareCursor(frame, duplicator);
+      if (options.streamCursor) drawSoftwareCursor(frame, duplicator);
       // Rotated-display capture can use CPU pixels even with a GPU encoder.
       gGpuInput = encoder->usingGpuInput() && frame.texture ? 1 : 0;
     }
@@ -6203,10 +6210,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      if (tcpClient) {
 	        tcpClient->sendAll(bytes.data(), bytes.size());
       } else if (udpClient) {
-        const std::uint64_t pacingBudgetMicros = std::clamp<std::uint64_t>(
-          (currentStreamDurationMicros() * 3) / 4,
-          4000,
-          25000);
+        const std::uint64_t pacingBudgetMicros = sanser::LatencyPolicy{options.ultraLowLatency}
+          .sendBudgetMicros(currentStreamDurationMicros());
         statsUdpFragments += udpClient->sendPacket(bytes, pacingBudgetMicros);
       } else
 #endif

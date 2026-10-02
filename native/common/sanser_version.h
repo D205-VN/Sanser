@@ -4,7 +4,7 @@
 #include <string_view>
 
 #ifndef SANSER_VERSION
-#define SANSER_VERSION "2.1.9"
+#define SANSER_VERSION "2.1.10"
 #endif
 
 #ifndef SANSER_PROTOCOL_VERSION

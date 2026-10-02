@@ -49,6 +49,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -59,7 +60,7 @@ sanser::LatencyPolicy gLatencyPolicy;
 std::atomic<bool> gShowLatencyOverlay{false};
 bool gOverlayShortcutDown = false;
 struct LiveLatency {
-  std::atomic<double> capture{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1};
+  std::atomic<double> capture{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
   std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
   std::atomic<int> gpuInput{-1};
   std::atomic<std::uint64_t> hostUpdated{0}, inputUpdated{0}, decodeUpdated{0};
@@ -156,7 +157,7 @@ void printHelp() {
     << "  --decode-snv P    Decode an SNV1 H.264 packet file with VideoToolbox\n"
     << "  --listen-snv P    Listen for SNV1 H.264 packets over TCP and decode them\n"
     << "  --listen-render-snv P Listen over TCP, render with Metal, send native input back\n"
-    << "  --ultra-low-latency Latest decoded frame, zero base pacing, 12 ms UDP gap deadline\n"
+    << "  --ultra-low-latency Latest decoded frame, zero base pacing, adaptive UDP repair\n"
     << "  --udp-video      Listen for SNU1/SNU2 UDP video instead of TCP video\n"
     << "  --session-token T Require host control proof and HMAC-authenticated control packets\n"
     << "  --control-port P  Dedicated native input/stats TCP port; defaults to render port + 1, 0 disables\n"
@@ -966,6 +967,7 @@ private:
   }
 
   static bool isPriorityInput(const std::string& json) {
+    if (gLatencyPolicy.ultra && (isVideoNack(json) || isKeyframeRequest(json))) return true;
     if (isPointerMove(json) && jsonBoolField(json, "dragging")) return true;
     const std::string type = inputTypeName(json);
     return type == "pointer-down" ||
@@ -1246,7 +1248,7 @@ private:
         auto takeBatchFromQueue = [&](std::deque<std::string>& sourceQueue) {
           std::vector<std::string> batch;
           const bool batchEnabled = batchEnabled_;
-          const std::size_t maxEvents = priorityBatch ? maxPriorityBatchEvents_ : maxBatchEvents_;
+          const std::size_t maxEvents = priorityBatch ? maxPriorityBatchEvents_ : (gLatencyPolicy.ultra ? 4 : maxBatchEvents_);
           batch.push_back(std::move(sourceQueue.front()));
           sourceQueue.pop_front();
           if (batchEnabled && isBatchable(batch.front())) {
@@ -2638,7 +2640,7 @@ bool sendVideoNackRequest(const std::string& reason,
   {
     std::lock_guard<std::mutex> lock(mutex);
     if (lastSentAt.time_since_epoch().count() != 0 &&
-        now - lastSentAt < std::chrono::milliseconds(15)) {
+        now - lastSentAt < std::chrono::milliseconds(gLatencyPolicy.ultra ? 3 : 15)) {
       return false;
     }
     lastSentAt = now;
@@ -2818,6 +2820,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
     const std::uint64_t processedMicros = jsonUint64Value(payload, "processedMicros");
     const double hostProcessMs = static_cast<double>(processedMicros) / 1000.0;
     gLiveLatency.inputRtt = rttMs;
+    gLiveLatency.hostInput = hostProcessMs;
     gLiveLatency.inputUpdated = steadyMicros();
     const bool duplicate = jsonBoolValue(payload, "duplicate");
     const bool stale = jsonBoolValue(payload, "stale");
@@ -3669,9 +3672,9 @@ struct ClientStreamStats {
     }
   }
 
-  bool shouldDropBeforeDecode(const SnvPacket& packet, std::string& reason) {
+  bool shouldDropBeforeDecode(const SnvPacket& packet, std::string& reason,
+                             std::uint64_t now = steadyMicros()) {
     const bool keyframe = (packet.flags & 1u) != 0;
-    const std::uint64_t now = steadyMicros();
     const std::uint64_t durationMicros = std::clamp<std::uint64_t>(
       packet.durationMicros > 0 ? packet.durationMicros : 16667,
       4000,
@@ -3717,6 +3720,15 @@ struct ClientStreamStats {
 
     const double lateMs = static_cast<double>(now - expectedSteadyMicros) / 1000.0;
     latencyLateMaxMs = std::max(latencyLateMaxMs, lateMs);
+    if (gLatencyPolicy.ultra) {
+      // Arrival jitter is not a lost reference. Discarding an intact P-frame
+      // here stalled all subsequent frames until an IDR, repeatedly on Wi-Fi.
+      // Decode the intact chain and let the newest-frame renderer discard old
+      // decoded images. Actual sequence gaps still gate decoding above.
+      latencyBaseMediaMicros = packet.timestampMicros;
+      latencyBaseSteadyMicros = now;
+      return false;
+    }
     latencyDropped += 1;
     totalLatencyDropped += 1;
     waitingForLatencyKeyframe = true;
@@ -4010,10 +4022,30 @@ struct UdpPacketAssembly {
   std::uint64_t mediaEpoch = 0;
   bool rekeyGrace = false;
   bool hadRetransmit = false;
+  bool lastFragmentSeen = false;
+  bool nackNotified = false;
+  std::chrono::steady_clock::time_point gapDetectedAt{};
 };
 
 class UdpVideoReassembler {
 public:
+  // A later frame or the final fragment proves a potential hole. Allow 3 ms
+  // for reordering, then request repair while retaining the partial assembly.
+  void pollRepairs(UdpVideoStats& stats,
+                   std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
+    if (!gLatencyPolicy.ultra) return;
+    for (auto& [key, assembly] : assemblies_) {
+      const auto highest = highestPacketIdByEpoch_.find(key.mediaEpoch);
+      const bool laterFrame = highest != highestPacketIdByEpoch_.end() && highest->second > key.packetId;
+      if (assembly.nackNotified || (!laterFrame && !assembly.lastFragmentSeen)) continue;
+      if (assembly.gapDetectedAt.time_since_epoch().count() == 0) assembly.gapDetectedAt = now;
+      if (now - assembly.gapDetectedAt >= std::chrono::milliseconds(3)) {
+        recordNackPacket(stats, key.packetId);
+        assembly.nackNotified = true;
+      }
+    }
+  }
+
   bool push(std::span<std::uint8_t> datagram,
             std::vector<std::uint8_t>& packetBytes,
             UdpVideoStats& stats,
@@ -4182,6 +4214,9 @@ public:
       assembly.mediaEpoch = fragmentMediaEpoch;
       assembly.rekeyGrace = authenticatedVideo && videoCrypto.rekeyGrace;
       assembly.hadRetransmit = false;
+      assembly.lastFragmentSeen = false;
+      assembly.nackNotified = false;
+      assembly.gapDetectedAt = {};
     }
     if (header.flags & 4u) {
       assembly.hadRetransmit = true;
@@ -4197,6 +4232,7 @@ public:
     assembly.received[header.fragmentIndex] = 1;
     assembly.receivedBytes += header.payloadSize;
     assembly.receivedFragments += 1;
+    if (header.fragmentIndex + 1 == header.fragmentCount) assembly.lastFragmentSeen = true;
 
     if (assembly.receivedFragments == assembly.fragmentCount &&
         assembly.receivedBytes == assembly.data.size()) {
@@ -4336,7 +4372,7 @@ public:
       const MissingPacket& missing = item.second;
       const bool neverSent = missing.sendCount == 0;
       const bool retryDue = missing.sendCount < maxRetries_ &&
-        now - missing.lastSentAt >= std::chrono::milliseconds(55);
+        now - missing.lastSentAt >= std::chrono::milliseconds(gLatencyPolicy.ultra ? 20 : 55);
       if ((neverSent || retryDue) && now - missing.firstSeenAt < std::chrono::milliseconds(gLatencyPolicy.repairDeadlineMs())) {
         packetIds.push_back(item.first);
         if (packetIds.size() >= maxBatchPackets_) break;
@@ -4515,7 +4551,7 @@ public:
     }
 
     auto oldest = packets_.begin();
-    const bool holdExpired = now - oldest->second.arrivedAt >= std::chrono::milliseconds(gLatencyPolicy.jitterHoldMs());
+    const bool holdExpired = now - oldest->second.arrivedAt >= std::chrono::milliseconds(gLatencyPolicy.jitterHoldMs(gLiveLatency.jitter.load(), gLiveLatency.rtt.load()));
     const bool bufferFull = packets_.size() >= maxBufferedPackets_;
     if (!holdExpired && !bufferFull) {
       windowHeldTicks_ += 1;
@@ -6658,6 +6694,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     row(@"Frame queue", avgRenderAgeMs, 4);
     row(@"Render GPU", decodeFresh ? gLiveLatency.renderGpu.load() : -1, 4);
     row(@"Input ACK RTT", now - gLiveLatency.inputUpdated.load() < 3000000 ? gLiveLatency.inputRtt.load() : -1, 15);
+    row(@"Host input", now - gLiveLatency.inputUpdated.load() < 3000000 ? gLiveLatency.hostInput.load() : -1, 5);
     if (gLatencyPolicy.ultra && hostFresh && gLiveLatency.gpuInput.load() == 0) {
       [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"⚠ CPU FALLBACK — higher latency\n" attributes:
         @{NSForegroundColorAttributeName:NSColor.systemOrangeColor, NSFontAttributeName:[NSFont boldSystemFontOfSize:15]}]];
@@ -7297,20 +7334,30 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       std::uint64_t repairFeedbackSequence = 0;
       auto lastMalformedPacketLogAt = std::chrono::steady_clock::time_point{};
       while (maxPackets == 0 || summary.packets < maxPackets) {
+        bool canRead = true;
+        if (gLatencyPolicy.ultra) {
+          pollfd waitForVideo{server.get(), POLLIN, 0};
+          const int ready = poll(&waitForVideo, 1, 3);
+          if (ready < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error("UDP readiness check failed.");
+          }
+          canRead = ready > 0;
+        }
         UdpEndpoint peerAddress{};
         peerAddress.length = sizeof(peerAddress.address);
-        const ssize_t received = recvfrom(server.get(),
+        const ssize_t received = canRead ? recvfrom(server.get(),
                                           datagramBuffer.data(),
                                           datagramBuffer.size(),
                                           0,
                                           reinterpret_cast<sockaddr*>(&peerAddress.address),
-                                          &peerAddress.length);
+                                          &peerAddress.length) : 0;
         if (received < 0) {
           if (errno == EINTR) continue;
           throw std::runtime_error("UDP receive failed.");
         }
-        if (received == 0) continue;
-        if (isSingleSocket && hasNegotiatedPeer && !sameUdpPeer(peerAddress, negotiatedPeer)) {
+        if (received == 0 && !gLatencyPolicy.ultra) continue;
+        if (received > 0 && isSingleSocket && hasNegotiatedPeer && !sameUdpPeer(peerAddress, negotiatedPeer)) {
           continue;
         }
 
@@ -7327,8 +7374,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         bool completedRekeyGrace = false;
 
         bool completedPacket = false;
-        if (isSingleSocket) {
-          if (received < 1) continue;
+        if (received > 0 && isSingleSocket) {
           const std::uint8_t mtype = datagramBuffer[0];
           if (mtype == 0x00) {
             // Video
@@ -7355,7 +7401,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
             // Keepalive or Probes
             continue;
           }
-        } else {
+        } else if (received > 0) {
           completedPacket = reassembler.push(
                                               std::span(datagramBuffer.data(), static_cast<std::size_t>(received)),
                                               packetBytes,
@@ -7366,6 +7412,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                                               peerAddress,
                                               videoPeerLock);
         }
+        reassembler.pollRepairs(udpStats);
         nackController.observeMissing(udpStats.newNackPacketIds);
         udpStats.newNackPacketIds.clear();
         if (completedPacketId != 0) {

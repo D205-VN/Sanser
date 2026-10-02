@@ -107,7 +107,7 @@ it('uses the requested Ultra Low Latency profile rather than the host local pres
   await host.online(runtime);
   await settle();
   expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({
-    ultraLowLatency: true, fps: 120, width: 1280, height: 720, bitrateKbps: 12000
+    ultraLowLatency: true, fps: 60, width: 1920, height: 1080, bitrateKbps: 25000
   }));
 });
 

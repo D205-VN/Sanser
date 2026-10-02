@@ -55,6 +55,55 @@ int main() {
       stats.observe(gap); requireLatency(stats.shouldDropBeforeDecode(gap, reason), "missing reference must block dependent frame");
       stats.observe(delta); requireLatency(stats.shouldDropBeforeDecode(delta, reason), "wait for IDR after deadline");
       stats.observe(idr); requireLatency(!stats.shouldDropBeforeDecode(idr, reason), "IDR must recover decoding");
+      // Reproduce the 2.1.9 regression: intact frames arriving >15 ms late
+      // repeatedly entered IDR wait, dropping up to 46/60 frames on real Wi-Fi.
+      ClientStreamStats variableArrival;
+      std::uint64_t arrival = 1000000;
+      for (std::uint64_t sequence = 1; sequence <= 120; ++sequence) {
+        auto next = testPacket(sequence, sequence == 1);
+        arrival += 8333 + (sequence % 3 == 0 ? 45000 : 0);
+        variableArrival.observe(next);
+        requireLatency(!variableArrival.shouldDropBeforeDecode(next, reason, arrival),
+          "intact references must survive variable arrival time without waiting for IDR");
+      }
+      requireLatency(variableArrival.keyframeWaitDropped == 0 && variableArrival.latencyDropped == 0,
+        "arrival jitter alone must not drop the encoded reference chain");
+      requireLatency(gLatencyPolicy.jitterHoldMs(0) == 12 && gLatencyPolicy.jitterHoldMs(20) == 30 &&
+        gLatencyPolicy.jitterHoldMs(1000) == 50, "gap recovery must adapt within bounded limits");
+      requireLatency(gLatencyPolicy.repairDeadlineMs() == 60, "repair must allow a round trip before expiry");
+      requireLatency(gLatencyPolicy.retransmitCacheMs() == 150 &&
+        gLatencyPolicy.retransmitCacheMs() > gLatencyPolicy.repairDeadlineMs(), "cache retention must not equal playout deadline");
+      requireLatency(gLatencyPolicy.sendBudgetMicros(8333) == 3000 &&
+        gLatencyPolicy.sendBudgetMicros(16667) == 4166 && gLatencyPolicy.sendBudgetMicros(50000) == 5000,
+        "Ultra software pacing budget must stay within 3-5 ms");
+      requireLatency(gLatencyPolicy.jitterHoldMs(0, 10) == 18, "gap deadline must allow feedback round trip");
+
+      UdpVideoReassembler repair;
+      UdpVideoStats repairStats;
+      UdpPeerLock repairPeer("TEST");
+      const auto peer = resolveUdpAddress("127.0.0.1:55000");
+      std::vector<std::uint8_t> assembled;
+      std::uint64_t packetId = 0, epoch = 0;
+      bool grace = false;
+      auto fragment = [&](std::uint64_t id, std::uint16_t index) {
+        UdpVideoFragmentHeader header;
+        header.packetId = id; header.packetSize = 3; header.fragmentCount = 3;
+        header.fragmentIndex = index; header.fragmentOffset = index; header.payloadSize = 1;
+        std::vector<std::uint8_t> bytes(sizeof(header) + 1, static_cast<std::uint8_t>(index));
+        std::memcpy(bytes.data(), &header, sizeof(header));
+        return repair.push(bytes, assembled, repairStats, packetId, epoch, grace, peer, repairPeer);
+      };
+      requireLatency(!fragment(1, 0) && !fragment(1, 2), "missing middle fragment stays incomplete");
+      repair.pollRepairs(repairStats, start);
+      repair.pollRepairs(repairStats, start + milliseconds(2));
+      requireLatency(repairStats.newNackPacketIds.empty(), "short reordering must not produce premature NACK");
+      repair.pollRepairs(repairStats, start + milliseconds(3));
+      requireLatency(repairStats.newNackPacketIds == std::vector<std::uint64_t>{1}, "missing fragment must request repair after 3 ms");
+      requireLatency(fragment(1, 1) && assembled == std::vector<std::uint8_t>({0, 1, 2}), "repair must retain and complete partial frame");
+      repairStats.newNackPacketIds.clear();
+      requireLatency(!fragment(2, 0) && !fragment(2, 2) && fragment(2, 1), "reordering before deadline completes normally");
+      repair.pollRepairs(repairStats, start + milliseconds(10));
+      requireLatency(repairStats.newNackPacketIds.empty(), "completed reordering must not request repair");
       requireLatency(gLatencyPolicy.presentAt(10000, 1000000, 90000) == 14000, "future sender timeline cannot add latency");
       requireLatency(gLatencyPolicy.presentAt(10000, 0, 0) == 10000, "zero base render hold");
 

@@ -201,8 +201,20 @@ fn parse_sidecar_capabilities(
     Ok(capabilities)
 }
 
-fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
+fn native_command(path: &Path) -> Command {
+    #[allow(unused_mut)]
     let mut command = Command::new(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Output is piped to Sanser; do not allocate a blank terminal.
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
+fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
+    let mut command = native_command(path);
     command
         .arg("--capabilities-json")
         .env_clear()
@@ -477,7 +489,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             } else {
                 // Legacy Windows capture otherwise defaults to a 250 ms
                 // screenshot interval, overriding the requested stream FPS.
-                args.extend(["--interval-ms".into(), "0".into()]);
+                args.extend(["--interval-ms", "0", "--no-stream-cursor"].map(str::to_owned));
             }
             if request.ultra_low_latency {
                 args.push("--ultra-low-latency".into());
@@ -545,7 +557,7 @@ fn open_private_log(path: &Path) -> Option<File> {
 }
 
 fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest) -> Command {
-    let mut command = Command::new(path);
+    let mut command = native_command(path);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -826,6 +838,35 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn native_child_runs_without_allocating_a_console() -> std::io::Result<()> {
+        let output = native_command(Path::new("powershell.exe"))
+            .args([
+                "-NoProfile", "-NonInteractive", "-Command",
+                "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class ConsoleProbe { [DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow(); }'; [ConsoleProbe]::GetConsoleWindow().ToInt64()",
+            ])
+            .stdin(Stdio::null())
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_uses_local_cursor_without_changing_other_native_arguments()
+    -> Result<(), DesktopError> {
+        let mut value = request(EngineKind::Host);
+        assert!(build_args(&value)?.contains(&"--no-stream-cursor".into()));
+        value.wire_protocol = Some("snv2".into());
+        assert!(!build_args(&value)?.contains(&"--no-stream-cursor".into()));
         Ok(())
     }
 
