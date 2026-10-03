@@ -111,6 +111,82 @@ it('uses the requested Ultra Low Latency profile rather than the host local pres
   }));
 });
 
+it('replaces a running sender when the same client retries with fresh credentials', async () => {
+  mocks.sessions.mockResolvedValue({ items: [target] });
+  await host.online(runtime);
+  await settle();
+  expect(get(host).engineRunning).toBe(true);
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  mocks.credentials.mockResolvedValue({ sessionToken: 'new-token', wireProtocol: 'snv2' });
+  await host.refreshRequests();
+  await settle();
+  expect(mocks.stop).toHaveBeenCalledWith('host');
+  expect(mocks.stopRelay).toHaveBeenCalledWith('host');
+  expect(mocks.launch).toHaveBeenCalledTimes(2);
+  expect(mocks.launch).toHaveBeenLastCalledWith(expect.objectContaining({ sessionToken: 'new-token' }));
+  expect(mocks.punch).toHaveBeenCalledTimes(2);
+  const nextPunch = mocks.punch.mock.invocationCallOrder[1];
+  if (nextPunch === undefined) throw new Error('Missing replacement negotiation');
+  expect(mocks.stop.mock.invocationCallOrder[0]).toBeLessThan(nextPunch);
+  expect(mocks.stopRelay.mock.invocationCallOrder[0]).toBeLessThan(nextPunch);
+  await host.refreshRequests();
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledTimes(2);
+});
+
+it('cancels an in-flight generation before negotiating a client retry', async () => {
+  let oldSignal: AbortSignal | undefined;
+  mocks.punch.mockImplementationOnce((...args: unknown[]) => {
+    oldSignal = args[7] as AbortSignal;
+    return new Promise((_resolve, reject) => oldSignal?.addEventListener('abort',
+      () => reject(new DOMException('Cancelled', 'AbortError')), { once: true }));
+  });
+  mocks.sessions.mockResolvedValue({ items: [target] });
+  await host.online(runtime);
+  await settle();
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  await host.refreshRequests();
+  await settle();
+  expect(oldSignal?.aborted).toBe(true);
+  expect(mocks.punch).toHaveBeenCalledTimes(2);
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+  expect(mocks.relay).not.toHaveBeenCalled();
+  expect(get(host)).toMatchObject({ engineRunning: true, failedP2pSessionId: null });
+});
+
+it('does not start a replacement sender if stopping the previous sender fails', async () => {
+  mocks.sessions.mockResolvedValue({ items: [target] });
+  await host.online(runtime);
+  await settle();
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  mocks.stop.mockRejectedValueOnce(new Error('Unable to stop old sender'));
+  await host.refreshRequests();
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+  expect(get(host).error).toContain('Unable to stop old sender');
+  await host.refreshRequests();
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledTimes(2);
+});
+
+it('stops a late native launch before replacing its generation', async () => {
+  const launch = deferred<undefined>();
+  mocks.launch.mockReturnValueOnce(launch.promise);
+  mocks.sessions.mockResolvedValue({ items: [target] });
+  await host.online(runtime);
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  const refresh = host.refreshRequests();
+  await settle();
+  expect(mocks.punch).toHaveBeenCalledTimes(1);
+  launch.resolve(undefined);
+  await refresh;
+  await settle();
+  expect(mocks.stop).toHaveBeenCalledWith('host');
+  expect(mocks.launch).toHaveBeenCalledTimes(2);
+  expect(get(host)).toMatchObject({ engineRunning: true, launchingSessionId: null });
+});
+
 it('cancels host negotiation on going offline without relay fallback or a late engine launch', async () => {
   let signal: AbortSignal | undefined;
   mocks.punch.mockImplementation((...args: unknown[]) => {

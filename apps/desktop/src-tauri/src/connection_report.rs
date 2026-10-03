@@ -24,6 +24,7 @@ const SOURCES: &[&str] = &[
     "SNINPUT_ACKED",
     "SNINPUT_LATENCY",
     "SNU1_STATS",
+    "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
     "gpuInput",
@@ -73,6 +74,15 @@ const FIELDS: &[&str] = &[
     "incomplete",
     "jitterLate",
     "jitterPending",
+    "rawDatagrams",
+    "unexpectedPeer",
+    "controlDatagrams",
+    "videoDatagrams",
+    "completed",
+    "authRejected",
+    "peerRejected",
+    "malformed",
+    "startupTimeout",
 ];
 
 #[derive(Clone, Serialize)]
@@ -196,11 +206,6 @@ impl Report {
             _ => false,
         });
         self.delay_sample_count += u64::from(delayed);
-        self.status = if self.delay_sample_count > 0 {
-            "delay-observed"
-        } else {
-            "samples-collected"
-        };
         self.updated_at_ms = sample.at_ms;
         for (key, value) in &sample.values {
             let maximum = self
@@ -209,6 +214,22 @@ impl Report {
                 .or_default();
             *maximum = maximum.max(*value);
         }
+        let video_started = [
+            "SNU1_STARTUP.decoded",
+            "SNV1_CLIENT_STATS.decoded",
+            "SNV1_RENDER_STATS.rendered",
+        ]
+        .iter()
+        .any(|key| self.maxima.get(*key).is_some_and(|value| *value > 0.0));
+        self.status = if self.maxima.get("SNU1_STARTUP.startupTimeout") == Some(&1.0) {
+            "startup-timeout"
+        } else if self.maxima.contains_key("SNU1_STARTUP.rawDatagrams") && !video_started {
+            "awaiting-video"
+        } else if self.delay_sample_count > 0 {
+            "delay-observed"
+        } else {
+            "samples-collected"
+        };
         if self.samples.len() == MAX_SAMPLES {
             self.samples.pop_front();
         }
@@ -325,6 +346,42 @@ mod tests {
             "sessionToken": "never-store-this-token"
         }))
         .unwrap()
+    }
+    #[test]
+    fn startup_timeout_survives_late_overlay_samples_without_storing_peer_or_token() {
+        let mut report = Report::new(&request());
+        report.observe(parse_sample(b"SNU1_STARTUP rawDatagrams=30 unexpectedPeer=30 controlDatagrams=0 videoDatagrams=0 completed=0 decoded=0 startupTimeout=1 peer=192.0.2.1 token=123").unwrap());
+        report.observe(parse_sample(b"SNV1_RENDER_STATS rendered=0 renderGpuMs=0.5").unwrap());
+        assert_eq!(report.status, "startup-timeout");
+        assert_eq!(
+            report.maxima.get("SNU1_STARTUP.unexpectedPeer"),
+            Some(&30.0)
+        );
+        assert_eq!(report.maxima.get("SNV1_RENDER_STATS.rendered"), Some(&0.0));
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("192.0.2.1") && !json.contains("token"));
+    }
+    #[test]
+    fn overlay_or_control_traffic_does_not_mark_video_startup_complete() {
+        let mut report = Report::new(&request());
+        report.observe(
+            parse_sample(
+                b"SNU1_STARTUP rawDatagrams=10 controlDatagrams=10 decoded=0 startupTimeout=0",
+            )
+            .unwrap(),
+        );
+        report.observe(parse_sample(b"SNV1_RENDER_STATS rendered=0 renderGpuMs=0.5").unwrap());
+        assert_eq!(report.status, "awaiting-video");
+        report.observe(
+            parse_sample(b"SNU1_STARTUP rawDatagrams=100 completed=1 decoded=1 startupTimeout=0")
+                .unwrap(),
+        );
+        assert_eq!(report.status, "samples-collected");
+        // stdout from another worker may arrive out of order.
+        report.observe(
+            parse_sample(b"SNU1_STARTUP rawDatagrams=10 decoded=0 startupTimeout=0").unwrap(),
+        );
+        assert_eq!(report.status, "samples-collected");
     }
     #[test]
     fn detects_delay_and_retains_bounded_samples_without_claiming_missing_data_is_healthy() {

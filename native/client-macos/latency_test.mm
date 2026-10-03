@@ -24,6 +24,31 @@ int main() {
     try {
       using namespace std::chrono;
       const auto start = steady_clock::now();
+      UdpVideoStartup silent(true, start);
+      requireLatency(silent.failure(0, start + seconds(19)) == nullptr, "allow host startup before deadline");
+      requireLatency(std::string(silent.failure(0, start + seconds(20))).find("No UDP packets") != std::string::npos,
+        "successful probing without native traffic must time out");
+      UdpVideoStartup foreignPeer(true, start);
+      foreignPeer.rawDatagrams = foreignPeer.unexpectedPeer = 100;
+      requireLatency(std::string(foreignPeer.failure(0, start + seconds(20))).find("unexpected peer") != std::string::npos,
+        "unrelated UDP must neither satisfy nor extend startup deadline");
+      UdpVideoStartup controlOnly(true, start);
+      controlOnly.rawDatagrams = controlOnly.controlDatagrams = 100;
+      requireLatency(std::string(controlOnly.failure(0, start + seconds(20))).find("no video") != std::string::npos,
+        "control keepalives must not conceal a missing video stream");
+      controlOnly.videoDatagrams = controlOnly.authRejected = 50;
+      requireLatency(std::string(controlOnly.failure(0, start + seconds(20))).find("authentication failed") != std::string::npos,
+        "credential rejection must be distinguishable from transport silence");
+      controlOnly.authRejected = 0;
+      requireLatency(std::string(controlOnly.failure(0, start + seconds(20))).find("no complete video") != std::string::npos,
+        "fragment loss must be distinguishable from decode failure");
+      controlOnly.completed = 1;
+      requireLatency(std::string(controlOnly.failure(0, start + seconds(20))).find("no frame could be decoded") != std::string::npos,
+        "completed packets do not prove a decoded frame exists");
+      requireLatency(controlOnly.failure(1, start + seconds(20)) == nullptr &&
+        controlOnly.failure(1, start + hours(1)) == nullptr, "first decoded frame disables startup timeout on idle desktops");
+      UdpVideoStartup standalone(false, start);
+      requireLatency(standalone.failure(0, start + hours(1)) == nullptr, "standalone listeners may wait for a host");
       SnvPacket packet;
       gLatencyPolicy.ultra = true;
       requireLatency(NativeInputPolicyTest::acknowledged("{\"type\":\"input-reset\"}"),

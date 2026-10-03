@@ -7293,6 +7293,52 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
   }
 }
 
+// A successful NAT probe is not proof that the native host is sending video.
+// Bound startup only for a negotiated connection; standalone listeners may wait
+// for a host indefinitely. Once decoded, an idle desktop is not a startup error.
+struct UdpVideoStartup {
+  using Clock = std::chrono::steady_clock;
+  Clock::time_point startedAt;
+  Clock::time_point reportedAt;
+  bool enabled;
+  bool decoded = false;
+  std::uint64_t rawDatagrams = 0;
+  std::uint64_t unexpectedPeer = 0;
+  std::uint64_t controlDatagrams = 0;
+  std::uint64_t videoDatagrams = 0;
+  std::uint64_t completed = 0;
+  std::uint64_t authRejected = 0;
+
+  explicit UdpVideoStartup(bool negotiated, Clock::time_point now = Clock::now())
+      : startedAt(now), reportedAt(now), enabled(negotiated) {}
+
+  const char* failure(std::uint64_t decodedFrames, Clock::time_point now = Clock::now()) {
+    decoded = decoded || decodedFrames > 0;
+    if (!enabled || decoded || now - startedAt < std::chrono::seconds(20)) return nullptr;
+    if (rawDatagrams == 0)
+      return "No UDP packets received from the host within 20 seconds. Check the Windows Host error and firewall, then retry the connection.";
+    if (rawDatagrams == unexpectedPeer)
+      return "UDP packets arrived only from an unexpected peer. Retry the connection to negotiate fresh endpoints.";
+    if (videoDatagrams == 0)
+      return "UDP traffic arrived but no video arrived within 20 seconds. Check the Windows Host capture/encoder error, then retry.";
+    if (authRejected > 0 && completed == 0)
+      return "Video authentication failed before the first frame. Retry the connection on both devices to refresh session credentials.";
+    if (completed == 0)
+      return "Video fragments arrived but no complete video packet was recovered within 20 seconds. Retry the connection and check packet loss.";
+    return "Video packets arrived but no frame could be decoded within 20 seconds. Check the host encoder and retry the connection.";
+  }
+
+  void report(bool timedOut, std::uint64_t decodedFrames) const {
+    // Numeric, bounded diagnostics only: no addresses, credentials or input.
+    std::cout << "SNU1_STARTUP rawDatagrams=" << rawDatagrams
+              << " unexpectedPeer=" << unexpectedPeer
+              << " controlDatagrams=" << controlDatagrams
+              << " videoDatagrams=" << videoDatagrams
+              << " completed=" << completed << " authRejected=" << authRejected
+              << " decoded=" << decodedFrames << " startupTimeout=" << (timedOut ? 1 : 0) << std::endl;
+  }
+};
+
 void decodeUdpStreamToRenderer(std::uint16_t port,
                                std::uint16_t controlPort,
                                std::uint16_t audioPort,
@@ -7361,16 +7407,31 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       std::uint64_t lastEmptySampleSkipped = 0;
       std::uint64_t repairFeedbackSequence = 0;
       auto lastMalformedPacketLogAt = std::chrono::steady_clock::time_point{};
+      UdpVideoStartup startup(!udpConnect.empty());
       while (maxPackets == 0 || summary.packets < maxPackets) {
+        const auto startupNow = std::chrono::steady_clock::now();
+        const auto decodedFrames = decoder.decodedFrames();
+        const bool firstDecodedFrame = !startup.decoded && decodedFrames > 0;
+        if (const char* failure = startup.failure(decodedFrames, startupNow)) {
+          startup.report(true, decodedFrames);
+          throw std::runtime_error(failure);
+        }
+        if (startup.enabled && (firstDecodedFrame ||
+            (!startup.decoded && startupNow - startup.reportedAt >= std::chrono::seconds(1)))) {
+          startup.report(false, decodedFrames);
+          startup.reportedAt = startupNow;
+        }
         bool canRead = true;
-        if (gLatencyPolicy.ultra) {
+        {
           pollfd waitForVideo{server.get(), POLLIN, 0};
-          const int ready = poll(&waitForVideo, 1, 3);
+          const int ready = poll(&waitForVideo, 1, gLatencyPolicy.ultra ? 3 : 10);
           if (ready < 0) {
             if (errno == EINTR) continue;
             throw std::runtime_error("UDP readiness check failed.");
           }
-          canRead = ready > 0;
+          if (ready > 0 && (waitForVideo.revents & (POLLERR | POLLHUP | POLLNVAL)))
+            throw std::runtime_error("UDP listener closed before video could be received.");
+          canRead = ready > 0 && (waitForVideo.revents & POLLIN);
         }
         UdpEndpoint peerAddress{};
         peerAddress.length = sizeof(peerAddress.address);
@@ -7385,8 +7446,9 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           if (errno == EINTR) continue;
           throw std::runtime_error("UDP receive failed.");
         }
-        if (received == 0 && !gLatencyPolicy.ultra) continue;
+        if (received > 0) ++startup.rawDatagrams;
         if (received > 0 && isSingleSocket && hasNegotiatedPeer && !sameUdpPeer(peerAddress, negotiatedPeer)) {
+          ++startup.unexpectedPeer;
           continue;
         }
 
@@ -7403,10 +7465,12 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         bool completedRekeyGrace = false;
 
         bool completedPacket = false;
+        const auto authRejectedBefore = udpStats.authRejectedDatagrams;
         if (received > 0 && isSingleSocket) {
           const std::uint8_t mtype = datagramBuffer[0];
           if (mtype == 0x00) {
             // Video
+            ++startup.videoDatagrams;
             completedPacket = reassembler.push(
                                                 std::span(datagramBuffer.data() + 1, static_cast<std::size_t>(received - 1)),
                                                 packetBytes,
@@ -7423,6 +7487,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
             continue;
           } else if (mtype == 0x02) {
             // Control
+            ++startup.controlDatagrams;
             std::string controlJson(reinterpret_cast<const char*>(datagramBuffer.data() + 1), received - 1);
             gControlUdpQueue.push(controlJson);
             continue;
@@ -7431,6 +7496,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
             continue;
           }
         } else if (received > 0) {
+          ++startup.videoDatagrams;
           completedPacket = reassembler.push(
                                               std::span(datagramBuffer.data(), static_cast<std::size_t>(received)),
                                               packetBytes,
@@ -7441,6 +7507,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                                               peerAddress,
                                               videoPeerLock);
         }
+        startup.authRejected += udpStats.authRejectedDatagrams - authRejectedBefore;
+        if (completedPacket) ++startup.completed;
         reassembler.pollRepairs(udpStats);
         nackController.observeMissing(udpStats.newNackPacketIds);
         udpStats.newNackPacketIds.clear();

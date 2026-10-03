@@ -65,6 +65,8 @@ export function createHostStore(): HostStore {
   const retryCounts = new Map<string, number>();
   const retryAfter = new Map<string, number>();
   const readyGenerations = new Map<string, string>();
+  // A retry keeps the session ID but rotates credentials and UDP endpoints.
+  let nativeGeneration: { id: string; readyAt: string } | null = null;
   const autoAcceptRetryAfter = new Map<string, number>();
 
   async function acceptPendingSession(sessionId: string, automatic: boolean): Promise<ConnectionSession> {
@@ -135,6 +137,7 @@ export function createHostStore(): HostStore {
     const hostDeviceId = current.deviceId;
     const generation = lifecycleGeneration;
     const cancelled = () => signal.aborted || generation !== lifecycleGeneration || !get(store).online;
+    nativeGeneration = { id: request.id, readyAt: request.requesterReadyAt };
     store.update((state) => ({ ...state, launchingSessionId: request.id, error: null }));
     try {
       const credentials = await client.sessionCredentials(request.id, hostDeviceId);
@@ -262,7 +265,11 @@ export function createHostStore(): HostStore {
       store.update((state) => ({ ...state, sessions: response.items, error: state.error === pollError ? null : state.error }));
       pollError = null;
       const launchingId = get(store).launchingSessionId;
-      if (launchingId && !response.items.some((item) => item.id === launchingId && item.status === 'accepted')) {
+      const generationStillAccepted = () => get(store).sessions.some((item) =>
+        item.id === nativeGeneration?.id && item.status === 'accepted' &&
+        item.transport === 'native' && item.requesterReadyAt === nativeGeneration.readyAt
+      );
+      if (launchingId && !generationStillAccepted()) {
         negotiationController?.abort();
         await launchTask;
         if (generation !== lifecycleGeneration) return;
@@ -295,9 +302,12 @@ export function createHostStore(): HostStore {
       const latest = get(store);
       if (latest.engineRunning) {
         const active = latest.sessions.find((item) => item.status === 'accepted');
-        if (!active) {
-          await stopEngine('host').catch(() => undefined);
+        if (!active || !generationStillAccepted()) {
+          // Do not bind a new sender until the old sender and relay have stopped.
+          await stopEngine('host');
+          await stopRelay('host');
           if (generation !== lifecycleGeneration) return;
+          nativeGeneration = null;
           store.update((state) => ({ ...state, engineRunning: false }));
         } else {
           const status = await engineStatus('host');
@@ -324,7 +334,7 @@ export function createHostStore(): HostStore {
         }
       }
       const ready = get(store).sessions.find((item) => item.status === 'accepted' && item.requesterReadyAt);
-      if (ready?.requesterReadyAt && !latest.engineRunning) {
+      if (ready?.requesterReadyAt && !get(store).engineRunning) {
         if (readyGenerations.get(ready.id) !== ready.requesterReadyAt) {
           readyGenerations.set(ready.id, ready.requesterReadyAt);
           retryCounts.delete(ready.id);
@@ -458,6 +468,7 @@ export function createHostStore(): HostStore {
       retryCounts.clear();
       retryAfter.clear();
       readyGenerations.clear();
+      nativeGeneration = null;
       autoAcceptRetryAfter.clear();
       pollError = null;
       store.update((current) => ({ ...current, online: false, busy: true }));
