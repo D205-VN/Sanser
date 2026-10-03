@@ -223,6 +223,9 @@
       {:else if active === 'host'}
         <article class="card card-body settings-card stack">
           <div><h2 class="card-title">Host</h2><p class="card-subtitle">Choose how this computer shares its screen.</p></div>
+          {#if runtime.platform.startsWith('windows')}
+            <p class="card-subtitle">Closing the window keeps Sanser running in the system tray. Use the tray icon to reopen Sanser or choose Quit Sanser to stop it.</p>
+          {/if}
           <details class="sharing-help"><summary>Advanced network setup</summary>
           <div class="field">
             <label for="direct-udp-port">Direct UDP port</label>
