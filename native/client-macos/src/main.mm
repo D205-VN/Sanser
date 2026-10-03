@@ -62,6 +62,7 @@ bool gOverlayShortcutDown = false;
 struct LiveLatency {
   std::atomic<double> capture{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
   std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
+  std::atomic<double> pacingWait{-1}, pacingOvershoot{-1}, socketSend{-1};
   std::atomic<int> gpuInput{-1};
   std::atomic<std::uint64_t> hostUpdated{0}, inputUpdated{0}, decodeUpdated{0};
 } gLiveLatency;
@@ -2808,8 +2809,17 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
     gLiveLatency.capture = jsonDoubleValue(payload, "captureMs", -1);
     gLiveLatency.encode = jsonDoubleValue(payload, "encodeMs", -1);
     gLiveLatency.send = jsonDoubleValue(payload, "sendMs", -1);
+    gLiveLatency.pacingWait = jsonDoubleValue(payload, "pacingWaitMs", -1);
+    gLiveLatency.pacingOvershoot = jsonDoubleValue(payload, "pacingOvershootMs", -1);
+    gLiveLatency.socketSend = jsonDoubleValue(payload, "socketSendMs", -1);
     gLiveLatency.gpuInput = static_cast<int>(jsonDoubleValue(payload, "gpuInput", -1));
     gLiveLatency.hostUpdated = steadyMicros();
+    std::cout << "SNV1_HOST_TIMING captureAvgMs=" << gLiveLatency.capture.load()
+              << " encodeAvgMs=" << gLiveLatency.encode.load()
+              << " sendAvgMs=" << gLiveLatency.send.load()
+              << " udpPacedAvgMs=" << gLiveLatency.pacingWait.load()
+              << " udpWaitOvershootAvgMs=" << gLiveLatency.pacingOvershoot.load()
+              << " udpSocketAvgMs=" << gLiveLatency.socketSend.load() << "\n";
     std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
     return HostControlEvent::Pong;
   }
@@ -3045,6 +3055,8 @@ struct SnvPacket {
   std::uint32_t durationMicros = 0;
   std::uint32_t flags = 0;
   std::uint64_t hostUnixMicros = 0;
+  // Local-only timestamp; never serialized or compared to the host clock.
+  std::uint64_t receivedAtMicros = 0;
   std::vector<std::uint8_t> payload;
 };
 
@@ -3597,6 +3609,7 @@ struct ClientStreamStats {
   std::uint64_t totalDropped = 0;
   std::uint64_t lastSequence = 0;
   std::uint64_t lastArrivalMicros = 0;
+  std::uint64_t lastMediaTimestampMicros = 0;
   bool hasLastSequence = false;
   double jitterMs = 0.0;
   double ageSumMs = 0.0;
@@ -3628,15 +3641,7 @@ struct ClientStreamStats {
     lastSequence = packet.sequence;
     hasLastSequence = true;
 
-    const std::uint64_t arrival = steadyMicros();
-    if (lastArrivalMicros > 0 && packet.durationMicros > 0) {
-      const double actualMs = static_cast<double>(arrival - lastArrivalMicros) / 1000.0;
-      const double expectedMs = static_cast<double>(packet.durationMicros) / 1000.0;
-      const double sampleJitter = std::abs(actualMs - expectedMs);
-      jitterMs = jitterMs == 0.0 ? sampleJitter : (jitterMs * 0.85 + sampleJitter * 0.15);
-      gLiveLatency.jitter = jitterMs;
-    }
-    lastArrivalMicros = arrival;
+    if (packet.receivedAtMicros == 0) observeArrival(packet, steadyMicros());
 
     if (packet.hostUnixMicros > 0) {
       const double ageMs = (static_cast<double>(unixMicros()) -
@@ -3647,6 +3652,20 @@ struct ClientStreamStats {
         ageSamples += 1;
       }
     }
+  }
+
+  void observeArrival(const SnvPacket& packet, std::uint64_t arrival) {
+    // RFC 3550 transit variation: use sender timestamp DELTAS, not nominal FPS.
+    // UDP invokes this at assembly completion, before reordering/decode waits.
+    if (lastArrivalMicros > 0) {
+      const double arrivalDelta = static_cast<double>(arrival) - static_cast<double>(lastArrivalMicros);
+      const double mediaDelta = static_cast<double>(packet.timestampMicros) - static_cast<double>(lastMediaTimestampMicros);
+      const double sampleJitter = std::abs(arrivalDelta - mediaDelta) / 1000.0;
+      jitterMs += (sampleJitter - jitterMs) / 16.0;
+      gLiveLatency.jitter = jitterMs;
+    }
+    lastArrivalMicros = arrival;
+    lastMediaTimestampMicros = packet.timestampMicros;
   }
 
   void observeDecodeWork(std::uint64_t durationMicros, std::uint64_t workMicros) {
@@ -3758,6 +3777,8 @@ struct ClientStreamStats {
     windowDropped = 0;
     lastSequence = 0;
     lastArrivalMicros = 0;
+    lastMediaTimestampMicros = 0;
+    gLiveLatency.jitter = -1;
     hasLastSequence = false;
     jitterMs = 0.0;
     ageSumMs = 0.0;
@@ -6185,7 +6206,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   _renderView = view;
   _renderSlot = dispatch_semaphore_create(1);
   _latencyOverlay = [NSTextField labelWithString:@"Waiting for latency measurements…"];
-  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 310, 365, 292);
+  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 350, 365, 332);
   _latencyOverlay.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
   _latencyOverlay.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightMedium];
   _latencyOverlay.textColor = NSColor.whiteColor;
@@ -6692,7 +6713,9 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     };
     row(@"Capture", hostFresh ? gLiveLatency.capture.load() : -1, 5);
     row(@"Encode", hostFresh ? gLiveLatency.encode.load() : -1, 5);
-    row(@"Send / pacing", hostFresh ? gLiveLatency.send.load() : -1, 5);
+    row(@"Send total", hostFresh ? gLiveLatency.send.load() : -1, 5);
+    row(@"Pacing wait", hostFresh ? gLiveLatency.pacingWait.load() : -1, 5);
+    row(@"Timer overshoot", hostFresh ? gLiveLatency.pacingOvershoot.load() : -1, 1);
     row(@"Network RTT", hostFresh ? gLiveLatency.rtt.load() : -1, 15);
     row(@"Arrival jitter", decodeFresh ? gLiveLatency.jitter.load() : -1, 4);
     row(@"Decode", decodeFresh ? gLiveLatency.decode.load() : -1, 5);
@@ -7357,6 +7380,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                                           0,
                                           reinterpret_cast<sockaddr*>(&peerAddress.address),
                                           &peerAddress.length) : 0;
+        const auto receivedAtMicros = steadyMicros();
         if (received < 0) {
           if (errno == EINTR) continue;
           throw std::runtime_error("UDP receive failed.");
@@ -7428,7 +7452,10 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
 
         if (completedPacket) {
           try {
-            jitterBuffer.push(parseSnvPacketBytes(packetBytes), completedMediaEpoch, completedRekeyGrace);
+            auto receivedPacket = parseSnvPacketBytes(packetBytes);
+            receivedPacket.receivedAtMicros = receivedAtMicros;
+            stats.observeArrival(receivedPacket, receivedAtMicros);
+            jitterBuffer.push(std::move(receivedPacket), completedMediaEpoch, completedRekeyGrace);
           } catch (const std::exception& error) {
             udpStats.malformedDatagrams += 1;
             const auto now = std::chrono::steady_clock::now();

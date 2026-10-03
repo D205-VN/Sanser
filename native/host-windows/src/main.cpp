@@ -48,6 +48,7 @@
 #include <mmdeviceapi.h>
 #include <mmreg.h>
 #include <wrl/client.h>
+#include "windows_precise_wait.h"
 #endif
 
 struct InputBounds {
@@ -493,6 +494,7 @@ void makeProcessDpiAware() {
 
 // Only the control thread serializes these capture-thread measurements.
 std::atomic<double> gCaptureMs{-1}, gEncodeMs{-1}, gSendMs{-1};
+std::atomic<double> gPacingWaitMs{-1}, gPacingOvershootMs{-1}, gSocketSendMs{-1};
 std::atomic<int> gGpuInput{-1};
 bool gUltraLowLatency = false;
 
@@ -940,17 +942,16 @@ struct HmacSha256Provider {
 
   BCRYPT_ALG_HANDLE algorithm = nullptr;
   DWORD objectLength = 0;
-  std::mutex mutex;
 };
 
 HmacSha256Provider& hmacSha256Provider() {
-  static HmacSha256Provider provider;
+  // Video/audio/control must not serialize all authentication behind one lock.
+  thread_local HmacSha256Provider provider;
   return provider;
 }
 
 std::string hmacSha256Hex(const std::string& key, const std::string& message) {
   HmacSha256Provider& provider = hmacSha256Provider();
-  std::lock_guard<std::mutex> providerLock(provider.mutex);
   BCRYPT_HASH_HANDLE hash = nullptr;
   std::vector<unsigned char> hashObject(provider.objectLength);
   std::array<unsigned char, 32> digest{};
@@ -3846,6 +3847,9 @@ private:
                << ",\"captureMs\":" << gCaptureMs.load()
                << ",\"encodeMs\":" << gEncodeMs.load()
                << ",\"sendMs\":" << gSendMs.load()
+               << ",\"pacingWaitMs\":" << gPacingWaitMs.load()
+               << ",\"pacingOvershootMs\":" << gPacingOvershootMs.load()
+               << ",\"socketSendMs\":" << gSocketSendMs.load()
                << ",\"gpuInput\":" << gGpuInput.load()
                 << "}";
           sendControlJson(hello.str());
@@ -3874,6 +3878,9 @@ private:
                << ",\"captureMs\":" << gCaptureMs.load()
                << ",\"encodeMs\":" << gEncodeMs.load()
                << ",\"sendMs\":" << gSendMs.load()
+               << ",\"pacingWaitMs\":" << gPacingWaitMs.load()
+               << ",\"pacingOvershootMs\":" << gPacingOvershootMs.load()
+               << ",\"socketSendMs\":" << gSocketSendMs.load()
                << ",\"gpuInput\":" << gGpuInput.load()
                << "}";
           sendControlJson(pong.str());
@@ -4021,6 +4028,8 @@ public:
 
   struct PacingStats {
     double sleptMs = 0.0;
+    double overshootMs = 0.0;
+    double socketMs = 0.0;
     double clampedMs = 0.0;
     std::uint64_t clampEvents = 0;
     std::uint64_t clampPackets = 0;
@@ -4160,6 +4169,7 @@ public:
     const MediaCryptoSnapshot crypto = mediaCrypto_ ? mediaCrypto_->snapshot() : MediaCryptoSnapshot{};
     std::cerr << "SNU1 UDP video connected " << endpoint
               << " pacing=" << (pacingEnabled_ ? "on" : "off")
+              << " pacingTimer=" << (preciseWait_.highResolution() ? "high-resolution" : "yield-fallback")
               << " mediaCrypto=" << (crypto.enabled ? "SNU2+ChaCha20" : "off")
               << " mediaEpoch=" << crypto.epoch
               << " bitrate=" << bitrate_
@@ -4226,6 +4236,10 @@ public:
   PacingStats takePacingStats() {
     PacingStats stats;
     stats.sleptMs = pacedSleepMs_;
+    stats.overshootMs = pacedOvershootMs_;
+    stats.socketMs = socketSendMs_;
+    pacedOvershootMs_ = 0;
+    socketSendMs_ = 0;
     stats.clampedMs = pacedClampMs_;
     stats.clampEvents = pacedClampEvents_;
     stats.clampPackets = pacedClampPackets_;
@@ -4354,11 +4368,14 @@ private:
     const std::uint64_t requestedEnd = static_cast<std::uint64_t>(fragmentBegin) + maxFragments;
     const std::uint32_t fragmentEnd = static_cast<std::uint32_t>(
       std::min<std::uint64_t>(fragmentCount, requestedEnd));
+    std::vector<std::uint8_t> datagram;
+    std::vector<std::uint8_t> sendBuf;
+    datagram.reserve(sizeof(UdpVideoAuthenticatedFragmentHeader) + maxPayloadBytes);
+    sendBuf.reserve(1 + sizeof(UdpVideoAuthenticatedFragmentHeader) + maxPayloadBytes);
 	    for (std::uint32_t fragmentIndex = fragmentBegin; fragmentIndex < fragmentEnd; ++fragmentIndex) {
       const std::size_t offset = static_cast<std::size_t>(fragmentIndex) * maxPayloadBytes;
       const std::size_t chunkSize = std::min(maxPayloadBytes, packetBytes.size() - offset);
 
-      std::vector<std::uint8_t> datagram;
       if (crypto.enabled) {
         UdpVideoAuthenticatedFragmentHeader header{};
         header.fragmentCount = fragmentCount;
@@ -4396,9 +4413,9 @@ private:
       }
 
 	      paceDatagram(datagram.size(), packetPacingStartedAt, packetPacingBudget);
+      const auto socketStartedAt = std::chrono::steady_clock::now();
       int sent = 0;
       if (gSingleSocketMode) {
-        std::vector<std::uint8_t> sendBuf;
         sendBuf.resize(1 + datagram.size());
         sendBuf[0] = 0x00; // Video Byte
         std::memcpy(sendBuf.data() + 1, datagram.data(), datagram.size());
@@ -4415,6 +4432,8 @@ private:
                     static_cast<int>(datagram.size()),
                     0);
       }
+      socketSendMs_ += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - socketStartedAt).count();
       if (sent == SOCKET_ERROR || sent != static_cast<int>(datagram.size())) {
         throw std::runtime_error("UDP video send failed, WSA error " + std::to_string(WSAGetLastError()));
       }
@@ -4496,18 +4515,15 @@ private:
           }
         }
       }
-      pacedSleepMs_ += std::chrono::duration<double, std::milli>(sleepFor).count();
-      constexpr auto coarseSleepThreshold = std::chrono::microseconds(300);
-      constexpr auto spinTail = std::chrono::microseconds(75);
-      constexpr auto yieldThreshold = std::chrono::microseconds(20);
-      while (sleepFor > std::chrono::steady_clock::duration::zero()) {
-        const auto waitNow = std::chrono::steady_clock::now();
-        if (waitNow >= nextSendAt_) break;
-        const auto remaining = nextSendAt_ - waitNow;
-        if (remaining > coarseSleepThreshold) {
-          std::this_thread::sleep_until(nextSendAt_ - spinTail);
-        } else if (remaining > yieldThreshold) {
-          std::this_thread::yield();
+      if (sleepFor > std::chrono::steady_clock::duration::zero()) {
+        const auto waitStartedAt = std::chrono::steady_clock::now();
+        const auto deadline = nextSendAt_;
+        preciseWait_.until(deadline);
+        const auto finished = std::chrono::steady_clock::now();
+        // Measure actual waiting, including OS overshoot, not requested sleep.
+        pacedSleepMs_ += std::chrono::duration<double, std::milli>(finished - waitStartedAt).count();
+        if (finished > deadline) {
+          pacedOvershootMs_ += std::chrono::duration<double, std::milli>(finished - deadline).count();
         }
       }
     }
@@ -4539,7 +4555,10 @@ private:
   std::uint64_t mediaAuthEpoch_ = 0;
   bool hasMediaAuthEpoch_ = false;
   std::chrono::steady_clock::time_point nextSendAt_;
+  sanser::WindowsPreciseWait preciseWait_;
   double pacedSleepMs_ = 0.0;
+  double pacedOvershootMs_ = 0.0;
+  double socketSendMs_ = 0.0;
   double pacedClampMs_ = 0.0;
   std::uint64_t pacedClampEvents_ = 0;
   std::uint64_t pacedClampPackets_ = 0;
@@ -5672,6 +5691,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint64_t statsSendMaxMicros = 0;
   [[maybe_unused]] std::uint64_t statsUdpFragments = 0;
   double statsUdpPacedMs = 0.0;
+  double statsUdpOvershootMs = 0.0;
+  double statsUdpSocketMs = 0.0;
   std::uint64_t statsKeyframes = 0;
   std::uint32_t currentAdaptiveBitrate = initialAdaptiveBitrate;
   std::uint64_t seenFeedbackSequence = 0;
@@ -6434,6 +6455,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 		      if (udpClient) {
         const auto pacingStats = udpClient->takePacingStats();
         statsUdpPacedMs += pacingStats.sleptMs;
+        statsUdpOvershootMs += pacingStats.overshootMs;
+        statsUdpSocketMs += pacingStats.socketMs;
         statsUdpPacingClampMs += pacingStats.clampedMs;
         statsUdpPacingClampEvents += pacingStats.clampEvents;
         statsUdpPacingClampPackets += pacingStats.clampPackets;
@@ -6466,6 +6489,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      const double packetizeAvgMs = avgStageMs(statsPacketizeMicros);
 	      const double sendAvgMs = avgStageMs(statsSendMicros);
           gCaptureMs = captureAvgMs; gEncodeMs = encodeAvgMs; gSendMs = sendAvgMs;
+          gPacingWaitMs = statsFrames > 0 ? statsUdpPacedMs / statsFrames : 0;
+          gPacingOvershootMs = statsFrames > 0 ? statsUdpOvershootMs / statsFrames : 0;
+          gSocketSendMs = statsFrames > 0 ? statsUdpSocketMs / statsFrames : 0;
 	      const double udpPacedAvgMs = statsFrames > 0
 	        ? statsUdpPacedMs / static_cast<double>(statsFrames)
 	        : 0.0;
@@ -6535,6 +6561,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	                << " sendAvgMs=" << sendAvgMs
 		                << " sendMaxMs=" << maxStageMs(statsSendMaxMicros)
 		                << " udpPacedAvgMs=" << udpPacedAvgMs
+                    << " udpWaitOvershootAvgMs=" << gPacingOvershootMs.load()
+                    << " udpSocketAvgMs=" << gSocketSendMs.load()
 		                << " udpPacedTotalMs=" << statsUdpPacedMs
 #ifdef _WIN32
 	                << " udpPaceClampMs=" << statsUdpPacingClampMs
@@ -7113,6 +7141,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      statsSendMaxMicros = 0;
 	      statsUdpFragments = 0;
 	      statsUdpPacedMs = 0.0;
+          statsUdpOvershootMs = 0.0;
+          statsUdpSocketMs = 0.0;
 	      statsKeyframes = 0;
 #ifdef _WIN32
       statsCursorFrames = 0;

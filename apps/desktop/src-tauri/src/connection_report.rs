@@ -17,6 +17,7 @@ const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
     "SNV1_STATS",
     "SNV1_STAGE_PROFILE",
+    "SNV1_HOST_TIMING",
     "SNV1_CLIENT_STATS",
     "SNV1_RENDER_STATS",
     "SNINPUT_RTT",
@@ -65,6 +66,9 @@ const FIELDS: &[&str] = &[
     "encodeMaxMs",
     "sendAvgMs",
     "sendMaxMs",
+    "udpPacedAvgMs",
+    "udpWaitOvershootAvgMs",
+    "udpSocketAvgMs",
     "datagrams",
     "incomplete",
     "jitterLate",
@@ -388,6 +392,10 @@ mod tests {
     }
     #[test]
     fn accepts_only_known_numeric_metrics_without_secrets_or_clock_skew() {
+        let timing = parse_sample(b"SNV1_HOST_TIMING sendAvgMs=45 udpPacedAvgMs=4 udpWaitOvershootAvgMs=1.2 udpSocketAvgMs=38 captureAvgMs=-1 token=123").unwrap();
+        assert_eq!(timing.values.len(), 4);
+        assert_eq!(timing.values["sendAvgMs"], 45.0);
+        assert_eq!(timing.values["udpSocketAvgMs"], 38.0);
         let sample =
             parse_sample(b"SNINPUT_ACKED rttMs=150 token=123 x=45 key=65 avgAgeMs=3000 pending=2");
         assert!(sample.as_ref().is_some_and(

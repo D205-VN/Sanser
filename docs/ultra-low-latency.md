@@ -36,6 +36,14 @@ with SNV2 or remove its relative mouse/gamepad features.
   software pacing budget is 3–5 ms per packet with a bounded burst allowance;
   crypto, socket work and scheduling can make actual send time longer. This is
   not a guaranteed network delivery time or a new bandwidth estimate.
+- Windows packet pacing uses a reusable high-resolution waitable timer with a
+  short yield/spin tail rather than `sleep_until` for sub-millisecond gaps.
+  Actual waiting and timer overshoot are measured separately. If the high-resolution
+  timer is unavailable, the bounded wait uses a yield/spin fallback, which can use
+  more CPU. No global timer-resolution or process-priority setting is changed.
+- Each Windows sending/control thread owns its HMAC provider, avoiding a shared
+  authentication lock. Datagram buffers are reused across fragments of a frame.
+  Authentication, encryption and packet layout are unchanged.
 - Input retries poll every 2 ms with a 12 ms retry interval. Exhausted retries
   clear queued input and send an authenticated reset to avoid a stuck key.
   Connected gamepad snapshots coalesce per controller and refresh every 50 ms;
@@ -79,9 +87,11 @@ toggles it; plain F8 remains available to the remote app. It displays:
 | Field | Meaning |
 | --- | --- |
 | Capture / Encode | Host-local average processing durations, returned in authenticated control pongs |
-| Send / pacing | Host time submitting video, including pacing; not a separate queue-delay estimate |
+| Send total | Host time submitting video, including crypto, socket calls and pacing; not network delivery time |
+| Pacing wait | Actual host time waiting for packet pacing, including scheduler overshoot |
+| Timer overshoot | Portion of pacing waits spent past their target deadline; do not add it to Pacing wait |
 | Network RTT | Client-local control ping/pong duration |
-| Arrival jitter | Smoothed variation in completed packet arrival spacing |
+| Arrival jitter | Smoothed variation of arrival intervals minus sender media-timestamp intervals, sampled before the reorder buffer |
 | Decode | Local time from VideoToolbox submission to output callback |
 | Frame queue | Average decoded-frame wait before a draw consumes it |
 | Render GPU | Metal command GPU execution time; excludes scan-out |
@@ -92,6 +102,17 @@ Unavailable or stale samples show `—`. Red values indicate per-stage budgets,
 not measured total end-to-end latency. CPU fallback keeps the warning visible.
 The bounded local diagnostics report also retains frame-queue and GPU render
 measurements. No screen content, typed text or session credentials are added.
+Authenticated host timing samples (including socket submission time) now persist
+on the client too, so a Mac report can diagnose Windows sending. Pacing/socket
+averages include retransmission work in the reporting window; Send total is the
+normal video submission path and is not an exact sum of those window averages.
+
+Arrival jitter uses the RFC 3550 transit-variation estimator. Sender and receiver
+clock offsets cancel; nominal FPS, source idle periods, skipped captures and
+the receiver's reorder hold no longer count as network variation by themselves.
+It is still measured at application-level frame assembly, not the NIC: sender
+encode/send variation and receive-thread stalls can contribute. A lower corrected
+reading does not by itself prove that actual latency improved.
 
 ## Validation and limits
 
@@ -103,3 +124,6 @@ input expiry. Loopback and codec tests check interoperability with the actual en
 These checks do not establish physical Mac–Windows latency. Measure Direct and
 Relay separately on real devices. Moving a signaling server to a Mac or using
 a Cloudflare tunnel does not itself guarantee 5–15 ms input-to-display latency.
+
+References: [Windows high-resolution timers](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw),
+[RFC 3550 interarrival jitter](https://www.rfc-editor.org/rfc/rfc3550.html#section-6.4.1).

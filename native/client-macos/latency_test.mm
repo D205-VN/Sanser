@@ -49,6 +49,31 @@ int main() {
       requireLatency(jitter.popReady(packet, start) && packet.sequence == 1, "generation restart must accept a fresh sequence");
 
       ClientStreamStats stats;
+      ClientStreamStats arrivalStats;
+      auto received = testPacket(1, true);
+      received.receivedAtMicros = 1000000;
+      arrivalStats.observeArrival(received, received.receivedAtMicros);
+      arrivalStats.observe(received);
+      // Capture cadence changes/idle gaps are not network jitter when arrival
+      // follows the sender timestamp, even though duration remains 8333 us.
+      received.sequence = 4;
+      received.timestampMicros += 50000;
+      received.receivedAtMicros += 50000;
+      arrivalStats.observeArrival(received, received.receivedAtMicros);
+      arrivalStats.observe(received); // delayed dequeue must not sample twice
+      requireLatency(arrivalStats.jitterMs == 0, "source cadence or sequence loss must not invent arrival jitter");
+      received.sequence = 5;
+      received.timestampMicros += 8333;
+      received.receivedAtMicros += 8333 + 45000;
+      arrivalStats.observeArrival(received, received.receivedAtMicros);
+      const auto measuredJitter = arrivalStats.jitterMs;
+      arrivalStats.observe(received);
+      requireLatency(std::abs(measuredJitter - 45.0 / 16) < 0.001 && arrivalStats.jitterMs == measuredJitter,
+        "actual 45 ms arrival variation must be measured once before the jitter buffer");
+      arrivalStats.resetSequencing();
+      arrivalStats.observeArrival(testPacket(1), 2000000);
+      requireLatency(arrivalStats.jitterMs == 0, "new media generation must reset jitter baseline");
+      gLiveLatency.jitter = 0;
       std::string reason;
       auto first = testPacket(1, true), gap = testPacket(3), delta = testPacket(4), idr = testPacket(5, true);
       stats.observe(first); requireLatency(!stats.shouldDropBeforeDecode(first, reason), "decode initial IDR");

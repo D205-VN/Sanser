@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_host_windows VERSION 2.1.11 LANGUAGES CXX)
+project(sanser_host_windows VERSION 2.1.12 LANGUAGES CXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -31,6 +31,9 @@ target_compile_definitions(sanser-host-windows PRIVATE
 target_include_directories(sanser-host-windows PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
 if(BUILD_TESTING)
+  add_executable(sanser-precise-wait-test ../common/windows_precise_wait_test.cpp)
+  add_test(NAME sanser-precise-wait-test COMMAND sanser-precise-wait-test)
+  set_tests_properties(sanser-precise-wait-test PROPERTIES TIMEOUT 10)
   add_executable(sanser-wheel-delta-test ../common/wheel_delta_test.cpp)
   target_include_directories(sanser-wheel-delta-test PRIVATE ../common)
   add_test(NAME sanser-wheel-delta-test COMMAND sanser-wheel-delta-test)
