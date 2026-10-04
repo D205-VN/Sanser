@@ -144,6 +144,18 @@ pub struct EngineStatus {
     pub running: bool,
     pub process_id: Option<u32>,
     pub last_error: Option<String>,
+    pub startup_failure: Option<NativeStartupFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeStartupFailure {
+    NoUdp,
+    UnexpectedPeer,
+    NoVideo,
+    AuthRejected,
+    IncompleteVideo,
+    DecodeFailed,
 }
 
 #[derive(Debug, Clone, Serialize)]

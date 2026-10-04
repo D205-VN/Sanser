@@ -11,6 +11,35 @@ use std::{
 const TAIL_BYTES: usize = 8 * 1024;
 const DEBUG_FILE_BYTES: usize = 2 * 1024 * 1024;
 
+const STARTUP_ERROR_PREFIX: &str = "SNU1 UDP render listener error: [startup:";
+
+/// Classify only an explicit terminal native startup failure. A user closing
+/// the viewer, a crash or a generic timeout must never trigger auto-reopening.
+pub(crate) fn startup_failure(message: &str) -> Option<crate::models::NativeStartupFailure> {
+    use crate::models::NativeStartupFailure;
+    let line = message.lines().last()?;
+    let (code, _) = line.strip_prefix(STARTUP_ERROR_PREFIX)?.split_once("] ")?;
+    match code {
+        "no-udp" => Some(NativeStartupFailure::NoUdp),
+        "unexpected-peer" => Some(NativeStartupFailure::UnexpectedPeer),
+        "no-video" => Some(NativeStartupFailure::NoVideo),
+        "auth-rejected" => Some(NativeStartupFailure::AuthRejected),
+        "incomplete-video" => Some(NativeStartupFailure::IncompleteVideo),
+        "decode-failed" => Some(NativeStartupFailure::DecodeFailed),
+        _ => None,
+    }
+}
+
+pub(crate) fn display_error(message: &str) -> String {
+    if startup_failure(message).is_some()
+        && let Some(line) = message.lines().last()
+        && let Some((_, detail)) = line.split_once("] ")
+    {
+        return detail.to_owned();
+    }
+    message.to_owned()
+}
+
 pub(crate) struct EngineOutput {
     tail: Arc<Mutex<VecDeque<u8>>>,
     completed: mpsc::Receiver<()>,
@@ -130,6 +159,34 @@ mod tests {
                 .is_ok()
         );
         Ok(())
+    }
+
+    #[test]
+    fn only_explicit_terminal_startup_errors_are_classified() {
+        use crate::models::NativeStartupFailure;
+        for (code, expected) in [
+            ("no-udp", NativeStartupFailure::NoUdp),
+            ("unexpected-peer", NativeStartupFailure::UnexpectedPeer),
+            ("no-video", NativeStartupFailure::NoVideo),
+            ("auth-rejected", NativeStartupFailure::AuthRejected),
+            ("incomplete-video", NativeStartupFailure::IncompleteVideo),
+            ("decode-failed", NativeStartupFailure::DecodeFailed),
+        ] {
+            let message =
+                format!("old diagnostic\n{STARTUP_ERROR_PREFIX}{code}] Human-readable error");
+            assert_eq!(startup_failure(&message), Some(expected));
+            assert_eq!(display_error(&message), "Human-readable error");
+        }
+        for message in [
+            "process exited with exit status: 0",
+            "UDP receive timed out",
+            "[startup:no-udp] unrelated output",
+            "SNU1 UDP render listener error: [startup:unknown] error",
+            "SNU1 UDP render listener error: [startup:no-udp] error\nuser closed viewer",
+        ] {
+            assert_eq!(startup_failure(message), None);
+            assert_eq!(display_error(message), message);
+        }
     }
 
     #[test]

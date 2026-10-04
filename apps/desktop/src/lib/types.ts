@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.1.13' as const;
+export const SANSER_VERSION = '2.1.14' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
@@ -52,6 +52,7 @@ export interface EngineStatus {
   running: boolean;
   processId: number | null;
   lastError: string | null;
+  startupFailure?: 'no-udp' | 'unexpected-peer' | 'no-video' | 'auth-rejected' | 'incomplete-video' | 'decode-failed' | null;
 }
 
 export interface RuntimeStatus {

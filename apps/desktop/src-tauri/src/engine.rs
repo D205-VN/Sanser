@@ -785,7 +785,14 @@ impl EngineManager {
             installed,
             running,
             process_id,
-            last_error: state.last_errors.get(&kind).cloned(),
+            last_error: state
+                .last_errors
+                .get(&kind)
+                .map(|message| crate::engine_output::display_error(message)),
+            startup_failure: state
+                .last_errors
+                .get(&kind)
+                .and_then(|message| crate::engine_output::startup_failure(message)),
         })
     }
 }

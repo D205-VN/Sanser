@@ -161,7 +161,9 @@
       const message = error instanceof Error ? error.message : 'Unable to start native client';
       p2pRetryCount += 1;
       p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
-      failedP2pSessionId = p2pRetryCount >= 3 ? target.id : null;
+      const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0;
+      failedP2pSessionId = exhausted ? target.id : null;
+      if (exhausted) connection.blockNativeRetry();
       localError = message;
       connection.setError(message);
       return false;
@@ -173,7 +175,7 @@
   async function startNativeClient(target = sessionState): Promise<void> {
     const client = session.client();
     const localDeviceId = $presence.deviceId;
-    if (!target || !client || !localDeviceId || nativePreparationInFlight || $connection.engineRunning) return;
+    if (!target || !client || !localDeviceId || nativePreparationInFlight || $connection.engineRunning || $connection.nativeRetryBlocked) return;
     if (p2pRetrySessionId !== target.id) {
       p2pRetrySessionId = target.id;
       p2pRetryCount = 0;
@@ -210,19 +212,25 @@
       if (isAborted(controller.signal) || $connection.session?.id !== target.id) return;
       p2pRetryCount += 1;
       p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
-      failedP2pSessionId = p2pRetryCount >= 3 ? target.id : null;
+      const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0;
+      failedP2pSessionId = exhausted ? target.id : null;
+      if (exhausted) connection.blockNativeRetry();
       const message = error instanceof Error ? error.message : 'Unable to prepare a fresh native session';
       localError = message;
       connection.setError(message);
     } finally {
       nativePreparationInFlight = false;
       connection.setPreparing(false);
+      if (controller.signal.aborted && !disconnecting && $connection.session?.id === target.id) {
+        connection.setBusy(false);
+      }
       if (negotiationController === controller) negotiationController = null;
       phase = 'idle';
     }
   }
 
   async function retryNativeClient(): Promise<void> {
+    connection.resetNativeRetry();
     failedP2pSessionId = null;
     p2pRetryCount = 0;
     p2pRetryAfter = 0;
@@ -236,6 +244,7 @@
     if (!sessionState || disconnecting) return;
     const targetId = sessionState.id;
     disconnecting = true;
+    connection.blockNativeRetry();
     failedP2pSessionId = targetId;
     p2pRetryCount = 3;
     negotiationController?.abort();
@@ -279,17 +288,33 @@
         if (!componentActive || $connection.session?.id !== current.id) return;
         if (!status.running) {
           const message = status.lastError ?? 'The native client stopped unexpectedly';
-          await stopEngine('client').catch(() => undefined);
+          const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;
+          await stopEngine('client');
+          if (!stillCurrent()) return;
+          await stopRelay('client');
+          // Cleanup can outlive Disconnect or navigation to another session.
+          if (!stillCurrent()) return;
           connection.setEngineRunning(false);
           activeRoute = null;
-          failedP2pSessionId = current.id;
           p2pRetrySessionId = current.id;
-          p2pRetryCount = Math.max(p2pRetryCount, 3);
-          connection.setError(message);
+          const retryable = status.startupFailure !== undefined && status.startupFailure !== null &&
+            ['no-udp', 'unexpected-peer', 'no-video', 'incomplete-video'].includes(status.startupFailure);
+          const retry = retryable && connection.takeNativeStartupRetry();
+          if (retry) {
+            failedP2pSessionId = null;
+            p2pRetryCount = 0;
+            p2pRetryAfter = Date.now() + 1_500;
+          } else {
+            connection.blockNativeRetry();
+            failedP2pSessionId = current.id;
+            p2pRetryCount = Math.max(p2pRetryCount, 3);
+          }
+          localError = retry ? `${message} Retrying once with a fresh connection…` : message;
+          connection.setError(localError);
           diagnostics.add({
             level: 'warn',
             category: 'engine',
-            message: `${message}; the accepted session remains available for retry`
+            message: retry ? 'Retrying native video startup once with fresh credentials and endpoints' : `${message}; the accepted session remains available for retry`
           });
           return;
         }
@@ -303,7 +328,11 @@
         ['rejected', 'disconnected', 'expired', 'closed', 'failed'].includes(refreshed.status) &&
         $connection.engineRunning
       ) {
-        await stopEngine('client').catch(() => undefined);
+        const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;
+        await stopEngine('client');
+        if (!stillCurrent()) return;
+        await stopRelay('client');
+        if (!stillCurrent()) return;
         connection.setEngineRunning(false);
         activeRoute = null;
         return;
@@ -313,6 +342,7 @@
         refreshed.transport === 'native' &&
         localDeviceId &&
         !$connection.engineRunning &&
+        !$connection.nativeRetryBlocked &&
         failedP2pSessionId !== refreshed.id &&
         Date.now() >= p2pRetryAfter
       ) {
@@ -369,7 +399,7 @@
         <span class="capture-dot waiting"></span>
         <h2>{nativePreparationInFlight ? phaseLabels[phase] : sessionState.status === 'pending' ? 'Waiting for host approval' : sessionState.status === 'accepted' ? 'Host accepted the session' : `Session ${sessionState.status}`}</h2>
         <p>{nativeReady ? 'Open the remote desktop to begin.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for the other computer.'}</p>
-        <button class="button primary" disabled={!nativeReady || $connection.busy || nativePreparationInFlight} onclick={retryNativeClient}>{nativePreparationInFlight ? 'Connecting…' : failedP2pSessionId === sessionState.id ? 'Retry connection' : 'Open remote desktop'}</button>
+        <button class="button primary" disabled={!nativeReady || $connection.busy || nativePreparationInFlight} onclick={retryNativeClient}>{nativePreparationInFlight ? 'Connecting…' : failedP2pSessionId === sessionState.id || $connection.nativeRetryBlocked ? 'Retry connection' : 'Open remote desktop'}</button>
         {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">This connection is unavailable. Check Settings → Diagnostics for details.</span>{/if}
       </div>
     {:else}

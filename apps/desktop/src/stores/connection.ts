@@ -10,6 +10,8 @@ export interface ConnectionState {
   preparing: boolean;
   busy: boolean;
   error: string | null;
+  nativeStartupRetries: number;
+  nativeRetryBlocked: boolean;
 }
 
 const initial: ConnectionState = {
@@ -18,15 +20,19 @@ const initial: ConnectionState = {
   engineRunning: false,
   preparing: false,
   busy: false,
-  error: null
+  error: null,
+  nativeStartupRetries: 0,
+  nativeRetryBlocked: false
 };
 
 function createConnectionStore() {
   const store = writable<ConnectionState>(initial);
+  let refreshError: string | null = null;
 
   return {
     subscribe: store.subscribe,
     begin(connectionSession: ConnectionSession): void {
+      refreshError = null;
       store.set({ ...initial, session: connectionSession });
       diagnostics.add({
         level: 'info',
@@ -40,25 +46,31 @@ function createConnectionStore() {
       if (!current) return null;
       try {
         const refreshed = await client.getSession(current.id);
-        if (get(store).session?.id !== current.id) return null;
+        const latest = get(store).session;
+        if (!latest || latest.id !== current.id) return null;
         const credentialActive =
-          current.credentialExpiresAt !== undefined && current.credentialExpiresAt > Math.floor(Date.now() / 1_000);
+          latest.credentialExpiresAt !== undefined && latest.credentialExpiresAt > Math.floor(Date.now() / 1_000);
         const merged = credentialActive
           ? {
               ...refreshed,
-              address: current.address,
-              port: current.port,
-              sessionToken: current.sessionToken,
-              wireProtocol: current.wireProtocol,
-              credentialExpiresAt: current.credentialExpiresAt
+              address: latest.address,
+              port: latest.port,
+              sessionToken: latest.sessionToken,
+              wireProtocol: latest.wireProtocol,
+              credentialExpiresAt: latest.credentialExpiresAt
             }
           : refreshed;
-        store.update((state) => ({ ...state, session: merged, error: null }));
+        store.update((state) => ({ ...state, session: merged, error: state.error === refreshError ? null : state.error }));
+        refreshError = null;
         return merged;
       } catch (error) {
         if (get(store).session?.id !== current.id) return null;
         const message = error instanceof Error ? error.message : 'Unable to refresh the session';
-        store.update((state) => ({ ...state, error: message }));
+        store.update((state) => {
+          if (state.error !== null && state.error !== refreshError) return state;
+          refreshError = message;
+          return { ...state, error: message };
+        });
         return null;
       }
     },
@@ -86,7 +98,20 @@ function createConnectionStore() {
       });
     },
     setError(message: string | null): void {
+      refreshError = null;
       store.update((state) => ({ ...state, busy: false, error: message }));
+    },
+    takeNativeStartupRetry(): boolean {
+      const current = get(store);
+      if (current.session?.status !== 'accepted' || current.nativeRetryBlocked || current.nativeStartupRetries >= 1) return false;
+      store.update((state) => ({ ...state, nativeStartupRetries: state.nativeStartupRetries + 1 }));
+      return true;
+    },
+    blockNativeRetry(): void {
+      store.update((state) => ({ ...state, nativeRetryBlocked: true }));
+    },
+    resetNativeRetry(): void {
+      store.update((state) => ({ ...state, nativeStartupRetries: 0, nativeRetryBlocked: false }));
     },
     setBusy(busy: boolean): void {
       store.update((state) => ({ ...state, busy }));
@@ -95,6 +120,7 @@ function createConnectionStore() {
       store.update((state) => ({ ...state, metrics }));
     },
     clear(): void {
+      refreshError = null;
       store.set({ ...initial, preparing: get(store).preparing });
     }
   };

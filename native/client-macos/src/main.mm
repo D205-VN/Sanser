@@ -7316,16 +7316,16 @@ struct UdpVideoStartup {
     decoded = decoded || decodedFrames > 0;
     if (!enabled || decoded || now - startedAt < std::chrono::seconds(20)) return nullptr;
     if (rawDatagrams == 0)
-      return "No UDP packets received from the host within 20 seconds. Check the Windows Host error and firewall, then retry the connection.";
+      return "[startup:no-udp] No UDP packets received from the host within 20 seconds. Check the Windows Host error and firewall, then retry the connection.";
     if (rawDatagrams == unexpectedPeer)
-      return "UDP packets arrived only from an unexpected peer. Retry the connection to negotiate fresh endpoints.";
+      return "[startup:unexpected-peer] UDP packets arrived only from an unexpected peer. Retry the connection to negotiate fresh endpoints.";
     if (videoDatagrams == 0)
-      return "UDP traffic arrived but no video arrived within 20 seconds. Check the Windows Host capture/encoder error, then retry.";
+      return "[startup:no-video] UDP traffic arrived but no video arrived within 20 seconds. Check the Windows Host capture/encoder error, then retry.";
     if (authRejected > 0 && completed == 0)
-      return "Video authentication failed before the first frame. Retry the connection on both devices to refresh session credentials.";
+      return "[startup:auth-rejected] Video authentication failed before the first frame. Retry the connection on both devices to refresh session credentials.";
     if (completed == 0)
-      return "Video fragments arrived but no complete video packet was recovered within 20 seconds. Retry the connection and check packet loss.";
-    return "Video packets arrived but no frame could be decoded within 20 seconds. Check the host encoder and retry the connection.";
+      return "[startup:incomplete-video] Video fragments arrived but no complete video packet was recovered within 20 seconds. Retry the connection and check packet loss.";
+    return "[startup:decode-failed] Video packets arrived but no frame could be decoded within 20 seconds. Check the host encoder and retry the connection.";
   }
 
   void report(bool timedOut, std::uint64_t decodedFrames) const {
