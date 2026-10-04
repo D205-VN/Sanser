@@ -30,6 +30,7 @@ mod nomination;
 mod punch;
 mod scoring;
 mod security;
+mod selection;
 mod signaling;
 mod state;
 pub mod stun;
@@ -73,6 +74,7 @@ pub use security::{
     derive_keys, encrypt_payload, generate_x25519_keypair, public_key_from_base64,
     public_key_to_base64,
 };
+pub use selection::select_signaling_candidates;
 pub use signaling::{
     P2pCandidateBatch, P2pClosed, P2pFailed, P2pGatheringComplete, P2pHello, P2pNominate,
     P2pPathChanged, P2pPunchReady, P2pRole, P2pSelected, P2pSessionCredential, P2pSignal,

@@ -581,49 +581,16 @@ pub async fn p2p_gather(
         // A symmetric NAT may give STUN a random source port even when the
         // router has an explicit public:fixed -> host:fixed rule. Advertise
         // that fixed endpoint as a lower-priority fallback.
-        if gather_result.candidates.len() >= 16 {
-            gather_result.candidates.pop();
-        }
         gather_result.candidates.push(candidate);
     }
     let mut candidates = gather_result.candidates.clone();
     if let Some(result) = &ipv6_result {
         candidates.extend(result.candidates.iter().cloned());
     }
-    candidates.sort_unstable_by(|left, right| {
-        right
-            .priority
-            .cmp(&left.priority)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let required = [
-        candidates
-            .iter()
-            .find(|candidate| candidate.candidate_type == sanser_p2p::CandidateType::Ipv6Global)
-            .cloned(),
-        candidates
-            .iter()
-            .find(|candidate| candidate.candidate_type == sanser_p2p::CandidateType::Manual)
-            .cloned(),
-        candidates
-            .iter()
-            .find(|candidate| {
-                matches!(
-                    candidate.candidate_type,
-                    sanser_p2p::CandidateType::PortMapped
-                        | sanser_p2p::CandidateType::ServerReflexive
-                )
-            })
-            .cloned(),
-    ];
-    // Reserve three slots for one IPv6, manual-forward and discovered public
-    // endpoint so virtual IPv4 interfaces cannot crowd out useful fallbacks.
-    candidates.truncate(13);
-    for candidate in required.into_iter().flatten() {
-        if !candidates.iter().any(|item| item.id == candidate.id) {
-            candidates.push(candidate);
-        }
-    }
+    // Native media is IPv4-only today. Do not advertise unusable IPv6 paths
+    // or let their higher priority evict IPv4 LAN/STUN/router candidates.
+    candidates.retain(|candidate| candidate.address.is_ipv4());
+    let candidates = sanser_p2p::select_signaling_candidates(candidates);
     let signaled_ids = candidates
         .iter()
         .map(|candidate| candidate.id.clone())

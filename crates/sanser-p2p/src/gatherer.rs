@@ -189,8 +189,6 @@ fn port_mapped_candidate(
     Ok(candidate.validate().is_ok().then_some(candidate))
 }
 
-const MAX_SIGNAL_CANDIDATES: usize = 16;
-
 async fn resolve_stun_server(url: &str, ipv4: bool) -> Option<SocketAddr> {
     let host_port = if let Some(stripped) = url.strip_prefix("stun:") {
         stripped
@@ -529,38 +527,13 @@ pub async fn gather_candidates_on_socket(
                 reason: format!("failed to collect a UPnP candidate: {error}"),
             })?;
     }
-    let ordered = candidate_set.ordered_by_priority();
-    let external = ordered
-        .iter()
-        .find(|candidate| {
-            matches!(
-                candidate.candidate_type,
-                CandidateType::ServerReflexive | CandidateType::PortMapped
-            )
-        })
-        .map(|candidate| (*candidate).clone());
-    result.candidates = ordered
-        .into_iter()
-        .take(MAX_SIGNAL_CANDIDATES)
-        .cloned()
-        .collect();
-    if let Some(external) = external
-        && !result
-            .candidates
-            .iter()
-            .any(|candidate| candidate.endpoint() == external.endpoint())
-    {
-        if result.candidates.len() == MAX_SIGNAL_CANDIDATES {
-            result.candidates.pop();
-        }
-        result.candidates.push(external);
-        result.candidates.sort_unstable_by(|left, right| {
-            right
-                .priority
-                .cmp(&left.priority)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-    }
+    result.candidates = crate::select_signaling_candidates(
+        candidate_set
+            .ordered_by_priority()
+            .into_iter()
+            .cloned()
+            .collect(),
+    );
     for candidate in &result.candidates {
         let _ = tx
             .send(GatheringEvent::CandidateFound(candidate.clone()))

@@ -315,20 +315,34 @@ pub async fn query_stun(
     let mut buf = [0u8; 1024];
     let sleep_timer = tokio::time::sleep(timeout);
     tokio::pin!(sleep_timer);
+    // Retransmit the same transaction within the caller's gathering budget.
+    // RFC 8489 recommends an initial RTO of at least 500 ms and exponential
+    // backoff. A dropped first request must not make this server unusable.
+    let mut retry_delay = Duration::from_millis(500);
+    let retry_timer = tokio::time::sleep(retry_delay);
+    tokio::pin!(retry_timer);
 
     loop {
         tokio::select! {
+            biased;
             _ = &mut sleep_timer => {
                 return Err(P2pError::StunTimeout {
                     timeout_ms: timeout.as_millis() as u64,
                 });
             }
+            _ = &mut retry_timer => {
+                socket.send_to(&request, server_addr).await.map_err(|error| P2pError::StunFailed {
+                    reason: format!("failed to retry STUN request to {server_addr}: {error}"),
+                })?;
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(4));
+                retry_timer.as_mut().reset(tokio::time::Instant::now() + retry_delay);
+            }
             recv_res = socket.recv_from(&mut buf) => {
                 match recv_res {
                     Ok((n, from)) => {
-                        // In some NAT environments, the packet might be received from a slightly
-                        // different port/address, but RFC 5389 requires it to originate from the STUN server IP.
-                        if from.ip() == server_addr.ip() {
+                        // A binding response must come from the endpoint queried,
+                        // including its UDP port, and match this transaction.
+                        if from == server_addr {
                             match parse_binding_response(&buf[..n], &tid) {
                                 Ok((mapped_address, mapped_port)) => {
                                     return Ok(StunBinding {
@@ -363,6 +377,82 @@ pub async fn query_stun(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn binding_response(request: &[u8], port: u16) -> Vec<u8> {
+        let mut response = request[..STUN_HEADER_SIZE].to_vec();
+        response[..2].copy_from_slice(&STUN_BINDING_RESPONSE.to_be_bytes());
+        response[2..4].copy_from_slice(&12u16.to_be_bytes());
+        response.extend_from_slice(&ATTR_MAPPED_ADDRESS.to_be_bytes());
+        response.extend_from_slice(&8u16.to_be_bytes());
+        response.extend_from_slice(&[0, FAMILY_IPV4]);
+        response.extend_from_slice(&port.to_be_bytes());
+        response.extend_from_slice(&[203, 0, 113, 5]);
+        response
+    }
+
+    #[tokio::test]
+    async fn lost_first_request_retries_same_transaction_and_ignores_wrong_source_or_id() {
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let wrong_port = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_address = server.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut buf = [0; 1024];
+            let (n, source) = server.recv_from(&mut buf).await.unwrap();
+            let first = buf[..n].to_vec();
+            // No valid response to the first request. Neither a different
+            // server port nor a previous transaction may complete the query.
+            wrong_port
+                .send_to(&binding_response(&first, 50000), source)
+                .await
+                .unwrap();
+            let mut stale = binding_response(&first, 50001);
+            stale[8] ^= 1;
+            server.send_to(&stale, source).await.unwrap();
+            let (n, retry_source) =
+                tokio::time::timeout(Duration::from_secs(3), server.recv_from(&mut buf))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(source, retry_source, "retry must retain the NAT socket");
+            assert_eq!(&buf[..n], &first, "retry must retain the transaction id");
+            server
+                .send_to(&binding_response(&first, 51000), source)
+                .await
+                .unwrap();
+        });
+        let binding = query_stun(&client, server_address, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(binding.mapped_port, 51000);
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn short_gather_budget_does_not_wait_for_or_send_a_retry() {
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            query_stun(
+                &client,
+                server.local_addr().unwrap(),
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(P2pError::StunTimeout { timeout_ms: 100 })
+        ));
+        let mut buf = [0; 1024];
+        server.recv_from(&mut buf).await.unwrap();
+        assert_eq!(
+            server.try_recv_from(&mut buf).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 
     #[test]
     fn binding_request_has_correct_magic_cookie() {
