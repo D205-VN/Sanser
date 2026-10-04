@@ -6844,6 +6844,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	        std::uint32_t nextFps = currentAdaptiveFps;
 	        const bool hasDecodeFeedback = feedback.decodeSamples > 0 || feedback.decodeOverBudget > 0 ||
 	                                       feedback.decodeAvgMs >= 0.0 || feedback.decodeMaxMs >= 0.0;
+          const bool hasLatencyDropFeedback = feedback.latencyDropped > 0 ||
+            feedback.keyframeWaitDropped > 0 || feedback.latencyKeyframeRequests > 0 ||
+            feedback.latencyKeyframeSuppressed > 0 || feedback.latencyLateMaxMs >= 0.0;
           const bool hasRenderFeedback = feedback.source == "render" || feedback.rendered > 0;
           // Coalescing alone is normal for a newest-frame queue. Require actual
           // backlog/late presentation, or decode work above the frame budget.
