@@ -6,6 +6,7 @@
 #include "sanser_version.h"
 #include "wheel_delta.h"
 #include "latency_policy.h"
+#include "stream_adaptation_policy.h"
 
 #include <algorithm>
 #include <atomic>
@@ -493,7 +494,7 @@ void makeProcessDpiAware() {
 }
 
 // Only the control thread serializes these capture-thread measurements.
-std::atomic<double> gCaptureMs{-1}, gEncodeMs{-1}, gSendMs{-1};
+std::atomic<double> gCaptureMs{-1}, gCaptureWaitMs{-1}, gEncodeMs{-1}, gSendMs{-1};
 std::atomic<double> gPacingWaitMs{-1}, gPacingOvershootMs{-1}, gSocketSendMs{-1};
 std::atomic<int> gGpuInput{-1};
 bool gUltraLowLatency = false;
@@ -3845,6 +3846,7 @@ private:
           hello
                 << ",\"hostUnixMicros\":" << unixMicros()
                << ",\"captureMs\":" << gCaptureMs.load()
+               << ",\"captureWaitMs\":" << gCaptureWaitMs.load()
                << ",\"encodeMs\":" << gEncodeMs.load()
                << ",\"sendMs\":" << gSendMs.load()
                << ",\"pacingWaitMs\":" << gPacingWaitMs.load()
@@ -3876,6 +3878,7 @@ private:
                << ",\"sentSteadyMicros\":" << jsonUint64Value(payload, "sentSteadyMicros")
                << ",\"hostUnixMicros\":" << unixMicros()
                << ",\"captureMs\":" << gCaptureMs.load()
+               << ",\"captureWaitMs\":" << gCaptureWaitMs.load()
                << ",\"encodeMs\":" << gEncodeMs.load()
                << ",\"sendMs\":" << gSendMs.load()
                << ",\"pacingWaitMs\":" << gPacingWaitMs.load()
@@ -5408,9 +5411,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
     std::max<std::uint32_t>(1000000, maxAdaptiveBitrate / 4));
   const bool startupWarmupEnabled = hasNetworkVideo && options.intervalMs == 0;
   std::uint32_t initialAdaptiveFps = requestedFps;
-  if (startupWarmupEnabled && requestedFps > 45) {
-    initialAdaptiveFps = std::max<std::uint32_t>(30, requestedFps / 2);
-  }
+  // Warm up bandwidth separately; do not halve frame rate before measuring work.
   initialAdaptiveFps = std::clamp(initialAdaptiveFps, minAdaptiveFps, maxAdaptiveFps);
 
   std::uint32_t initialAdaptiveBitrate = maxAdaptiveBitrate;
@@ -5679,6 +5680,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint32_t hostLateSkipCredits = 0;
   std::uint64_t statsControlMicros = 0;
   std::uint64_t statsControlMaxMicros = 0;
+  std::uint64_t statsCaptureSamples = 0;
+  std::uint64_t statsCapturePolls = 0;
+  std::uint64_t statsCaptureWaitMicros = 0;
   std::uint64_t statsCaptureMicros = 0;
   std::uint64_t statsCaptureMaxMicros = 0;
   std::uint64_t statsPrepMicros = 0;
@@ -5711,6 +5715,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   std::uint32_t clientPressureHoldWindows = 0;
   std::string clientPressureHoldReason = "none";
   std::uint64_t statsFeedbackWindowSequence = 0;
+  sanser::StreamAdaptationPolicy adaptationPolicy;
   std::uint64_t renderRecoveryHoldConsumedWindow = 0;
   std::uint64_t clientPressureHoldConsumedWindow = 0;
   std::uint64_t recoveryIncreaseAppliedWindow = 0;
@@ -5992,6 +5997,14 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    const auto captureStartedAt = std::chrono::steady_clock::now();
 	    const bool capturedFreshFrame = duplicator.captureFrame(frame, adaptiveCaptureTimeoutMs);
 	    const auto captureFinishedAt = std::chrono::steady_clock::now();
+    const auto captureTotalMicros = microsBetween(captureStartedAt, captureFinishedAt);
+    const auto captureWaitMicros = std::min(captureTotalMicros, duplicator.lastAcquireWaitMicros());
+    ++statsCapturePolls;
+    statsCaptureWaitMicros += captureWaitMicros;
+    if (capturedFreshFrame) {
+      ++statsCaptureSamples;
+      observeMicros(statsCaptureMicros, statsCaptureMaxMicros, captureTotalMicros - captureWaitMicros);
+    }
 	    if (!capturedFreshFrame) {
 	#ifdef _WIN32
 	      POINT cursor{};
@@ -6074,7 +6087,6 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    }
 
 	    observeMicros(statsControlMicros, statsControlMaxMicros, microsBetween(frameStartedAt, controlFinishedAt));
-	    observeMicros(statsCaptureMicros, statsCaptureMaxMicros, microsBetween(captureStartedAt, captureFinishedAt));
 	    const auto prepStartedAt = std::chrono::steady_clock::now();
 	#ifdef _WIN32
 	    if (cursorOnlyFrame) {
@@ -6288,9 +6300,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    observeMicros(statsEncodeMicros, statsEncodeMaxMicros, microsBetween(encodeStartedAt, encodeFinishedAt));
 	    observeMicros(statsPacketizeMicros, statsPacketizeMaxMicros, framePacketizeMicros);
 	    observeMicros(statsSendMicros, statsSendMaxMicros, frameSendMicros);
-	    const auto hostWorkMicros = static_cast<std::uint64_t>(
-	      std::chrono::duration_cast<std::chrono::microseconds>(
-	        encodeSendFinishedAt - encodeSendStartedAt).count());
+    // Include capture/preparation/control work, but exclude DXGI waiting for a
+    // desktop change. An idle desktop is not host overload.
+    const auto hostWorkMicros = microsBetween(frameStartedAt, encodeSendFinishedAt) - captureWaitMicros;
     statsHostWorkMicros += hostWorkMicros;
     statsHostMaxWorkMicros = std::max<std::uint64_t>(statsHostMaxWorkMicros, hostWorkMicros);
 	    const std::uint64_t hostWorkBudgetMicros = currentStreamDurationMicros();
@@ -6406,12 +6418,14 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
           (udpRepairFeedbackFresh() && clearUdpRepairWindows >= recoveryCrossClearWindows);
       };
 	      auto recoveryGateOpen = [&](bool fromUdpRepair) {
+            if (adaptationPolicy.reducedIn(statsFeedbackWindowSequence)) return false;
 	        if (renderRecoveryHoldActive()) return false;
 	        if (clientPressureHoldActive()) return false;
 	        if (recoveryIncreaseAppliedWindow == statsFeedbackWindowSequence) return false;
 	        return fromUdpRepair ? streamFeedbackClearEnough() : udpRepairClearEnough();
 	      };
 	      auto recoveryGateReason = [&](bool fromUdpRepair) -> const char* {
+            if (adaptationPolicy.reducedIn(statsFeedbackWindowSequence)) return "window-reduction-used";
 	        if (renderRecoveryHoldActive()) return "render-recovery";
 	        if (clientPressureHoldActive()) return "client-pressure";
 	        if (recoveryIncreaseAppliedWindow == statsFeedbackWindowSequence) return "window-increase-used";
@@ -6483,12 +6497,16 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	        return static_cast<double>(maxMicros) / 1000.0;
 	      };
 	      const double controlAvgMs = avgStageMs(statsControlMicros);
-	      const double captureAvgMs = avgStageMs(statsCaptureMicros);
+	      const double captureAvgMs = statsCaptureSamples > 0
+            ? static_cast<double>(statsCaptureMicros) / statsCaptureSamples / 1000.0 : 0.0;
+          const double captureWaitAvgMs = statsCapturePolls > 0
+            ? static_cast<double>(statsCaptureWaitMicros) / statsCapturePolls / 1000.0 : 0.0;
 	      const double prepAvgMs = avgStageMs(statsPrepMicros);
 	      const double encodeAvgMs = avgStageMs(statsEncodeMicros);
 	      const double packetizeAvgMs = avgStageMs(statsPacketizeMicros);
 	      const double sendAvgMs = avgStageMs(statsSendMicros);
-          gCaptureMs = captureAvgMs; gEncodeMs = encodeAvgMs; gSendMs = sendAvgMs;
+          gCaptureMs = statsCaptureSamples > 0 ? captureAvgMs : -1;
+          gCaptureWaitMs = captureWaitAvgMs; gEncodeMs = encodeAvgMs; gSendMs = sendAvgMs;
           gPacingWaitMs = statsFrames > 0 ? statsUdpPacedMs / statsFrames : 0;
           gPacingOvershootMs = statsFrames > 0 ? statsUdpOvershootMs / statsFrames : 0;
           gSocketSendMs = statsFrames > 0 ? statsUdpSocketMs / statsFrames : 0;
@@ -6552,6 +6570,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	                << " controlMaxMs=" << maxStageMs(statsControlMaxMicros)
 	                << " captureAvgMs=" << captureAvgMs
 	                << " captureMaxMs=" << maxStageMs(statsCaptureMaxMicros)
+                    << " captureWaitAvgMs=" << captureWaitAvgMs
+                    << " captureSamples=" << statsCaptureSamples
+                    << " gpuPoolBusyDrops=" << duplicator.gpuPoolBusyDrops()
 	                << " prepAvgMs=" << prepAvgMs
 	                << " prepMaxMs=" << maxStageMs(statsPrepMaxMicros)
 	                << " encodeAvgMs=" << encodeAvgMs
@@ -6587,26 +6608,19 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	        clearFrameFeedbackWindows = 0;
 	        std::uint32_t nextBitrate = currentAdaptiveBitrate;
 	        std::uint32_t nextFps = currentAdaptiveFps;
-	        double hostBitrateFactor = hostWorkSevere ? 0.78 : 0.90;
-	        double hostFpsFactor = hostWorkSevere ? 0.84 : 0.94;
-	        std::string hostAdaptMode = "balanced";
-	        if (hostBottleneck == "capture") {
-	          hostAdaptMode = "capture-fps";
-	          hostBitrateFactor = hostWorkSevere ? 0.88 : 0.96;
-	          hostFpsFactor = hostWorkSevere ? 0.72 : 0.86;
-	        } else if (hostBottleneck == "encode") {
-	          hostAdaptMode = "encode";
-	          hostBitrateFactor = hostWorkSevere ? 0.76 : 0.88;
-	          hostFpsFactor = hostWorkSevere ? 0.78 : 0.90;
-	        } else if (hostBottleneck == "packetize" || hostBottleneck == "send") {
-	          hostAdaptMode = "network-send";
-	          hostBitrateFactor = hostWorkSevere ? 0.68 : 0.84;
-	          hostFpsFactor = hostWorkSevere ? 0.90 : 0.97;
-	        } else if (hostBottleneck == "control" || hostBottleneck == "prep") {
-	          hostAdaptMode = "host-prep";
-	          hostBitrateFactor = hostWorkSevere ? 0.84 : 0.94;
-	          hostFpsFactor = hostWorkSevere ? 0.80 : 0.90;
-	        }
+          double hostBitrateFactor = 1.0;
+          double hostFpsFactor = 1.0;
+          std::string hostAdaptMode;
+          if (hostBottleneck == "packetize" || hostBottleneck == "send") {
+            hostAdaptMode = "network-send";
+            hostBitrateFactor = adaptationPolicy.networkBitrateFactor(
+              statsFeedbackWindowSequence, 0, false, true);
+          } else {
+            hostAdaptMode = "processing-fps";
+            if (adaptiveFramePacing) {
+              hostFpsFactor = adaptationPolicy.processingFpsFactor(statsFeedbackWindowSequence, hostWorkSevere);
+            }
+          }
 	        nextBitrate = static_cast<std::uint32_t>(
 	          static_cast<double>(currentAdaptiveBitrate) * hostBitrateFactor);
 	        if (adaptiveFramePacing) {
@@ -6692,32 +6706,15 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
         lastUdpRepairFeedbackWindow = statsFeedbackWindowSequence;
         std::uint32_t nextBitrate = currentAdaptiveBitrate;
         std::uint32_t nextFps = currentAdaptiveFps;
-        const bool repairTransportSevere = repairFeedback.lossPercent >= 4.0 ||
-                                           repairFeedback.rttMs > 180.0 ||
-                                           repairFeedback.rttMaxMs > 260.0;
-        const bool repairTransportCongested = repairFeedback.lossPercent >= 1.0 ||
-                                              repairFeedback.rttMs > 90.0 ||
-                                              repairFeedback.rttMaxMs > 160.0;
-        if (repairFeedback.pressure >= 2) {
+        if (repairFeedback.pressure > 0) {
           clearUdpRepairWindows = 0;
           clearFeedbackWindows = 0;
           clearFrameFeedbackWindows = 0;
-          nextBitrate = static_cast<std::uint32_t>(
-            static_cast<double>(currentAdaptiveBitrate) * (repairTransportSevere ? 0.64 : 0.76));
-          if (adaptiveFramePacing) {
-            nextFps = static_cast<std::uint32_t>(
-              std::floor(static_cast<double>(currentAdaptiveFps) * (repairTransportSevere ? 0.78 : 0.84)));
-          }
-        } else if (repairFeedback.pressure == 1) {
-          clearUdpRepairWindows = 0;
-          clearFeedbackWindows = 0;
-          clearFrameFeedbackWindows = 0;
-          nextBitrate = static_cast<std::uint32_t>(
-            static_cast<double>(currentAdaptiveBitrate) * (repairTransportCongested ? 0.82 : 0.90));
-          if (adaptiveFramePacing) {
-            nextFps = static_cast<std::uint32_t>(
-              std::floor(static_cast<double>(currentAdaptiveFps) * (repairTransportCongested ? 0.90 : 0.95)));
-          }
+          nextBitrate = static_cast<std::uint32_t>(currentAdaptiveBitrate *
+            adaptationPolicy.networkBitrateFactor(statsFeedbackWindowSequence,
+              repairFeedback.lossPercent, repairFeedback.nackTimedOut > 0));
+          // Repair feedback describes network delivery, not host/client compute.
+          // Keep FPS unchanged so a bandwidth reduction does not also add judder.
 	        } else if (repairFeedback.pressure < 0) {
 	          if (renderRecoveryHoldActive() || clientPressureHoldActive()) {
 	            clearUdpRepairWindows = 0;
@@ -6847,78 +6844,37 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	        std::uint32_t nextFps = currentAdaptiveFps;
 	        const bool hasDecodeFeedback = feedback.decodeSamples > 0 || feedback.decodeOverBudget > 0 ||
 	                                       feedback.decodeAvgMs >= 0.0 || feedback.decodeMaxMs >= 0.0;
-	        const bool hasLatencyDropFeedback = feedback.latencyDropped > 0 ||
-	                                            feedback.keyframeWaitDropped > 0 ||
-	                                            feedback.latencyKeyframeRequests > 0 ||
-	                                            feedback.latencyKeyframeSuppressed > 0 ||
-	                                            feedback.latencyLateMaxMs >= 0.0;
-	        const bool hasRenderFeedback = feedback.source == "render" || feedback.rendered > 0;
-	        const bool hasNetworkFeedback = feedback.packets > 0 ||
-	                                        feedback.dropped > 0 ||
-	                                        feedback.totalDropped > 0 ||
-	                                        feedback.jitterMs > 0.0 ||
-	                                        feedback.avgAgeMs >= 0.0 ||
-	                                        feedback.maxAgeMs >= 0.0;
-	        const bool latencyPressure = hasLatencyDropFeedback &&
-	                                     (feedback.latencyDropped > 0 ||
-	                                      feedback.keyframeWaitDropped > 0 ||
-	                                      feedback.latencyLateMaxMs > 120.0);
-	        const bool renderQueuePressure = hasRenderFeedback &&
-	                                         (feedback.renderCoalesced > 0 ||
-		                                          feedback.renderDroppedQueue > 0 ||
-		                                          feedback.renderDroppedLate > 0 ||
-                                          feedback.renderQueuePressureReset > 0 ||
-		                                          feedback.renderQueueDepth >= 3 ||
-	                                          feedback.renderMaxPresentLateMs > 22.0);
-	        const bool decodePressure = hasDecodeFeedback &&
-	                                    (feedback.decodeOverBudget > 0 ||
-	                                     feedback.decodeAvgMs > 6.0 ||
-	                                     feedback.decodeMaxMs > 18.0);
-	        const bool networkPressure = hasNetworkFeedback &&
-	                                     (feedback.dropped > 0 ||
-	                                      feedback.jitterMs > 16.0 ||
-	                                      feedback.avgAgeMs > 90.0 ||
-	                                      feedback.maxAgeMs > 150.0);
-	        const bool transportSevere = feedback.lossPercent >= 4.0 ||
-	                                     feedback.rttMs > 180.0 ||
-	                                     feedback.rttMaxMs > 260.0;
-	        const bool transportCongested = feedback.lossPercent >= 1.0 ||
-	                                        feedback.rttMs > 90.0 ||
-	                                        feedback.rttMaxMs > 160.0;
-	        std::string clientAdaptMode = "balanced";
-	        double clientBitrateFactor = feedback.pressure >= 2 ? 0.72 : 0.88;
-	        double clientFpsFactor = feedback.pressure >= 2 ? 0.80 : 0.92;
-	        if (transportSevere || transportCongested) {
-	          clientAdaptMode = "rtt-loss";
-	          clientBitrateFactor = transportSevere ? 0.62 : 0.78;
-	          clientFpsFactor = transportSevere ? 0.80 : 0.90;
-	        } else if (latencyPressure) {
-	          clientAdaptMode = "latency-drop";
-	          clientBitrateFactor = feedback.pressure >= 2 ? 0.70 : 0.84;
-	          clientFpsFactor = feedback.pressure >= 2 ? 0.76 : 0.88;
-	        } else if (renderQueuePressure) {
-	          clientAdaptMode = "render-queue";
-	          clientBitrateFactor = feedback.pressure >= 2 ? 0.84 : 0.94;
-	          clientFpsFactor = feedback.pressure >= 2 ? 0.74 : 0.86;
-	        } else if (decodePressure) {
-	          clientAdaptMode = "client-decode";
-	          clientBitrateFactor = feedback.pressure >= 2 ? 0.78 : 0.90;
-	          clientFpsFactor = feedback.pressure >= 2 ? 0.80 : 0.90;
-	        } else if (networkPressure) {
-	          clientAdaptMode = "network";
-	          clientBitrateFactor = feedback.pressure >= 2 ? 0.68 : 0.84;
-	          clientFpsFactor = feedback.pressure >= 2 ? 0.88 : 0.96;
-	        }
+          const bool hasRenderFeedback = feedback.source == "render" || feedback.rendered > 0;
+          // Coalescing alone is normal for a newest-frame queue. Require actual
+          // backlog/late presentation, or decode work above the frame budget.
+          const bool renderQueuePressure = hasRenderFeedback &&
+            (feedback.renderQueueDepth >= 3 ||
+             (feedback.renderMaxPresentLateMs > 22.0 && feedback.renderDroppedLate > 0));
+          const bool decodePressure = hasDecodeFeedback &&
+            (feedback.decodeAvgMs > hostBudgetMs || feedback.decodeOverBudget > 1);
+          std::string clientAdaptMode = "observe";
+          double clientBitrateFactor = 1.0;
+          double clientFpsFactor = 1.0;
+          if (feedback.pressure > 0) {
+            clientBitrateFactor = adaptationPolicy.networkBitrateFactor(
+              statsFeedbackWindowSequence, feedback.lossPercent, false);
+            if (clientBitrateFactor < 1.0) {
+              clientAdaptMode = "sustained-loss";
+            } else if (!adaptationPolicy.bitrateReducedIn(statsFeedbackWindowSequence) &&
+                       (renderQueuePressure || decodePressure)) {
+              clientAdaptMode = decodePressure ? "client-decode" : "render-queue";
+              if (adaptiveFramePacing) {
+                clientFpsFactor = adaptationPolicy.processingFpsFactor(
+                  statsFeedbackWindowSequence, feedback.pressure >= 2);
+              }
+            }
+          }
 	        if (feedback.pressure > 0) {
 	          std::uint32_t holdWindows = feedback.pressure >= 2 ? 4 : 2;
-	          if (clientAdaptMode == "latency-drop") {
-	            holdWindows = feedback.pressure >= 2 ? 6 : 4;
-	          } else if (clientAdaptMode == "render-queue") {
+	          if (clientAdaptMode == "render-queue") {
 	            holdWindows = feedback.pressure >= 2 ? 5 : 3;
 	          } else if (clientAdaptMode == "client-decode") {
 	            holdWindows = feedback.pressure >= 2 ? 5 : 3;
-	          } else if (clientAdaptMode == "network") {
-	            holdWindows = feedback.pressure >= 2 ? 4 : 2;
 	          }
 	          clientPressureHoldWindows = std::max(clientPressureHoldWindows, holdWindows);
 	          clientPressureHoldReason = clientAdaptMode;
@@ -7129,6 +7085,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 		      statsHostTimelineSkipMicros = 0;
 		      statsControlMicros = 0;
 	      statsControlMaxMicros = 0;
+          statsCaptureSamples = 0;
+          statsCapturePolls = 0;
+          statsCaptureWaitMicros = 0;
 	      statsCaptureMicros = 0;
 	      statsCaptureMaxMicros = 0;
 	      statsPrepMicros = 0;

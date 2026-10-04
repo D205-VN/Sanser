@@ -33,7 +33,6 @@ interface SignalingMessage {
   };
 }
 
-const CANDIDATE_GENERATION = 1;
 const NEGOTIATION_TIMEOUT_MS = 20_000;
 const RETRY_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
 const TRANSIENT_SIGNAL_ERRORS = new Set([
@@ -68,8 +67,20 @@ export async function coordinateP2pConnection(
   controlling: boolean,
   sessionCredential: string,
   preferredLocalPort?: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  requesterReadyAt?: string | number
 ): Promise<P2pPunchResult> {
+  // The server advances this epoch whenever the client retries. Reusing 1
+  // accepts stale candidates/receipts and exhausts the server's per-generation
+  // candidate budget across otherwise fresh native connections.
+  // ApiClient normalizes server Unix seconds to an ISO timestamp. Accept both
+  // representations so host and viewer use exactly the server-issued epoch.
+  const candidateGeneration = requesterReadyAt === undefined ? 1
+    : typeof requesterReadyAt === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(requesterReadyAt)
+      ? Date.parse(requesterReadyAt) / 1_000 : Number(requesterReadyAt);
+  if (!Number.isInteger(candidateGeneration) || candidateGeneration < 1 || candidateGeneration > 0xffff_ffff) {
+    throw new Error('Invalid native candidate generation');
+  }
   const cancelled = () => new DOMException('Connection cancelled', 'AbortError');
   if (signal?.aborted) throw cancelled();
   const attemptId = crypto.randomUUID();
@@ -200,7 +211,7 @@ export async function coordinateP2pConnection(
       if (settled || candidatesAcknowledged) return;
       if (
         send('p2p.candidates', {
-          generation: CANDIDATE_GENERATION,
+          generation: candidateGeneration,
           candidates: localCandidates
         })
       ) {
@@ -209,7 +220,7 @@ export async function coordinateP2pConnection(
     };
 
     const acknowledgeCandidates = (): void => {
-      const payload = { generation: CANDIDATE_GENERATION };
+      const payload = { generation: candidateGeneration };
       // candidatesAck is explicit in current servers. gatheringComplete is a
       // compatibility receipt for servers deployed before this fix.
       send('p2p.candidatesAck', payload);
@@ -310,7 +321,7 @@ export async function coordinateP2pConnection(
       if (message.sessionId !== sessionId || message.senderDeviceId !== peerDeviceId) return;
       if (
         message.type === 'p2p.candidates' &&
-        message.payload?.generation === CANDIDATE_GENERATION &&
+        message.payload?.generation === candidateGeneration &&
         Array.isArray(message.payload.candidates) &&
         message.payload.candidates.length > 0
       ) {
@@ -326,7 +337,7 @@ export async function coordinateP2pConnection(
       }
       if (
         (message.type === 'p2p.candidatesAck' || message.type === 'p2p.gatheringComplete') &&
-        message.payload?.generation === CANDIDATE_GENERATION
+        message.payload?.generation === candidateGeneration
       ) {
         candidatesAcknowledged = true;
         if (retryTimer !== undefined) window.clearTimeout(retryTimer);

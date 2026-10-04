@@ -159,7 +159,8 @@ export function createHostStore(): HostStore {
           true,
           credentials.sessionToken,
           settings.host.directUdpPort,
-          signal
+          signal,
+          request.requesterReadyAt
         );
       } catch (directError) {
         directCheck = directCheckFailure(directError, request.networkMode === 'relay');

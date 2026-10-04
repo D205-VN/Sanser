@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_client_macos VERSION 2.1.14 LANGUAGES CXX OBJCXX)
+project(sanser_client_macos VERSION 2.1.15 LANGUAGES CXX OBJCXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -30,6 +30,8 @@ add_executable(sanser-client-macos
 )
 
 if(BUILD_TESTING)
+  add_executable(sanser-stream-adaptation-test ../common/stream_adaptation_policy_test.cpp)
+  add_test(NAME sanser-stream-adaptation-test COMMAND sanser-stream-adaptation-test)
   add_executable(sanser-wheel-delta-test ../common/wheel_delta_test.cpp)
   target_include_directories(sanser-wheel-delta-test PRIVATE ../common)
   add_test(NAME sanser-wheel-delta-test COMMAND sanser-wheel-delta-test)

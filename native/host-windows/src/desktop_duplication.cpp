@@ -129,6 +129,7 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
 }
 
 bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) {
+  lastAcquireWaitMicros_ = 0;
   if (impl_->recoveryPending) {
     const auto now = std::chrono::steady_clock::now();
     if (now < impl_->nextRecoveryAttempt) return false;
@@ -152,7 +153,11 @@ bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) 
 
   DXGI_OUTDUPL_FRAME_INFO frameInfo{};
   ComPtr<IDXGIResource> desktopResource;
+  const auto acquireStartedAt = std::chrono::steady_clock::now();
   const HRESULT acquireHr = impl_->duplication->AcquireNextFrame(timeoutMs, &frameInfo, desktopResource.GetAddressOf());
+  lastAcquireWaitMicros_ = static_cast<std::uint64_t>(
+    std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - acquireStartedAt).count());
   if (acquireHr == DXGI_ERROR_WAIT_TIMEOUT) return false;
   if (acquireHr == DXGI_ERROR_ACCESS_LOST) {
     impl_->recoveryPending = true;
@@ -220,6 +225,11 @@ bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) 
         frame.texture = std::move(owned);
         return SUCCEEDED(releaseFrame());
       }
+      // Let the caller drain the encoder before trying another capture. Pool
+      // pressure must not silently turn GPU capture into synchronous readback.
+      ++gpuPoolBusyDrops_;
+      releaseFrame();
+      return false;
     }
     frame.texture.reset();
     impl_->context->CopyResource(impl_->staging.Get(), desktopTexture.Get());

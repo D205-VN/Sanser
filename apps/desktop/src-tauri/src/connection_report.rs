@@ -63,6 +63,9 @@ const FIELDS: &[&str] = &[
     "hostMaxWorkMs",
     "captureAvgMs",
     "captureMaxMs",
+    "captureWaitAvgMs",
+    "captureSamples",
+    "gpuPoolBusyDrops",
     "encodeAvgMs",
     "encodeMaxMs",
     "sendAvgMs",
@@ -448,9 +451,22 @@ mod tests {
         fs::remove_dir_all(directory)
     }
     #[test]
+    fn idle_capture_wait_is_recorded_without_being_classified_as_slow_capture() {
+        let mut report = Report::new(&request());
+        report.observe(
+            parse_sample(b"SNV1_HOST_TIMING captureAvgMs=2 captureWaitAvgMs=100").unwrap(),
+        );
+        assert_eq!(report.delay_sample_count, 0);
+        assert_eq!(report.maxima["SNV1_HOST_TIMING.captureWaitAvgMs"], 100.0);
+        report
+            .observe(parse_sample(b"SNV1_HOST_TIMING captureAvgMs=70 captureWaitAvgMs=0").unwrap());
+        assert_eq!(report.delay_sample_count, 1);
+    }
+    #[test]
     fn accepts_only_known_numeric_metrics_without_secrets_or_clock_skew() {
-        let timing = parse_sample(b"SNV1_HOST_TIMING sendAvgMs=45 udpPacedAvgMs=4 udpWaitOvershootAvgMs=1.2 udpSocketAvgMs=38 captureAvgMs=-1 token=123").unwrap();
-        assert_eq!(timing.values.len(), 4);
+        let timing = parse_sample(b"SNV1_HOST_TIMING sendAvgMs=45 udpPacedAvgMs=4 udpWaitOvershootAvgMs=1.2 udpSocketAvgMs=38 captureAvgMs=-1 captureWaitAvgMs=40 token=123").unwrap();
+        assert_eq!(timing.values.len(), 5);
+        assert_eq!(timing.values["captureWaitAvgMs"], 40.0);
         assert_eq!(timing.values["sendAvgMs"], 45.0);
         assert_eq!(timing.values["udpSocketAvgMs"], 38.0);
         let sample =

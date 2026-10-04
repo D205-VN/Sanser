@@ -84,7 +84,8 @@
           false, // client is controlled
           target.sessionToken,
           undefined,
-          signal
+          signal,
+          target.requesterReadyAt
         );
         diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
       } catch (directError) {

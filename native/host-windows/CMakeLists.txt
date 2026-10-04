@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_host_windows VERSION 2.1.14 LANGUAGES CXX)
+project(sanser_host_windows VERSION 2.1.15 LANGUAGES CXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -31,6 +31,8 @@ target_compile_definitions(sanser-host-windows PRIVATE
 target_include_directories(sanser-host-windows PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
 if(BUILD_TESTING)
+  add_executable(sanser-stream-adaptation-test ../common/stream_adaptation_policy_test.cpp)
+  add_test(NAME sanser-stream-adaptation-test COMMAND sanser-stream-adaptation-test)
   add_executable(sanser-precise-wait-test ../common/windows_precise_wait_test.cpp)
   add_test(NAME sanser-precise-wait-test COMMAND sanser-precise-wait-test)
   set_tests_properties(sanser-precise-wait-test PROPERTIES TIMEOUT 10)

@@ -32,6 +32,9 @@ public:
   bool captureFrame(FrameBgra& frame, std::uint32_t timeoutMs = 1000);
   void setGpuCapture(bool enabled) { gpuCapture_ = enabled; }
   ID3D11Device* gpuDevice() const;
+  // AcquireNextFrame may wait for a desktop change; this is not capture work.
+  std::uint64_t lastAcquireWaitMicros() const { return lastAcquireWaitMicros_; }
+  std::uint64_t gpuPoolBusyDrops() const { return gpuPoolBusyDrops_; }
 
   std::uint32_t width() const { return width_; }
   std::uint32_t height() const { return height_; }
@@ -51,6 +54,8 @@ private:
   long left_ = 0;
   long top_ = 0;
   bool gpuCapture_ = false;
+  std::uint64_t lastAcquireWaitMicros_ = 0;
+  std::uint64_t gpuPoolBusyDrops_ = 0;
 };
 
 std::string hresultMessage(long hr);

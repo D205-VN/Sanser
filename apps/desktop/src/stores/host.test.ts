@@ -35,7 +35,7 @@ const runtime = { platform: 'macOS', capabilities: {
   webRtc: { state: 'unavailable' }, gamepad: { state: 'unavailable' }, crossPlatformHost: true
 } } as RuntimeStatus;
 const target = { id: 'test-session', hostDeviceId: 'local-host', requesterDeviceId: 'remote-client',
-  status: 'accepted', transport: 'native', networkMode: 'auto', requesterReadyAt: 'now',
+  status: 'accepted', transport: 'native', networkMode: 'auto', requesterReadyAt: '2026-10-04T00:00:00.000Z',
   qualityProfile: 'balanced', requestedCodec: 'auto'
 } as ConnectionSession;
 
@@ -116,7 +116,7 @@ it('replaces a running sender when the same client retries with fresh credential
   await host.online(runtime);
   await settle();
   expect(get(host).engineRunning).toBe(true);
-  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: '2026-10-04T00:00:01.000Z' }] });
   mocks.credentials.mockResolvedValue({ sessionToken: 'new-token', wireProtocol: 'snv2' });
   await host.refreshRequests();
   await settle();
@@ -125,6 +125,8 @@ it('replaces a running sender when the same client retries with fresh credential
   expect(mocks.launch).toHaveBeenCalledTimes(2);
   expect(mocks.launch).toHaveBeenLastCalledWith(expect.objectContaining({ sessionToken: 'new-token' }));
   expect(mocks.punch).toHaveBeenCalledTimes(2);
+  expect(mocks.punch.mock.calls[0]?.[8]).toBe('2026-10-04T00:00:00.000Z');
+  expect(mocks.punch.mock.calls[1]?.[8]).toBe('2026-10-04T00:00:01.000Z');
   const nextPunch = mocks.punch.mock.invocationCallOrder[1];
   if (nextPunch === undefined) throw new Error('Missing replacement negotiation');
   expect(mocks.stop.mock.invocationCallOrder[0]).toBeLessThan(nextPunch);
@@ -144,7 +146,7 @@ it('cancels an in-flight generation before negotiating a client retry', async ()
   mocks.sessions.mockResolvedValue({ items: [target] });
   await host.online(runtime);
   await settle();
-  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: '2026-10-04T00:00:01.000Z' }] });
   await host.refreshRequests();
   await settle();
   expect(oldSignal?.aborted).toBe(true);
@@ -158,7 +160,7 @@ it('does not start a replacement sender if stopping the previous sender fails', 
   mocks.sessions.mockResolvedValue({ items: [target] });
   await host.online(runtime);
   await settle();
-  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: '2026-10-04T00:00:01.000Z' }] });
   mocks.stop.mockRejectedValueOnce(new Error('Unable to stop old sender'));
   await host.refreshRequests();
   expect(mocks.launch).toHaveBeenCalledTimes(1);
@@ -175,7 +177,7 @@ it('stops a late native launch before replacing its generation', async () => {
   await host.online(runtime);
   await settle();
   expect(mocks.launch).toHaveBeenCalledTimes(1);
-  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: 'retry-2' }] });
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, requesterReadyAt: '2026-10-04T00:00:01.000Z' }] });
   const refresh = host.refreshRequests();
   await settle();
   expect(mocks.punch).toHaveBeenCalledTimes(1);

@@ -26,7 +26,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   connection.setPreparing(false);
   connection.begin(target);
-  mocks.ready.mockResolvedValue({ requesterReadyAt: 'now' });
+  mocks.ready.mockResolvedValue({ requesterReadyAt: '2026-10-04T00:00:00.000Z' });
   mocks.credentials.mockResolvedValue({ sessionId: target.id, peerRouteAddress: '192.0.2.1', basePort: 5000, sessionToken: 'test-only-token', expiresAt: 9999999999, wireProtocol: 'snv2' });
   mocks.disconnect.mockResolvedValue(undefined);
   mocks.stop.mockResolvedValue(undefined);
@@ -47,6 +47,7 @@ it('allows cancelling an in-progress route without falling back to relay or laun
   render(ActiveSession, { runtime, navigate: vi.fn() });
   await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
   await screen.findByRole('heading', { name: 'Connecting directly' });
+  expect(mocks.punch.mock.calls[0]?.[8]).toBe('2026-10-04T00:00:00.000Z');
   const cancel = screen.getByRole('button', { name: 'Cancel connection' });
   expect(cancel).toBeEnabled();
   await fireEvent.click(cancel);

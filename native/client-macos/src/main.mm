@@ -60,7 +60,7 @@ sanser::LatencyPolicy gLatencyPolicy;
 std::atomic<bool> gShowLatencyOverlay{false};
 bool gOverlayShortcutDown = false;
 struct LiveLatency {
-  std::atomic<double> capture{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
+  std::atomic<double> capture{-1}, captureWait{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
   std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
   std::atomic<double> pacingWait{-1}, pacingOvershoot{-1}, socketSend{-1};
   std::atomic<int> gpuInput{-1};
@@ -2807,6 +2807,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
   if (payload.find("\"type\":\"control-pong\"") != std::string::npos) {
     gLiveLatency.rtt = rttMs;
     gLiveLatency.capture = jsonDoubleValue(payload, "captureMs", -1);
+    gLiveLatency.captureWait = jsonDoubleValue(payload, "captureWaitMs", -1);
     gLiveLatency.encode = jsonDoubleValue(payload, "encodeMs", -1);
     gLiveLatency.send = jsonDoubleValue(payload, "sendMs", -1);
     gLiveLatency.pacingWait = jsonDoubleValue(payload, "pacingWaitMs", -1);
@@ -2815,6 +2816,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
     gLiveLatency.gpuInput = static_cast<int>(jsonDoubleValue(payload, "gpuInput", -1));
     gLiveLatency.hostUpdated = steadyMicros();
     std::cout << "SNV1_HOST_TIMING captureAvgMs=" << gLiveLatency.capture.load()
+              << " captureWaitAvgMs=" << gLiveLatency.captureWait.load()
               << " encodeAvgMs=" << gLiveLatency.encode.load()
               << " sendAvgMs=" << gLiveLatency.send.load()
               << " udpPacedAvgMs=" << gLiveLatency.pacingWait.load()
@@ -6206,7 +6208,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   _renderView = view;
   _renderSlot = dispatch_semaphore_create(1);
   _latencyOverlay = [NSTextField labelWithString:@"Waiting for latency measurements…"];
-  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 350, 365, 332);
+  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 370, 365, 352);
   _latencyOverlay.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
   _latencyOverlay.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightMedium];
   _latencyOverlay.textColor = NSColor.whiteColor;
@@ -6711,7 +6713,8 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
       [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:text attributes:
         @{NSForegroundColorAttributeName: value > budget ? NSColor.systemRedColor : NSColor.whiteColor}]];
     };
-    row(@"Capture", hostFresh ? gLiveLatency.capture.load() : -1, 5);
+    row(@"Capture work", hostFresh ? gLiveLatency.capture.load() : -1, 5);
+    row(@"Capture wait", hostFresh ? gLiveLatency.captureWait.load() : -1, std::numeric_limits<double>::infinity());
     row(@"Encode", hostFresh ? gLiveLatency.encode.load() : -1, 5);
     row(@"Send total", hostFresh ? gLiveLatency.send.load() : -1, 5);
     row(@"Pacing wait", hostFresh ? gLiveLatency.pacingWait.load() : -1, 5);

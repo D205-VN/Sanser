@@ -326,6 +326,38 @@ it('cancels candidate exchange and releases only its reserved attempt', async ()
   expect(invokeMock).not.toHaveBeenCalledWith('p2p_punch', expect.anything());
 });
 
+it.each(['iso', 'seconds', 'number'] as const)('isolates retry generations using the %s epoch representation', async (format) => {
+  const { client } = createClient();
+  const epoch = 1_791_000_123;
+  const pending = coordinateP2pConnection(client, sessionId, localDeviceId, peerDeviceId,
+    true, sessionCredential, undefined, undefined,
+    format === 'iso' ? new Date(epoch * 1_000).toISOString() : format === 'seconds' ? String(epoch) : epoch);
+  await flushSetup();
+  const socket = FakeWebSocket.instances[0];
+  if (!socket) throw new Error('Signaling WebSocket was not created');
+  socket.open();
+  expect(signals(socket)[0]?.payload.generation).toBe(epoch);
+  for (const generation of [1, epoch - 1, epoch + 1]) {
+    socket.receive({ sessionId, senderDeviceId: peerDeviceId, type: 'p2p.candidates',
+      payload: { generation, candidates: remoteCandidates } });
+    socket.receive({ sessionId, senderDeviceId: peerDeviceId, type: 'p2p.candidatesAck', payload: { generation } });
+  }
+  expect(invokeMock).not.toHaveBeenCalledWith('p2p_punch', expect.anything());
+  socket.receive({ sessionId, senderDeviceId: peerDeviceId, type: 'p2p.candidates',
+    payload: { generation: epoch, candidates: remoteCandidates } });
+  expect(invokeMock).not.toHaveBeenCalledWith('p2p_punch', expect.anything());
+  expect(signals(socket).slice(-2).every(message => message.payload.generation === epoch)).toBe(true);
+  socket.receive({ sessionId, senderDeviceId: peerDeviceId, type: 'p2p.candidatesAck', payload: { generation: epoch } });
+  await expect(pending).resolves.toEqual(punchResult);
+});
+
+it.each([0, -1, 1.5, '1.5', 0x1_0000_0000, 'bad-epoch', '2026-10-04T00:00:00.500Z'])('rejects invalid candidate generation %s before gathering', async (epoch) => {
+  const { client } = createClient();
+  await expect(coordinateP2pConnection(client, sessionId, localDeviceId, peerDeviceId,
+    true, sessionCredential, undefined, undefined, epoch)).rejects.toThrow('Invalid native candidate generation');
+  expect(invokeMock).not.toHaveBeenCalled();
+});
+
 it('does not open signaling when cancelled while gathering candidates', async () => {
   const { client } = createClient();
   let finishGather: ((result: typeof gatherResult) => void) | undefined;
