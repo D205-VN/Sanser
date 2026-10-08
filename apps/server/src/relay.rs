@@ -136,8 +136,8 @@ impl RelayHub {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RelayQuery {
-    session_id: String,
-    device_id: String,
+    pub(crate) session_id: String,
+    pub(crate) device_id: String,
 }
 
 pub async fn relay_socket(
@@ -161,7 +161,7 @@ pub async fn relay_socket(
         }))
 }
 
-async fn authorize_relay(
+pub(crate) async fn authorize_relay(
     state: &AppState,
     auth: &AuthContext,
     session_id: &str,
@@ -290,7 +290,7 @@ async fn run_relay_socket(
     state.relay.remove(&key, &device_id, connection_id).await;
 }
 
-fn normalize_uuid(value: &str, name: &str) -> Result<String, AppError> {
+pub(crate) fn normalize_uuid(value: &str, name: &str) -> Result<String, AppError> {
     Uuid::parse_str(value.trim())
         .map(|value| value.to_string())
         .map_err(|_| AppError::Validation(format!("{name} must be a UUID")))

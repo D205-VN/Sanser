@@ -39,6 +39,7 @@ thiserror = "2"
 sanser-core = { path = "../../crates/sanser-core" }
 sanser-auth = { path = "../../crates/sanser-auth" }
 sanser-p2p = { path = "../../crates/sanser-p2p" }
+sanser-network = { path = "../../crates/sanser-network" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }

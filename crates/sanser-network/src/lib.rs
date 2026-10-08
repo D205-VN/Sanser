@@ -7,6 +7,7 @@ pub use sanser_p2p as p2p_v2;
 
 mod discovery;
 mod priority_queue;
+pub mod relay_datagram;
 mod retransmit;
 mod route;
 

@@ -273,10 +273,11 @@ pub fn launch_engine(
     engines: State<'_, EngineManager>,
     p2p: State<'_, P2pSessionManager>,
     relay: State<'_, crate::relay::RelayManager>,
-    request: LaunchEngineRequest,
+    mut request: LaunchEngineRequest,
 ) -> Result<(), DesktopError> {
     let reserved_socket = if request.relay {
         relay.verify_launch(&request)?;
+        request.relay_transport = relay.transport(request.kind);
         None
     } else {
         relay.stop_for_engine(request.kind);

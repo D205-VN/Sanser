@@ -16,6 +16,7 @@ pub struct AppState {
     pub events: broadcast::Sender<EventEnvelope>,
     pub signaling: Arc<SignalHub>,
     pub relay: Arc<RelayHub>,
+    pub udp_relay: Arc<crate::udp_relay::UdpRelayHub>,
     pub general_limiter: RateLimiter,
     pub login_limiter: RateLimiter,
 }
@@ -31,6 +32,7 @@ impl AppState {
             events,
             signaling: Arc::new(SignalHub::default()),
             relay: Arc::new(RelayHub::default()),
+            udp_relay: Arc::new(crate::udp_relay::UdpRelayHub::default()),
             general_limiter: RateLimiter::new(general_limit, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(login_limit, Duration::from_secs(600)),
         }

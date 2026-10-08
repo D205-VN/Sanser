@@ -1,7 +1,7 @@
 # Sanser server
 
 Axum API, account service, device registry and WebSocket signaling for Sanser
-2.1.15. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
+2.1.16. The server is PostgreSQL-only and accepts only TLS Neon endpoints. It
 does not contain a SQLite or local-database fallback.
 
 ## Neon configuration
@@ -60,7 +60,7 @@ curl --fail https://sanser.onrender.com/api/v2/readiness
 ```
 
 Both now include `features: ["device-roles", "cross-platform-native", "session-idle-7d"]`. Readiness
-must return HTTP 200 and `status: "ready"`, with version `2.1.15`. Older `2.0.8`
+must return HTTP 200 and `status: "ready"`, with version `2.1.16`. Older `2.0.8`
 builds may not support these roles; verify the feature list as well as the version.
 Then select **Check again** on the Mac Host page and test with matching desktop
 builds on both devices. Deployment and real-device testing
@@ -208,3 +208,9 @@ TEST_DATABASE_URL='postgresql://...neon.tech/TEST_DATABASE?sslmode=require' \
 Use a dedicated Neon test branch/database even with schema isolation. A process
 kill or test panic can interrupt asynchronous cleanup, in which case stale
 `sanser_test_*` schemas should be reviewed and removed manually.
+
+## Optional UDP media relay
+
+See [UDP relay setup](../../docs/udp-relay.md) for `RELAY_UDP_BIND` and
+`RELAY_UDP_PUBLIC`. Both must point to this server process through reachable UDP
+ingress. Leave them unset where only HTTP/WSS ingress is available.

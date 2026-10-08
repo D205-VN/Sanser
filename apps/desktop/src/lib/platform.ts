@@ -103,6 +103,7 @@ export interface RelayStartRequest {
 }
 
 export interface RelayStartResult {
+  transport?: 'udp' | 'wss';
   enginePort: number;
   proxyPort: number;
 }

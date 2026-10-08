@@ -4,6 +4,7 @@
 
 namespace {
 struct NativeInputPolicyTest {
+  static auto retryDelay() { return NativeInputSender::retryDelay(); }
   static bool acknowledged(const std::string& event) { return NativeInputSender::isBatchable(event); }
 };
 }
@@ -57,6 +58,17 @@ int main() {
         "connected gamepad snapshots must not enter reliable backlog");
       requireLatency(NativeInputPolicyTest::acknowledged("{\"type\":\"gamepad-state\",\"connected\":false}"),
         "gamepad disconnect must remain reliable");
+      gLatencyPolicy.ultra = false;
+      requireLatency(!NativeInputPolicyTest::acknowledged("{\"type\":\"gamepad-state\",\"connected\":true}"),
+        "Auto must not retransmit obsolete gamepad snapshots");
+      gLiveLatency.rtt = 10; gLiveLatency.hostUpdated = steadyMicros();
+      requireLatency(NativeInputPolicyTest::retryDelay() == milliseconds(17), "LAN retry follows RTT");
+      gLiveLatency.rtt = 100;
+      requireLatency(NativeInputPolicyTest::retryDelay() == milliseconds(152), "WAN retry must allow one RTT");
+      gLiveLatency.hostUpdated = 0;
+      requireLatency(NativeInputPolicyTest::retryDelay() == milliseconds(40), "stale RTT must not drive input retries");
+      gLiveLatency.rtt = -1;
+      gLatencyPolicy.ultra = true;
       UdpVideoPacketJitterBuffer jitter;
       jitter.resetForMediaGeneration(1);
       jitter.push(testPacket(1, true), 1, false, start);

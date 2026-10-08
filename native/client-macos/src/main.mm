@@ -675,7 +675,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if ((fd_ < 0 && (!isUdp_ || udpFd_ < 0)) || stopped_) return false;
     if (authRequired_ && !controlAuthenticated_ && !isAllowedBeforeAuth(json)) return false;
-    if (gLatencyPolicy.ultra && inputTypeName(json) == "gamepad-state") {
+    if (inputTypeName(json) == "gamepad-state") {
       const auto slot = jsonIntField(json, "index");
       for (auto it = queue_.begin(); it != queue_.end();) {
         if (inputTypeName(*it) == "gamepad-state" && jsonIntField(*it, "index") == slot) it = queue_.erase(it);
@@ -991,7 +991,7 @@ private:
   }
 
   static bool isBatchable(const std::string& json) {
-    return !(gLatencyPolicy.ultra && inputTypeName(json) == "gamepad-state" && jsonBoolField(json, "connected")) && !isControlPing(json) && !isStreamStats(json) && !isUdpRepairStats(json) && !isRenderStats(json) &&
+    return !(inputTypeName(json) == "gamepad-state" && jsonBoolField(json, "connected")) && !isControlPing(json) && !isStreamStats(json) && !isUdpRepairStats(json) && !isRenderStats(json) &&
            !isKeyframeRequest(json) && !isVideoNack(json) && !isControlHello(json);
   }
 
@@ -1216,7 +1216,7 @@ private:
       UdpEndpoint hostEndpoint{};
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        condition_.wait_for(lock, std::chrono::milliseconds(gLatencyPolicy.ultra ? 2 : 20), [&] {
+        condition_.wait_for(lock, std::chrono::milliseconds(isUdp_ ? 2 : 20), [&] {
           const auto now = std::chrono::steady_clock::now();
           return stopped_ || ((fd_ >= 0 || (isUdp_ && udpFd_ >= 0)) && (!urgentQueue_.empty() || !queue_.empty() || hasRetryWorkLocked(now)));
         });
@@ -1418,7 +1418,7 @@ private:
         continue;
       }
       if (it->second.attempts >= maxBatchRetryAttempts_) {
-        if (gLatencyPolicy.ultra) {
+        if (isUdp_) {
           // A key-up that missed every ACK must not leave a held key behind.
           // The reset is itself acknowledged/retried; never send it only once.
           urgentQueue_.clear(); queue_.clear(); pendingBatches_.clear();
@@ -1583,7 +1583,16 @@ private:
   static constexpr std::uint32_t maxBatchRetryAttempts_ = 4;
   static constexpr auto backpressurePriorityAge_ = std::chrono::milliseconds(160);
   static constexpr auto backpressurePendingAge_ = std::chrono::milliseconds(450);
-  static std::chrono::milliseconds retryDelay() { return std::chrono::milliseconds(gLatencyPolicy.ultra ? 12 : 85); }
+  static std::chrono::milliseconds retryDelay() {
+    // ACK delay follows the path RTT, not the selected video profile. A fixed
+    // 12 ms timer retransmits prematurely on WAN; 85 ms wastes a LAN round trip.
+    const double rtt = gLiveLatency.rtt.load();
+    const auto updated = gLiveLatency.hostUpdated.load();
+    const auto now = steadyMicros();
+    if (!std::isfinite(rtt) || rtt < 0 || updated == 0 || now < updated || now - updated > 5000000)
+      return std::chrono::milliseconds(40);
+    return std::chrono::milliseconds(static_cast<int>(std::ceil(std::clamp(rtt * 1.5 + 2.0, 8.0, 250.0))));
+  }
 };
 
 class MediaReplayWindow {
@@ -4006,6 +4015,7 @@ bool readSnvPacketFromFd(int fd, SnvPacket& packet) {
 }
 
 struct UdpVideoStats {
+  std::uint64_t deliveredBytes = 0;
   std::uint64_t datagrams = 0;
   std::uint64_t fragments = 0;
   std::uint64_t retransmitFragments = 0;
@@ -4254,6 +4264,7 @@ public:
       return false;
     }
 
+    stats.deliveredBytes += header.payloadSize;
     const auto* payload = datagram.data() + header.headerSize;
     std::memcpy(assembly.data.data() + header.fragmentOffset, payload, header.payloadSize);
     assembly.received[header.fragmentIndex] = 1;
@@ -7724,6 +7735,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           std::ostringstream repairFeedback;
           repairFeedback << "{\"type\":\"udp-repair-stats\""
 	                         << ",\"sequence\":" << repairSequence
+                         << ",\"deliveredBytes\":" << udpStats.deliveredBytes
+                         << ",\"deliveryWindowMs\":" << (statsSeconds * 1000.0)
                          << ",\"datagrams\":" << udpStats.datagrams
                          << ",\"fragments\":" << udpStats.fragments
                          << ",\"retransmitFragments\":" << udpStats.retransmitFragments

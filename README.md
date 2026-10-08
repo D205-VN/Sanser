@@ -1,9 +1,9 @@
-# Sanser 2.1.15
+# Sanser 2.1.16
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.1.15
+Product:  Sanser 2.1.16
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -14,7 +14,7 @@ Native:   Authenticated SNV2 media engines
 - Account, device and signaling data backed only by PostgreSQL on Neon.
 - Local preferences stored as a bounded JSON file; secrets stay in Keychain/Credential Manager.
 - Versioned `/api/v2` auth, devices, connection sessions, ICE and bounded WebSocket candidate signaling.
-- Auto, Direct and Relay modes with native UDP plus an end-to-end encrypted WSS/443 fallback for CGNAT and blocked UDP.
+- Auto, Direct and Relay modes with native UDP, optional authenticated UDP relay, and an end-to-end encrypted WSS/443 fallback for blocked UDP. See [UDP relay setup](docs/udp-relay.md).
 - Short-lived access tokens, refresh-token rotation/revocation and Argon2id passwords.
 - Typed Tauri commands and sidecar allowlists; Node.js is not a packaged runtime.
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.

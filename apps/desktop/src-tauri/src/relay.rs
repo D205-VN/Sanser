@@ -1,3 +1,6 @@
+#[path = "udp_relay.rs"]
+mod udp;
+
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -39,6 +42,7 @@ const RELAY_MAX_DATAGRAM_BYTES: usize =
     RELAY_MAX_FRAME_BYTES - RELAY_HEADER_BYTES - RELAY_TAG_BYTES;
 
 struct RelayBridge {
+    transport: &'static str,
     id: uuid::Uuid,
     session_id: uuid::Uuid,
     engine_port: u16,
@@ -53,6 +57,14 @@ pub struct RelayManager {
 }
 
 impl RelayManager {
+    pub fn transport(&self, kind: EngineKind) -> Option<String> {
+        self.bridges
+            .lock()
+            .ok()?
+            .get(&kind)
+            .map(|bridge| bridge.transport.to_owned())
+    }
+
     fn stop(&self, kind: EngineKind) {
         if let Ok(mut failures) = self.failures.lock() {
             failures.remove(&kind);
@@ -144,6 +156,7 @@ impl Drop for RelayStartRequest {
 pub struct RelayStartResult {
     engine_port: u16,
     proxy_port: u16,
+    transport: &'static str,
 }
 
 #[tauri::command]
@@ -247,54 +260,69 @@ pub async fn relay_start(
         }),
     );
 
-    let (mut websocket, response) = tokio::time::timeout(
-        RELAY_CONNECT_TIMEOUT,
-        connect_async_with_config(websocket_request, None, true),
-    )
-    .await
-    .map_err(|_| DesktopError::Process("relay WebSocket connection timed out".into()))?
-    .map_err(|error| {
-        DesktopError::Process(format!("relay WebSocket connection failed: {error}"))
-    })?;
-    if response
-        .headers()
-        .get(header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        != Some("sanser-relay-v1")
-    {
-        return Err(DesktopError::Process(
-            "relay server did not negotiate the secure relay protocol".into(),
-        ));
-    }
-
-    tokio::time::timeout(RELAY_CONNECT_TIMEOUT, async {
-        loop {
-            match websocket.next().await {
-                Some(Ok(Message::Text(message)))
-                    if message.as_str().contains("relay.peerReady") =>
-                {
-                    return Ok::<(), DesktopError>(());
-                }
-                Some(Ok(Message::Ping(payload))) => websocket
-                    .send(Message::Pong(payload))
-                    .await
-                    .map_err(|error| DesktopError::Process(error.to_string()))?,
-                Some(Ok(Message::Close(_))) | None => {
-                    return Err(DesktopError::Process(
-                        "relay closed while waiting for the peer".into(),
-                    ));
-                }
-                Some(Err(error)) => {
-                    return Err(DesktopError::Process(format!(
-                        "relay failed while waiting for the peer: {error}"
-                    )));
-                }
-                _ => {}
-            }
+    let udp = match udp::connect(websocket_request.clone()).await {
+        Ok(transport) => Some(transport),
+        Err(reason) => {
+            eprintln!("SANSER_RELAY udpUnavailable={reason}; trying WSS fallback");
+            None
         }
-    })
-    .await
-    .map_err(|_| DesktopError::Process("relay peer did not become ready in time".into()))??;
+    };
+    let websocket = if udp.is_none() {
+        let (mut websocket, response) = tokio::time::timeout(
+            RELAY_CONNECT_TIMEOUT,
+            connect_async_with_config(websocket_request, None, true),
+        )
+        .await
+        .map_err(|_| DesktopError::Process("relay WebSocket connection timed out".into()))?
+        .map_err(|error| {
+            DesktopError::Process(format!("relay WebSocket connection failed: {error}"))
+        })?;
+        if response
+            .headers()
+            .get(header::SEC_WEBSOCKET_PROTOCOL)
+            .and_then(|value| value.to_str().ok())
+            != Some("sanser-relay-v1")
+        {
+            return Err(DesktopError::Process(
+                "relay server did not negotiate the secure relay protocol".into(),
+            ));
+        }
+
+        tokio::time::timeout(RELAY_CONNECT_TIMEOUT, async {
+            loop {
+                match websocket.next().await {
+                    Some(Ok(Message::Text(message)))
+                        if message.as_str().contains("relay.peerReady") =>
+                    {
+                        return Ok::<(), DesktopError>(());
+                    }
+                    Some(Ok(Message::Ping(payload))) => websocket
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|error| DesktopError::Process(error.to_string()))?,
+                    Some(Ok(Message::Close(_))) | None => {
+                        return Err(DesktopError::Process(
+                            "relay closed while waiting for the peer".into(),
+                        ));
+                    }
+                    Some(Err(error)) => {
+                        return Err(DesktopError::Process(format!(
+                            "relay failed while waiting for the peer: {error}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| DesktopError::Process("relay peer did not become ready in time".into()))??;
+
+        Some(websocket)
+    } else {
+        None
+    };
+    let transport_name = if udp.is_some() { "udp" } else { "wss" };
+    eprintln!("SANSER_RELAY transport={transport_name}");
 
     // Release the engine reservation only after both relay peers are present;
     // the native sidecar binds this port immediately after the command returns.
@@ -303,6 +331,7 @@ pub async fn relay_start(
     let (stop_tx, stop_rx) = oneshot::channel();
     let bridge_id = uuid::Uuid::new_v4();
     let bridge = RelayBridge {
+        transport: transport_name,
         id: bridge_id,
         session_id,
         engine_port,
@@ -318,7 +347,13 @@ pub async fn relay_start(
     let failures = Arc::clone(&manager.failures);
     let kind = request.kind;
     tauri::async_runtime::spawn(async move {
-        let failure = run_bridge(proxy_socket, engine_endpoint, websocket, cipher, stop_rx).await;
+        let failure = if let Some(udp) = udp {
+            udp::run(udp, proxy_socket, engine_endpoint, cipher, stop_rx).await
+        } else if let Some(websocket) = websocket {
+            run_bridge(proxy_socket, engine_endpoint, websocket, cipher, stop_rx).await
+        } else {
+            Some("relay negotiation did not select a transport".into())
+        };
         if let Ok(mut active) = bridges.lock()
             && active
                 .get(&kind)
@@ -335,6 +370,7 @@ pub async fn relay_start(
     Ok(RelayStartResult {
         engine_port,
         proxy_port,
+        transport: transport_name,
     })
 }
 
@@ -506,7 +542,7 @@ struct RelayCipher {
     send_nonce_prefix: [u8; 16],
     send_sequence: u64,
     peer_nonce_prefix: Option<[u8; 16]>,
-    receive_sequence: Option<u64>,
+    receive_window: sanser_network::relay_datagram::ReplayWindow,
 }
 
 impl RelayCipher {
@@ -534,7 +570,7 @@ impl RelayCipher {
             send_nonce_prefix,
             send_sequence: 0,
             peer_nonce_prefix: None,
-            receive_sequence: None,
+            receive_window: sanser_network::relay_datagram::ReplayWindow::default(),
         })
     }
 
@@ -588,9 +624,6 @@ impl RelayCipher {
         if self
             .peer_nonce_prefix
             .is_some_and(|pinned| pinned != prefix)
-            || self
-                .receive_sequence
-                .is_some_and(|last_sequence| sequence <= last_sequence)
         {
             return Err(DesktopError::Process(
                 "relay rejected a replayed or migrated frame".into(),
@@ -611,7 +644,11 @@ impl RelayCipher {
             )
             .map_err(|_| DesktopError::Process("relay frame authentication failed".into()))?;
         self.peer_nonce_prefix.get_or_insert(prefix);
-        self.receive_sequence = Some(sequence);
+        if !self.receive_window.accept(sequence) {
+            return Err(DesktopError::Process(
+                "relay rejected a replayed frame".into(),
+            ));
+        }
         Ok(plaintext)
     }
 }
@@ -717,6 +754,26 @@ mod tests {
         assert!(!frame.windows(6).any(|window| window == b"opaque"));
         assert_eq!(receiver.decrypt(&frame).unwrap(), b"opaque SNV2 packet");
         assert!(receiver.decrypt(&frame).is_err());
+    }
+
+    #[test]
+    fn relay_cipher_accepts_reordered_datagrams_without_accepting_replays() {
+        let session = uuid::Uuid::new_v4();
+        let left = uuid::Uuid::new_v4();
+        let right = uuid::Uuid::new_v4();
+        let credential = "a-secure-session-credential-123456";
+        let mut sender = RelayCipher::new(session, left, right, credential).unwrap();
+        let mut receiver = RelayCipher::new(session, right, left, credential).unwrap();
+        let first = sender.encrypt(b"first").unwrap();
+        let second = sender.encrypt(b"second").unwrap();
+        let third = sender.encrypt(b"third").unwrap();
+        assert_eq!(receiver.decrypt(&third).unwrap(), b"third");
+        let mut forged = first.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        assert!(receiver.decrypt(&forged).is_err());
+        assert_eq!(receiver.decrypt(&first).unwrap(), b"first");
+        assert_eq!(receiver.decrypt(&second).unwrap(), b"second");
+        assert!(receiver.decrypt(&first).is_err());
     }
 
     #[tokio::test]

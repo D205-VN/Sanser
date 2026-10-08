@@ -18,6 +18,7 @@ const SOURCES: &[&str] = &[
     "SNV1_STATS",
     "SNV1_STAGE_PROFILE",
     "SNV1_HOST_TIMING",
+    "SNV1_ADAPT",
     "SNV1_CLIENT_STATS",
     "SNV1_RENDER_STATS",
     "SNINPUT_RTT",
@@ -27,6 +28,8 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "deliveredMbps",
+    "estimatedDeliveryMbps",
     "gpuInput",
     "avgRenderAgeMs",
     "maxRenderAgeMs",
@@ -140,6 +143,7 @@ struct Report {
     platform: &'static str,
     kind: crate::models::EngineKind,
     route: &'static str,
+    relay_transport: Option<&'static str>,
     direct_check: &'static str,
     requested_fps: u16,
     requested_bitrate_kbps: u32,
@@ -177,6 +181,15 @@ impl Report {
                 _ => "not-reported",
             },
             route: if request.relay { "relay" } else { "direct" },
+            relay_transport: if request.relay {
+                match request.relay_transport.as_deref() {
+                    Some("udp") => Some("udp"),
+                    Some("wss") => Some("wss"),
+                    _ => None,
+                }
+            } else {
+                None
+            },
             requested_fps: request.fps,
             requested_bitrate_kbps: request.bitrate_kbps,
             ultra_low_latency: request.ultra_low_latency,
@@ -350,6 +363,22 @@ mod tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn report_records_confirmed_relay_transport_and_delivery_estimate() {
+        let mut value = request();
+        assert_eq!(Report::new(&value).relay_transport, None);
+        value.relay_transport = Some("udp".into());
+        let mut report = Report::new(&value);
+        assert_eq!(report.relay_transport, Some("udp"));
+        report.observe(
+            parse_sample(b"SNV1_ADAPT deliveredMbps=16.0 estimatedDeliveryMbps=17.2 token=secret")
+                .unwrap(),
+        );
+        assert_eq!(report.maxima.get("SNV1_ADAPT.deliveredMbps"), Some(&16.0));
+        value.relay = false;
+        assert_eq!(Report::new(&value).relay_transport, None);
+    }
+
     #[test]
     fn startup_timeout_survives_late_overlay_samples_without_storing_peer_or_token() {
         let mut report = Report::new(&request());

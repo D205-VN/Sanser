@@ -9,6 +9,7 @@ pub mod relay;
 pub mod routes;
 pub mod state;
 mod time;
+pub mod udp_relay;
 pub mod websocket;
 
 use std::{net::SocketAddr, time::Duration};
@@ -125,6 +126,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v2/events", get(websocket::events_socket))
         .route("/api/v2/signaling", get(websocket::signaling_socket))
         .route("/api/v2/relay", get(relay::relay_socket))
+        .route("/api/v2/relay/udp", get(udp_relay::relay_socket))
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state.clone())
@@ -161,11 +163,22 @@ pub async fn serve(config: Config) -> Result<(), ServerError> {
     let address = SocketAddr::new(config.host, config.port);
     let pool = db::connect(&config).await.map_err(ServerError::Database)?;
     let state = AppState::new(config, pool.clone());
-    let cancellation = CancellationToken::new();
-    let cleanup_task = spawn_cleanup(state.clone(), cancellation.clone());
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(ServerError::Bind)?;
+    let cancellation = CancellationToken::new();
+    let udp_task = if let Some(address) = state.config.udp_relay_bind {
+        let socket = tokio::net::UdpSocket::bind(address)
+            .await
+            .map_err(ServerError::Bind)?;
+        let hub = state.udp_relay.clone();
+        let stop = cancellation.clone();
+        tracing::info!(%address, "Sanser UDP relay listening");
+        Some(tokio::spawn(async move { hub.run(socket, stop).await }))
+    } else {
+        None
+    };
+    let cleanup_task = spawn_cleanup(state.clone(), cancellation.clone());
     tracing::info!(address = %listener.local_addr().unwrap_or(address), "Sanser API server listening");
 
     let result = axum::serve(
@@ -181,6 +194,9 @@ pub async fn serve(config: Config) -> Result<(), ServerError> {
     .map_err(ServerError::Serve);
     cancellation.cancel();
     let _ = cleanup_task.await;
+    if let Some(task) = udp_task {
+        let _ = task.await;
+    }
     pool.close().await;
     result
 }

@@ -39,4 +39,24 @@ int main() {
   sanser::StreamAdaptationPolicy sender;
   require(sender.networkBitrateFactor(1, 0, false, true) == 1, "isolated slow send must not reduce");
   require(sender.networkBitrateFactor(2, 0, false, true) == 0.88, "sustained slow send reduces bitrate");
+
+  sanser::StreamAdaptationPolicy measured;
+  for (unsigned w = 1; w <= 4; ++w) {
+    measured.observeDelivery(w, 25000000, 3000000, 3000000, 100, 0);
+    require(measured.networkBitrateFactor(w, 0, false) == 1,
+      "idle desktop and stable high RTT must not imply congestion");
+  }
+  require(measured.deliveryEstimateBps() == 0, "app-limited samples must not cap bandwidth");
+  measured.observeDelivery(5, 25000000, 18000000, 25000000, 115, 3);
+  require(measured.networkBitrateFactor(5, 2, false) == 1, "one pressure window is insufficient");
+  measured.observeDelivery(6, 25000000, 16000000, 25000000, 130, 3);
+  require(measured.networkBitrateFactor(6, 2, false) == 0.75,
+    "sustained delivery deficit must use observed goodput, bounded to 25 percent reduction");
+  require(measured.networkBitrateFactor(6, 10, true) == 1, "same window cannot reduce twice");
+  measured.observeDelivery(7, 18000000, 17500000, 18000000, 100, 0);
+  require(measured.networkBitrateFactor(7, 0, false) == 1, "drained queue must stop reductions");
+  measured.observeDelivery(8, 18000000, 2000000, 2000000, 100, 0);
+  require(measured.deliveryEstimateBps() > 16000000, "idle sample cannot erase measured delivery");
+  measured.observeDelivery(9, 18000000, NAN, 18000000, NAN, 0);
+  require(measured.networkBitrateFactor(9, 0, false) == 1, "invalid measurements cannot poison policy");
 }

@@ -60,6 +60,8 @@ pub struct LaunchEngineRequest {
     pub udp_bind_port: Option<u16>,
     #[serde(default)]
     pub relay: bool,
+    #[serde(skip)]
+    pub relay_transport: Option<String>,
     #[serde(default)]
     pub wire_protocol: Option<String>,
     #[serde(default)]

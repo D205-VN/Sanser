@@ -303,6 +303,7 @@ StreamFeedbackSnapshot gStreamFeedback;
 std::mutex gStreamFeedbackMutex;
 
 struct UdpRepairFeedbackSnapshot {
+  double deliveredBps = -1.0;
   std::uint64_t sequence = 0;
   std::uint64_t clientSequence = 0;
   std::uint64_t datagrams = 0;
@@ -3063,6 +3064,12 @@ void handleStreamStatsPayload(const std::string& json) {
 void handleUdpRepairStatsPayload(const std::string& json) {
   UdpRepairFeedbackSnapshot feedback;
   feedback.clientSequence = jsonUint64Value(json, "sequence");
+  const double deliveryBytes = jsonDoubleValue(json, "deliveredBytes", -1.0);
+  const double deliveryWindowMs = jsonDoubleValue(json, "deliveryWindowMs", -1.0);
+  if (std::isfinite(deliveryBytes) && deliveryBytes >= 0 && deliveryBytes <= 1024.0 * 1024 * 1024 &&
+      std::isfinite(deliveryWindowMs) && deliveryWindowMs >= 500 && deliveryWindowMs <= 10000) {
+    feedback.deliveredBps = deliveryBytes * 8000.0 / deliveryWindowMs;
+  }
   feedback.datagrams = jsonUint64Value(json, "datagrams");
   feedback.fragments = jsonUint64Value(json, "fragments");
   feedback.retransmitFragments = jsonUint64Value(json, "retransmitFragments");
@@ -3137,6 +3144,7 @@ void handleUdpRepairStatsPayload(const std::string& json) {
 
   {
     std::lock_guard<std::mutex> lock(gUdpRepairFeedbackMutex);
+    if (feedback.clientSequence != 0 && feedback.clientSequence <= gUdpRepairFeedback.clientSequence) return;
     feedback.sequence = gUdpRepairFeedback.sequence + 1;
     gUdpRepairFeedback = feedback;
   }
@@ -6592,6 +6600,14 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 #endif
 		                << "\n";
 
+          const auto repairFeedback = latestUdpRepairFeedback();
+          if (repairFeedback.sequence != 0 && repairFeedback.sequence != seenUdpRepairFeedbackSequence) {
+            adaptationPolicy.observeDelivery(statsFeedbackWindowSequence, currentAdaptiveBitrate,
+              repairFeedback.deliveredBps, mbps * 1000000.0,
+              repairFeedback.rttMs >= 0 ? repairFeedback.rttMs : repairFeedback.rttSmoothedMs,
+              gSocketSendMs.load());
+          }
+
 	      const bool hostWorkSevere = hasNetworkVideo && statsFrames > 0 &&
                                   hostBudgetMs > 0.0 &&
                                   (hostAvgWorkMs > hostBudgetMs * hostWorkSevereRatio ||
@@ -6700,19 +6716,18 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                   << "\n";
       }
 
-      const auto repairFeedback = latestUdpRepairFeedback();
       if (repairFeedback.sequence != 0 && repairFeedback.sequence != seenUdpRepairFeedbackSequence) {
         seenUdpRepairFeedbackSequence = repairFeedback.sequence;
         lastUdpRepairFeedbackWindow = statsFeedbackWindowSequence;
         std::uint32_t nextBitrate = currentAdaptiveBitrate;
         std::uint32_t nextFps = currentAdaptiveFps;
-        if (repairFeedback.pressure > 0) {
+        const double deliveryFactor = adaptationPolicy.networkBitrateFactor(statsFeedbackWindowSequence,
+          repairFeedback.lossPercent, repairFeedback.nackTimedOut > 0);
+        if (repairFeedback.pressure > 0 || deliveryFactor < 1.0) {
           clearUdpRepairWindows = 0;
           clearFeedbackWindows = 0;
           clearFrameFeedbackWindows = 0;
-          nextBitrate = static_cast<std::uint32_t>(currentAdaptiveBitrate *
-            adaptationPolicy.networkBitrateFactor(statsFeedbackWindowSequence,
-              repairFeedback.lossPercent, repairFeedback.nackTimedOut > 0));
+          nextBitrate = static_cast<std::uint32_t>(currentAdaptiveBitrate * deliveryFactor);
           // Repair feedback describes network delivery, not host/client compute.
           // Keep FPS unchanged so a bandwidth reduction does not also add judder.
 	        } else if (repairFeedback.pressure < 0) {
@@ -6819,6 +6834,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
           std::cerr << "SNV1_ADAPT source=udp-repair"
                     << " pressure=" << pressureLabel(repairFeedback.pressure)
                     << " requestedMbps=" << (static_cast<double>(nextBitrate) / 1000000.0)
+                    << " deliveredMbps=" << repairFeedback.deliveredBps / 1000000.0
+                    << " estimatedDeliveryMbps=" << adaptationPolicy.deliveryEstimateBps() / 1000000.0
                     << " currentMbps=" << (static_cast<double>(currentAdaptiveBitrate) / 1000000.0)
 	                    << " applied=" << (applied ? "yes" : "no")
 	                    << " restarted=" << (restarted ? "yes" : "no")
@@ -7039,6 +7056,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
           std::cerr << "SNV1_ADAPT source=" << feedback.source
                     << " pressure=" << pressureLabel(feedback.pressure)
                     << " requestedMbps=" << (static_cast<double>(nextBitrate) / 1000000.0)
+                    << " deliveredMbps=" << repairFeedback.deliveredBps / 1000000.0
+                    << " estimatedDeliveryMbps=" << adaptationPolicy.deliveryEstimateBps() / 1000000.0
                     << " currentMbps=" << (static_cast<double>(currentAdaptiveBitrate) / 1000000.0)
 	                    << " applied=" << (applied ? "yes" : "no")
 	                    << " restarted=" << (restarted ? "yes" : "no")

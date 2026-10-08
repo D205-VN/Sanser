@@ -824,6 +824,7 @@ mod tests {
             udp_connect: None,
             udp_bind_port: None,
             relay: false,
+            relay_transport: None,
             wire_protocol: None,
         }
     }

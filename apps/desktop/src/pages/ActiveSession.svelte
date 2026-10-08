@@ -109,7 +109,7 @@
           accessToken,
           sessionCredential: target.sessionToken
         });
-        diagnostics.add({ level: 'info', category: 'network', message: 'Encrypted relay route is ready' });
+        diagnostics.add({ level: 'info', category: 'network', message: `Encrypted relay route is ready (${relayResult.transport === 'udp' ? 'UDP datagrams' : 'WSS/TCP fallback'})` });
       }
 
       if (signal.aborted || !componentActive || $connection.session?.id !== target.id || $session.mode !== 'cloud') {

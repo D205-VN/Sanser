@@ -184,7 +184,7 @@ export function createHostStore(): HostStore {
           sessionCredential: credentials.sessionToken,
           preferredEnginePort: settings.host.directUdpPort
         });
-        diagnostics.add({ level: 'info', category: 'network', message: 'Encrypted relay route is ready' });
+        diagnostics.add({ level: 'info', category: 'network', message: `Encrypted relay route is ready (${relayRoute.transport === 'udp' ? 'UDP datagrams' : 'WSS/TCP fallback'})` });
       }
       if (cancelled() || get(store).deviceId !== hostDeviceId) {
         if (relayRoute) await stopRelay('host').catch(() => undefined);

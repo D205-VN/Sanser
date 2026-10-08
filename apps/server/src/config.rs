@@ -13,6 +13,8 @@ pub const PROTOCOL_VERSION: u8 = sanser_core::PROTOCOL_VERSION;
 pub struct Config {
     pub host: IpAddr,
     pub port: u16,
+    pub udp_relay_bind: Option<std::net::SocketAddr>,
+    pub udp_relay_public: Option<String>,
     pub database_url: String,
     pub database_max_connections: u32,
     pub database_min_connections: u32,
@@ -105,6 +107,14 @@ impl Config {
         let config = Self {
             host,
             port,
+            udp_relay_bind: optional_env("RELAY_UDP_BIND")
+                .map(|value| {
+                    value.parse().map_err(|_| {
+                        ConfigError::Invalid("RELAY_UDP_BIND must be an IP:port".into())
+                    })
+                })
+                .transpose()?,
+            udp_relay_public: optional_env("RELAY_UDP_PUBLIC"),
             database_url,
             database_max_connections: parse_env("DATABASE_MAX_CONNECTIONS", "10")?,
             database_min_connections: parse_env("DATABASE_MIN_CONNECTIONS", "1")?,
@@ -156,6 +166,8 @@ impl Config {
         let config = Self {
             host: "127.0.0.1".parse().expect("valid loopback address"),
             port: 0,
+            udp_relay_bind: None,
+            udp_relay_public: None,
             database_url,
             database_max_connections: 4,
             database_min_connections: 0,
@@ -185,6 +197,35 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.udp_relay_bind.is_some() != self.udp_relay_public.is_some() {
+            return Err(ConfigError::Invalid(
+                "RELAY_UDP_BIND and RELAY_UDP_PUBLIC must be configured together".into(),
+            ));
+        }
+        if self
+            .udp_relay_bind
+            .is_some_and(|address| address.port() == 0)
+        {
+            return Err(ConfigError::Invalid(
+                "RELAY_UDP_BIND must use a nonzero port".into(),
+            ));
+        }
+        if let Some(endpoint) = &self.udp_relay_public {
+            let url = url::Url::parse(&format!("udp://{endpoint}"))
+                .map_err(|_| ConfigError::Invalid("RELAY_UDP_PUBLIC must be a host:port".into()))?;
+            if url.host_str().is_none()
+                || url.port().is_none_or(|port| port == 0)
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || !url.path().is_empty()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(ConfigError::Invalid(
+                    "RELAY_UDP_PUBLIC must be a host:port without URL metadata".into(),
+                ));
+            }
+        }
         if !(1..=100).contains(&self.database_max_connections)
             || self.database_min_connections > self.database_max_connections
         {
@@ -439,6 +480,29 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_relay_requires_a_complete_endpoint_configuration() {
+        let mut config =
+            Config::test("postgresql://user:pass@ep-test.neon.tech/sanser?sslmode=require".into())
+                .unwrap();
+        config.udp_relay_bind = Some("0.0.0.0:50001".parse().unwrap());
+        assert!(config.validate().is_err());
+        for endpoint in ["relay.example.com:50001", "127.0.0.1:50001", "[::1]:50001"] {
+            config.udp_relay_public = Some(endpoint.into());
+            assert!(config.validate().is_ok(), "{endpoint}");
+        }
+        for endpoint in [
+            "relay.example.com",
+            "relay.example.com:0",
+            "user:pass@host:123",
+            "host:123/path",
+            "host:123?x=1",
+        ] {
+            config.udp_relay_public = Some(endpoint.into());
+            assert!(config.validate().is_err(), "{endpoint}");
+        }
+    }
 
     #[test]
     fn database_is_neon_postgres_with_required_tls() {
