@@ -10,6 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tauri::Emitter;
 
 const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
@@ -152,6 +153,54 @@ pub(crate) fn parse_sample(line: &[u8]) -> Option<Sample> {
     })
 }
 
+/// Probe RTT includes application handling; live Wire RTT is an estimate that
+/// still includes OS queues. A rise is a diagnostic signal, not proof of NAT/QoS.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteHealth {
+    attempt_id: String,
+    probe: sanser_p2p::ProbeStatistics,
+    live_wire_rtt_ms: Option<f64>,
+    status: &'static str,
+    consecutive_elevated: u32,
+    #[serde(skip)]
+    last_sample_at_ms: Option<u64>,
+}
+impl RouteHealth {
+    fn observe(&mut self, wire_ms: f64, at_ms: u64, media_at_ms: Option<u64>) {
+        self.live_wire_rtt_ms = Some(wire_ms);
+        if self.probe.samples < 3 {
+            self.status = "insufficient-probe-samples";
+            return;
+        }
+        if media_at_ms.is_none_or(|started| at_ms.saturating_sub(started) < 2_000) {
+            self.status = "awaiting-media-warmup";
+            return;
+        }
+        if self
+            .last_sample_at_ms
+            .is_some_and(|last| at_ms.saturating_sub(last) > 5_000)
+        {
+            self.consecutive_elevated = 0;
+        }
+        self.last_sample_at_ms = Some(at_ms);
+        let threshold = 80.0_f64
+            .max(self.probe.median_ms * 2.0)
+            .max(self.probe.median_ms + 40.0);
+        if wire_ms > threshold {
+            self.consecutive_elevated = self.consecutive_elevated.saturating_add(1);
+            self.status = if self.consecutive_elevated >= 3 {
+                "elevated-after-media"
+            } else {
+                "checking-elevated-rtt"
+            };
+        } else {
+            self.consecutive_elevated = 0;
+            self.status = "no-sustained-rise";
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Report {
@@ -164,6 +213,9 @@ struct Report {
     route: &'static str,
     relay_transport: Option<&'static str>,
     direct_check: &'static str,
+    route_health: Option<RouteHealth>,
+    #[serde(skip)]
+    media_started_at_ms: Option<u64>,
     requested_fps: u16,
     requested_bitrate_kbps: u32,
     ultra_low_latency: bool,
@@ -209,6 +261,23 @@ impl Report {
             } else {
                 None
             },
+            route_health: if request.relay {
+                None
+            } else {
+                request
+                    .direct_probe
+                    .clone()
+                    .zip(request.direct_attempt_id.clone())
+                    .map(|(probe, attempt_id)| RouteHealth {
+                        attempt_id,
+                        probe,
+                        live_wire_rtt_ms: None,
+                        status: "awaiting-media-warmup",
+                        consecutive_elevated: 0,
+                        last_sample_at_ms: None,
+                    })
+            },
+            media_started_at_ms: None,
             requested_fps: request.fps,
             requested_bitrate_kbps: request.bitrate_kbps,
             ultra_low_latency: request.ultra_low_latency,
@@ -223,6 +292,21 @@ impl Report {
         }
     }
     fn observe(&mut self, sample: Sample) {
+        if matches!(
+            sample.source.as_str(),
+            "SNU1_STARTUP" | "SNV1_CLIENT_STATS" | "SNV1_RENDER_STATS"
+        ) && ["decoded", "rendered"]
+            .iter()
+            .any(|key| sample.values.get(*key).is_some_and(|value| *value > 0.0))
+        {
+            self.media_started_at_ms.get_or_insert(sample.at_ms);
+        }
+        if sample.source == "SNCONTROL_TIMING"
+            && let Some(wire) = sample.values.get("wireEstimateMs")
+            && let Some(health) = self.route_health.as_mut()
+        {
+            health.observe(*wire, sample.at_ms, self.media_started_at_ms);
+        }
         self.sample_count += 1;
         // RTT and local processing durations use one machine's monotonic clock.
         // Cross-machine wall-clock frame ages are deliberately excluded.
@@ -275,6 +359,7 @@ impl Report {
 pub(crate) fn start(
     directory: &Path,
     request: &LaunchEngineRequest,
+    app: Option<tauri::AppHandle>,
 ) -> std::io::Result<SyncSender<Sample>> {
     fs::create_dir_all(directory)?;
     let mut report = Report::new(request);
@@ -285,14 +370,23 @@ pub(crate) fn start(
     ));
     save(&path, &report)?;
     prune(directory)?;
-    let (sender, receiver) = mpsc::sync_channel(128);
+    let (sender, receiver) = mpsc::sync_channel::<Sample>(128);
     thread::Builder::new()
         .name("sanser-connection-report".into())
         .spawn(move || {
             let mut flushed = Instant::now();
             loop {
                 match receiver.recv_timeout(Duration::from_secs(5)) {
-                    Ok(sample) => report.observe(sample),
+                    Ok(sample) => {
+                        let control_sample = sample.source == "SNCONTROL_TIMING";
+                        report.observe(sample);
+                        if control_sample
+                            && let Some(health) = &report.route_health
+                            && let Some(app) = &app
+                        {
+                            let _ = app.emit("direct-route-health", health);
+                        }
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         report.ended = true;
@@ -382,6 +476,43 @@ mod tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn route_health_requires_media_warmup_and_sustained_increase() {
+        let mut health = RouteHealth {
+            attempt_id: "test".into(),
+            probe: sanser_p2p::ProbeStatistics {
+                samples: 5,
+                median_ms: 13.0,
+                min_ms: 11.0,
+                max_ms: 16.0,
+                jitter_ms: 1.0,
+                loss_percent: 0.0,
+                score_ms: 15.0,
+            },
+            live_wire_rtt_ms: None,
+            status: "awaiting-media-warmup",
+            consecutive_elevated: 0,
+            last_sample_at_ms: None,
+        };
+        health.observe(200.0, 5_000, None);
+        health.observe(200.0, 6_000, Some(5_000));
+        assert_eq!(health.consecutive_elevated, 0);
+        for time in [7_000, 8_000] {
+            health.observe(200.0, time, Some(5_000));
+        }
+        assert_ne!(health.status, "elevated-after-media");
+        health.observe(200.0, 9_000, Some(5_000));
+        assert_eq!(health.status, "elevated-after-media");
+        health.observe(15.0, 10_000, Some(5_000));
+        assert_eq!(health.status, "no-sustained-rise");
+        health.observe(200.0, 11_000, Some(5_000));
+        health.observe(200.0, 20_000, Some(5_000));
+        assert_eq!(health.consecutive_elevated, 1); // Stale samples do not form a streak.
+        health.probe.samples = 1;
+        health.observe(200.0, 21_000, Some(5_000));
+        assert_eq!(health.status, "insufficient-probe-samples");
+    }
+
     #[test]
     fn udp_receive_queue_report_excludes_packet_contents() {
         let sample = parse_sample(b"SNU1_RX_QUEUE queuedDatagrams=4 highWaterDatagrams=1024 receiveDropped=20 receiveExpired=10 receiveOversized=0 receiveQueueAvgMs=2 receiveQueueMaxMs=8 token=123 payload=456").unwrap();
@@ -491,7 +622,7 @@ mod tests {
     fn reports_survive_end_of_session_and_export_without_credentials() -> std::io::Result<()> {
         let directory =
             std::env::temp_dir().join(format!("sanser-reports-{}", uuid::Uuid::new_v4()));
-        let sender = start(&directory, &request())?;
+        let sender = start(&directory, &request(), None)?;
         sender
             .send(parse_sample(b"SNV1_STAGE_PROFILE encodeAvgMs=75 token=123").unwrap())
             .unwrap();

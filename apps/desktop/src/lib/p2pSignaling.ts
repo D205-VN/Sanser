@@ -1,12 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ApiClient } from './api';
 import type { LaunchEngineRequest } from './types';
-import { diagnostics, networkDiagnostics } from '../stores/diagnostics';
+import { diagnostics, networkDiagnostics, type DirectSelectionDiagnostics } from '../stores/diagnostics';
 
 export interface P2pPunchResult {
   localPort: number;
   remoteAddress: string;
   remotePort: number;
+  selection?: DirectSelectionDiagnostics;
 }
 
 interface P2pGatherResult {
@@ -255,10 +256,21 @@ export async function coordinateP2pConnection(
       })
         .then((result) => {
           if (settled) return;
+          if (result.selection) networkDiagnostics.selectRoute(result.selection, attemptId);
           diagnostics.add({
             level: 'info',
             category: 'network',
-            message: `[P2P] Direct route selected on reserved local port ${result.localPort}`
+            message: `[P2P] Direct route selected on reserved local port ${result.localPort}`,
+            details: result.selection ? {
+              localCandidate: result.selection.localCandidateEndpoint,
+              localType: result.selection.localCandidateType,
+              remoteCandidate: result.selection.remoteCandidateEndpoint,
+              remoteType: result.selection.remoteCandidateType,
+              verifiedRemote: result.selection.verifiedRemoteEndpoint,
+              probeMedianMs: result.selection.probe?.medianMs ?? null,
+              probeSamples: result.selection.probe?.samples ?? 0,
+              reason: result.selection.reason
+            } : undefined
           });
           succeed(result);
         })

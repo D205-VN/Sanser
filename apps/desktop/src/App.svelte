@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
   import BrandMark from './components/BrandMark.svelte';
   import Sidebar from './components/Sidebar.svelte';
@@ -10,7 +11,7 @@
   import Host from './pages/Host.svelte';
   import Settings from './pages/Settings.svelte';
   import Welcome from './pages/Welcome.svelte';
-  import { diagnostics } from './stores/diagnostics';
+  import { diagnostics, networkDiagnostics, type DirectRouteHealth } from './stores/diagnostics';
   import { connection } from './stores/connection';
   import { host } from './stores/host';
   import { preferences } from './stores/preferences';
@@ -122,6 +123,8 @@
   }
 
   onMount(() => {
+    const routeHealthLifecycle = new AbortController();
+    let stopRouteHealth: UnlistenFn | undefined;
     const expiryTimer = window.setInterval(checkSessionInactivity, 60_000);
     window.addEventListener('focus', checkSessionInactivity);
     document.addEventListener('visibilitychange', checkSessionInactivity);
@@ -131,12 +134,20 @@
         diagnostics.setEnabled(loadedPreferences.diagnosticsEnabled);
         const [loadedRuntime] = await Promise.all([runtimeStatus(), session.initialize(loadedPreferences.serverUrl)]);
         runtime = loadedRuntime;
+        if (loadedRuntime.capabilities.desktopShell.state === 'available') {
+          const unlisten = await listen<DirectRouteHealth>('direct-route-health', (event) => networkDiagnostics.updateRouteHealth(event.payload))
+            .catch(() => { diagnostics.add({ level: 'warn', category: 'network', message: 'Live route comparison is unavailable; measurements are still saved in connection reports.' }); return undefined; });
+          if (routeHealthLifecycle.signal.aborted) unlisten?.();
+          else stopRouteHealth = unlisten;
+        }
         diagnostics.add({ level: 'info', category: 'app', message: 'Sanser desktop initialized', details: { platform: loadedRuntime.platform, version: loadedRuntime.version } });
       } catch (error) {
         bootError = error instanceof Error ? error.message : 'Unable to initialize Sanser';
       }
     })();
     return () => {
+      routeHealthLifecycle.abort();
+      stopRouteHealth?.();
       window.clearInterval(expiryTimer);
       window.removeEventListener('focus', checkSessionInactivity);
       document.removeEventListener('visibilitychange', checkSessionInactivity);

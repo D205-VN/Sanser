@@ -64,7 +64,10 @@ pub use migration::{
     MigrationController, MigrationReason, MigrationState, ReconnectAction, ReconnectSchedule,
 };
 pub use nomination::{Nomination, NominationPolicy};
-pub use punch::{PunchAttempt, PunchState, check_connectivity};
+pub use punch::{
+    ConnectivitySelection, ProbeStatistics, PunchAttempt, PunchState, check_connectivity,
+    check_connectivity_measured,
+};
 pub use scoring::{
     P2pRouteKind, PathEvidence, PathMetrics, RouteScore, ScoringError, VerificationStatus,
     VerifiedPath, select_best_path,

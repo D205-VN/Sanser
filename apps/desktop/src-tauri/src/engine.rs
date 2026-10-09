@@ -704,6 +704,7 @@ impl EngineManager {
                 |directory| match crate::connection_report::start(
                     &directory.join("connections"),
                     request,
+                    Some(app.clone()),
                 ) {
                     Ok(report) => Some(report),
                     Err(error) => {
@@ -825,6 +826,8 @@ mod tests {
             udp_bind_port: None,
             relay: false,
             relay_transport: None,
+            direct_probe: None,
+            direct_attempt_id: None,
             wire_protocol: None,
         }
     }

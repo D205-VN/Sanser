@@ -59,6 +59,25 @@
     <div class="notice warning">If STUN works but direct connection still times out, forward UDP {$preferences.host.directUdpPort} on the home router to the host computer. The current media engine requires IPv4. Auto mode tries authenticated direct connectivity and then the encrypted relay.</div>
   </article>
 
+  {#if $networkDiagnostics.selection}
+    {@const selected = $networkDiagnostics.selection}
+    <article class="card card-body stack">
+      <div><h2 class="card-title">Selected Direct candidate</h2><p class="card-subtitle">{selected.reason}</p></div>
+      <div class="advanced-metrics">
+        <div><span>Local advertised · {selected.localCandidateType}</span><strong>{selected.localCandidateEndpoint}</strong></div>
+        <div><span>Remote advertised · {selected.remoteCandidateType}</span><strong>{selected.remoteCandidateEndpoint}</strong></div>
+        <div><span>Authenticated peer endpoint</span><strong>{selected.verifiedRemoteEndpoint}</strong></div>
+        <div><span>Probe median / min / max</span><strong>{selected.probe ? `${selected.probe.medianMs.toFixed(1)} / ${selected.probe.minMs.toFixed(1)} / ${selected.probe.maxMs.toFixed(1)} ms` : 'Not measured'}</strong></div>
+        <div><span>Probe samples / loss</span><strong>{selected.probe ? `${selected.probe.samples} / ${selected.probe.lossPercent.toFixed(0)}%` : '—'}</strong></div>
+        <div><span>Live Wire RTT estimate</span><strong>{$networkDiagnostics.routeHealth?.liveWireRttMs != null ? `${$networkDiagnostics.routeHealth.liveWireRttMs.toFixed(1)} ms` : 'Awaiting media measurements'}</strong></div>
+      </div>
+      <p class="muted">Candidate addresses are advertised endpoints, not proof of the physical interface selected by the OS. Probe RTT includes probe handling; live Wire RTT still includes OS queues. Fewer than 3 probe samples means limited confidence. This is the latest nomination, not a guarantee that a session is still active.</p>
+      {#if $networkDiagnostics.routeHealth?.status === 'elevated-after-media'}
+        <div class="notice warning">RTT increased substantially in at least three measurements after media started. The initial probe was faster; investigate the media path and OS/network queues. No route migration has been performed.</div>
+      {/if}
+    </article>
+  {/if}
+
   <div class="grid two diagnostics-grid">
     <article class="card card-body stack">
       <div><h2 class="card-title">Runtime capabilities</h2><p class="card-subtitle">Availability comes from the packaged shell and installed sidecars.</p></div>

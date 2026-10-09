@@ -62,6 +62,10 @@ pub struct LaunchEngineRequest {
     pub relay: bool,
     #[serde(skip)]
     pub relay_transport: Option<String>,
+    #[serde(skip)]
+    pub direct_probe: Option<sanser_p2p::ProbeStatistics>,
+    #[serde(skip)]
+    pub direct_attempt_id: Option<String>,
     #[serde(default)]
     pub wire_protocol: Option<String>,
     #[serde(default)]

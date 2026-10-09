@@ -281,7 +281,7 @@ pub fn launch_engine(
         None
     } else {
         relay.stop_for_engine(request.kind);
-        p2p.take_selected_socket(&request)?
+        p2p.take_selected_socket(&mut request)?
     };
     let result = engines.launch(&app, &request, reserved_socket);
     if result.is_err() && request.relay {
@@ -329,7 +329,7 @@ pub async fn export_diagnostics(
 }
 
 use sanser_p2p::{
-    CandidatePair, GathererConfig, P2pCandidate, PairState, check_connectivity,
+    CandidatePair, GathererConfig, P2pCandidate, PairState, check_connectivity_measured,
     gather_candidates_on_socket, make_pair_id, pair_priority,
 };
 use serde::{Deserialize, Serialize};
@@ -355,6 +355,7 @@ struct P2pTransport {
     attempt_id: uuid::Uuid,
     sockets: Vec<P2pTransportSocket>,
     selected_socket: Option<usize>,
+    selected_probe: Option<sanser_p2p::ProbeStatistics>,
     phase: P2pTransportPhase,
 }
 
@@ -387,7 +388,7 @@ impl P2pSessionManager {
 
     fn take_selected_socket(
         &self,
-        request: &LaunchEngineRequest,
+        request: &mut LaunchEngineRequest,
     ) -> Result<Option<Arc<tokio::net::UdpSocket>>, DesktopError> {
         let Some(session_id) = request.session_id.as_deref() else {
             return Ok(None);
@@ -435,6 +436,8 @@ impl P2pSessionManager {
                 "native engine port does not match the selected P2P socket".into(),
             ));
         }
+        request.direct_probe.clone_from(&current.selected_probe);
+        request.direct_attempt_id = Some(current.attempt_id.to_string());
         Ok(transport.take().and_then(|mut selected| {
             let index = selected.selected_socket?;
             (index < selected.sockets.len()).then(|| selected.sockets.swap_remove(index).socket)
@@ -524,6 +527,7 @@ pub async fn p2p_gather(
             attempt_id,
             sockets,
             selected_socket: None,
+            selected_probe: None,
             phase: P2pTransportPhase::Gathering,
         });
     }
@@ -718,6 +722,20 @@ pub struct P2pPunchResult {
     pub local_port: u16,
     pub remote_address: String,
     pub remote_port: u16,
+    pub selection: DirectSelectionDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectSelectionDiagnostics {
+    pub pair_id: String,
+    pub local_candidate_type: sanser_p2p::CandidateType,
+    pub local_candidate_endpoint: String,
+    pub remote_candidate_type: sanser_p2p::CandidateType,
+    pub remote_candidate_endpoint: String,
+    pub verified_remote_endpoint: String,
+    pub probe: Option<sanser_p2p::ProbeStatistics>,
+    pub reason: String,
 }
 
 #[tauri::command]
@@ -787,7 +805,7 @@ pub async fn p2p_punch(
         if pairs.is_empty() {
             continue;
         }
-        match check_connectivity(
+        match check_connectivity_measured(
             &socket,
             &mut pairs,
             session_id,
@@ -799,14 +817,34 @@ pub async fn p2p_punch(
         )
         .await
         {
-            Ok(pair) => {
-                selected_route = Some((index, socket, pair));
+            Ok(selection) => {
+                let pair = &selection.pair;
+                let local = local_candidates
+                    .iter()
+                    .find(|candidate| candidate.id == pair.local_candidate_id)
+                    .ok_or_else(|| "Selected local candidate metadata is missing".to_owned())?;
+                let remote = request
+                    .remote_candidates
+                    .iter()
+                    .find(|candidate| candidate.id == pair.remote_candidate_id)
+                    .ok_or_else(|| "Selected remote candidate metadata is missing".to_owned())?;
+                let details = DirectSelectionDiagnostics {
+                    pair_id: pair.pair_id.clone(),
+                    local_candidate_type: local.candidate_type,
+                    local_candidate_endpoint: local.endpoint().to_string(),
+                    remote_candidate_type: remote.candidate_type,
+                    remote_candidate_endpoint: remote.endpoint().to_string(),
+                    verified_remote_endpoint: pair.remote.to_string(),
+                    probe: selection.probe.clone(),
+                    reason: selection.reason.to_owned(),
+                };
+                selected_route = Some((index, socket, selection.pair, details));
                 break;
             }
             Err(error) => last_error = Some(error.to_string()),
         }
     }
-    let Some((selected_index, socket, selected)) = selected_route else {
+    let Some((selected_index, socket, selected, details)) = selected_route else {
         manager.clear_if_current(session_id, attempt_id);
         return Err(last_error.unwrap_or_else(|| {
             "No compatible IPv4 media candidate pair could be constructed".into()
@@ -820,6 +858,7 @@ pub async fn p2p_punch(
             return Err("P2P connectivity check was superseded".into());
         };
         transport.selected_socket = Some(selected_index);
+        transport.selected_probe.clone_from(&details.probe);
         transport.phase = P2pTransportPhase::Selected;
     }
     let local_port = socket
@@ -830,6 +869,7 @@ pub async fn p2p_punch(
         local_port,
         remote_address: selected.remote.ip().to_string(),
         remote_port: selected.remote.port(),
+        selection: details,
     })
 }
 

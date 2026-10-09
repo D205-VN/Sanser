@@ -12,6 +12,35 @@ export interface DiagnosticEvent {
   details?: Record<string, DiagnosticValue>;
 }
 
+export interface ProbeStatistics {
+  samples: number;
+  medianMs: number;
+  minMs: number;
+  maxMs: number;
+  jitterMs: number;
+  lossPercent: number;
+  scoreMs: number;
+}
+
+export interface DirectSelectionDiagnostics {
+  pairId: string;
+  localCandidateType: string;
+  localCandidateEndpoint: string;
+  remoteCandidateType: string;
+  remoteCandidateEndpoint: string;
+  verifiedRemoteEndpoint: string;
+  probe: ProbeStatistics | null;
+  reason: string;
+}
+
+export interface DirectRouteHealth {
+  attemptId: string;
+  probe: ProbeStatistics;
+  liveWireRttMs: number | null;
+  status: string;
+  consecutiveElevated: number;
+}
+
 export interface NetworkDiagnosticState {
   checkedAt: string | null;
   localPort: number | null;
@@ -22,6 +51,8 @@ export interface NetworkDiagnosticState {
   publicEndpoint: string | null;
   gatheringDurationMs: number | null;
   candidateCount: number;
+  selection: (DirectSelectionDiagnostics & { attemptId: string }) | null;
+  routeHealth: DirectRouteHealth | null;
 }
 
 interface GatherTelemetry {
@@ -43,7 +74,9 @@ const EMPTY_NETWORK_DIAGNOSTICS: NetworkDiagnosticState = {
   ipv6Available: null,
   publicEndpoint: null,
   gatheringDurationMs: null,
-  candidateCount: 0
+  candidateCount: 0,
+  selection: null,
+  routeHealth: null
 };
 
 function createNetworkDiagnosticStore() {
@@ -60,7 +93,24 @@ function createNetworkDiagnosticStore() {
         ipv6Available: result.ipv6Available,
         publicEndpoint: result.publicEndpoint,
         gatheringDurationMs: result.durationMs,
-        candidateCount: result.candidates.length
+        candidateCount: result.candidates.length,
+        selection: null,
+        routeHealth: null
+      });
+    },
+    selectRoute(selection: DirectSelectionDiagnostics, attemptId: string): void {
+      store.update((state) => ({ ...state, selection: { ...selection, attemptId }, routeHealth: null }));
+    },
+    updateRouteHealth(health: DirectRouteHealth): void {
+      store.update((state) => {
+        if (state.selection?.attemptId !== health.attemptId) return state;
+        if (health.status === 'elevated-after-media' && state.routeHealth?.status !== health.status) {
+          diagnostics.add({ level: 'warn', category: 'network',
+            message: 'Direct RTT rose after media started. Check the media path, OS/network queues and router; no automatic route migration was performed.',
+            details: { probeMedianMs: health.probe.medianMs, liveWireRttMs: health.liveWireRttMs }
+          });
+        }
+        return { ...state, routeHealth: health };
       });
     },
     clear(): void {
