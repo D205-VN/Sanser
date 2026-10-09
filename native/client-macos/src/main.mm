@@ -60,6 +60,7 @@ namespace {
 sanser::LatencyPolicy gLatencyPolicy;
 std::atomic<bool> gShowLatencyOverlay{false};
 bool gOverlayShortcutDown = false;
+constexpr unsigned short kOverlayShortcutKeyCode = 0x1C; // macOS ANSI 8 (number row)
 struct LiveLatency {
   std::atomic<double> capture{-1}, captureWait{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
   std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
@@ -6025,7 +6026,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)keyDown:(NSEvent*)event {
-  if ([event keyCode] == 100 && ([event modifierFlags] & NSEventModifierFlagControl) &&
+  if ([event keyCode] == kOverlayShortcutKeyCode && ([event modifierFlags] & NSEventModifierFlagControl) &&
       ([event modifierFlags] & NSEventModifierFlagOption)) {
     gOverlayShortcutDown = true;
     if (![event isARepeat]) gShowLatencyOverlay = !gShowLatencyOverlay.load();
@@ -6036,7 +6037,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)keyUp:(NSEvent*)event {
-  if ([event keyCode] == 100 && gOverlayShortcutDown) { gOverlayShortcutDown = false; return; }
+  if ([event keyCode] == kOverlayShortcutKeyCode && gOverlayShortcutDown) { gOverlayShortcutDown = false; return; }
   logKeyEvent("key-up", event);
 }
 
@@ -6795,7 +6796,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     const bool hostFresh = now - gLiveLatency.hostUpdated.load() < 3000000;
     const bool decodeFresh = now - gLiveLatency.decodeUpdated.load() < 3000000;
     NSMutableAttributedString* overlay = [[NSMutableAttributedString alloc] initWithString:
-      gLatencyPolicy.ultra ? @"ULTRA LOW LATENCY · Ctrl+Opt+F8\n" : @"LATENCY · Ctrl+Opt+F8\n"];
+      gLatencyPolicy.ultra ? @"ULTRA LOW LATENCY · Ctrl+Opt+8\n" : @"LATENCY · Ctrl+Opt+8\n"];
     auto row = [&](NSString* name, double value, double budget) {
       NSString* text = value >= 0 && std::isfinite(value)
         ? [NSString stringWithFormat:@"%-16s %6.1f ms\n", name.UTF8String, value]

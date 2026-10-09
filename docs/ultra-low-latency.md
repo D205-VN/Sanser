@@ -81,8 +81,8 @@ error if unavailable. The Mac SNV2 presenter also limits GPU work to one submiss
 
 ## Measurements
 
-The Mac→Windows native overlay starts visible in Ultra. **Control+Option+F8**
-toggles it; plain F8 remains available to the remote app. It displays:
+The Mac→Windows native overlay starts visible in Ultra. **Control+Option+8**
+toggles it; plain 8 and F8 remain available to the remote app. It displays:
 
 | Field | Meaning |
 | --- | --- |

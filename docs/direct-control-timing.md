@@ -65,7 +65,7 @@ not refresh the overlay.
 2. Connect with Direct selected. Keep resolution/FPS/bitrate/Ultra settings
    unchanged during the baseline. Confirm Direct in the report; don't infer it
    just from private/local bridge socket addresses.
-3. Toggle the overlay with **Ctrl+Option+F8**. Record idle desktop and active
+3. Toggle the overlay with **Ctrl+Option+8**. Record idle desktop and active
    window movement separately for at least 60 seconds each. Include continuous
    pointer movement plus key/button presses for ACK samples.
 4. At the same time run `ping <Windows-LAN-IP>` on Mac for a LAN baseline.
