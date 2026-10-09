@@ -30,6 +30,8 @@ add_executable(sanser-client-macos
 )
 
 if(BUILD_TESTING)
+  add_executable(sanser-control-timing-test ../common/control_timing_test.cpp)
+  add_test(NAME sanser-control-timing-test COMMAND sanser-control-timing-test)
   add_executable(sanser-stream-adaptation-test ../common/stream_adaptation_policy_test.cpp)
   add_test(NAME sanser-stream-adaptation-test COMMAND sanser-stream-adaptation-test)
   add_executable(sanser-wheel-delta-test ../common/wheel_delta_test.cpp)

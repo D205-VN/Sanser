@@ -1,5 +1,6 @@
 #include "engine.h"
 #include "latency_policy.h"
+#include "control_timing.h"
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
 #import <CoreAudio/CoreAudio.h>
@@ -63,9 +64,14 @@ struct LiveLatency {
   std::atomic<double> capture{-1}, captureWait{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
   std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
   std::atomic<double> pacingWait{-1}, pacingOvershoot{-1}, socketSend{-1};
+  std::atomic<double> hostControlSendLock{-1}, hostControlSendCall{-1};
+  std::atomic<double> wireEstimate{-1}, controlApp{-1}, controlSocket{-1};
+  std::atomic<double> macSendQueue{-1}, hostControlQueue{-1}, hostControlWork{-1}, macReceiveQueue{-1};
+  std::atomic<std::uint64_t> controlTimingUpdated{0};
   std::atomic<int> gpuInput{-1};
   std::atomic<std::uint64_t> hostUpdated{0}, inputUpdated{0}, decodeUpdated{0};
 } gLiveLatency;
+sanser::ControlTimingTracker gControlTiming;
 
 
 constexpr std::uint32_t kSnvCodecH264 = 1;
@@ -671,8 +677,12 @@ public:
     return inputSessionId_;
   }
 
-  bool sendJson(const std::string& json) {
+  bool sendJson(const std::string& original) {
+    const auto queuedAt = steadyMicros(); // T0 includes waiting for sender mutex.
     std::lock_guard<std::mutex> lock(mutex_);
+    std::string json = original;
+    if (isUdp_ && !json.empty() && json.front() == '{')
+      json.insert(1, "\"clientQueuedMicros\":" + std::to_string(queuedAt) + ",");
     if ((fd_ < 0 && (!isUdp_ || udpFd_ < 0)) || stopped_) return false;
     if (authRequired_ && !controlAuthenticated_ && !isAllowedBeforeAuth(json)) return false;
     if (inputTypeName(json) == "gamepad-state") {
@@ -1294,6 +1304,20 @@ private:
                   << "\n";
       }
 
+      // Ping every second; sample input at most four times/sec. Every retry gets
+      // a NEW probe, so late ACKs cannot be paired with a newer send attempt.
+      static thread_local std::uint64_t lastInputProbe = 0;
+      std::uint64_t timingProbe = 0;
+      const auto probeNow = steadyMicros();
+      const auto kind = inputTypeName(json);
+      const bool inputProbe = kind == "input-batch" && probeNow - lastInputProbe >= 250000;
+      if (isUdp && (kind == "control-ping" || inputProbe)) {
+        auto queued = jsonUint64Field(json, "clientQueuedMicros");
+        if (!queued) queued = probeNow;
+        timingProbe = gControlTiming.prepare(queued, inputProbe);
+        json.insert(1, "\"timingProbe\":" + std::to_string(timingProbe) + ",");
+        if (inputProbe) lastInputProbe = probeNow;
+      }
       std::string outbound = json;
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1306,6 +1330,7 @@ private:
         std::vector<std::uint8_t> payload;
         payload.push_back(0x02); // Control Byte
         payload.insert(payload.end(), outbound.begin(), outbound.end());
+        if (timingProbe) gControlTiming.sending(timingProbe, [] { return steadyMicros(); }); // T1
         const int s = sendto(udpFd,
                              reinterpret_cast<const char*>(payload.data()),
                              payload.size(),
@@ -1483,7 +1508,13 @@ private:
     std::ostringstream out;
     sequence = ++batchSequence_;
     sentSteadyMicros = steadyMicros();
+    auto queuedAt = sentSteadyMicros;
+    for (const auto& event : events) {
+      const auto at = jsonUint64Field(event, "clientQueuedMicros");
+      if (at) queuedAt = std::min(queuedAt, at);
+    }
     out << "{\"type\":\"input-batch\""
+        << ",\"clientQueuedMicros\":" << queuedAt
         << ",\"inputSessionId\":\"" << inputSessionId_ << "\""
         << ",\"sequence\":" << sequence
         << ",\"sentSteadyMicros\":" << sentSteadyMicros
@@ -2724,7 +2755,35 @@ enum class HostControlEvent {
   Other
 };
 
-HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
+void publishControlTiming(const std::optional<sanser::ControlTiming>& sample) {
+  if (!sample) return;
+  const auto& t = *sample;
+  const auto now = steadyMicros();
+  if (now < t.t6 || now - t.t6 > 3000000) return; // Delayed receipts are not fresh measurements.
+  if (!t.input) {
+    gLiveLatency.controlApp = t.appMs;
+    gLiveLatency.controlSocket = t.socketMs;
+    gLiveLatency.wireEstimate = t.residualMs;
+    gLiveLatency.macSendQueue = t.sendQueueMs;
+    gLiveLatency.hostControlQueue = t.hostQueueMs;
+    gLiveLatency.hostControlWork = t.hostWorkMs;
+    gLiveLatency.macReceiveQueue = t.receiveQueueMs;
+    gLiveLatency.hostControlSendLock = t.hostSendLockMicros / 1000.0;
+    gLiveLatency.hostControlSendCall = t.hostSendCallMicros / 1000.0;
+    gLiveLatency.controlTimingUpdated = steadyMicros();
+  }
+  std::cout << (t.input ? "SNINPUT_TIMING" : "SNCONTROL_TIMING")
+            << " appRttMs=" << t.appMs << " socketRttMs=" << t.socketMs
+            << " wireEstimateMs=" << t.residualMs
+            << " macSendQueueMs=" << t.sendQueueMs << " hostReceiveQueueMs=" << t.hostQueueMs
+            << " hostControlWorkMs=" << t.hostWorkMs << " macReceiveQueueMs=" << t.receiveQueueMs
+            << " hostSendLockMs=" << t.hostSendLockMicros / 1000.0
+            << " hostSendCallMs=" << t.hostSendCallMicros / 1000.0
+            << " t0=" << t.t0 << " t1=" << t.t1 << " t2=" << t.t2
+            << " t3=" << t.t3 << " t4=" << t.t4 << " t5=" << t.t5 << " t6=" << t.t6 << "\n";
+}
+
+HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::uint64_t receivedMicros = 0) {
   std::string payload = rawPayload;
   const std::string rawType = jsonStringValue(rawPayload, "type");
   bool securePayload = false;
@@ -2809,11 +2868,29 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload) {
     return HostControlEvent::Other;
   }
 
+  const auto processedMicros = steadyMicros(); // T6: after demux + authentication
+  const auto type = jsonStringValue(payload, "type");
+  const auto probe = jsonUint64Value(payload, "timingProbe");
+  if (receivedMicros && probe) {
+    if (type == "control-timing") {
+      publishControlTiming(gControlTiming.receipt(probe,
+        jsonUint64Value(payload, "hostReceivedMicros"),
+        jsonUint64Value(payload, "hostDequeuedMicros"),
+        jsonUint64Value(payload, "hostSentMicros"),
+        jsonUint64Value(payload, "hostSendLockMicros"),
+        jsonUint64Value(payload, "hostSendCallMicros")));
+      return HostControlEvent::Other;
+    }
+    if (type == "control-pong" || type == "input-ack")
+      publishControlTiming(gControlTiming.received(probe, receivedMicros, processedMicros));
+  }
   const std::uint64_t sentSteadyMicros = jsonUint64Value(payload, "sentSteadyMicros");
-  if (sentSteadyMicros == 0) return HostControlEvent::Other;
-  const double rttMs = static_cast<double>(steadyMicros() - sentSteadyMicros) / 1000.0;
-  recordControlRtt(rttMs);
+  if (sentSteadyMicros == 0 || sentSteadyMicros > processedMicros) return HostControlEvent::Other;
+  const double rttMs = static_cast<double>(processedMicros - sentSteadyMicros) / 1000.0;
   if (payload.find("\"type\":\"control-pong\"") != std::string::npos) {
+    // Keep retry/congestion feedback conservative (application RTT), but do not
+    // mix input ACK/retry latencies into the control-ping estimator.
+    recordControlRtt(rttMs);
     gLiveLatency.rtt = rttMs;
     gLiveLatency.capture = jsonDoubleValue(payload, "captureMs", -1);
     gLiveLatency.captureWait = jsonDoubleValue(payload, "captureWaitMs", -1);
@@ -5564,7 +5641,7 @@ public:
 };
 
 static ThreadSafeQueue<std::vector<std::uint8_t>> gAudioUdpQueue(256);
-static ThreadSafeQueue<std::string> gControlUdpQueue(128);
+static ThreadSafeQueue<sanser::ReceivedControl> gControlUdpQueue(128);
 
 class ScopedFd {
 public:
@@ -5749,8 +5826,10 @@ void serviceControlSocket(int fd) {
 
     std::string payload;
     bool hasPacket = false;
+    sanser::ReceivedControl receivedControl;
     if (fd <= 0) {
-      hasPacket = gControlUdpQueue.pop_with_timeout(payload, std::chrono::milliseconds(200));
+      hasPacket = gControlUdpQueue.pop_with_timeout(receivedControl, std::chrono::milliseconds(200));
+      if (hasPacket) payload = std::move(receivedControl.payload);
     } else {
       fd_set readSet;
       FD_ZERO(&readSet);
@@ -5768,7 +5847,7 @@ void serviceControlSocket(int fd) {
     }
 
     if (!hasPacket) continue;
-    const HostControlEvent event = handleHostControlPayload(payload);
+    const HostControlEvent event = handleHostControlPayload(payload, receivedControl.receivedMicros);
     const auto receivedAt = std::chrono::steady_clock::now();
     if (event == HostControlEvent::HelloAck) {
       helloAcked = true;
@@ -6219,7 +6298,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   _renderView = view;
   _renderSlot = dispatch_semaphore_create(1);
   _latencyOverlay = [NSTextField labelWithString:@"Waiting for latency measurements…"];
-  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 370, 365, 352);
+  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 550, 420, 532);
   _latencyOverlay.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
   _latencyOverlay.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightMedium];
   _latencyOverlay.textColor = NSColor.whiteColor;
@@ -6730,7 +6809,16 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     row(@"Send total", hostFresh ? gLiveLatency.send.load() : -1, 5);
     row(@"Pacing wait", hostFresh ? gLiveLatency.pacingWait.load() : -1, 5);
     row(@"Timer overshoot", hostFresh ? gLiveLatency.pacingOvershoot.load() : -1, 1);
-    row(@"Network RTT", hostFresh ? gLiveLatency.rtt.load() : -1, 15);
+    const bool timingFresh = now - gLiveLatency.controlTimingUpdated.load() < 3000000;
+    row(@"Control app RTT", timingFresh ? gLiveLatency.controlApp.load() : (hostFresh ? gLiveLatency.rtt.load() : -1), 30);
+    row(@"Socket RTT", timingFresh ? gLiveLatency.controlSocket.load() : -1, 25);
+    row(@"Wire RTT est.*", timingFresh ? gLiveLatency.wireEstimate.load() : -1, 25);
+    row(@"Mac send queue", timingFresh ? gLiveLatency.macSendQueue.load() : -1, 3);
+    row(@"Host recv queue", timingFresh ? gLiveLatency.hostControlQueue.load() : -1, 3);
+    row(@"Host ctrl work", timingFresh ? gLiveLatency.hostControlWork.load() : -1, 5);
+    row(@"Host send lock", timingFresh ? gLiveLatency.hostControlSendLock.load() : -1, 1);
+    row(@"Host send call", timingFresh ? gLiveLatency.hostControlSendCall.load() : -1, 2);
+    row(@"Mac recv queue", timingFresh ? gLiveLatency.macReceiveQueue.load() : -1, 3);
     row(@"Arrival jitter", decodeFresh ? gLiveLatency.jitter.load() : -1, 4);
     row(@"Decode", decodeFresh ? gLiveLatency.decode.load() : -1, 5);
     row(@"Frame queue", avgRenderAgeMs, 4);
@@ -6742,7 +6830,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
         @{NSForegroundColorAttributeName:NSColor.systemOrangeColor, NSFontAttributeName:[NSFont boldSystemFontOfSize:15]}]];
       _latencyOverlay.hidden = NO;
     }
-    [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"Local timings; excludes display scan-out"]];
+    [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"* Includes OS queues / receive scheduling\nLocal timings; excludes display scan-out"]];
     _latencyOverlay.attributedStringValue = overlay;
 
     const ControlRttWindow controlRtt = takeControlRttWindow();
@@ -7503,7 +7591,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
             // Control
             ++startup.controlDatagrams;
             std::string controlJson(reinterpret_cast<const char*>(datagramBuffer.data() + 1), received - 1);
-            gControlUdpQueue.push(controlJson);
+            gControlUdpQueue.push({std::move(controlJson), receivedAtMicros});
             continue;
           } else {
             // Keepalive or Probes

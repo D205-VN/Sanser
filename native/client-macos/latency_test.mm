@@ -23,6 +23,85 @@ SnvPacket testPacket(std::uint64_t sequence, bool keyframe = false) {
 int main() {
   @autoreleasepool {
     try {
+      // Exercise the actual asynchronous UDP sender, demux timestamps and reply
+      // parser. A timing receipt must not replace the original pong's T5/T6.
+      {
+        ScopedFd receiver(socket(AF_INET, SOCK_DGRAM, 0));
+        ScopedFd senderFd(socket(AF_INET, SOCK_DGRAM, 0));
+        sockaddr_in local{}; local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        requireLatency(bind(receiver.get(), reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0,
+          "bind timing loopback");
+        socklen_t size = sizeof(local);
+        requireLatency(getsockname(receiver.get(), reinterpret_cast<sockaddr*>(&local), &size) == 0,
+          "read timing port");
+        UdpEndpoint target{}; target.length = sizeof(local);
+        std::memcpy(&target.address, &local, sizeof(local));
+        NativeInputSender sender;
+        const std::string token = "timing-test-session";
+        sender.setAuthRequired(true, token);
+        sender.setControlAuthenticated(true);
+        sender.setPacketAuthEnabled(true);
+        sender.setUdpTarget(senderFd.get(), target);
+        const auto originalSent = steadyMicros();
+        requireLatency(sender.sendJson("{\"type\":\"control-ping\",\"sentSteadyMicros\":" +
+          std::to_string(originalSent) + "}"), "enqueue real control ping");
+        pollfd ready{receiver.get(), POLLIN, 0};
+        requireLatency(poll(&ready, 1, 2000) == 1, "sender must wake for ping");
+        char buffer[4096]; const auto bytes = recv(receiver.get(), buffer, sizeof(buffer), 0);
+        requireLatency(bytes > 1 && buffer[0] == 0x02, "control uses multiplexed UDP");
+        const std::string envelope(buffer+1, bytes-1);
+        std::string request;
+        std::uint64_t clientSequence = 0;
+        requireLatency(unwrapSecureControlEnvelope(envelope, token, "c2h", clientSequence, request),
+          "measurement fields covered by packet authentication");
+        gExpectedSessionToken = token;
+        gHostPacketAuthVerified = true;
+        gLastHostSecureSequence = 0;
+        const auto probe = jsonUint64Value(request, "timingProbe");
+        requireLatency(probe && jsonUint64Value(request, "clientQueuedMicros") >= originalSent,
+          "outbound request carries per-attempt probe and enqueue time");
+        const auto received = steadyMicros();
+        const std::string pong = "{\"type\":\"control-pong\",\"timingProbe\":" + std::to_string(probe) +
+          ",\"sentSteadyMicros\":" + std::to_string(originalSent) + "}";
+        takeControlRttWindow();
+        requireLatency(handleHostControlPayload(makeSecureControlEnvelope(token, "h2c", 1, pong), received) == HostControlEvent::Pong,
+          "production pong parser");
+        requireLatency(gLiveLatency.controlTimingUpdated == 0, "no fabricated wire RTT before receipt");
+        const auto beforeReceipt = steadyMicros();
+        const std::string receipt = "{\"type\":\"control-timing\",\"timingProbe\":" + std::to_string(probe) +
+          ",\"hostReceivedMicros\":900000000,\"hostDequeuedMicros\":900000000,\"hostSentMicros\":900000000}";
+        handleHostControlPayload(receipt, beforeReceipt);
+        requireLatency(gLiveLatency.controlTimingUpdated == 0, "unauthenticated receipt rejected");
+        handleHostControlPayload(makeSecureControlEnvelope(token, "h2c", 2, receipt), beforeReceipt);
+        requireLatency(gLiveLatency.controlTimingUpdated > 0 && gLiveLatency.wireEstimate >= 0,
+          "receipt publishes complete timeline");
+        const auto window = takeControlRttWindow();
+        requireLatency(window.samples == 1, "one control ping sample");
+        sender.setBatchEnabled(true);
+        requireLatency(sender.sendJson("{\"type\":\"key-down\",\"keyCode\":65}"), "enqueue input for timing");
+        requireLatency(poll(&ready, 1, 2000) == 1, "input sender must wake");
+        const auto inputBytes = recv(receiver.get(), buffer, sizeof(buffer), 0);
+        requireLatency(inputBytes > 1 && buffer[0] == 0x02, "input stays on UDP");
+        std::string input;
+        requireLatency(unwrapSecureControlEnvelope(std::string(buffer+1, inputBytes-1), token,
+          "c2h", clientSequence, input), "authenticated input batch");
+        const auto inputProbe = jsonUint64Value(input, "timingProbe");
+        requireLatency(inputProbe && inputProbe != probe && jsonStringValue(input, "type") == "input-batch",
+          "sampled input has independent attempt ID");
+        const auto inputSent = jsonUint64Value(input, "sentSteadyMicros");
+        const auto inputQueued = jsonUint64Value(input, "clientQueuedMicros");
+        requireLatency(inputQueued > 0 && inputQueued <= inputSent, "batch preserves event enqueue time");
+        handleHostControlPayload(makeSecureControlEnvelope(token, "h2c", 3,
+          "{\"type\":\"input-ack\",\"sequence\":1,\"timingProbe\":" + std::to_string(inputProbe) +
+          ",\"sentSteadyMicros\":" + std::to_string(inputSent) + "}"), steadyMicros());
+        handleHostControlPayload(makeSecureControlEnvelope(token, "h2c", 4,
+          "{\"type\":\"control-timing\",\"timingProbe\":" + std::to_string(inputProbe) +
+          ",\"hostReceivedMicros\":900000000,\"hostDequeuedMicros\":900000000,\"hostSentMicros\":900000000}"), steadyMicros());
+        requireLatency(takeControlRttWindow().samples == 0, "input ACK must not pollute ping RTT");
+        gLiveLatency.controlTimingUpdated = 0;
+        gExpectedSessionToken.clear(); gHostPacketAuthVerified = false; gLastHostSecureSequence = 0;
+      }
       using namespace std::chrono;
       const auto start = steady_clock::now();
       UdpVideoStartup silent(true, start);

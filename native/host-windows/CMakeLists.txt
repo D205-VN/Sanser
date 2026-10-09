@@ -31,6 +31,8 @@ target_compile_definitions(sanser-host-windows PRIVATE
 target_include_directories(sanser-host-windows PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
 if(BUILD_TESTING)
+  add_executable(sanser-control-timing-test ../common/control_timing_test.cpp)
+  add_test(NAME sanser-control-timing-test COMMAND sanser-control-timing-test)
   add_executable(sanser-stream-adaptation-test ../common/stream_adaptation_policy_test.cpp)
   add_test(NAME sanser-stream-adaptation-test COMMAND sanser-stream-adaptation-test)
   add_executable(sanser-precise-wait-test ../common/windows_precise_wait_test.cpp)

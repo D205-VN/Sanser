@@ -6,6 +6,7 @@
 #include "sanser_version.h"
 #include "wheel_delta.h"
 #include "latency_policy.h"
+#include "control_timing.h"
 #include "stream_adaptation_policy.h"
 
 #include <algorithm>
@@ -217,7 +218,7 @@ public:
     }
 };
 
-static ThreadSafeQueue<std::string> gControlHostQueue;
+static ThreadSafeQueue<sanser::ReceivedControl> gControlHostQueue;
 
 struct VirtualGamepadUpdateResult {
   bool handled = false;
@@ -3565,7 +3566,8 @@ private:
     return remaining == 0 ? RecvStatus::Complete : RecvStatus::Closed;
   }
 
-  void sendControlJson(const std::string& json) {
+  std::uint64_t sendControlJson(const std::string& json, std::uint64_t* lockWait = nullptr,
+                                std::uint64_t* sendCall = nullptr) {
     const std::string payload = packetAuthEnabled_
       ? makeSecureControlEnvelope(sessionToken_, "h2c", ++hostSecureSequence_, json)
       : json;
@@ -3576,13 +3578,17 @@ private:
       sendBuf[0] = 0x02; // Control Byte
       std::memcpy(sendBuf.data() + 1, payload.data(), payload.size());
       
+      const auto lockStarted = steadyMicros();
       std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
-      send(gUdpMainSocket, reinterpret_cast<const char*>(sendBuf.data()), static_cast<int>(sendBuf.size()), 0);
-      return;
+      if (lockWait) *lockWait = steadyMicros() - lockStarted;
+      const auto sentAt = steadyMicros(); // T4: after auth/serialization/socket lock
+      const int sent = send(gUdpMainSocket, reinterpret_cast<const char*>(sendBuf.data()), static_cast<int>(sendBuf.size()), 0);
+      if (sendCall) *sendCall = steadyMicros() - sentAt;
+      return sent == static_cast<int>(sendBuf.size()) ? sentAt : 0;
     }
 
     const SOCKET sendSocket = controlReceiveSocket();
-    if (sendSocket == INVALID_SOCKET) return;
+    if (sendSocket == INVALID_SOCKET) return 0;
 
     ControlMessageHeader header{};
     header.payloadSize = static_cast<std::uint32_t>(payload.size());
@@ -3590,6 +3596,29 @@ private:
     if (!payload.empty()) {
       sendAllOnSocket(sendSocket, payload.data(), payload.size());
     }
+    return 0; // Timing extension is UDP-only.
+  }
+
+  void sendTimedControlReply(const std::string& reply, const std::string& request,
+                             std::uint64_t received, std::uint64_t dequeued) {
+    const auto probe = jsonUint64Value(request, "timingProbe");
+    std::string measured = reply;
+    if (probe && received) {
+      measured.insert(1, "\"timingProbe\":" + std::to_string(probe) + ",");
+    }
+    std::uint64_t lockWait = 0, sendCall = 0;
+    const auto sent = sendControlJson(measured, &lockWait, &sendCall);
+    if (!probe || !received || !sent) return;
+    // Reporting T4 in a second packet avoids measuring BEFORE authentication or
+    // the socket mutex. Receipt transport time is never included in the sample.
+    std::ostringstream receipt;
+    receipt << "{\"type\":\"control-timing\",\"timingProbe\":" << probe
+            << ",\"hostReceivedMicros\":" << received
+            << ",\"hostDequeuedMicros\":" << dequeued
+            << ",\"hostSentMicros\":" << sent
+            << ",\"hostSendLockMicros\":" << lockWait
+            << ",\"hostSendCallMicros\":" << sendCall << "}";
+    sendControlJson(receipt.str());
   }
 
   void flushGamepadRumbleEvents(const char* stage) {
@@ -3740,13 +3769,18 @@ private:
     auto lastControlRxAt = std::chrono::steady_clock::now();
     while (running_) {
       std::string payload;
+      sanser::ReceivedControl receivedControl;
+      std::uint64_t receivedMicros = 0, dequeuedMicros = 0;
       if (gSingleSocketMode) {
-        if (!gControlHostQueue.pop_with_timeout(payload, std::chrono::seconds(1))) {
+        if (!gControlHostQueue.pop_with_timeout(receivedControl, std::chrono::seconds(1))) {
           releaseStaleRemoteInputIfNeeded("header", lastControlRxAt);
           flushGamepadRumbleEvents("timeout");
           if (handleControlTimeout("header", lastControlRxAt)) return false;
           continue;
         }
+        dequeuedMicros = steadyMicros(); // T3 before auth and input processing
+        receivedMicros = receivedControl.receivedMicros;
+        payload = std::move(receivedControl.payload);
         lastControlRxAt = std::chrono::steady_clock::now();
       } else {
         if (controlReceiveSocket() == INVALID_SOCKET) break;
@@ -3894,7 +3928,7 @@ private:
                << ",\"socketSendMs\":" << gSocketSendMs.load()
                << ",\"gpuInput\":" << gGpuInput.load()
                << "}";
-          sendControlJson(pong.str());
+          sendTimedControlReply(pong.str(), payload, receivedMicros, dequeuedMicros);
           flushGamepadRumbleEvents("control-ping");
           continue;
         }
@@ -3953,7 +3987,7 @@ private:
               << ",\"sessionMismatch\":" << (sessionMismatch ? "true" : "false")
               << ",\"hostUnixMicros\":" << unixMicros()
               << "}";
-          sendControlJson(ack.str());
+          sendTimedControlReply(ack.str(), payload, receivedMicros, dequeuedMicros);
           static auto lastBatchLog = std::chrono::steady_clock::time_point{};
           const auto now = std::chrono::steady_clock::now();
           if (now - lastBatchLog > std::chrono::milliseconds(250)) {
@@ -4201,6 +4235,7 @@ public:
           }
           if (sock == INVALID_SOCKET) break;
           int received = recv(sock, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0);
+          const auto receivedMicros = steadyMicros(); // T2 immediately after recv
           if (received <= 0) {
             int err = WSAGetLastError();
             if (err == WSAEINTR || err == WSAEWOULDBLOCK) {
@@ -4213,7 +4248,7 @@ public:
           const std::uint8_t mtype = buffer[0];
           if (mtype == 0x02) {
             std::string controlJson(reinterpret_cast<const char*>(buffer.data() + 1), received - 1);
-            gControlHostQueue.push(controlJson);
+            gControlHostQueue.push({std::move(controlJson), receivedMicros});
           }
         }
       });

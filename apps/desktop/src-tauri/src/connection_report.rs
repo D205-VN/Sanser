@@ -15,6 +15,8 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "SNCONTROL_TIMING",
+    "SNINPUT_TIMING",
     "SNV1_STATS",
     "SNV1_STAGE_PROFILE",
     "SNV1_HOST_TIMING",
@@ -28,6 +30,15 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "hostSendLockMs",
+    "hostSendCallMs",
+    "appRttMs",
+    "socketRttMs",
+    "wireEstimateMs",
+    "macSendQueueMs",
+    "hostReceiveQueueMs",
+    "hostControlWorkMs",
+    "macReceiveQueueMs",
     "deliveredMbps",
     "estimatedDeliveryMbps",
     "gpuInput",
@@ -208,7 +219,7 @@ impl Report {
         // RTT and local processing durations use one machine's monotonic clock.
         // Cross-machine wall-clock frame ages are deliberately excluded.
         let delayed = sample.values.iter().any(|(key, value)| match key.as_str() {
-            "rttMs" | "avgRttMs" | "maxRttMs" => {
+            "rttMs" | "avgRttMs" | "maxRttMs" | "appRttMs" | "socketRttMs" => {
                 *value >= if self.ultra_low_latency { 15.0 } else { 100.0 }
             }
             "avgRenderAgeMs" | "renderGpuMs" => {
@@ -363,6 +374,15 @@ mod tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn direct_control_timing_keeps_queue_metrics_without_raw_timestamps_or_content() {
+        let sample = parse_sample(b"SNCONTROL_TIMING appRttMs=180 socketRttMs=142 wireEstimateMs=12 macSendQueueMs=20 hostReceiveQueueMs=120 hostControlWorkMs=10 macReceiveQueueMs=18 t0=1000000 t2=900000000 token=123 key=65").unwrap();
+        assert_eq!(sample.values.len(), 7);
+        assert_eq!(sample.values["wireEstimateMs"], 12.0);
+        assert_eq!(sample.values["hostReceiveQueueMs"], 120.0);
+        assert!(parse_sample(b"SNINPUT_TIMING appRttMs=15 hostControlWorkMs=2").is_some());
+    }
+
     #[test]
     fn report_records_confirmed_relay_transport_and_delivery_estimate() {
         let mut value = request();
