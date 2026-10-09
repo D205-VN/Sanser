@@ -102,6 +102,79 @@ int main() {
         gLiveLatency.controlTimingUpdated = 0;
         gExpectedSessionToken.clear(); gHostPacketAuthVerified = false; gLastHostSecureSequence = 0;
       }
+      // A deliberately stalled video consumer must not prevent socket demux.
+      {
+        auto bindLoopback = [](int fd) {
+          UdpEndpoint endpoint{}; endpoint.length = sizeof(sockaddr_in);
+          auto* address = reinterpret_cast<sockaddr_in*>(&endpoint.address);
+          address->sin_family = AF_INET; address->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+          requireLatency(bind(fd, reinterpret_cast<sockaddr*>(address), endpoint.length) == 0, "bind receive pump test");
+          requireLatency(getsockname(fd, reinterpret_cast<sockaddr*>(address), &endpoint.length) == 0, "pump endpoint");
+          return endpoint;
+        };
+        ScopedFd receiveFd(socket(AF_INET, SOCK_DGRAM, 0));
+        ScopedFd sourceFd(socket(AF_INET, SOCK_DGRAM, 0));
+        ScopedFd foreignFd(socket(AF_INET, SOCK_DGRAM, 0));
+        const auto destination = bindLoopback(receiveFd.get());
+        const auto source = bindLoopback(sourceFd.get());
+        bindLoopback(foreignFd.get());
+        auto send = [&](int fd, const std::vector<std::uint8_t>& bytes) {
+          requireLatency(sendto(fd, bytes.data(), bytes.size(), 0,
+            reinterpret_cast<const sockaddr*>(&destination.address), destination.length) == static_cast<ssize_t>(bytes.size()),
+            "send pump test datagram");
+        };
+        gControlUdpQueue.clear(); gAudioUdpQueue.clear();
+        UdpReceivePump pump(receiveFd.get(), true, &source, 8, 50000);
+        for (int i=0; i<40; ++i) send(sourceFd.get(), {0x00, static_cast<std::uint8_t>(i)});
+        // Do not pop ANY video until control and audio have both been delivered.
+        send(foreignFd.get(), {0x02, 'x'});
+        send(sourceFd.get(), {0x01, 0x5a});
+        const auto beforePong = steadyMicros();
+        send(sourceFd.get(), {0x02, 'p'});
+        sanser::ReceivedControl pong;
+        requireLatency(gControlUdpQueue.pop_with_timeout(pong, std::chrono::seconds(2)),
+          "control must arrive while video processing is completely stopped");
+        requireLatency(pong.payload == "p" && pong.receivedMicros >= beforePong && pong.receivedMicros <= steadyMicros(),
+          "preserve socket receive timestamp and reject unexpected source");
+        std::vector<std::uint8_t> audio;
+        requireLatency(gAudioUdpQueue.pop_with_timeout(audio, std::chrono::seconds(2)) && audio == std::vector<std::uint8_t>{0x5a},
+          "audio bypasses a full video queue");
+        const auto window = pump.takeWindow();
+        requireLatency(window.depth <= 8 && window.highWater <= 8 && pump.dropped > 0,
+          "slow video consumer cannot grow memory without bound");
+        requireLatency(pump.unexpectedPeer == 1, "peer check happens before any control/audio/video routing");
+        std::this_thread::sleep_for(std::chrono::milliseconds(65));
+        UdpReceivePump::Datagram packet;
+        requireLatency(!pump.pop(packet, std::chrono::milliseconds(0)) && pump.expired > 0,
+          "expired video is dropped even if no newer packet arrives");
+        send(sourceFd.get(), {0x00, 0x7f});
+        requireLatency(pump.pop(packet, std::chrono::seconds(2)) && packet.bytes[1] == 0x7f,
+          "fresh video resumes after overload");
+        pump.stop(); // Must join without needing another network packet.
+        pump.stop(); // Idempotent cleanup; socket remains owned by the caller.
+        requireLatency(fcntl(receiveFd.get(), F_GETFD) != -1, "receive pump does not close the shared sender socket");
+      }
+      // Dedicated video UDP still carries unprefixed fragments.
+      {
+        ScopedFd fd(socket(AF_INET, SOCK_DGRAM, 0));
+        sockaddr_in local{}; local.sin_family=AF_INET; local.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        requireLatency(bind(fd.get(), reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "bind nonmultiplexed test");
+        socklen_t size=sizeof(local); getsockname(fd.get(), reinterpret_cast<sockaddr*>(&local), &size);
+        UdpReceivePump pump(fd.get(), false, nullptr);
+        const char bytes[] = "SNU1";
+        requireLatency(sendto(fd.get(), bytes, 4, 0, reinterpret_cast<sockaddr*>(&local), size) == 4, "send unprefixed video");
+        UdpReceivePump::Datagram packet;
+        requireLatency(pump.pop(packet, std::chrono::seconds(2)) && packet.size == 4 && packet.bytes[0] == 'S',
+          "nonmultiplexed video keeps its first byte");
+      }
+      {
+        UdpReceivePump broken(std::numeric_limits<int>::max(), false, nullptr);
+        UdpReceivePump::Datagram packet;
+        bool propagated = false;
+        try { broken.pop(packet, std::chrono::seconds(2)); }
+        catch (const std::runtime_error&) { propagated = true; }
+        requireLatency(propagated, "socket failure wakes the video consumer instead of hanging");
+      }
       using namespace std::chrono;
       const auto start = steady_clock::now();
       UdpVideoStartup silent(true, start);

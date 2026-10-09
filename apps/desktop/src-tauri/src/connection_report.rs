@@ -15,6 +15,7 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "SNU1_RX_QUEUE",
     "SNCONTROL_TIMING",
     "SNINPUT_TIMING",
     "SNV1_STATS",
@@ -30,6 +31,13 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "queuedDatagrams",
+    "highWaterDatagrams",
+    "receiveDropped",
+    "receiveExpired",
+    "receiveOversized",
+    "receiveQueueAvgMs",
+    "receiveQueueMaxMs",
     "hostSendLockMs",
     "hostSendCallMs",
     "appRttMs",
@@ -374,6 +382,14 @@ mod tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn udp_receive_queue_report_excludes_packet_contents() {
+        let sample = parse_sample(b"SNU1_RX_QUEUE queuedDatagrams=4 highWaterDatagrams=1024 receiveDropped=20 receiveExpired=10 receiveOversized=0 receiveQueueAvgMs=2 receiveQueueMaxMs=8 token=123 payload=456").unwrap();
+        assert_eq!(sample.values.len(), 7);
+        assert_eq!(sample.values["receiveDropped"], 20.0);
+        assert_eq!(sample.values["receiveQueueMaxMs"], 8.0);
+    }
+
     #[test]
     fn direct_control_timing_keeps_queue_metrics_without_raw_timestamps_or_content() {
         let sample = parse_sample(b"SNCONTROL_TIMING appRttMs=180 socketRttMs=142 wireEstimateMs=12 macSendQueueMs=20 hostReceiveQueueMs=120 hostControlWorkMs=10 macReceiveQueueMs=18 t0=1000000 t2=900000000 token=123 key=65").unwrap();

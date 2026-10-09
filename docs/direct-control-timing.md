@@ -1,7 +1,7 @@
 # Direct UDP control/input timing
 
 This instrumented Windows host → Mac client path keeps the existing multiplexed
-UDP socket, scheduling, Auto/Ultra policies and media protocol. Select **Direct**
+UDP socket, Auto/Ultra policies and media protocol. Select **Direct**
 for the baseline and verify the negotiated route in the connection report.
 The extension can also measure the local UDP bridge used by relay; those samples
 must not be called Direct or compared without their route metadata.
@@ -37,8 +37,8 @@ Legacy peers continue to work but have no decomposed timing (overlay shows `—`
 - `wireEstimateMs = (T5−T1)−(T4−T2)`
 
 **Wire RTT estimate includes OS/socket queues and receiver scheduling before
-`recv` returns.** In particular, Mac video/decode work before the next `recvfrom`
-can increase this residual. It does not prove that the Internet is slow. These
+`recv` returns.** In v2.1.18 the Mac socket receiver is independent of video processing;
+OS scheduling before the receiver runs can still increase this residual. It does not prove that the Internet is slow. These
 are userspace markers, not NIC/kernel packet timestamps. No one-way delay is
 computed from the unsynchronized Mac and Windows clocks.
 
@@ -89,3 +89,30 @@ a loopback test): ICMP roughly 6–12 ms, socket/residual RTT roughly 10–25 ms
 input ACK 10–30 ms, host input under 5 ms and frame queue under 3–5 ms. Keep P50/P95,
 route and sample count alongside any averages. No physical two-machine result is
 claimed by the automated tests.
+
+## Independent receiver (2.1.18)
+
+The Mac renderer now owns a joined UDP receiver thread. It reads and validates
+source/size, timestamps each datagram, and forwards control/audio directly to
+existing queues. It does not authenticate video, reassemble, decode or render.
+Those operations remain on the video consumer; control authentication remains on
+the control consumer. The shared UDP socket and negotiation are unchanged.
+
+The raw video queue is capped at 1,024 datagrams (roughly 1.6 MiB of payload/address
+storage) and 50 ms age. Age is an expiration limit, **not** a buffering delay:
+video is consumed as soon as available. Under overload, oldest/expired datagrams
+are discarded; existing authenticated reassembly and sequence recovery still
+prevent decoding partial frames. A rate-limited keyframe request aids recovery.
+Packets are also expired on pop, so stale video is not released when traffic stops.
+
+`SNU1_RX_QUEUE` reports queue depth/high-water mark, cumulative dropped/expired/
+oversized counts and per-window average/maximum queue residence. These numeric
+metrics are saved in the connection report. The overlay's `UDP video queue` is
+that window's **maximum**, not a new network latency estimate. No-sample windows
+show unavailable timing. T5 remains the actual socket-read timestamp.
+
+Automated UDP tests stop video consumption, overflow a small queue, and verify
+control/audio delivery, source filtering, expiration, resumption, nonmultiplexed
+video, error propagation and clean joined shutdown. They demonstrate separation
+of paths, not a real-device RTT/visual-latency guarantee. For an A/B comparison,
+keep route, host workload, video settings and network unchanged between versions.

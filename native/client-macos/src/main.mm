@@ -65,6 +65,8 @@ struct LiveLatency {
   std::atomic<double> capture{-1}, captureWait{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
   std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
   std::atomic<double> pacingWait{-1}, pacingOvershoot{-1}, socketSend{-1};
+  std::atomic<double> receiveVideoQueueMax{-1};
+  std::atomic<std::uint64_t> receiveQueueUpdated{0};
   std::atomic<double> hostControlSendLock{-1}, hostControlSendCall{-1};
   std::atomic<double> wireEstimate{-1}, controlApp{-1}, controlSocket{-1};
   std::atomic<double> macSendQueue{-1}, hostControlQueue{-1}, hostControlWork{-1}, macReceiveQueue{-1};
@@ -6299,7 +6301,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   _renderView = view;
   _renderSlot = dispatch_semaphore_create(1);
   _latencyOverlay = [NSTextField labelWithString:@"Waiting for latency measurements…"];
-  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 550, 420, 532);
+  _latencyOverlay.frame = NSMakeRect(16, view.bounds.size.height - 570, 420, 552);
   _latencyOverlay.autoresizingMask = NSViewMinYMargin | NSViewMaxXMargin;
   _latencyOverlay.font = [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightMedium];
   _latencyOverlay.textColor = NSColor.whiteColor;
@@ -6820,6 +6822,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     row(@"Host send lock", timingFresh ? gLiveLatency.hostControlSendLock.load() : -1, 1);
     row(@"Host send call", timingFresh ? gLiveLatency.hostControlSendCall.load() : -1, 2);
     row(@"Mac recv queue", timingFresh ? gLiveLatency.macReceiveQueue.load() : -1, 3);
+    row(@"UDP video queue", now - gLiveLatency.receiveQueueUpdated.load() < 3000000 ? gLiveLatency.receiveVideoQueueMax.load() : -1, 5);
     row(@"Arrival jitter", decodeFresh ? gLiveLatency.jitter.load() : -1, 4);
     row(@"Decode", decodeFresh ? gLiveLatency.decode.load() : -1, 5);
     row(@"Frame queue", avgRenderAgeMs, 4);
@@ -7397,6 +7400,138 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
 }
 
 // A successful NAT probe is not proof that the native host is sending video.
+// One owner reads the socket. No reassembly, crypto or decoder work runs here.
+// The socket outlives this object; destruction joins before the owner closes it.
+class UdpReceivePump {
+public:
+  struct Datagram {
+    std::array<std::uint8_t, kMaxUdpVideoDatagramBytes + 1> bytes{};
+    std::size_t size = 0;
+    UdpEndpoint peer{};
+    std::uint64_t receivedMicros = 0;
+  };
+  struct Window {
+    std::size_t depth = 0, highWater = 0;
+    std::uint64_t samples = 0;
+    double ageSumMs = 0, ageMaxMs = 0;
+  };
+  std::atomic<std::uint64_t> raw{0}, unexpectedPeer{0}, control{0}, video{0};
+  std::atomic<std::uint64_t> dropped{0}, expired{0}, oversized{0};
+
+  UdpReceivePump(int fd, bool multiplexed, const UdpEndpoint* peer,
+                 std::size_t capacity = 1024, std::uint64_t maxAgeMicros = 50000)
+      : fd_(fd), multiplexed_(multiplexed), hasPeer_(peer != nullptr),
+        peer_(peer ? *peer : UdpEndpoint{}), capacity_(std::clamp<std::size_t>(capacity, 1, 1024)),
+        maxAgeMicros_(std::max<std::uint64_t>(1, maxAgeMicros)) {
+    worker_ = std::thread([this] { receiveLoop(); });
+  }
+  ~UdpReceivePump() { stop(); }
+  UdpReceivePump(const UdpReceivePump&) = delete;
+  UdpReceivePump& operator=(const UdpReceivePump&) = delete;
+
+  void stop() {
+    stopped_ = true;
+    ready_.notify_all();
+    if (worker_.joinable()) worker_.join();
+  }
+  bool pop(Datagram& value, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ready_.wait_for(lock, timeout, [&] { return stopped_ || !error_.empty() || !queue_.empty(); });
+    if (!error_.empty()) throw std::runtime_error(error_);
+    const auto now = steadyMicros();
+    expireLocked(now);
+    if (queue_.empty() || stopped_) return false;
+    value = std::move(queue_.front());
+    queue_.pop_front();
+    const double age = (now - value.receivedMicros) / 1000.0;
+    ++window_.samples;
+    window_.ageSumMs += age;
+    window_.ageMaxMs = std::max(window_.ageMaxMs, age);
+    return true;
+  }
+  Window takeWindow() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Window result = window_;
+    result.depth = queue_.size();
+    window_ = {};
+    window_.highWater = queue_.size();
+    return result;
+  }
+private:
+  void expireLocked(std::uint64_t now) {
+    while (!queue_.empty() && now - queue_.front().receivedMicros > maxAgeMicros_) {
+      queue_.pop_front(); ++dropped; ++expired;
+    }
+  }
+  void receiveLoop() {
+    try {
+      while (!stopped_) {
+        pollfd readable{fd_, POLLIN, 0};
+        const int ready = poll(&readable, 1, 10);
+        if (stopped_) break;
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready < 0 || (readable.revents & (POLLERR | POLLHUP | POLLNVAL)))
+          throw std::runtime_error("UDP receive pump socket failed.");
+        if (!ready) continue;
+        Datagram packet;
+        packet.peer.length = sizeof(packet.peer.address);
+        const auto received = recvfrom(fd_, packet.bytes.data(), packet.bytes.size(), MSG_DONTWAIT,
+          reinterpret_cast<sockaddr*>(&packet.peer.address), &packet.peer.length);
+        packet.receivedMicros = steadyMicros(); // T5 stays at the actual socket read.
+        if (received < 0) {
+          if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+          throw std::runtime_error("UDP receive pump read failed.");
+        }
+        if (!received) continue;
+        ++raw;
+        if (hasPeer_ && !sameUdpPeer(packet.peer, peer_)) { ++unexpectedPeer; continue; }
+        if (static_cast<std::size_t>(received) > kMaxUdpVideoDatagramBytes) { ++oversized; continue; }
+        packet.size = static_cast<std::size_t>(received);
+        if (multiplexed_) {
+          const auto type = packet.bytes[0];
+          if (type == 0x02) {
+            ++control;
+            gControlUdpQueue.push({std::string(reinterpret_cast<const char*>(packet.bytes.data()+1),
+                                              packet.size-1), packet.receivedMicros});
+            continue;
+          }
+          if (type == 0x01) {
+            gAudioUdpQueue.push(std::vector<std::uint8_t>(packet.bytes.begin()+1,
+                                                         packet.bytes.begin()+packet.size));
+            continue;
+          }
+          if (type != 0x00) continue;
+        }
+        ++video;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          expireLocked(packet.receivedMicros);
+          if (queue_.size() >= capacity_) { queue_.pop_front(); ++dropped; }
+          queue_.push_back(std::move(packet));
+          window_.highWater = std::max(window_.highWater, queue_.size());
+        }
+        ready_.notify_one();
+      }
+    } catch (const std::exception& error) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      error_ = error.what();
+    }
+    ready_.notify_all();
+  }
+  const int fd_;
+  const bool multiplexed_, hasPeer_;
+  const UdpEndpoint peer_;
+  const std::size_t capacity_;
+  const std::uint64_t maxAgeMicros_;
+  std::atomic<bool> stopped_{false};
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<Datagram> queue_;
+  Window window_;
+  std::string error_;
+  std::thread worker_;
+};
+
 // Bound startup only for a negotiated connection; standalone listeners may wait
 // for a host indefinitely. Once decoded, an idle desktop is not a startup error.
 struct UdpVideoStartup {
@@ -7504,7 +7639,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       UdpPeerLock videoPeerLock("SNU1");
       UdpVideoStats udpStats;
       auto udpStatsStartedAt = std::chrono::steady_clock::now();
-      std::array<std::uint8_t, kMaxUdpVideoDatagramBytes> datagramBuffer{};
+      UdpReceivePump receiver(server.get(), isSingleSocket, hasNegotiatedPeer ? &negotiatedPeer : nullptr);
+      std::uint64_t observedReceiveDrops = 0;
       std::uint64_t lastFeedbackDecodeErrors = 0;
       std::uint64_t lastNoParameterSkipped = 0;
       std::uint64_t lastEmptySampleSkipped = 0;
@@ -7512,6 +7648,10 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       auto lastMalformedPacketLogAt = std::chrono::steady_clock::time_point{};
       UdpVideoStartup startup(!udpConnect.empty());
       while (maxPackets == 0 || summary.packets < maxPackets) {
+        startup.rawDatagrams = receiver.raw.load();
+        startup.unexpectedPeer = receiver.unexpectedPeer.load();
+        startup.controlDatagrams = receiver.control.load();
+        startup.videoDatagrams = receiver.video.load();
         const auto startupNow = std::chrono::steady_clock::now();
         const auto decodedFrames = decoder.decodedFrames();
         const bool firstDecodedFrame = !startup.decoded && decodedFrames > 0;
@@ -7524,35 +7664,20 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           startup.report(false, decodedFrames);
           startup.reportedAt = startupNow;
         }
-        bool canRead = true;
-        {
-          pollfd waitForVideo{server.get(), POLLIN, 0};
-          const int ready = poll(&waitForVideo, 1, gLatencyPolicy.ultra ? 3 : 10);
-          if (ready < 0) {
-            if (errno == EINTR) continue;
-            throw std::runtime_error("UDP readiness check failed.");
-          }
-          if (ready > 0 && (waitForVideo.revents & (POLLERR | POLLHUP | POLLNVAL)))
-            throw std::runtime_error("UDP listener closed before video could be received.");
-          canRead = ready > 0 && (waitForVideo.revents & POLLIN);
-        }
-        UdpEndpoint peerAddress{};
-        peerAddress.length = sizeof(peerAddress.address);
-        const ssize_t received = canRead ? recvfrom(server.get(),
-                                          datagramBuffer.data(),
-                                          datagramBuffer.size(),
-                                          0,
-                                          reinterpret_cast<sockaddr*>(&peerAddress.address),
-                                          &peerAddress.length) : 0;
-        const auto receivedAtMicros = steadyMicros();
-        if (received < 0) {
-          if (errno == EINTR) continue;
-          throw std::runtime_error("UDP receive failed.");
-        }
-        if (received > 0) ++startup.rawDatagrams;
-        if (received > 0 && isSingleSocket && hasNegotiatedPeer && !sameUdpPeer(peerAddress, negotiatedPeer)) {
-          ++startup.unexpectedPeer;
-          continue;
+        UdpReceivePump::Datagram datagram;
+        const bool hasVideo = receiver.pop(datagram, std::chrono::milliseconds(gLatencyPolicy.ultra ? 3 : 10));
+        const auto received = hasVideo ? datagram.size : 0;
+        const auto receivedAtMicros = datagram.receivedMicros;
+        auto& datagramBuffer = datagram.bytes;
+        const auto& peerAddress = datagram.peer;
+        const auto receiveDrops = receiver.dropped.load();
+        if (receiveDrops != observedReceiveDrops) {
+          observedReceiveDrops = receiveDrops;
+          // Never decode partial frames or discard reference dependencies blindly.
+          // Existing reassembly/NACK/sequence recovery handles holes; request a
+          // fresh reference frame at a bounded rate after local overload.
+          sendKeyframeRequest("udp-receive-queue-overflow", summary.lastSequence,
+                              receiveDrops, decoder.decodeErrors(), std::chrono::milliseconds(1000));
         }
 
         const std::uint64_t mediaGeneration = gMediaPeerGeneration.load(std::memory_order_relaxed);
@@ -7569,46 +7694,12 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
 
         bool completedPacket = false;
         const auto authRejectedBefore = udpStats.authRejectedDatagrams;
-        if (received > 0 && isSingleSocket) {
-          const std::uint8_t mtype = datagramBuffer[0];
-          if (mtype == 0x00) {
-            // Video
-            ++startup.videoDatagrams;
-            completedPacket = reassembler.push(
-                                                std::span(datagramBuffer.data() + 1, static_cast<std::size_t>(received - 1)),
-                                                packetBytes,
-                                                udpStats,
-                                                completedPacketId,
-                                                completedMediaEpoch,
-                                                completedRekeyGrace,
-                                                peerAddress,
-                                                videoPeerLock);
-          } else if (mtype == 0x01) {
-            // Audio
-            std::vector<std::uint8_t> audioPacket(datagramBuffer.data() + 1, datagramBuffer.data() + received);
-            gAudioUdpQueue.push(audioPacket);
-            continue;
-          } else if (mtype == 0x02) {
-            // Control
-            ++startup.controlDatagrams;
-            std::string controlJson(reinterpret_cast<const char*>(datagramBuffer.data() + 1), received - 1);
-            gControlUdpQueue.push({std::move(controlJson), receivedAtMicros});
-            continue;
-          } else {
-            // Keepalive or Probes
-            continue;
-          }
-        } else if (received > 0) {
-          ++startup.videoDatagrams;
+        if (received > 0) {
+          const std::size_t offset = isSingleSocket ? 1 : 0;
           completedPacket = reassembler.push(
-                                              std::span(datagramBuffer.data(), static_cast<std::size_t>(received)),
-                                              packetBytes,
-                                              udpStats,
-                                              completedPacketId,
-                                              completedMediaEpoch,
-                                              completedRekeyGrace,
-                                              peerAddress,
-                                              videoPeerLock);
+              std::span(datagramBuffer.data() + offset, received - offset),
+              packetBytes, udpStats, completedPacketId, completedMediaEpoch,
+              completedRekeyGrace, peerAddress, videoPeerLock);
         }
         startup.authRejected += udpStats.authRejectedDatagrams - authRejectedBefore;
         if (completedPacket) ++startup.completed;
@@ -7784,6 +7875,16 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         const auto statsNow = std::chrono::steady_clock::now();
         const double statsSeconds = std::chrono::duration<double>(statsNow - udpStatsStartedAt).count();
         if (statsSeconds >= 1.0) {
+          const auto receiveWindow = receiver.takeWindow();
+          gLiveLatency.receiveVideoQueueMax = receiveWindow.samples ? receiveWindow.ageMaxMs : -1;
+          gLiveLatency.receiveQueueUpdated = steadyMicros();
+          std::cout << "SNU1_RX_QUEUE queuedDatagrams=" << receiveWindow.depth
+                    << " highWaterDatagrams=" << receiveWindow.highWater
+                    << " receiveDropped=" << receiver.dropped.load()
+                    << " receiveExpired=" << receiver.expired.load()
+                    << " receiveOversized=" << receiver.oversized.load()
+                    << " receiveQueueAvgMs=" << (receiveWindow.samples ? receiveWindow.ageSumMs / receiveWindow.samples : -1)
+                    << " receiveQueueMaxMs=" << (receiveWindow.samples ? receiveWindow.ageMaxMs : -1) << "\n";
           const UdpVideoNackWindowStats nackWindow = nackController.takeWindowStats();
           const UdpVideoJitterWindowStats jitterWindow = jitterBuffer.takeWindowStats();
           const ControlRttWindow controlRtt = takeControlRttWindow();
@@ -7894,6 +7995,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         }
       }
 
+      receiver.stop();
       decoder.flush();
       printDecodeSummary("udp-render:" + std::to_string(port), summary, decoder);
     } catch (const std::exception& error) {
