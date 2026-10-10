@@ -37,6 +37,9 @@ export interface DirectRouteHealth {
   attemptId: string;
   probe: ProbeStatistics;
   liveWireRttMs: number | null;
+  echoRttMs?: number | null;
+  echoHostHoldMs?: number | null;
+  echoUpdatedAtMs?: number | null;
   status: string;
   consecutiveElevated: number;
 }

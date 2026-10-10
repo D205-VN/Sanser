@@ -69,9 +69,12 @@
         <div><span>Authenticated peer endpoint</span><strong>{selected.verifiedRemoteEndpoint}</strong></div>
         <div><span>Probe median / min / max</span><strong>{selected.probe ? `${selected.probe.medianMs.toFixed(1)} / ${selected.probe.minMs.toFixed(1)} / ${selected.probe.maxMs.toFixed(1)} ms` : 'Not measured'}</strong></div>
         <div><span>Probe samples / loss</span><strong>{selected.probe ? `${selected.probe.samples} / ${selected.probe.lossPercent.toFixed(0)}%` : '—'}</strong></div>
+        <div><span>Latest same-socket UDP echo RTT</span><strong>{$networkDiagnostics.routeHealth?.echoRttMs != null ? `${$networkDiagnostics.routeHealth.echoRttMs.toFixed(1)} ms` : 'Not measured'}</strong></div>
+        <div><span>Echo host hold</span><strong>{$networkDiagnostics.routeHealth?.echoHostHoldMs != null ? `${$networkDiagnostics.routeHealth.echoHostHoldMs.toFixed(1)} ms` : '—'}</strong></div>
+        <div><span>Echo measured at</span><strong>{$networkDiagnostics.routeHealth?.echoUpdatedAtMs ? new Date($networkDiagnostics.routeHealth.echoUpdatedAtMs).toLocaleTimeString() : 'Awaiting a supporting host'}</strong></div>
         <div><span>Live Wire RTT estimate</span><strong>{$networkDiagnostics.routeHealth?.liveWireRttMs != null ? `${$networkDiagnostics.routeHealth.liveWireRttMs.toFixed(1)} ms` : 'Awaiting media measurements'}</strong></div>
       </div>
-      <p class="muted">Candidate addresses are advertised endpoints, not proof of the physical interface selected by the OS. Probe RTT includes probe handling; live Wire RTT still includes OS queues. Fewer than 3 probe samples means limited confidence. This is the latest nomination, not a guarantee that a session is still active.</p>
+      <p class="muted">Candidate addresses are advertised endpoints, not proof of the physical interface selected by the OS. UDP echo bypasses control/decode queues but still includes OS/socket scheduling and responder work. Probe RTT includes probe handling; live Wire RTT still includes OS queues. Fewer than 3 probe samples means limited confidence. This is the latest nomination, not a guarantee that a session is still active.</p>
       {#if $networkDiagnostics.routeHealth?.status === 'elevated-after-media'}
         <div class="notice warning">RTT increased substantially in at least three measurements after media started. The initial probe was faster; investigate the media path and OS/network queues. No route migration has been performed.</div>
       {/if}

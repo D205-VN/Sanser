@@ -20,6 +20,10 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(sanser-udp-echo-test udp_echo_test.cpp)
+  target_link_libraries(sanser-udp-echo-test PRIVATE sanser-snv2)
+  add_test(NAME sanser-udp-echo-test COMMAND sanser-udp-echo-test)
+
   add_executable(sanser-snv2-test snv2_test.cpp)
   target_link_libraries(sanser-snv2-test PRIVATE sanser-snv2)
   add_test(NAME sanser-snv2-test COMMAND sanser-snv2-test)

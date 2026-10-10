@@ -154,6 +154,49 @@ int main() {
         pump.stop(); // Idempotent cleanup; socket remains owned by the caller.
         requireLatency(fcntl(receiveFd.get(), F_GETFD) != -1, "receive pump does not close the shared sender socket");
       }
+      // Echo shares the actual media fd, bypassing a stopped video consumer.
+      {
+        auto bindEcho = [](int fd) {
+          UdpEndpoint endpoint{}; endpoint.length = sizeof(sockaddr_in);
+          auto* address = reinterpret_cast<sockaddr_in*>(&endpoint.address);
+          address->sin_family = AF_INET; address->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+          requireLatency(bind(fd, reinterpret_cast<sockaddr*>(address), endpoint.length) == 0, "bind echo");
+          requireLatency(getsockname(fd, reinterpret_cast<sockaddr*>(address), &endpoint.length) == 0, "echo address");
+          return endpoint;
+        };
+        ScopedFd media(socket(AF_INET, SOCK_DGRAM, 0)), host(socket(AF_INET, SOCK_DGRAM, 0));
+        const auto local = bindEcho(media.get()), peer = bindEcho(host.get());
+        const std::string token = "authenticated-same-media-socket-echo-test";
+        gLiveLatency.echoUpdated = 0;
+        UdpReceivePump pump(media.get(), true, &peer, 2, 50000, token);
+        pollfd readable{host.get(), POLLIN, 0};
+        requireLatency(poll(&readable, 1, 2000) == 1, "echo sent without a control sender");
+        sanser::echo::Packet probe{};
+        UdpEndpoint from{}; from.length = sizeof(from.address);
+        requireLatency(recvfrom(host.get(), probe.data(), probe.size(), 0,
+          reinterpret_cast<sockaddr*>(&from.address), &from.length) == static_cast<ssize_t>(probe.size()), "echo request size");
+        requireLatency(sameUdpPeer(from, local), "echo uses the media port, not a second socket");
+        sanser::echo::Responder responder(token);
+        requireLatency(responder.accept(probe, steadyMicros()), "production echo responder authenticates request");
+        for (int i = 0; i < 10; ++i) {
+          const std::uint8_t video[] = {0, 1};
+          sendto(host.get(), video, sizeof(video), 0, reinterpret_cast<const sockaddr*>(&local.address), local.length);
+        }
+        auto response = responder.response(0);
+        auto invalid = response; invalid.back() ^= 1;
+        sendto(host.get(), invalid.data(), invalid.size(), 0, reinterpret_cast<const sockaddr*>(&local.address), local.length);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        requireLatency(gLiveLatency.echoUpdated == 0, "bad HMAC cannot publish a measurement");
+        sendto(host.get(), response.data(), response.size(), 0, reinterpret_cast<const sockaddr*>(&local.address), local.length);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!gLiveLatency.echoUpdated && std::chrono::steady_clock::now() < deadline)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        requireLatency(gLiveLatency.echoUpdated > 0 && gLiveLatency.echoRtt >= 0, "echo returns while video is never consumed");
+        requireLatency(pump.dropped > 0 && pump.takeWindow().depth <= 2, "echo bypasses bounded full video queue");
+        requireLatency(pump.takeEchoSample().has_value() && !pump.takeEchoSample(), "bounded latest echo report sample");
+        pump.stop();
+        gLiveLatency.echoUpdated = 0;
+      }
       // Dedicated video UDP still carries unprefixed fragments.
       {
         ScopedFd fd(socket(AF_INET, SOCK_DGRAM, 0));

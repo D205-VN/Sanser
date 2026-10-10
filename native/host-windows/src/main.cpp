@@ -1,3 +1,4 @@
+#include "udp_echo.h"
 #include "engine.h"
 #include "bmp_writer.h"
 #include "desktop_duplication.h"
@@ -4097,7 +4098,8 @@ public:
                           std::uint32_t bitrate,
                           bool pacingEnabled,
                           std::shared_ptr<MediaCryptoState> mediaCrypto = {},
-                          std::uint16_t udpBindPort = 0)
+                          std::uint16_t udpBindPort = 0,
+                          const std::string& echoToken = {})
     : bitrate_(std::max<std::uint32_t>(bitrate, 1000000)),
       pacingEnabled_(pacingEnabled),
       mediaCrypto_(std::move(mediaCrypto)),
@@ -4225,7 +4227,10 @@ public:
       gUdpMainSocket = socket_;
     }
     if (gSingleSocketMode) {
-      std::thread receiverThread([]() {
+      std::shared_ptr<sanser::echo::Responder> echo;
+      try { echo = std::make_shared<sanser::echo::Responder>(echoToken); }
+      catch (...) { std::cerr << "UDP echo diagnostics unavailable\n"; }
+      std::thread receiverThread([echo]() {
         std::array<std::uint8_t, 65536> buffer;
         while (true) {
           SOCKET sock = INVALID_SOCKET;
@@ -4246,6 +4251,17 @@ public:
           }
           if (received < 1) continue;
           const std::uint8_t mtype = buffer[0];
+          if (mtype == sanser::echo::kLane) {
+            try {
+              if (echo && echo->accept(std::span(buffer).first(static_cast<std::size_t>(received)), receivedMicros)) {
+                std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
+                if (gUdpMainSocket != sock) break;
+                const auto reply = echo->response(steadyMicros() - receivedMicros);
+                send(sock, reinterpret_cast<const char*>(reply.data()), static_cast<int>(reply.size()), 0);
+              }
+            } catch (...) { /* Optional measurement must not stop streaming. */ }
+            continue;
+          }
           if (mtype == 0x02) {
             std::string controlJson(reinterpret_cast<const char*>(buffer.data() + 1), received - 1);
             gControlHostQueue.push({std::move(controlJson), receivedMicros});
@@ -5496,7 +5512,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
                                                  initialAdaptiveBitrate,
                                                  options.udpPacing,
                                                  mediaCrypto,
-                                                 options.udpBindPort);
+                                                 options.udpBindPort,
+                                                 options.sessionToken);
     if (!options.controlConnect.empty()) {
       controlClient = std::make_unique<TcpClient>("", options.controlConnect, options.sessionToken, mediaCrypto);
       controlClient->startControlReceiver();

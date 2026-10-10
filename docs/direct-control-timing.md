@@ -37,7 +37,7 @@ Legacy peers continue to work but have no decomposed timing (overlay shows `—`
 - `wireEstimateMs = (T5−T1)−(T4−T2)`
 
 **Wire RTT estimate includes OS/socket queues and receiver scheduling before
-`recv` returns.** In v2.1.19 the Mac socket receiver is independent of video processing;
+`recv` returns.** In v2.1.20 the Mac socket receiver is independent of video processing;
 OS scheduling before the receiver runs can still increase this residual. It does not prove that the Internet is slow. These
 are userspace markers, not NIC/kernel packet timestamps. No one-way delay is
 computed from the unsynchronized Mac and Windows clocks.
@@ -90,7 +90,7 @@ input ACK 10–30 ms, host input under 5 ms and frame queue under 3–5 ms. Keep
 route and sample count alongside any averages. No physical two-machine result is
 claimed by the automated tests.
 
-## Independent receiver (2.1.19)
+## Independent receiver (2.1.20)
 
 The Mac renderer now owns a joined UDP receiver thread. It reads and validates
 source/size, timestamps each datagram, and forwards control/audio directly to

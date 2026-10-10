@@ -15,6 +15,7 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "SNU1_ECHO",
     "SNU1_RX_QUEUE",
     "SNCONTROL_TIMING",
     "SNINPUT_TIMING",
@@ -31,6 +32,9 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "hostHoldMs",
+    "residualMs",
+    "sendCallMs",
     "queuedDatagrams",
     "highWaterDatagrams",
     "receiveDropped",
@@ -160,6 +164,9 @@ pub(crate) struct RouteHealth {
     attempt_id: String,
     probe: sanser_p2p::ProbeStatistics,
     live_wire_rtt_ms: Option<f64>,
+    echo_rtt_ms: Option<f64>,
+    echo_host_hold_ms: Option<f64>,
+    echo_updated_at_ms: Option<u64>,
     status: &'static str,
     consecutive_elevated: u32,
     #[serde(skip)]
@@ -271,6 +278,9 @@ impl Report {
                         attempt_id,
                         probe,
                         live_wire_rtt_ms: None,
+                        echo_rtt_ms: None,
+                        echo_host_hold_ms: None,
+                        echo_updated_at_ms: None,
                         status: "awaiting-media-warmup",
                         consecutive_elevated: 0,
                         last_sample_at_ms: None,
@@ -299,6 +309,15 @@ impl Report {
             .any(|key| sample.values.get(*key).is_some_and(|value| *value > 0.0))
         {
             self.media_started_at_ms.get_or_insert(sample.at_ms);
+        }
+        if sample.source == "SNU1_ECHO"
+            && let (Some(rtt), Some(hold)) =
+                (sample.values.get("rttMs"), sample.values.get("hostHoldMs"))
+            && let Some(health) = self.route_health.as_mut()
+        {
+            health.echo_rtt_ms = Some(*rtt);
+            health.echo_host_hold_ms = Some(*hold);
+            health.echo_updated_at_ms = Some(sample.at_ms);
         }
         if sample.source == "SNCONTROL_TIMING"
             && let Some(wire) = sample.values.get("wireEstimateMs")
@@ -381,7 +400,8 @@ pub(crate) fn start(
             loop {
                 match receiver.recv_timeout(Duration::from_secs(5)) {
                     Ok(sample) => {
-                        let control_sample = sample.source == "SNCONTROL_TIMING";
+                        let control_sample =
+                            matches!(sample.source.as_str(), "SNCONTROL_TIMING" | "SNU1_ECHO");
                         report.observe(sample);
                         if control_sample
                             && let Some(health) = &report.route_health
@@ -480,6 +500,31 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn echo_report_retains_only_numeric_measurements_and_does_not_mark_video_started() {
+        let mut request = request();
+        request.relay = false;
+        request.direct_attempt_id = Some("attempt".into());
+        request.direct_probe = Some(sanser_p2p::ProbeStatistics {
+            samples: 5,
+            median_ms: 14.0,
+            min_ms: 13.0,
+            max_ms: 16.0,
+            jitter_ms: 1.0,
+            loss_percent: 0.0,
+            score_ms: 16.0,
+        });
+        let mut report = Report::new(&request);
+        report.observe(parse_sample(b"SNU1_ECHO rttMs=14 hostHoldMs=0.1 residualMs=13.9 sendCallMs=0.02 nonce=123 token=456").unwrap());
+        let health = report.route_health.as_ref().unwrap();
+        assert_eq!(health.echo_rtt_ms, Some(14.0));
+        assert_eq!(health.live_wire_rtt_ms, None);
+        assert!(report.media_started_at_ms.is_none());
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("nonce"));
+        assert!(!json.contains("token"));
+    }
+
+    #[test]
     fn route_health_requires_media_warmup_and_sustained_increase() {
         let mut health = RouteHealth {
             attempt_id: "test".into(),
@@ -493,6 +538,9 @@ mod tests {
                 score_ms: 15.0,
             },
             live_wire_rtt_ms: None,
+            echo_rtt_ms: None,
+            echo_host_hold_ms: None,
+            echo_updated_at_ms: None,
             status: "awaiting-media-warmup",
             consecutive_elevated: 0,
             last_sample_at_ms: None,

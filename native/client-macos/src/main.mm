@@ -1,6 +1,7 @@
 #include "engine.h"
 #include "latency_policy.h"
 #include "control_timing.h"
+#include "udp_echo.h"
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
 #import <CoreAudio/CoreAudio.h>
@@ -65,6 +66,8 @@ struct LiveLatency {
   std::atomic<double> capture{-1}, captureWait{-1}, encode{-1}, send{-1}, rtt{-1}, inputRtt{-1}, hostInput{-1};
   std::atomic<double> jitter{-1}, decode{-1}, renderGpu{-1};
   std::atomic<double> pacingWait{-1}, pacingOvershoot{-1}, socketSend{-1};
+  std::atomic<double> echoRtt{-1}, echoHostHold{-1};
+  std::atomic<std::uint64_t> echoUpdated{0};
   std::atomic<double> receiveVideoQueueMax{-1};
   std::atomic<std::uint64_t> receiveQueueUpdated{0};
   std::atomic<double> hostControlSendLock{-1}, hostControlSendCall{-1};
@@ -6815,6 +6818,9 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     const bool timingFresh = now - gLiveLatency.controlTimingUpdated.load() < 3000000;
     row(@"Control app RTT", timingFresh ? gLiveLatency.controlApp.load() : (hostFresh ? gLiveLatency.rtt.load() : -1), 30);
     row(@"Socket RTT", timingFresh ? gLiveLatency.controlSocket.load() : -1, 25);
+    const bool echoFresh = now - gLiveLatency.echoUpdated.load() < 3000000;
+    row(@"UDP echo RTT*", echoFresh ? gLiveLatency.echoRtt.load() : -1, 25);
+    row(@"Echo host hold", echoFresh ? gLiveLatency.echoHostHold.load() : -1, 3);
     row(@"Wire RTT est.*", timingFresh ? gLiveLatency.wireEstimate.load() : -1, 25);
     row(@"Mac send queue", timingFresh ? gLiveLatency.macSendQueue.load() : -1, 3);
     row(@"Host recv queue", timingFresh ? gLiveLatency.hostControlQueue.load() : -1, 3);
@@ -7400,7 +7406,8 @@ void decodeTcpStreamToRenderer(std::uint16_t port,
 }
 
 // A successful NAT probe is not proof that the native host is sending video.
-// One owner reads the socket. No reassembly, crypto or decoder work runs here.
+// One owner reads the socket. Only fixed-size diagnostic HMAC runs here;
+// media reassembly/decryption and decoder work remain on the consumer.
 // The socket outlives this object; destruction joins before the owner closes it.
 class UdpReceivePump {
 public:
@@ -7419,10 +7426,17 @@ public:
   std::atomic<std::uint64_t> dropped{0}, expired{0}, oversized{0};
 
   UdpReceivePump(int fd, bool multiplexed, const UdpEndpoint* peer,
-                 std::size_t capacity = 1024, std::uint64_t maxAgeMicros = 50000)
+                 std::size_t capacity = 1024, std::uint64_t maxAgeMicros = 50000,
+                 const std::string& echoToken = {})
       : fd_(fd), multiplexed_(multiplexed), hasPeer_(peer != nullptr),
         peer_(peer ? *peer : UdpEndpoint{}), capacity_(std::clamp<std::size_t>(capacity, 1, 1024)),
         maxAgeMicros_(std::max<std::uint64_t>(1, maxAgeMicros)) {
+    if (hasPeer_ && multiplexed_ && !echoToken.empty()) {
+      std::uint64_t nonce = 0;
+      do { arc4random_buf(&nonce, sizeof(nonce)); } while (!nonce);
+      try { echo_ = std::make_unique<sanser::echo::Client>(echoToken, nonce); }
+      catch (...) { std::cerr << "UDP echo diagnostics unavailable\n"; }
+    }
     worker_ = std::thread([this] { receiveLoop(); });
   }
   ~UdpReceivePump() { stop(); }
@@ -7449,6 +7463,10 @@ public:
     window_.ageMaxMs = std::max(window_.ageMaxMs, age);
     return true;
   }
+  std::optional<sanser::echo::Sample> takeEchoSample() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::exchange(echoSample_, std::nullopt);
+  }
   Window takeWindow() {
     std::lock_guard<std::mutex> lock(mutex_);
     Window result = window_;
@@ -7466,6 +7484,17 @@ private:
   void receiveLoop() {
     try {
       while (!stopped_) {
+        if (echo_) {
+          try {
+            if (auto probe = echo_->prepare(steadyMicros())) {
+              const auto before = steadyMicros();
+              echo_->sending(before);
+              const auto sent = sendto(fd_, probe->data(), probe->size(), MSG_DONTWAIT,
+                reinterpret_cast<const sockaddr*>(&peer_.address), peer_.length);
+              echo_->sent(sent == static_cast<ssize_t>(probe->size()), steadyMicros() - before);
+            }
+          } catch (...) { echo_.reset(); }
+        }
         pollfd readable{fd_, POLLIN, 0};
         const int ready = poll(&readable, 1, 10);
         if (stopped_) break;
@@ -7489,6 +7518,21 @@ private:
         packet.size = static_cast<std::size_t>(received);
         if (multiplexed_) {
           const auto type = packet.bytes[0];
+          if (type == sanser::echo::kLane) {
+            if (echo_) {
+              try {
+                if (auto sample = echo_->receive(std::span(packet.bytes).first(packet.size), packet.receivedMicros)) {
+                  gLiveLatency.echoRtt = sample->rttMs;
+                  gLiveLatency.echoHostHold = sample->hostHoldMs;
+                  gLiveLatency.echoUpdated = packet.receivedMicros;
+                  // Logging is done by the video consumer, never by the socket reader.
+                  std::lock_guard<std::mutex> lock(mutex_);
+                  echoSample_ = *sample;
+                }
+              } catch (...) { echo_.reset(); }
+            }
+            continue;
+          }
           if (type == 0x02) {
             ++control;
             gControlUdpQueue.push({std::string(reinterpret_cast<const char*>(packet.bytes.data()+1),
@@ -7518,6 +7562,8 @@ private:
     }
     ready_.notify_all();
   }
+  std::unique_ptr<sanser::echo::Client> echo_;
+  std::optional<sanser::echo::Sample> echoSample_;
   const int fd_;
   const bool multiplexed_, hasPeer_;
   const UdpEndpoint peer_;
@@ -7639,7 +7685,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
       UdpPeerLock videoPeerLock("SNU1");
       UdpVideoStats udpStats;
       auto udpStatsStartedAt = std::chrono::steady_clock::now();
-      UdpReceivePump receiver(server.get(), isSingleSocket, hasNegotiatedPeer ? &negotiatedPeer : nullptr);
+      UdpReceivePump receiver(server.get(), isSingleSocket, hasNegotiatedPeer ? &negotiatedPeer : nullptr,
+                              1024, 50000, gExpectedSessionToken);
       std::uint64_t observedReceiveDrops = 0;
       std::uint64_t lastFeedbackDecodeErrors = 0;
       std::uint64_t lastNoParameterSkipped = 0;
@@ -7663,6 +7710,10 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
             (!startup.decoded && startupNow - startup.reportedAt >= std::chrono::seconds(1)))) {
           startup.report(false, decodedFrames);
           startup.reportedAt = startupNow;
+        }
+        if (auto echo = receiver.takeEchoSample()) {
+          std::cout << "SNU1_ECHO rttMs=" << echo->rttMs << " hostHoldMs=" << echo->hostHoldMs
+                    << " residualMs=" << echo->residualMs << " sendCallMs=" << echo->sendCallMs << "\n";
         }
         UdpReceivePump::Datagram datagram;
         const bool hasVideo = receiver.pop(datagram, std::chrono::milliseconds(gLatencyPolicy.ultra ? 3 : 10));
