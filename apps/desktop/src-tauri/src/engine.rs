@@ -11,7 +11,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 use crate::{
@@ -704,7 +704,12 @@ impl EngineManager {
                 |directory| match crate::connection_report::start(
                     &directory.join("connections"),
                     request,
-                    Some(app.clone()),
+                    Some(Box::new({
+                        let app = app.clone();
+                        move |health| {
+                            let _ = app.emit("direct-route-health", health);
+                        }
+                    })),
                 ) {
                     Ok(report) => Some(report),
                     Err(error) => {

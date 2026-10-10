@@ -10,7 +10,6 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::Emitter;
 
 const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
@@ -157,7 +156,7 @@ pub(crate) fn parse_sample(line: &[u8]) -> Option<Sample> {
 /// still includes OS queues. A rise is a diagnostic signal, not proof of NAT/QoS.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RouteHealth {
+pub(crate) struct RouteHealth {
     attempt_id: String,
     probe: sanser_p2p::ProbeStatistics,
     live_wire_rtt_ms: Option<f64>,
@@ -356,10 +355,14 @@ impl Report {
     }
 }
 
+// Keep persistence/analysis independent of the GUI runtime. In particular, a
+// Windows unit-test executable does not carry Tauri's Common Controls manifest.
+pub(crate) type RouteHealthObserver = Box<dyn Fn(&RouteHealth) + Send>;
+
 pub(crate) fn start(
     directory: &Path,
     request: &LaunchEngineRequest,
-    app: Option<tauri::AppHandle>,
+    on_route_health: Option<RouteHealthObserver>,
 ) -> std::io::Result<SyncSender<Sample>> {
     fs::create_dir_all(directory)?;
     let mut report = Report::new(request);
@@ -382,9 +385,9 @@ pub(crate) fn start(
                         report.observe(sample);
                         if control_sample
                             && let Some(health) = &report.route_health
-                            && let Some(app) = &app
+                            && let Some(observer) = &on_route_health
                         {
-                            let _ = app.emit("direct-route-health", health);
+                            observer(health);
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -616,6 +619,53 @@ mod tests {
             Some(&9.1)
         );
         assert!(!report.maxima.contains_key("SNINPUT_RTT.rttMs"));
+    }
+
+    #[test]
+    fn report_delivers_route_health_without_a_gui_runtime() -> std::io::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("sanser-route-health-{}", uuid::Uuid::new_v4()));
+        let mut launch = request();
+        launch.relay = false;
+        launch.direct_attempt_id = Some("current-attempt".into());
+        launch.direct_probe = Some(sanser_p2p::ProbeStatistics {
+            samples: 5,
+            median_ms: 13.0,
+            min_ms: 11.0,
+            max_ms: 16.0,
+            jitter_ms: 1.0,
+            loss_percent: 0.0,
+            score_ms: 15.0,
+        });
+        let (notification, received) = mpsc::channel();
+        let sender = start(
+            &directory,
+            &launch,
+            Some(Box::new(move |health| {
+                notification.send(health.clone()).unwrap();
+            })),
+        )?;
+        sender
+            .send(parse_sample(b"SNCONTROL_TIMING wireEstimateMs=200").unwrap())
+            .unwrap();
+        let health = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(health.attempt_id, "current-attempt");
+        assert_eq!(health.live_wire_rtt_ms, Some(200.0));
+        assert_eq!(health.status, "awaiting-media-warmup");
+        drop(sender);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !recent(&directory)
+            .first()
+            .is_some_and(|report| report["ended"] == true)
+        {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            recent(&directory)[0]["routeHealth"]["probe"]["medianMs"],
+            13.0
+        );
+        fs::remove_dir_all(directory)
     }
 
     #[test]
