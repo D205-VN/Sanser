@@ -65,6 +65,7 @@
       <div><h2 class="card-title">Selected Direct candidate</h2><p class="card-subtitle">{selected.reason}</p></div>
       <div class="advanced-metrics">
         <div><span>Local advertised · {selected.localCandidateType}</span><strong>{selected.localCandidateEndpoint}</strong></div>
+        <div><span>Advertised local interface · name-based classification</span><strong>{selected.localCandidateInterface ? `${selected.localCandidateInterface.name} · ${selected.localCandidateInterface.kind}` : 'Unknown (not verified from the candidate)'}</strong></div>
         <div><span>Remote advertised · {selected.remoteCandidateType}</span><strong>{selected.remoteCandidateEndpoint}</strong></div>
         <div><span>Authenticated peer endpoint</span><strong>{selected.verifiedRemoteEndpoint}</strong></div>
         <div><span>Probe median / min / max</span><strong>{selected.probe ? `${selected.probe.medianMs.toFixed(1)} / ${selected.probe.minMs.toFixed(1)} / ${selected.probe.maxMs.toFixed(1)} ms` : 'Not measured'}</strong></div>

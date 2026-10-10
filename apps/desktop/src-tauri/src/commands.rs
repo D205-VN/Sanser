@@ -731,6 +731,7 @@ pub struct DirectSelectionDiagnostics {
     pub pair_id: String,
     pub local_candidate_type: sanser_p2p::CandidateType,
     pub local_candidate_endpoint: String,
+    pub local_candidate_interface: Option<sanser_p2p::NetworkInterface>,
     pub remote_candidate_type: sanser_p2p::CandidateType,
     pub remote_candidate_endpoint: String,
     pub verified_remote_endpoint: String,
@@ -832,6 +833,15 @@ pub async fn p2p_punch(
                     pair_id: pair.pair_id.clone(),
                     local_candidate_type: local.candidate_type,
                     local_candidate_endpoint: local.endpoint().to_string(),
+                    // Advertised candidate metadata only. A wildcard UDP socket
+                    // does not bind the selected candidate to this physical NIC.
+                    local_candidate_interface: sanser_p2p::enumerate_interfaces()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|iface| {
+                            Some(iface.index) == local.interface_index
+                                && iface.address == local.address
+                        }),
                     remote_candidate_type: remote.candidate_type,
                     remote_candidate_endpoint: remote.endpoint().to_string(),
                     verified_remote_endpoint: pair.remote.to_string(),

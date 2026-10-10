@@ -26,6 +26,7 @@ export interface DirectSelectionDiagnostics {
   pairId: string;
   localCandidateType: string;
   localCandidateEndpoint: string;
+  localCandidateInterface?: { name: string; kind: string } | null;
   remoteCandidateType: string;
   remoteCandidateEndpoint: string;
   verifiedRemoteEndpoint: string;

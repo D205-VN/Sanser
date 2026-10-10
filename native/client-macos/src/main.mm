@@ -60,6 +60,7 @@ namespace {
 
 sanser::LatencyPolicy gLatencyPolicy;
 std::atomic<bool> gShowLatencyOverlay{false};
+std::atomic<bool> gHostCapturePaused{false};
 bool gOverlayShortcutDown = false;
 constexpr unsigned short kOverlayShortcutKeyCode = 0x1C; // macOS ANSI 8 (number row)
 struct LiveLatency {
@@ -2900,6 +2901,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
     gLiveLatency.rtt = rttMs;
     gLiveLatency.capture = jsonDoubleValue(payload, "captureMs", -1);
     gLiveLatency.captureWait = jsonDoubleValue(payload, "captureWaitMs", -1);
+    gHostCapturePaused = jsonUint64Value(payload, "capturePaused") == 1;
     gLiveLatency.encode = jsonDoubleValue(payload, "encodeMs", -1);
     gLiveLatency.send = jsonDoubleValue(payload, "sendMs", -1);
     gLiveLatency.pacingWait = jsonDoubleValue(payload, "pacingWaitMs", -1);
@@ -2908,6 +2910,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
     gLiveLatency.gpuInput = static_cast<int>(jsonDoubleValue(payload, "gpuInput", -1));
     gLiveLatency.hostUpdated = steadyMicros();
     std::cout << "SNV1_HOST_TIMING captureAvgMs=" << gLiveLatency.capture.load()
+              << " capturePaused=" << (gHostCapturePaused.load() ? 1 : 0)
               << " captureWaitAvgMs=" << gLiveLatency.captureWait.load()
               << " encodeAvgMs=" << gLiveLatency.encode.load()
               << " sendAvgMs=" << gLiveLatency.send.load()
@@ -4146,11 +4149,21 @@ struct UdpPacketAssembly {
 
 class UdpVideoReassembler {
 public:
+  void resetForMediaGeneration(std::uint64_t generation, UdpVideoStats& stats) {
+    observeMediaGeneration(generation, stats);
+  }
+  std::size_t incompletePackets() const { return assemblies_.size(); }
+  std::uint64_t missingFragments() const {
+    std::uint64_t missing = 0;
+    for (const auto& [key, assembly] : assemblies_) {
+      missing += assembly.fragmentCount - assembly.receivedFragments;
+    }
+    return missing;
+  }
   // A later frame or the final fragment proves a potential hole. Allow 3 ms
   // for reordering, then request repair while retaining the partial assembly.
   void pollRepairs(UdpVideoStats& stats,
                    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
-    if (!gLatencyPolicy.ultra) return;
     prune(stats, now);
     for (auto& [key, assembly] : assemblies_) {
       const auto highest = highestPacketIdByEpoch_.find(key.mediaEpoch);
@@ -4397,6 +4410,8 @@ private:
     }
     assemblies_.clear();
     highestPacketIdByEpoch_.clear();
+    stats.newNackPacketIds.clear();
+    stats.nackPacketIds.clear();
     std::cout << "SNU1_EPOCH_RESET generation=" << mediaGeneration_
               << " nextGeneration=" << generation
               << " droppedAssemblies=" << dropped
@@ -6842,6 +6857,12 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     }
     [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"* Includes OS queues / receive scheduling\nLocal timings; excludes display scan-out"]];
     _latencyOverlay.attributedStringValue = overlay;
+    if (hostFresh && gHostCapturePaused.load()) {
+      _latencyOverlay.attributedStringValue = [[NSAttributedString alloc]
+        initWithString:@"Screen capture temporarily unavailable.\nWindows may be showing UAC, a locked screen,\nor switching displays.\n\nWaiting for the desktop to return…"
+        attributes:@{NSForegroundColorAttributeName:NSColor.systemOrangeColor}];
+      _latencyOverlay.hidden = NO;
+    }
 
     const ControlRttWindow controlRtt = takeControlRttWindow();
     std::ostringstream feedback;
@@ -7592,6 +7613,15 @@ struct UdpVideoStartup {
   std::uint64_t videoDatagrams = 0;
   std::uint64_t completed = 0;
   std::uint64_t authRejected = 0;
+  Clock::time_point lastRecoveryAt{};
+
+  bool recoveryDue(std::uint64_t decodedFrames, Clock::time_point now = Clock::now()) {
+    if (!enabled || decoded || decodedFrames > 0 || videoDatagrams == 0 ||
+        now - startedAt < std::chrono::seconds(1) ||
+        (lastRecoveryAt != Clock::time_point{} && now - lastRecoveryAt < std::chrono::seconds(1))) return false;
+    lastRecoveryAt = now;
+    return true;
+  }
 
   explicit UdpVideoStartup(bool negotiated, Clock::time_point now = Clock::now())
       : startedAt(now), reportedAt(now), enabled(negotiated) {}
@@ -7701,6 +7731,10 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         startup.videoDatagrams = receiver.video.load();
         const auto startupNow = std::chrono::steady_clock::now();
         const auto decodedFrames = decoder.decodedFrames();
+        if (startup.recoveryDue(decodedFrames, startupNow)) {
+          sendKeyframeRequest("udp-startup-recovery", summary.lastSequence, 0,
+                              decoder.decodeErrors(), std::chrono::milliseconds(1000));
+        }
         const bool firstDecodedFrame = !startup.decoded && decodedFrames > 0;
         if (const char* failure = startup.failure(decodedFrames, startupNow)) {
           startup.report(true, decodedFrames);
@@ -7732,6 +7766,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         }
 
         const std::uint64_t mediaGeneration = gMediaPeerGeneration.load(std::memory_order_relaxed);
+        reassembler.resetForMediaGeneration(mediaGeneration, udpStats);
         const bool jitterGenerationReset = jitterBuffer.resetForMediaGeneration(mediaGeneration);
         const bool nackGenerationReset = nackController.resetForMediaGeneration(mediaGeneration);
         if (jitterGenerationReset || nackGenerationReset) {
@@ -7942,6 +7977,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           const double repairLossPct = packetLossPercent(nackWindow.sentPackets + nackWindow.timedOutPackets,
                                                          udpStats.completedPackets);
           std::cout << "SNU1_STATS datagrams=" << udpStats.datagrams
+                    << " incomplete=" << reassembler.incompletePackets()
+                    << " missingFragments=" << reassembler.missingFragments()
                     << " fragments=" << udpStats.fragments
                     << " retransmitFragments=" << udpStats.retransmitFragments
                     << " completed=" << udpStats.completedPackets

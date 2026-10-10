@@ -90,6 +90,7 @@ const FIELDS: &[&str] = &[
     "captureAvgMs",
     "captureMaxMs",
     "captureWaitAvgMs",
+    "capturePaused",
     "captureSamples",
     "gpuPoolBusyDrops",
     "encodeAvgMs",
@@ -101,6 +102,13 @@ const FIELDS: &[&str] = &[
     "udpSocketAvgMs",
     "datagrams",
     "incomplete",
+    "missingFragments",
+    "droppedAssemblies",
+    "retransmitCompleted",
+    "nackSent",
+    "nackRecovered",
+    "nackTimedOut",
+    "replayRejected",
     "jitterLate",
     "jitterPending",
     "rawDatagrams",
@@ -786,5 +794,15 @@ mod tests {
         assert!(directory.join("keep.txt").exists());
         assert!(!directory.join("connection-000.json").exists());
         fs::remove_dir_all(directory)
+    }
+
+    #[test]
+    fn video_repair_diagnostics_preserve_numeric_counts_only() {
+        let sample = parse_sample(b"SNU1_STATS incomplete=2 missingFragments=3 nackSent=4 nackRecovered=1 nackTimedOut=0 replayRejected=2 sessionToken=123").unwrap();
+        assert_eq!(sample.values["missingFragments"], 3.0);
+        assert_eq!(sample.values["nackRecovered"], 1.0);
+        assert!(!sample.values.contains_key("sessionToken"));
+        let capture = parse_sample(b"SNV1_HOST_TIMING capturePaused=1").unwrap();
+        assert_eq!(capture.values["capturePaused"], 1.0);
     }
 }

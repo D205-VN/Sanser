@@ -245,6 +245,14 @@ int main() {
         controlOnly.failure(1, start + hours(1)) == nullptr, "first decoded frame disables startup timeout on idle desktops");
       UdpVideoStartup standalone(false, start);
       requireLatency(standalone.failure(0, start + hours(1)) == nullptr, "standalone listeners may wait for a host");
+      UdpVideoStartup stalledStartup(true, start);
+      requireLatency(!stalledStartup.recoveryDue(0, start + seconds(1)), "no keyframe storm without video");
+      stalledStartup.videoDatagrams = 3;
+      requireLatency(!stalledStartup.recoveryDue(0, start + milliseconds(999)), "allow initial IDR to arrive");
+      requireLatency(stalledStartup.recoveryDue(0, start + seconds(1)), "recover stalled fragments before 20 second timeout");
+      requireLatency(!stalledStartup.recoveryDue(0, start + milliseconds(1999)), "startup requests are rate limited");
+      requireLatency(stalledStartup.recoveryDue(0, start + seconds(2)), "retry when repair did not produce a frame");
+      requireLatency(!stalledStartup.recoveryDue(1, start + seconds(3)), "decoded startup must stop recovery requests");
       SnvPacket packet;
       gLatencyPolicy.ultra = true;
       requireLatency(NativeInputPolicyTest::acknowledged("{\"type\":\"input-reset\"}"),
@@ -335,39 +343,49 @@ int main() {
         "Ultra software pacing budget must stay within 3-5 ms");
       requireLatency(gLatencyPolicy.jitterHoldMs(0, 10) == 18, "gap deadline must allow feedback round trip");
 
-      UdpVideoReassembler repair;
-      UdpVideoStats repairStats;
-      UdpPeerLock repairPeer("TEST");
-      const auto peer = resolveUdpAddress("127.0.0.1:55000");
-      std::vector<std::uint8_t> assembled;
-      std::uint64_t packetId = 0, epoch = 0;
-      bool grace = false;
-      auto fragment = [&](std::uint64_t id, std::uint16_t index) {
-        UdpVideoFragmentHeader header;
-        header.packetId = id; header.packetSize = 3; header.fragmentCount = 3;
-        header.fragmentIndex = index; header.fragmentOffset = index; header.payloadSize = 1;
-        std::vector<std::uint8_t> bytes(sizeof(header) + 1, static_cast<std::uint8_t>(index));
-        std::memcpy(bytes.data(), &header, sizeof(header));
-        return repair.push(bytes, assembled, repairStats, packetId, epoch, grace, peer, repairPeer);
-      };
-      requireLatency(!fragment(1, 0) && !fragment(1, 2), "missing middle fragment stays incomplete");
-      repair.pollRepairs(repairStats, start);
-      repair.pollRepairs(repairStats, start + milliseconds(2));
-      requireLatency(repairStats.newNackPacketIds.empty(), "short reordering must not produce premature NACK");
-      repair.pollRepairs(repairStats, start + milliseconds(3));
-      requireLatency(repairStats.newNackPacketIds == std::vector<std::uint64_t>{1}, "missing fragment must request repair after 3 ms");
-      requireLatency(fragment(1, 1) && assembled == std::vector<std::uint8_t>({0, 1, 2}), "repair must retain and complete partial frame");
-      repairStats.newNackPacketIds.clear();
-      requireLatency(!fragment(2, 0) && !fragment(2, 2) && fragment(2, 1), "reordering before deadline completes normally");
-      repair.pollRepairs(repairStats, start + milliseconds(10));
-      requireLatency(repairStats.newNackPacketIds.empty(), "completed reordering must not request repair");
-      requireLatency(!fragment(3, 0), "missing tail stays incomplete on an idle desktop");
-      const auto idle = steady_clock::now() + milliseconds(51);
-      repair.pollRepairs(repairStats, idle);
-      repair.pollRepairs(repairStats, idle + milliseconds(3));
-      requireLatency(repairStats.newNackPacketIds == std::vector<std::uint64_t>{3}, "idle missing tail must request repair without another video packet");
-      repair.pollRepairs(repairStats, idle + seconds(1));
-      requireLatency(repairStats.droppedAssemblies == 1, "partial frames must expire during receive silence");
+      for (bool ultra : {false, true}) {
+        gLatencyPolicy.ultra = ultra;
+        UdpVideoReassembler repair;
+        UdpVideoStats repairStats;
+        UdpPeerLock repairPeer("TEST");
+        const auto peer = resolveUdpAddress("127.0.0.1:55000");
+        std::vector<std::uint8_t> assembled;
+        std::uint64_t packetId = 0, epoch = 0;
+        bool grace = false;
+        auto fragment = [&](std::uint64_t id, std::uint16_t index) {
+          UdpVideoFragmentHeader header;
+          header.packetId = id; header.packetSize = 3; header.fragmentCount = 3;
+          header.fragmentIndex = index; header.fragmentOffset = index; header.payloadSize = 1;
+          std::vector<std::uint8_t> bytes(sizeof(header) + 1, static_cast<std::uint8_t>(index));
+          std::memcpy(bytes.data(), &header, sizeof(header));
+          return repair.push(bytes, assembled, repairStats, packetId, epoch, grace, peer, repairPeer);
+        };
+        requireLatency(!fragment(1, 0) && !fragment(1, 2), "missing middle fragment stays incomplete");
+        requireLatency(repair.incompletePackets() == 1 && repair.missingFragments() == 1,
+          "report the current missing fragments, not all historical packet loss");
+        repair.pollRepairs(repairStats, start);
+        repair.pollRepairs(repairStats, start + milliseconds(2));
+        requireLatency(repairStats.newNackPacketIds.empty(), "short reordering must not produce premature NACK");
+        repair.pollRepairs(repairStats, start + milliseconds(3));
+        requireLatency(repairStats.newNackPacketIds == std::vector<std::uint64_t>{1}, "missing fragment must request repair after 3 ms");
+        requireLatency(fragment(1, 1) && assembled == std::vector<std::uint8_t>({0, 1, 2}), "repair must retain and complete partial frame");
+        repairStats.newNackPacketIds.clear();
+        requireLatency(!fragment(2, 0) && !fragment(2, 2) && fragment(2, 1), "reordering before deadline completes normally");
+        repair.pollRepairs(repairStats, start + milliseconds(10));
+        requireLatency(repairStats.newNackPacketIds.empty(), "completed reordering must not request repair");
+        requireLatency(!fragment(3, 0), "missing tail stays incomplete on an idle desktop");
+        const auto idle = steady_clock::now() + milliseconds(75);
+        repair.pollRepairs(repairStats, idle);
+        repair.pollRepairs(repairStats, idle + milliseconds(3));
+        requireLatency(repairStats.newNackPacketIds == std::vector<std::uint64_t>{3}, "idle missing tail must request repair without another video packet");
+        repair.pollRepairs(repairStats, idle + seconds(1));
+        requireLatency(repairStats.droppedAssemblies == 1, "partial frames must expire during receive silence");
+        requireLatency(!fragment(4, 0), "partial old-generation frame");
+        repair.resetForMediaGeneration(gMediaPeerGeneration.load() + 1, repairStats);
+        requireLatency(repair.incompletePackets() == 0 && repair.missingFragments() == 0 &&
+          repairStats.newNackPacketIds.empty(), "generation reset clears assemblies and obsolete repair requests even without new video");
+      }
+      gLatencyPolicy.ultra = true;
       requireLatency(gLatencyPolicy.presentAt(10000, 1000000, 90000) == 14000, "future sender timeline cannot add latency");
       requireLatency(gLatencyPolicy.presentAt(10000, 0, 0) == 10000, "zero base render hold");
 

@@ -48,25 +48,34 @@ fn detect_interface_kind(name: &str) -> InterfaceKind {
     let name_lower = name.to_lowercase();
     if name_lower.contains("loopback") || name_lower == "lo" || name_lower == "lo0" {
         InterfaceKind::Loopback
-    } else if name_lower.contains("wlan")
-        || name_lower.contains("wifi")
-        || name_lower.contains("wi-fi")
-        || name_lower.contains("awdl")
-    {
-        InterfaceKind::WiFi
-    } else if name_lower.contains("vpn")
-        || name_lower.contains("tun")
-        || name_lower.contains("tap")
-        || name_lower.contains("utun")
-        || name_lower.contains("wg")
-        || name_lower.contains("tailscale")
-        || name_lower.contains("zerotier")
-        || name_lower.contains("ppp")
+    } else if ["vpn", "tailscale", "zerotier", "wireguard", "tap-windows"]
+        .iter()
+        .any(|marker| name_lower.contains(marker))
+        || ["utun", "tun", "tap", "wg", "ppp", "zt"]
+            .iter()
+            .any(|prefix| name_lower.starts_with(prefix))
     {
         InterfaceKind::Vpn
-    } else if name_lower.contains("eth") || name_lower.contains("ethernet") {
-        InterfaceKind::Ethernet
-    } else if name_lower.contains("en") {
+    } else if [
+        "feth", "veth", "vmnet", "vboxnet", "bridge", "br-", "docker", "virbr",
+    ]
+    .iter()
+    .any(|prefix| name_lower.starts_with(prefix))
+        || ["virtual", "vmware", "vethernet", "hyper-v"]
+            .iter()
+            .any(|marker| name_lower.contains(marker))
+    {
+        // feth is also used by overlays on macOS; it is not a physical LAN.
+        InterfaceKind::Virtual
+    } else if name_lower.starts_with("wlan")
+        || name_lower.contains("wifi")
+        || name_lower.contains("wi-fi")
+        || name_lower.starts_with("awdl")
+    {
+        InterfaceKind::WiFi
+    } else if name_lower.starts_with("eth") || name_lower.starts_with("en") {
+        // en* does not distinguish Ethernet from Wi-Fi on macOS. This is a
+        // candidate preference heuristic, not a measurement of the OS route.
         InterfaceKind::Ethernet
     } else {
         InterfaceKind::Unknown
@@ -95,9 +104,10 @@ pub struct NetworkInterface {
     pub address: IpAddr,
     /// Interface kind.
     pub kind: InterfaceKind,
-    /// Whether the interface is currently up and has a default route.
+    /// Whether the enumerator considers the interface available.
+    /// Address enumeration currently does not verify link state or a default route.
     pub is_up: bool,
-    /// Estimated cost (lower = preferred). Wi-Fi > Ethernet > VPN.
+    /// Tie-breaking preference only; measured path quality takes precedence.
     pub cost: InterfaceCost,
 }
 
@@ -199,6 +209,49 @@ mod tests {
             kind,
             is_up: up,
             cost: InterfaceCost::Low,
+        }
+    }
+
+    #[test]
+    fn overlay_and_virtual_names_are_not_physical_lan() {
+        for name in [
+            "feth786",
+            "veth123",
+            "VMware Network Adapter VMnet8",
+            "vEthernet (Default Switch)",
+            "bridge100",
+        ] {
+            assert_eq!(
+                detect_interface_kind(name),
+                InterfaceKind::Virtual,
+                "{name}"
+            );
+        }
+        for name in [
+            "utun4",
+            "tun0",
+            "tap0",
+            "wg0",
+            "ztabcdef",
+            "ZeroTier One",
+            "Tailscale",
+            "Ethernet VPN",
+        ] {
+            assert_eq!(detect_interface_kind(name), InterfaceKind::Vpn, "{name}");
+        }
+        assert_eq!(detect_interface_kind("Ethernet 2"), InterfaceKind::Ethernet);
+        assert_eq!(detect_interface_kind("Wi-Fi"), InterfaceKind::WiFi);
+        assert_eq!(
+            detect_interface_kind("unrecognized adapter"),
+            InterfaceKind::Unknown
+        );
+    }
+
+    #[test]
+    fn overlays_remain_eligible_for_measured_connectivity() {
+        for kind in [InterfaceKind::Vpn, InterfaceKind::Virtual] {
+            let iface = make_iface(IpAddr::V4(Ipv4Addr::new(10, 116, 236, 203)), kind, true);
+            assert_eq!(filter_interface(&iface), InterfaceFilter::Accept);
         }
     }
 

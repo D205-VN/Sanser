@@ -500,6 +500,7 @@ void makeProcessDpiAware() {
 std::atomic<double> gCaptureMs{-1}, gCaptureWaitMs{-1}, gEncodeMs{-1}, gSendMs{-1};
 std::atomic<double> gPacingWaitMs{-1}, gPacingOvershootMs{-1}, gSocketSendMs{-1};
 std::atomic<int> gGpuInput{-1};
+std::atomic<bool> gCapturePaused{false};
 bool gUltraLowLatency = false;
 
 struct Options {
@@ -3890,6 +3891,7 @@ private:
                 << ",\"hostUnixMicros\":" << unixMicros()
                << ",\"captureMs\":" << gCaptureMs.load()
                << ",\"captureWaitMs\":" << gCaptureWaitMs.load()
+               << ",\"capturePaused\":" << (gCapturePaused.load() ? 1 : 0)
                << ",\"encodeMs\":" << gEncodeMs.load()
                << ",\"sendMs\":" << gSendMs.load()
                << ",\"pacingWaitMs\":" << gPacingWaitMs.load()
@@ -3920,6 +3922,7 @@ private:
           pong << "{\"type\":\"control-pong\""
                << ",\"sentSteadyMicros\":" << jsonUint64Value(payload, "sentSteadyMicros")
                << ",\"hostUnixMicros\":" << unixMicros()
+               << ",\"capturePaused\":" << (gCapturePaused.load() ? 1 : 0)
                << ",\"captureMs\":" << gCaptureMs.load()
                << ",\"captureWaitMs\":" << gCaptureWaitMs.load()
                << ",\"encodeMs\":" << gEncodeMs.load()
@@ -5603,9 +5606,12 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   }
   duplicator.setGpuCapture(encoder->usingGpuInput());
   gGpuInput = encoder->usingGpuInput() ? 1 : 0;
+  auto captureGeneration = duplicator.generation();
+  bool captureUnavailable = false;
   auto restartEncoder = [&](std::uint32_t bitrate, const char* reason) -> bool {
     auto nextOptions = encodeOptions;
     nextOptions.bitrate = bitrate;
+    if (nextOptions.gpuDevice) nextOptions.gpuDevice = duplicator.gpuDevice();
     try {
       auto replacement = makePacketEncoder(nextOptions, reason);
       encoder = std::move(replacement);
@@ -6057,6 +6063,38 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    const auto captureStartedAt = std::chrono::steady_clock::now();
 	    const bool capturedFreshFrame = duplicator.captureFrame(frame, adaptiveCaptureTimeoutMs);
 	    const auto captureFinishedAt = std::chrono::steady_clock::now();
+    if (duplicator.recovering()) {
+      gCapturePaused = true;
+      if (!captureUnavailable) {
+        std::cerr << "SNV1_CAPTURE_PAUSED reason=desktop-unavailable possibleSecureDesktop=yes\n";
+        captureUnavailable = true;
+      }
+      // Preserve the client's last displayed frame and the control session.
+      // Do not feed old GPU textures to an encoder during device recovery.
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+    if (captureGeneration != duplicator.generation()) {
+      if (encodeOptions.gpuDevice && encodeOptions.gpuDevice != duplicator.gpuDevice()) {
+        if (!restartEncoder(currentAdaptiveBitrate, "capture-device-recovered")) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(250));
+          continue;
+        }
+      }
+      captureGeneration = duplicator.generation();
+      hasLastCleanFrame = false;
+      lastCleanFrame = FrameBgra{};
+      hasLastCursor = false;
+      requestKeyframe("capture-recovered", 0, 0, 0, 0);
+      pendingKeyframeRequest = latestKeyframeRequest();
+      hasPendingKeyframeRequest = pendingKeyframeRequest.sequence != 0 &&
+        pendingKeyframeRequest.sequence != seenKeyframeRequestSequence;
+      captureUnavailable = false;
+      gCapturePaused = false;
+      std::cerr << "SNV1_CAPTURE_RESUMED generation=" << captureGeneration << " keyframeRequested=1\n";
+      // Keep the first recovered frame: an idle desktop might not produce a
+      // second one. The encoder can read back this texture if it fell back to CPU.
+    }
     const auto captureTotalMicros = microsBetween(captureStartedAt, captureFinishedAt);
     const auto captureWaitMicros = std::min(captureTotalMicros, duplicator.lastAcquireWaitMicros());
     ++statsCapturePolls;

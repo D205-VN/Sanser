@@ -47,6 +47,7 @@ DesktopDuplicator::DesktopDuplicator() : impl_(std::make_unique<Impl>()) {}
 DesktopDuplicator::~DesktopDuplicator() = default;
 
 ID3D11Device* DesktopDuplicator::gpuDevice() const { return impl_->device.Get(); }
+bool DesktopDuplicator::recovering() const { return impl_->recoveryPending; }
 
 void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t outputIndex) {
   auto next = std::make_unique<Impl>();
@@ -65,7 +66,14 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
   };
   D3D_FEATURE_LEVEL chosenLevel{};
 
-  checkHr(D3D11CreateDevice(
+  // A desktop switch invalidates duplication, not necessarily the D3D device.
+  // Keep the encoder and capture textures on the same healthy device.
+  if (impl_->device && adapterIndex == adapterIndex_ &&
+      SUCCEEDED(impl_->device->GetDeviceRemovedReason())) {
+    next->device = impl_->device;
+    next->context = impl_->context;
+  } else {
+    checkHr(D3D11CreateDevice(
             adapter.Get(),
             D3D_DRIVER_TYPE_UNKNOWN,
             nullptr,
@@ -77,6 +85,7 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
             &chosenLevel,
             next->context.GetAddressOf()),
           "D3D11CreateDevice");
+  }
   ComPtr<ID3D10Multithread> multithread;
   if (SUCCEEDED(next->context.As(&multithread))) multithread->SetMultithreadProtected(TRUE);
 
@@ -126,6 +135,7 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
   surfaceWidth_ = nextSurfaceWidth;
   surfaceHeight_ = nextSurfaceHeight;
   rotation_ = static_cast<unsigned int>(outputDesc.Rotation);
+  ++generation_;
 }
 
 bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) {
@@ -133,6 +143,8 @@ bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) 
   if (impl_->recoveryPending) {
     const auto now = std::chrono::steady_clock::now();
     if (now < impl_->nextRecoveryAttempt) return false;
+    // Release the invalid duplication before creating its replacement.
+    impl_->duplication.Reset();
     try {
       initialize(adapterIndex_, outputIndex_);
     } catch (const std::exception& error) {
@@ -159,7 +171,9 @@ bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) 
     std::chrono::duration_cast<std::chrono::microseconds>(
       std::chrono::steady_clock::now() - acquireStartedAt).count());
   if (acquireHr == DXGI_ERROR_WAIT_TIMEOUT) return false;
-  if (acquireHr == DXGI_ERROR_ACCESS_LOST) {
+  if (acquireHr == DXGI_ERROR_ACCESS_LOST || acquireHr == E_ACCESSDENIED ||
+      acquireHr == DXGI_ERROR_SESSION_DISCONNECTED ||
+      acquireHr == DXGI_ERROR_DEVICE_REMOVED || acquireHr == DXGI_ERROR_DEVICE_RESET) {
     impl_->recoveryPending = true;
     impl_->nextRecoveryAttempt = std::chrono::steady_clock::now();
     return false;

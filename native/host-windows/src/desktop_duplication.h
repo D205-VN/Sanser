@@ -35,6 +35,8 @@ public:
   // AcquireNextFrame may wait for a desktop change; this is not capture work.
   std::uint64_t lastAcquireWaitMicros() const { return lastAcquireWaitMicros_; }
   std::uint64_t gpuPoolBusyDrops() const { return gpuPoolBusyDrops_; }
+  bool recovering() const;
+  std::uint64_t generation() const { return generation_; }
 
   std::uint32_t width() const { return width_; }
   std::uint32_t height() const { return height_; }
@@ -56,6 +58,7 @@ private:
   bool gpuCapture_ = false;
   std::uint64_t lastAcquireWaitMicros_ = 0;
   std::uint64_t gpuPoolBusyDrops_ = 0;
+  std::uint64_t generation_ = 0;
 };
 
 std::string hresultMessage(long hr);
