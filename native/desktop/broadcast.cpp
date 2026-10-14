@@ -133,6 +133,14 @@ std::vector<ViewerStats> Broadcaster::stats() const {
     peer->submitted.load(),peer->dispatched.load(),peer->replaced.load(),peer->referenceDrops.load(),peer->peer.videoQueueDrops(),peer->peer.repairedDatagrams(),peer->peer.repairCacheMisses()});
   return result;
 }
+std::uint32_t Broadcaster::bitrate() const {
+  std::lock_guard lock(peersMutex_); auto budget=source_.bitrate;
+  for(const auto& [id,peer]:peers_) {
+    (void)id;
+    if(peer->running && peer->peer.running() && peer->peer.ready()) budget=std::min(budget,peer->peer.recommendedBitrate());
+  }
+  return budget;
+}
 
 std::optional<SharingCommand> parseSharingCommand(const std::string& line,std::uint32_t bitrate) {
   if(line.size()>1024 || line.find('\0')!=std::string::npos) return std::nullopt;
@@ -168,6 +176,7 @@ void HostOutput::stop() { if(broadcast_) broadcast_->stop(); else single_->stop(
 bool HostOutput::ready() const { return broadcast_ ? broadcast_->ready() : single_->ready(); }
 bool HostOutput::running() const { return !nativeStopRequested() && (broadcast_ ? broadcast_->running() : single_->running()); }
 void HostOutput::video(Frame frame) { if(broadcast_) broadcast_->publish(std::move(frame)); else single_->video(frame); }
+std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : options_.bitrate; }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }
 void HostOutput::pumpControl() {
   for(const auto& line:takeNativeCommands()) {

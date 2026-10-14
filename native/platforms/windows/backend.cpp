@@ -21,6 +21,27 @@
 using Microsoft::WRL::ComPtr;
 namespace sanser::desktop {
 namespace {
+LRESULT CALLBACK sharingNoticeProc(HWND window,UINT message,WPARAM w,LPARAM l) {
+  auto* output=reinterpret_cast<HostOutput*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+  if(message==WM_NCCREATE) { output=static_cast<HostOutput*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(output)); }
+  if((message==WM_COMMAND && LOWORD(w)==1) || message==WM_CLOSE) { if(output) output->stop(); return 0; }
+  return DefWindowProcW(window,message,w,l);
+}
+struct SharingNotice {
+  HWND window=nullptr;
+  explicit SharingNotice(HostOutput& output,bool enabled) {
+    if(!enabled) return;
+    WNDCLASSW klass{}; klass.lpfnWndProc=sharingNoticeProc; klass.hInstance=GetModuleHandleW(nullptr); klass.lpszClassName=L"SanserSharingNotice"; klass.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1); klass.hCursor=LoadCursorW(nullptr,IDC_ARROW); RegisterClassW(&klass);
+    RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0);
+    window=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Sanser sharing",WS_POPUP|WS_BORDER,area.right-380,area.top+12,360,56,nullptr,nullptr,klass.hInstance,&output);
+    if(!window) throw std::runtime_error("Unable to show the screen-sharing indicator");
+    CreateWindowW(L"STATIC",L"Sanser · Screen sharing active",WS_CHILD|WS_VISIBLE,12,18,235,24,window,nullptr,klass.hInstance,nullptr);
+    CreateWindowW(L"BUTTON",L"Stop",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,258,10,88,34,window,reinterpret_cast<HMENU>(1),klass.hInstance,nullptr);
+    ShowWindow(window,SW_SHOWNOACTIVATE);
+  }
+  ~SharingNotice() { if(window) DestroyWindow(window); }
+  void pump() { if(!window) return; MSG message; while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); } }
+};
 void check(HRESULT hr,const char* operation) { if(FAILED(hr)) throw std::runtime_error(std::string(operation)+" failed ("+std::to_string(static_cast<unsigned long>(hr))+")"); }
 struct Runtime {
   Runtime() { check(CoInitializeEx(nullptr,COINIT_MULTITHREADED),"COM startup"); check(MFStartup(MF_VERSION),"Media Foundation startup"); }
@@ -185,13 +206,18 @@ int runWindows(bool host,int argc,char** argv) {
     display.setGpuCapture(encoder->usingGpuInput());
     if(options.ultraLowLatency && !encoder->usingGpuInput())
       throw std::runtime_error("Ultra Low Latency requires GPU capture and hardware encoding on Windows. Choose Balanced if the GPU path is unavailable.");
+    SharingNotice notice(peer,options.sharing);
     peer.onInput=[&](Input event) { injector.apply(event); }; HostOutputStop shutdown{peer}; peer.start();
     FrameBgra cached; bool hasCached=false, force=false;
     auto generation=display.generation();
     const auto mediaStart=Clock::now();
+    auto bitrate=options.bitrate;
     while(peer.running()) {
       const auto began=Clock::now();
       peer.pumpControl();
+      notice.pump(); if(!peer.running()) break;
+      const auto target=peer.bitrate();
+      if(target!=bitrate && encoder->setBitrate(target)) bitrate=target;
       force=peer.takeKeyframeRequest() || force;
       if(peer.ready()) {
         FrameBgra frame;
@@ -201,6 +227,7 @@ int runWindows(bool host,int argc,char** argv) {
           if(encoding.gpuDevice && encoding.gpuDevice!=display.gpuDevice()) {
             encoding.gpuDevice=display.gpuDevice();
             encoder=std::make_unique<MfVideoPacketEncoder>(options.width,options.height,encoding);
+            bitrate=options.bitrate;
             display.setGpuCapture(encoder->usingGpuInput());
           }
           generation=display.generation(); hasCached=false; cached=FrameBgra{}; force=true;

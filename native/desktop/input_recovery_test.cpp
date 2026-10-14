@@ -82,6 +82,34 @@ int main() {
     const std::string token(48,'r');
     {
       Stub remote; Options options; options.host=true; options.input=false; options.token=token;
+      options.bitrate=25000000; options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer host(options); PacketCodec codec(token,false); PeerStop stop{host}; host.start();
+      wire::Header h; h.keyId=123; h.sequence=1; h.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,codec.seal(h,{'S','A','K','1'}));
+      const auto ready=Clock::now()+std::chrono::seconds(1);
+      while(!host.ready() && Clock::now()<ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.ready(),"feedback handshake");
+      auto feedback=[&](std::uint64_t bytes) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(260));
+        Bytes payload{'S','V','F','1',0,0,1,244}; // 500 ms window
+        for(int i=7;i>=0;--i) payload.push_back(static_cast<std::uint8_t>(bytes>>(i*8)));
+        payload.insert(payload.end(),{0,0,0,100,0,0,0,0});
+        h.sequence++; h.packetType=wire::PacketType::NetworkFeedback;
+        remote.send(options.port,codec.seal(h,payload));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      };
+      for(unsigned i=0;i<3;++i) feedback(0);
+      check(host.recommendedBitrate()==options.bitrate,"idle desktop must not reduce bitrate because throughput is low");
+      host.video(Frame{Bytes(50000,1),1280,720,true}); feedback(0);
+      check(host.recommendedBitrate()==options.bitrate,"one transient delivery window must not reduce bitrate");
+      host.video(Frame{Bytes(50000,1),1280,720,true}); feedback(0);
+      check(host.recommendedBitrate()<options.bitrate && host.recommendedBitrate()>=5000000,"sustained delivery deficit reduces the viewer budget within quality bounds");
+      const auto reduced=host.recommendedBitrate();
+      for(unsigned i=0;i<10;++i) { host.video(Frame{Bytes(50000,1),1280,720,true}); feedback(50008); }
+      check(host.recommendedBitrate()>reduced && host.recommendedBitrate()<=options.bitrate,"healthy delivery recovers the budget gradually");
+    }
+    {
+      Stub remote; Options options; options.host=true; options.input=false; options.token=token;
       options.bitrate=100000000; options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
       Peer host(options); PacketCodec clientCodec(token,false),foreignCodec(std::string(48,'f'),false);
       std::atomic<unsigned> keyframes{0}; host.onKeyframe=[&] { ++keyframes; };

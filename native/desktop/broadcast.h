@@ -32,6 +32,7 @@ public:
   bool ready() const;
   bool running() const { return running_.load(); }
   bool takeKeyframeRequest();
+  std::uint32_t bitrate() const;
   std::vector<ViewerStats> stats() const;
   std::uint64_t publishedFrames() const { return published_.load(); }
 private:
@@ -57,6 +58,7 @@ public:
   void video(Frame frame);
   bool takeKeyframeRequest();
   void pumpControl();
+  std::uint32_t bitrate() const;
   std::function<void(Input)> onInput;
 private:
   Options options_;

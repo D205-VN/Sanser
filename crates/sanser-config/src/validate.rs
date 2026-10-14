@@ -330,7 +330,7 @@ mod tests {
 
     fn base() -> Vec<(&'static str, &'static str)> {
         vec![
-            ("SANSER_VERSION", "2.1.21"),
+            ("SANSER_VERSION", VERSION),
             ("SANSER_PROTOCOL_VERSION", "2"),
             (
                 "DATABASE_URL",

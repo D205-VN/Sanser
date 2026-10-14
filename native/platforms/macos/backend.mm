@@ -60,6 +60,10 @@ public:
     if(VTCompressionSessionEncodeFrame(session_,pixels,time,CMTimeMake(1,options_.fps),properties,nullptr,nullptr)!=noErr) failed_=true;
   }
   void keyframe() { force_=true; }
+  bool setBitrate(std::uint32_t bitrate) {
+    std::lock_guard lock(encodeMutex_);
+    return VTSessionSetProperty(session_,kVTCompressionPropertyKey_AverageBitRate,(__bridge CFNumberRef)@(bitrate))==noErr;
+  }
   bool failed() const { return failed_; }
 private:
   static void output(void* context,void*,OSStatus status,VTEncodeInfoFlags,CMSampleBufferRef sample) {
@@ -168,6 +172,14 @@ API_AVAILABLE(macos(12.3))
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error { (void)stream; (void)error; self.failed=YES; }
 @end
 
+@interface SanserSharingStop : NSObject
+@property(nonatomic,assign) HostOutput* output;
+- (void)stopSharing:(id)sender;
+@end
+@implementation SanserSharingStop
+- (void)stopSharing:(id)sender { (void)sender; if(self.output) self.output->stop(); }
+@end
+
 @interface SanserRemoteView : SanserMetalView
 @property(nonatomic,assign) Peer* peer;
 @property(nonatomic,assign) BOOL released;
@@ -215,6 +227,24 @@ struct API_AVAILABLE(macos(12.3)) CaptureStop {
     dispatch_sync(queue, ^{ capture.encoder=nullptr; });
     [stream stopCaptureWithCompletionHandler:^(NSError*) {}];
   }
+};
+struct SharingNotice {
+  NSPanel* __strong panel=nil;
+  SanserSharingStop* __strong action=nil;
+  SharingNotice(HostOutput& output,bool enabled) {
+    if(!enabled) return;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    const auto area=NSScreen.mainScreen.visibleFrame;
+    panel=[[NSPanel alloc] initWithContentRect:NSMakeRect(NSMaxX(area)-380,NSMaxY(area)-76,360,56) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    panel.releasedWhenClosed=NO; panel.level=NSFloatingWindowLevel; panel.movableByWindowBackground=YES; panel.hidesOnDeactivate=NO;
+    panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
+    NSTextField* label=[NSTextField labelWithString:@"Sanser · Screen sharing active"]; label.frame=NSMakeRect(12,18,240,22); [panel.contentView addSubview:label];
+    action=[SanserSharingStop new]; action.output=&output;
+    NSButton* stop=[NSButton buttonWithTitle:@"Stop" target:action action:@selector(stopSharing:)]; stop.frame=NSMakeRect(258,10,88,34); [panel.contentView addSubview:stop];
+    [panel orderFrontRegardless];
+  }
+  ~SharingNotice() { if(action) action.output=nullptr; [panel close]; }
+  void pump() { if(!panel) return; NSEvent* event; while((event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:YES])) [NSApp sendEvent:event]; }
 };
 #ifdef SANSER_CODEC_TEST
 // Exercises the actual VideoToolbox encoder/decoder without capturing a screen
@@ -363,9 +393,14 @@ int runMac(bool host,int argc,char** argv) {
         [stream startCaptureWithCompletionHandler:^(NSError* error) { dispatch_async(dispatch_get_main_queue(), ^{ failed=error!=nil; started=true; }); }];
         while(!started && Clock::now()<deadline) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         if(!started || failed) throw std::runtime_error("Screen capture could not start; check Screen Recording permission");
+        SharingNotice notice(peer,options.sharing);
         HostOutputStop shutdown{peer}; peer.start();
+        auto bitrate=options.bitrate;
         while(peer.running() && !capture.failed && !encoder.failed()) {
           peer.pumpControl();
+          notice.pump(); if(!peer.running()) break;
+          const auto target=peer.bitrate();
+          if(target!=bitrate && encoder.setBitrate(target)) bitrate=target;
           if(peer.takeKeyframeRequest()) { encoder.keyframe(); encoder.refresh(); }
           [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
         }

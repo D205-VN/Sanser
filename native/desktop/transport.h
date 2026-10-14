@@ -94,6 +94,7 @@ public:
   std::uint64_t videoQueueDrops() const { return videoQueueDrops_.load(); }
   std::uint64_t repairedDatagrams() const { return repairedDatagrams_.load(); }
   std::uint64_t repairCacheMisses() const { return repairCacheMisses_.load(); }
+  std::uint32_t recommendedBitrate() const { return videoBudget_.load(); }
 private:
   void loop();
   void sendLoop();
@@ -108,6 +109,7 @@ private:
   Options options_;
   PacketCodec codec_;
   std::intptr_t socket_ = -1;
+  bool timerResolution_=false;
   std::thread worker_;
   std::thread sender_;
   std::atomic<bool> running_{false}, ready_{false};
@@ -117,6 +119,11 @@ private:
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
   std::atomic<std::uint64_t> videoQueueDrops_{0};
   std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0};
+  std::atomic<std::uint64_t> offeredBytes_{0};
+  std::atomic<std::uint32_t> videoBudget_{0};
+  std::uint64_t receivedVideoBytes_=0, receivedVideoDatagrams_=0, requestedVideoFragments_=0, lastFeedbackDrops_=0;
+  unsigned congestionWindows_=0, recoveryWindows_=0;
+  Clock::time_point lastVideoFeedback_{};
   std::uint32_t generation_ = 0, peerGeneration_ = 0;
   std::set<std::uint32_t> previousGenerations_;
   std::uint64_t lastVideo_ = 0, lastMouse_ = 0;

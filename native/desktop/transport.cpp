@@ -13,6 +13,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <mmsystem.h>
 #include <bcrypt.h>
 #else
 #include <arpa/inet.h>
@@ -225,8 +226,10 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
 }
 
 Peer::Peer(const Options& o) : options_(o), codec_(o.token, o.host) {
+  videoBudget_=o.bitrate;
 #ifdef _WIN32
   WSADATA data{}; if (WSAStartup(MAKEWORD(2,2), &data) != 0) throw std::runtime_error("Winsock unavailable");
+  timerResolution_=timeBeginPeriod(1)==TIMERR_NOERROR;
 #endif
   try {
   std::random_device random; do { generation_=random(); } while(generation_==0);
@@ -247,6 +250,7 @@ Peer::Peer(const Options& o) : options_(o), codec_(o.token, o.host) {
     if(socket_!=-1) closeSocket(static_cast<Socket>(socket_));
     socket_=-1;
 #ifdef _WIN32
+    if(timerResolution_) timeEndPeriod(1);
     WSACleanup();
 #endif
     throw;
@@ -254,6 +258,7 @@ Peer::Peer(const Options& o) : options_(o), codec_(o.token, o.host) {
 }
 Peer::~Peer() { stop(); if (socket_ != -1) closeSocket(static_cast<Socket>(socket_));
 #ifdef _WIN32
+  if(timerResolution_) timeEndPeriod(1);
   WSACleanup();
 #endif
 }
@@ -303,6 +308,7 @@ void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
   const auto& bytes=frame.payload;
   if (bytes.size()<=8 || bytes.size()>maxFrame) return;
   const auto id=++frame_;
+  offeredBytes_+=bytes.size();
   videoCacheBytes_+=bytes.size();
   videoCache_.emplace(id,CachedVideo{std::move(prepared),Clock::now(),{}, {}});
   while(videoCache_.size()>16 || videoCacheBytes_>8*1024*1024) {
@@ -392,6 +398,34 @@ void Peer::process(const Bytes& bytes) {
   if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
   if (h.packetType==snv2::PacketType::Disconnect) { running_=false; return; }
+  if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback && b.size()==24 && std::memcmp(b.data(),"SVF1",4)==0) {
+    if(Clock::now()-lastVideoFeedback_<std::chrono::milliseconds(250)) return;
+    const auto elapsed=r32(b.data()+4); if(elapsed<250 || elapsed>2000) return;
+    lastVideoFeedback_=Clock::now();
+    std::uint64_t delivered=0; for(std::size_t i=8;i<16;++i) delivered=(delivered<<8)|b[i];
+    const auto packets=r32(b.data()+16), missing=r32(b.data()+20);
+    const auto offered=offeredBytes_.exchange(0), drops=videoQueueDrops_.load();
+    // Compare actual offered encoded bytes, never the configured target. An
+    // idle/compressible desktop must not be mistaken for insufficient bandwidth.
+    const bool busy=offered>=32000;
+    const bool loss=packets>=16 && static_cast<double>(missing)/packets>0.03;
+    const bool congested=busy && (static_cast<double>(delivered)<static_cast<double>(offered)*0.85 || loss || drops>lastFeedbackDrops_);
+    lastFeedbackDrops_=drops;
+    if(congested) {
+      recoveryWindows_=0;
+      if(++congestionWindows_>=2) {
+        videoBudget_=std::max(std::min(options_.bitrate,5000000U),static_cast<std::uint32_t>(videoBudget_.load()*0.85));
+        congestionWindows_=0;
+      }
+    } else {
+      congestionWindows_=0;
+      if(busy && ++recoveryWindows_>=10) {
+        videoBudget_=std::min(options_.bitrate,videoBudget_.load()+std::max(500000U,videoBudget_.load()/20));
+        recoveryWindows_=0;
+      }
+    }
+    return;
+  }
   if (h.packetType==snv2::PacketType::NetworkFeedback && (b.size()==8 || b.size()==16)) {
     std::uint64_t ack=0, mask=0;
     for (std::size_t i=0;i<8;++i) ack=(ack<<8)|b[i];
@@ -408,6 +442,7 @@ void Peer::process(const Bytes& bytes) {
   if (h.packetType==snv2::PacketType::Nack && options_.host) { queueVideoRepair(b); return; }
   if (h.packetType==snv2::PacketType::KeyframeRequest && options_.host) { if(onKeyframe) onKeyframe(); return; }
   if (h.packetType==snv2::PacketType::Video && !options_.host && h.streamId==1) {
+    receivedVideoBytes_+=b.size(); ++receivedVideoDatagrams_;
     auto frame=reassembler_.push(h,b);
     if(frame) {
       if(lastVideo_ && h.frameId!=lastVideo_+1 && !frame->keyframe) needKeyframe_=true;
@@ -480,6 +515,7 @@ void Peer::sendLoop() {
 }
 void Peer::loop() {
   auto lastHello=Clock::time_point{};
+  auto lastFeedback=Clock::now();
   try {
     while(running_ && !stopRequested) {
       const auto now=Clock::now();
@@ -505,10 +541,20 @@ void Peer::loop() {
           Bytes request{'S','V','N','1'};
           for(int i=7;i>=0;--i) request.push_back(static_cast<std::uint8_t>(repair.frame>>(i*8)));
           u16(request,static_cast<std::uint16_t>(repair.missing.size()));
+          requestedVideoFragments_+=repair.missing.size();
           for(auto index:repair.missing) u16(request,index);
           transmit(snv2::PacketType::Nack,request);
         }
         if(expired) requestKeyframe();
+        if(ready_ && now-lastFeedback>=std::chrono::milliseconds(500)) {
+          Bytes feedback{'S','V','F','1'};
+          u32(feedback,static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now-lastFeedback).count()));
+          for(int i=7;i>=0;--i) feedback.push_back(static_cast<std::uint8_t>(receivedVideoBytes_>>(i*8)));
+          u32(feedback,static_cast<std::uint32_t>(std::min<std::uint64_t>(receivedVideoDatagrams_,UINT32_MAX)));
+          u32(feedback,static_cast<std::uint32_t>(std::min<std::uint64_t>(requestedVideoFragments_,UINT32_MAX)));
+          transmit(snv2::PacketType::NetworkFeedback,feedback);
+          receivedVideoBytes_=receivedVideoDatagrams_=requestedVideoFragments_=0; lastFeedback=now;
+        }
       }
     }
   } catch (...) { running_=false; }

@@ -399,7 +399,8 @@ async fn devices_and_session_state_machine_enforce_ownership() {
                 Some(json!({
                     "id": id,
                     "name": name,
-                    "platform": "test",
+                    "platform": if id==&host_id {"windows-x86_64"} else {"macos-aarch64"},
+                    "deviceRole": if id==&host_id {"host"} else {"client"},
                     "routeAddress": route,
                     "nativeTransport": true,
                     "webrtc": true,
@@ -639,7 +640,7 @@ async fn devices_and_session_state_machine_enforce_ownership() {
         StatusCode::NOT_FOUND
     );
 
-    sqlx::query("UPDATE connection_sessions SET accepted_at = 1 WHERE id = $1")
+    sqlx::query("UPDATE connection_sessions SET requester_ready_at = 1 WHERE id = $1")
         .bind(session_id)
         .execute(&server.state.pool)
         .await
@@ -737,14 +738,23 @@ async fn ice_uses_authenticated_short_lived_turn_credentials() {
         .request(Method::GET, "/api/v2/network/ice", None, Some(access))
         .await;
     assert_eq!(response.0, StatusCode::OK, "{}", response.1);
-    assert_eq!(response.1["iceTransportPolicy"], "relay");
+    assert_eq!(response.1["iceTransportPolicy"], "all");
     assert!(response.1["expiresAt"].as_i64().is_some());
-    let username = response.1["iceServers"][0]["username"]
-        .as_str()
-        .expect("temporary TURN username");
+    let turn = response.1["iceServers"]
+        .as_array()
+        .expect("ICE servers")
+        .iter()
+        .find(|server| {
+            server["urls"].as_array().is_some_and(|urls| {
+                urls.iter()
+                    .any(|url| url.as_str().is_some_and(|url| url.starts_with("turn:")))
+            })
+        })
+        .expect("TURN entry");
+    let username = turn["username"].as_str().expect("temporary TURN username");
     assert!(username.contains(':'));
     assert!(
-        !response.1["iceServers"][0]["credential"]
+        !turn["credential"]
             .as_str()
             .expect("TURN credential")
             .is_empty()
@@ -783,10 +793,10 @@ async fn request_guards_return_structured_errors_and_request_ids() {
     assert_eq!(invalid.0, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(invalid.1["error"]["code"], "validation_error");
 
+    server.close().await;
     let Some(limited) =
         TestServer::with_config(|config| config.general_rate_limit_per_minute = 1).await
     else {
-        server.close().await;
         return;
     };
     assert_eq!(
@@ -802,7 +812,6 @@ async fn request_guards_return_structured_errors_and_request_ids() {
     assert_eq!(rate_limited.0, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(rate_limited.1["error"]["code"], "rate_limited");
     limited.close().await;
-    server.close().await;
 }
 
 #[tokio::test]
