@@ -117,10 +117,11 @@ impl EngineChild {
     fn wait_sharing_ack(&mut self, request: Uuid, timeout: Duration) -> Result<(), DesktopError> {
         let deadline = Instant::now() + timeout;
         loop {
-            match self
-                .acknowledgements
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
+            match self.acknowledgements.recv_timeout(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(ENGINE_STARTUP_POLL_INTERVAL),
+            ) {
                 Ok(ack) if ack.request == request => {
                     return if ack.accepted {
                         Ok(())
@@ -131,7 +132,23 @@ impl EngineChild {
                     };
                 }
                 Ok(_) => {}
-                Err(_) => {
+                Err(error) => {
+                    // Permission/capture failure can occur after the initial
+                    // stabilization period. Preserve stderr instead of hiding
+                    // the host's failure behind an acknowledgement timeout.
+                    if let Some(status) = self.process.try_wait().map_err(|error| {
+                        DesktopError::Process(format!("unable to inspect native host: {error}"))
+                    })? {
+                        return Err(DesktopError::Process(self.output.exit_message(format!(
+                            "native host exited before sharing acknowledgement with {status}"
+                        ))));
+                    }
+                    if Instant::now() < deadline {
+                        if matches!(error, std::sync::mpsc::RecvTimeoutError::Disconnected) {
+                            thread::sleep(ENGINE_STARTUP_POLL_INTERVAL);
+                        }
+                        continue;
+                    }
                     if let Some(sharing) = self.sharing.as_mut() {
                         sharing.desynchronized = true;
                     }
@@ -832,7 +849,7 @@ impl EngineManager {
         if let Some(peer) = sharing {
             let viewer = peer.viewer;
             child.sharing = Some(crate::sharing_engine::SharingHost::new(peer));
-            if let Err(error) = child.wait_sharing_ack(viewer, Duration::from_secs(20)) {
+            if let Err(error) = child.wait_sharing_ack(viewer, Duration::from_secs(25)) {
                 let _ = stop_child(&mut child);
                 return Err(error);
             }
@@ -979,6 +996,44 @@ mod tests {
     use std::net::Ipv6Addr;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn sharing_startup_preserves_delayed_capture_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "sleep 0.1; printf 'Screen Recording denied; quit and reopen Sanser\\n' >&2; exit 1",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = EngineChild::spawn(&mut command, None, None)?;
+        let result = child.wait_sharing_ack(Uuid::new_v4(), Duration::from_secs(2));
+        assert!(matches!(result, Err(DesktopError::Process(ref message))
+            if message.contains("Screen Recording denied") && !message.contains("timed out")));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sharing_startup_accepts_delayed_ack() -> Result<(), Box<dyn std::error::Error>> {
+        let request = Uuid::new_v4();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "sleep 0.1; printf 'SNSHARE_ACK request=%s accepted=1\\n' \"$SANSER_TEST_ACK\"",
+            ])
+            .env("SANSER_TEST_ACK", request.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = EngineChild::spawn(&mut command, None, None)?;
+        let result = child.wait_sharing_ack(request, Duration::from_secs(2));
+        child.process.wait()?;
+        result?;
+        Ok(())
+    }
 
     fn request(kind: EngineKind) -> LaunchEngineRequest {
         LaunchEngineRequest {

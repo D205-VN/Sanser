@@ -6,6 +6,7 @@
 #include "transport.h"
 #include "broadcast.h"
 #include "engine.h"
+#include "capture_startup.h"
 #import "metal_presenter.h"
 #include "keyboard.h"
 #include <algorithm>
@@ -169,7 +170,7 @@ API_AVAILABLE(macos(12.3))
   (void)stream; if(type!=SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample) || !self.encoder) return;
   auto image=CMSampleBufferGetImageBuffer(sample); if(image) self.encoder->encode(image,CMSampleBufferGetPresentationTimeStamp(sample));
 }
-- (void)stream:(SCStream*)stream didStopWithError:(NSError*)error { (void)stream; (void)error; self.failed=YES; }
+- (void)stream:(SCStream*)stream didStopWithError:(NSError*)error { (void)stream; std::cerr<<captureFailure(error,"Screen capture stopped")<<std::endl; self.failed=YES; }
 @end
 
 @interface SanserSharingStop : NSObject
@@ -369,13 +370,18 @@ int runMac(bool host,int argc,char** argv) {
     auto options=parseOptions(host,argc,argv); [NSApplication sharedApplication];
     if(host) {
       if(@available(macOS 12.3,*)) {
-        if(!CGPreflightScreenCaptureAccess()) { CGRequestScreenCaptureAccess(); throw std::runtime_error("Allow Screen Recording for Sanser in System Settings, then retry"); }
-        if(options.input && !AXIsProcessTrusted()) { NSDictionary* request=@{(__bridge NSString*)kAXTrustedCheckOptionPrompt:@YES}; AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)request); throw std::runtime_error("Allow Accessibility for Sanser to enable remote input, or turn remote input off"); }
-        __block SCShareableContent* content=nil; __block bool finished=false;
-        [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent* value,NSError*) { dispatch_async(dispatch_get_main_queue(), ^{ content=value; finished=true; }); }];
-        const auto deadline=Clock::now()+std::chrono::seconds(10);
-        while(!finished && Clock::now()<deadline) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+        // ScreenCaptureKit is the authority for this capture process. A stale
+        // CoreGraphics preflight must not abort a newly granted capture or
+        // trigger a second permission request before ScreenCaptureKit runs.
+        __block SCShareableContent* content=nil;
+        auto readContent=^(CaptureCompletion complete) {
+          [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent* value,NSError* error) {
+            dispatch_async(dispatch_get_main_queue(), ^{ content=value; complete(error); });
+          }];
+        };
+        awaitCaptureOperation([readContent](CaptureCompletion complete) { readContent(complete); },"Read available screens");
         if(!content || content.displays.count==0) throw std::runtime_error("No display is available for capture");
+        if(options.input && !AXIsProcessTrusted()) { NSDictionary* request=@{(__bridge NSString*)kAXTrustedCheckOptionPrompt:@YES}; AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)request); throw std::runtime_error("On the host Mac, allow Accessibility for Sanser, then quit and reopen Sanser before reconnecting; or turn remote input off"); }
         SCDisplay* display=content.displays.firstObject; for(SCDisplay* candidate in content.displays) if(candidate.displayID==CGMainDisplayID()) display=candidate;
         const double scale=std::min(static_cast<double>(options.width)/display.width,static_cast<double>(options.height)/display.height);
         options.width=std::max(64U,static_cast<std::uint32_t>(display.width*scale)&~1U);
@@ -388,11 +394,12 @@ int runMac(bool host,int argc,char** argv) {
         SCStream* stream=[[SCStream alloc] initWithFilter:filter configuration:config delegate:capture];
         dispatch_queue_t queue=dispatch_queue_create("sanser.capture",DISPATCH_QUEUE_SERIAL);
         CaptureStop captureStop{stream,capture,queue};
-        NSError* failure=nil; if(![stream addStreamOutput:capture type:SCStreamOutputTypeScreen sampleHandlerQueue:queue error:&failure]) throw std::runtime_error("Unable to create screen capture output");
-        __block bool started=false,failed=false;
-        [stream startCaptureWithCompletionHandler:^(NSError* error) { dispatch_async(dispatch_get_main_queue(), ^{ failed=error!=nil; started=true; }); }];
-        while(!started && Clock::now()<deadline) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-        if(!started || failed) throw std::runtime_error("Screen capture could not start; check Screen Recording permission");
+        NSError* failure=nil; if(![stream addStreamOutput:capture type:SCStreamOutputTypeScreen sampleHandlerQueue:queue error:&failure]) throw std::runtime_error(failure ? captureFailure(failure,"Create screen capture output") : "Unable to create screen capture output");
+        // Stream startup gets its own deadline, independent of time spent on
+        // display enumeration or the user's permission dialog.
+        awaitCaptureOperation([&](CaptureCompletion complete) {
+          [stream startCaptureWithCompletionHandler:complete];
+        },"Start screen capture");
         SharingNotice notice(peer,options.sharing);
         HostOutputStop shutdown{peer}; peer.start();
         auto bitrate=options.bitrate;

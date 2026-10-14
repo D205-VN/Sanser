@@ -108,7 +108,7 @@
   </div>
   {#if !canHost}<div class="notice warning">{runtime.capabilities.hostEngine.reason ?? 'Screen sharing is unavailable on this computer.'}</div>{/if}
   {#if runtime.platform.toLowerCase().includes('mac') && canHost}
-    <details class="sharing-help"><summary>Mac permissions</summary><p>Allow Screen Recording in System Settings to share your screen. Allow Accessibility for remote keyboard and mouse control.</p></details>
+    <details class="sharing-help"><summary>Mac permissions</summary><p>On this Mac, allow Sanser in System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording. Allow Accessibility for remote keyboard and mouse control. After changing permissions, quit Sanser completely (Cmd+Q), reopen /Applications/Sanser.app, and reconnect. If permission is already enabled but capture still fails after an update, turn Sanser’s recording permission off and on, then quit and reopen the app.</p></details>
   {/if}
   {#if runtime.capabilities.multiViewerHost === true}<SharingPanel />{/if}
   <div class="grid two host-grid">
