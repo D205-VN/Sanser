@@ -38,6 +38,20 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); connection.setPreparing(false); connection.clear(); vi.useRealTimers(); });
 
+it('keeps a view-only session input-disabled even if credential metadata omits the restriction', async () => {
+  const viewer = { ...target, accessMode: 'view-only' as const };
+  connection.begin(viewer);
+  mocks.getSession.mockResolvedValue(viewer);
+  mocks.credentials.mockResolvedValue({ sessionId: target.id, peerRouteAddress: '192.0.2.1',
+    basePort: 5000, sessionToken: 'test-only-token', expiresAt: 9999999999, wireProtocol: 'legacy', accessMode: 'control' });
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({
+    inputEnabled: false, relativeMouse: false
+  })));
+  expect(get(connection).session?.accessMode).toBe('view-only');
+});
+
 it('allows cancelling an in-progress route without falling back to relay or launching an engine', async () => {
   let activeSignal: AbortSignal | undefined;
   mocks.punch.mockImplementation((...args: unknown[]) => {
