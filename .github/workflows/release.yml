@@ -104,10 +104,40 @@ jobs:
         shell: bash
         run: apps/desktop/src-tauri/binaries/sanser-client-macos-aarch64-apple-darwin --capabilities-json | jq -e '.nativeSnv2 == true'
       - name: Build application and DMG
-        run: npm --workspace @sanser/desktop run tauri -- build --target aarch64-apple-darwin
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$APPLE_CERTIFICATE" ]]; then
+            if [[ "$APPLE_SIGNING_IDENTITY" != "Developer ID Application: "* || -z "$APPLE_CERTIFICATE_PASSWORD" ]]; then
+              echo '::error::Configure a Developer ID Application identity and certificate password together with APPLE_CERTIFICATE.'
+              exit 1
+            fi
+          else
+            if [[ -n "$APPLE_SIGNING_IDENTITY" || -n "$APPLE_CERTIFICATE_PASSWORD" ]]; then
+              echo '::error::Apple signing configuration is incomplete; APPLE_CERTIFICATE is required.'
+              exit 1
+            fi
+            unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD
+            export APPLE_SIGNING_IDENTITY=-
+            echo '::warning::Ad-hoc Mac build: Screen Recording permission may need to be removed and granted again after an update.'
+          fi
+          if [[ -n "$APPLE_ID" || -n "$APPLE_PASSWORD" || -n "$APPLE_TEAM_ID" ]]; then
+            if [[ -z "$APPLE_ID" || -z "$APPLE_PASSWORD" || -z "$APPLE_TEAM_ID" || "$APPLE_SIGNING_IDENTITY" == - ]]; then
+              echo '::error::Notarization requires Developer ID signing plus APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID.'
+              exit 1
+            fi
+          else
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          fi
+          npm --workspace @sanser/desktop run tauri -- build --target aarch64-apple-darwin
         env:
-          # Ad-hoc app signing until an Apple Developer certificate is configured.
-          APPLE_SIGNING_IDENTITY: "-"
+          # Tauri imports the certificate into a temporary keychain. Never print it.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Name artifacts

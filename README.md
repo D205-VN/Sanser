@@ -91,8 +91,10 @@ deployed behind HTTPS on a server reachable by every client.
    Node.js, Rust, or a local API server.
 
 The GitHub release uses the updater signing secrets configured in the workflow.
-The macOS app is ad-hoc signed; Apple Developer signing/notarization is
-not configured in this workflow.
+The workflow supports Developer ID signing and optional notarization through
+Apple repository secrets. Without those secrets, builds remain ad-hoc signed
+and warn that screen-recording permissions may need to be granted again after
+an update. See [Mac permissions and signing](docs/macos-permissions.md).
 
 ## Development
 
