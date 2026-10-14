@@ -10,11 +10,19 @@ existing platform-native SNV2/H.264 capture, encoder and decoder backends.
 | 2 | View-only credentials, client input suppression and host enforcement | Implemented; native authentication/permission tests pass. |
 | 3 | One capture/encoder delivering to independent authenticated peers | Implemented; three-viewer UDP and real VideoToolbox codec loopback tests pass. |
 | 4 | Invite/join/remove/stop UI, independent transport lifecycle and visible sharing indicator | Implemented, including viewer retries, logout cleanup and shared bitrate feedback. |
-| 5 | Database/Windows/macOS CI, installers and real 2–3-computer validation | Automated checks and Preview packaging workflow implemented; final CI/release results must be verified. Physical device/network validation remains. |
+| 5 | Database/Windows/macOS CI, installers and real 2–3-computer validation | CI passed all nine jobs; Mac/Windows Preview installers are published. Physical 2–3-computer and network validation remains. |
 
-**Four implementation steps are complete. Step 5 remains open until the Preview
-has passed final automated checks and real-device testing.** Loopback tests do
+**Four implementation steps are complete. Step 5 has passed automated checks
+and Preview packaging, with real-device testing still open.** Loopback tests do
 not prove physical Windows capture, GPU compatibility or WAN performance.
+
+- [Verified CI: 9/9 jobs](https://github.com/D205-VN/Sanser/actions/runs/38561115391).
+- [Preview build/publication: 4/4 jobs](https://github.com/D205-VN/Sanser/actions/runs/38561849882).
+- [Download 2.1.22 Preview](https://github.com/D205-VN/Sanser/releases/tag/v2.1.22).
+
+The Preview tag points to `af405fca251448943890b2bfbdec6a52608e08dc`, the code
+commit verified by those checks. Later documentation updates remain on the same
+development branch.
 
 ## Using the feature
 
@@ -111,11 +119,11 @@ first-decoded-frame event is distinct from overlay/control traffic.
 
 ## Validation and remaining work
 
-Local validation includes Svelte checking/lint, 156 frontend tests, Rust workspace
-tests, and 12 native CTests. Tests cover single encoder/three peers, independent
+Local validation passed Svelte checking/lint, 156 frontend tests, Rust workspace
+tests and 12 macOS native CTests. Tests cover single encoder/three peers, independent
 relay fallback/removal, fresh viewer retry, shutdown/reinitialization, cancelled
 Direct reservations, repair authentication/expiry and real VideoToolbox idle late
-join. Windows-native compilation and loopback tests run in GitHub CI.
+join. Windows-native compilation and all 12 loopback/codec tests passed in GitHub CI.
 
 The dedicated PostgreSQL CI job runs eight API integration tests, including
 migration application, racing four invitations for three slots, consent,
@@ -124,9 +132,10 @@ member removal and group-stop reservation release. Local runs without a dedicate
 `TEST_DATABASE_URL` explicitly skip these tests; production databases are never
 used by this fixture.
 
-The `v2.1.22` workflow builds a GitHub **Preview prerelease**, signed updater
-packages and Mac/Windows installers. The previous stable release remains latest.
-See `docs/releases/v2.1.22.md` for scope and use.
+The `v2.1.22` workflow published a GitHub **Preview prerelease** with nine assets:
+Mac DMG/ZIP/updater bundle, Windows installer/portable executable, updater
+signatures, platform manifest and SHA-256 checksums. The previous 2.1.21 stable
+release remains latest. See `docs/releases/v2.1.22.md` for scope and use.
 
 Still required on real devices:
 

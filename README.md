@@ -1,9 +1,9 @@
-# Sanser 2.1.21
+# Sanser 2.1.22 Preview
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.1.21
+Product:  Sanser 2.1.22 Preview
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -19,6 +19,18 @@ Native:   Authenticated SNV2 media engines
 - Typed Tauri commands and sidecar allowlists; Node.js is not a packaged runtime.
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
+
+The 2.1.22 Preview adds one-encoder screen sharing for up to three view-only
+computers in the same account. See [Preview notes](docs/releases/v2.1.22.md) and
+[implementation/validation progress](docs/multi-viewer-progress.md). The previous
+2.1.21 release remains the stable automatic-update channel.
+
+On the host, select **Host → Go online → Start sharing → Invite**. Each invited
+computer selects **Join**. Use **Remove** for one viewer or **Stop sharing** for
+the group; a floating native Stop indicator remains visible on the host screen.
+Update both desktops and the server: sharing requires `sharing-media` server
+support and packaged `multiViewerHost` capability. Physical 2–3-machine and WAN
+performance testing remains necessary.
 
 Platform streaming features are enabled only when the corresponding v2 native engine reports a real capability. The UI labels unavailable work explicitly; it does not expose functional-looking controls without a backend.
 
@@ -78,9 +90,9 @@ deployed behind HTTPS on a server reachable by every client.
 4. Distribute the signed installer. Users do not need `.env`, Neon credentials,
    Node.js, Rust, or a local API server.
 
-The GitHub macOS release also expects the signing secrets already referenced in
-the workflow plus `APPLE_API_KEY`, `APPLE_API_ISSUER`, and
-`APPLE_API_PRIVATE_KEY` (the `.p8` contents) for notarization.
+The GitHub release uses the updater signing secrets configured in the workflow.
+The macOS Preview app is ad-hoc signed; Apple Developer signing/notarization is
+not configured in this workflow.
 
 ## Development
 
@@ -167,7 +179,7 @@ For a local unsigned verification bundle only:
 npm run desktop:bundle:local
 ```
 
-Expected release artifact names and unverified platform items are tracked in [the release ledger](docs/sanser-2-release.md). Local unsigned macOS builds are not notarized.
+Current Preview scope and remaining platform validation are tracked in [the Preview notes](docs/releases/v2.1.22.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
 
 ## Operating-system permissions
 
@@ -175,7 +187,7 @@ Expected release artifact names and unverified platform items are tracked in [th
 - macOS client requests Accessibility/Input Monitoring when remote input capture is enabled and microphone permission only when microphone forwarding is enabled.
 - macOS hosting is implemented with ScreenCaptureKit and VideoToolbox on macOS 12.3 or newer. Screen Recording is requested when hosting starts; Accessibility is needed when remote input is enabled.
 - Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; their audio and HEVC support remain incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
-- Screen sharing currently supports one host and one viewer per session. Broadcasting to multiple viewers is not implemented.
+- The 2.1.22 Preview supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
 
 ## Migration
 
@@ -183,11 +195,12 @@ The v2 migrator backs up legacy data, imports only validated non-secret preferen
 
 ## Troubleshooting
 
-- Auto mode tries direct UDP first and uses the end-to-end encrypted WSS relay when NAT traversal fails. Redeploy the current server and install the matching desktop build on both devices before testing fallback.
+- Auto mode tries direct UDP first and uses the authenticated UDP relay, or end-to-end encrypted WSS fallback, when NAT traversal fails. Redeploy the current server and install the matching desktop build on both devices before testing fallback.
 - Direct mode fails across networks: enable UPnP/port forwarding and allow Sanser through the firewall, or switch back to Auto/Relay. Direct intentionally never uses the relay.
 - Native capability is unavailable: build/install the platform v2 sidecar and inspect sanitized Diagnostics output.
 - Database is not ready: verify the Neon pooled endpoint, TLS query, network allowlist and migration access without pasting credentials into logs/issues.
 
 Sanser never sends realtime input, video or audio through PostgreSQL or the
 signaling REST API. Relay mode forwards only bounded, end-to-end encrypted
-frames through the in-memory WSS relay.
+datagrams through the configured UDP relay or encrypted frames through the
+in-memory WSS relay.
