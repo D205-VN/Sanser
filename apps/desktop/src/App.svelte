@@ -19,6 +19,7 @@
   import { session } from './stores/session';
   import { sharing } from './stores/sharing';
   import Updater from './components/Updater.svelte';
+  import { incomingSharingInvitations } from './lib/sharingInvitations';
 
   let updater = $state<{ checkForUpdates: (manual?: boolean) => Promise<void> }>();
   let updateChecking = $state(false);
@@ -32,9 +33,7 @@
   let browserOnline = $state(navigator.onLine);
   let autoOnlineAccountId = $state<string | null>(null);
   let sharingActionError = $state<string | null>(null);
-  const invitations = $derived($sharing.groups.flatMap((group) => group.members
-    .filter((member) => member.viewerDeviceId === $presence.deviceId && (member.state === 'invited' || member.state === 'accepted') && member.sessionId !== $connection.session?.id)
-    .map((member) => ({ group, member }))));
+  const invitations = $derived(incomingSharingInvitations($sharing.groups, $presence.deviceId, $connection.session?.id));
   const watchingCount = $derived($sharing.paused ? 0 : $sharing.ownGroup?.members.filter((member) => member.state === 'accepted' && member.startedAt !== undefined).length ?? 0);
 
   $effect(() => {
@@ -172,6 +171,7 @@
     return () => {
       routeHealthLifecycle.abort();
       stopRouteHealth?.();
+      void sharing.shutdown();
       window.clearInterval(expiryTimer);
       window.removeEventListener('focus', checkSessionInactivity);
       document.removeEventListener('visibilitychange', checkSessionInactivity);
@@ -206,6 +206,7 @@
       <main bind:this={pageContainer} class:session-scroll={page === 'session'} class="page-scroll">
         {#if signOutError}<div class="notice error" role="alert">{signOutError}</div>{/if}
         {#if sharingActionError}<div class="notice error" role="alert">{sharingActionError}</div>{/if}
+        {#if $sharing.error && page !== 'host'}<div class="notice warning" role="status">Screen sharing invitations could not be loaded. {$sharing.error} <button class="button small" onclick={() => sharing.refresh()}>Retry invitations</button></div>{/if}
         {#each invitations as invitation (invitation.member.id)}
           <div class="notice sharing-invitation" role="status"><div><strong>{$sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? 'A computer in your account'} invited you to view its screen.</strong><p>View only · Your keyboard and mouse remain on this computer.</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? 'Open shared screen' : 'Join'}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>Decline</button>{/if}</span></div>
         {/each}

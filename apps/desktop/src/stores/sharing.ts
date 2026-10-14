@@ -31,6 +31,8 @@ export function createSharingStore() {
   let timer: number | undefined;
   let pollingGeneration: number | null = null;
   let shutdownTask: Promise<void> | null = null;
+  let initializationTask: Promise<void> | null = null;
+  let supportRetryAt = 0;
   let lastHeartbeat = 0;
   let nativeStarted = false;
   const hasNative = (): boolean => nativeStarted;
@@ -134,9 +136,22 @@ export function createSharingStore() {
 
   async function poll(): Promise<void> {
     const api = session.client(); const epoch = generation;
-    if (!api || pollingGeneration === epoch || !get(store).supported || accountId !== get(session).account?.id) return;
+    if (!api || pollingGeneration === epoch || accountId !== get(session).account?.id) return;
     pollingGeneration = epoch;
     try {
+      if (!get(store).supported) {
+        if (Date.now() < supportRetryAt) return;
+        supportRetryAt = Date.now() + 10_000;
+        try {
+          const supported = await api.supportsSharingMedia();
+          if (epoch !== generation) return;
+          store.update((state) => ({ ...state, supported, error: supported ? null : 'Update the Sanser server to receive screen sharing invitations.' }));
+          if (!supported) return;
+        } catch (error) {
+          if (epoch === generation) store.update((state) => ({ ...state, error: message(error) }));
+          return;
+        }
+      }
       const [groups, devices] = await Promise.all([api.sharingGroups(), api.devices()]);
       if (epoch !== generation) return;
       const hostId = get(host).deviceId;
@@ -202,7 +217,7 @@ export function createSharingStore() {
       await haltNative(own?.id);
       if (own && api) await api.stopSharingGroup(own.id).catch(() => undefined);
       accountId = null; runtime = null; ownedGroupId = null; stoppedGroupId = null;
-      lastHeartbeat = 0; store.set({ ...initial });
+      lastHeartbeat = 0; supportRetryAt = 0; initializationTask = null; store.set({ ...initial });
     })().finally(() => { shutdownTask = null; });
     return shutdownTask;
   }
@@ -213,20 +228,17 @@ export function createSharingStore() {
       if (shutdownTask) await shutdownTask;
       if (accountId && accountId !== get(session).account?.id) await shutdown();
       const account = get(session).account?.id;
-      if (!account || (accountId === account && get(store).supported)) return;
-      generation += 1; const epoch = generation; accountId = account; runtime = value;
-      const api = session.client(); if (!api) return;
-      try {
-        const supported = await api.supportsSharingMedia();
-        if (epoch !== generation) return;
-        store.update((state) => ({ ...state, supported, error: supported ? null : 'Update the Sanser server to enable screen sharing invitations.' }));
-        if (supported) {
-          await poll();
-          if (epoch === generation && accountId === get(session).account?.id) timer = window.setInterval(() => void poll(), 2000);
-        }
-      } catch (error) { if (epoch === generation) store.update((state) => ({ ...state, error: message(error) })); }
+      if (!account) return;
+      if (accountId === account) { if (initializationTask) await initializationTask; return; }
+      generation += 1; const epoch = generation; accountId = account; runtime = value; supportRetryAt = 0;
+      if (timer !== undefined) window.clearInterval(timer);
+      // Keep polling after a transient startup failure. Otherwise a viewer can
+      // miss every invitation until logout, with no way to recover from Refresh.
+      timer = window.setInterval(() => void poll(), 2000);
+      initializationTask = poll().finally(() => { if (epoch === generation) initializationTask = null; });
+      await initializationTask;
     },
-    refresh: poll,
+    async refresh(): Promise<void> { supportRetryAt = 0; await poll(); },
     async create(): Promise<void> {
       await action(async () => {
         const current = get(host); const api = session.client();

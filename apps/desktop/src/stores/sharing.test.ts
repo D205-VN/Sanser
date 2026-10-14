@@ -148,3 +148,31 @@ it('releases a selected Direct port if sharing stops before native launch', asyn
   expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ attemptId: 'cancelled-attempt' }));
   expect(mocks.launch).not.toHaveBeenCalled();
 });
+
+it('recovers invitation polling after the initial support request fails', async () => {
+  mocks.api.supportsSharingMedia.mockRejectedValueOnce(new Error('Server restarting')).mockResolvedValue(true);
+  group = { ...group, hostDeviceId: 'remote-host', members: [{ id: 'pending', viewerDeviceId: 'viewer-local', state: 'invited', accessMode: 'view-only', createdAt: 1, updatedAt: 1 }] };
+  const store = createSharingStore(); stores.push(store); await store.initialize(runtime);
+  expect(get(store).error).toBe('Server restarting');
+  expect(mocks.api.sharingGroups).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(10_001);
+  expect(get(store).supported).toBe(true); expect(get(store).error).toBeNull();
+  expect(get(store).groups[0]?.members[0]?.id).toBe('pending');
+});
+
+it('lets Refresh retry invitation support immediately without signing out', async () => {
+  mocks.api.supportsSharingMedia.mockRejectedValueOnce(new Error('Temporary failure')).mockResolvedValue(true);
+  const store = createSharingStore(); stores.push(store); await store.initialize(runtime);
+  await store.refresh();
+  expect(get(store).supported).toBe(true); expect(mocks.api.supportsSharingMedia).toHaveBeenCalledTimes(2);
+});
+
+it('shares an in-flight initialization rather than invalidating its generation', async () => {
+  let finish!: (value: boolean) => void;
+  mocks.api.supportsSharingMedia.mockReturnValueOnce(new Promise<boolean>((resolve) => { finish = resolve; }));
+  const store = createSharingStore(); stores.push(store);
+  const first = store.initialize(runtime); const second = store.initialize(runtime);
+  expect(mocks.api.supportsSharingMedia).toHaveBeenCalledTimes(1);
+  finish(true); await Promise.all([first, second]);
+  expect(get(store).supported).toBe(true); expect(mocks.api.sharingGroups).toHaveBeenCalledTimes(1);
+});

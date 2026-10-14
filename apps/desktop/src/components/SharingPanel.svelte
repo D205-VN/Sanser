@@ -1,25 +1,21 @@
 <script lang="ts">
   import { get } from 'svelte/store';
-  import type { RuntimeStatus, SharingMember } from '../lib/types';
+  import { sharingViewerCandidates } from '../lib/sharingInvitations';
+  import type { SharingMember } from '../lib/types';
   import { host } from '../stores/host';
   import { presence } from '../stores/presence';
   import { sharing } from '../stores/sharing';
-  let { runtime }: { runtime: RuntimeStatus } = $props();
   let selected = $state('');
   let actionError = $state<string | null>(null);
   const group = $derived($sharing.ownGroup);
   const active = $derived(group?.members.filter((member) => member.state === 'invited' || member.state === 'accepted') ?? []);
   const ownComputer = $derived($sharing.devices.find((device) => device.id === $host.deviceId)?.computerId);
-  const candidates = $derived($sharing.devices.filter((device) =>
-    device.deviceRole === 'client' && device.id !== $presence.deviceId && device.id !== $host.deviceId &&
-    (!ownComputer || device.computerId !== ownComputer) && device.crossPlatform === true &&
-    device.capabilities.nativeTransport && !active.some((member) => member.viewerDeviceId === device.id)
-  ));
+  const candidates = $derived(sharingViewerCandidates($sharing.devices, [$presence.deviceId, $host.deviceId], ownComputer, active.map((member) => member.viewerDeviceId)));
   function name(id: string): string { return $sharing.devices.find((device) => device.id === id)?.name ?? `Computer ${id.slice(0, 8)}`; }
   function viewerState(member: SharingMember): string {
     const error = $sharing.peerErrors[member.id];
     if (error) return error;
-    if (member.state === 'invited') return 'Invitation sent · waiting for approval';
+    if (member.state === 'invited') return $sharing.devices.find((device) => device.id === member.viewerDeviceId)?.online ? 'Invitation sent · waiting for approval' : 'Invited computer is offline. Remove this invitation and select its online registration.';
     return member.startedAt !== undefined && !$sharing.paused ? 'Watching · view only' : 'Connecting · waiting for the first frame';
   }
   async function run(operation: () => Promise<void>): Promise<void> {
@@ -37,7 +33,7 @@
   </div>
   {#if actionError}<div class="notice error" role="alert">{actionError}</div>{/if}
   {#if !$sharing.supported}
-    <div class="notice">{$sharing.error ?? 'Checking sharing support…'} <button class="button small" onclick={() => run(() => sharing.initialize(runtime))}>Check again</button></div>
+    <div class="notice">{$sharing.error ?? 'Checking sharing support…'} <button class="button small" onclick={() => run(() => sharing.refresh())}>Check again</button></div>
   {:else if !group}
     <div class="button-row"><button class="button primary" disabled={!$host.online || $sharing.busy || $host.engineRunning || $host.launchingSessionId !== null} onclick={() => run(() => sharing.create())}>Start sharing</button><span class="muted">{$host.online ? 'Only computers in your account can be invited.' : 'Go online first.'}</span></div>
   {:else}
@@ -51,11 +47,11 @@
         <label for="sharing-viewer">Invite a computer</label>
         <select id="sharing-viewer" bind:value={selected} disabled={$sharing.busy || candidates.length === 0}>
           <option value="">Choose a computer…</option>
-          {#each candidates as device (device.id)}<option value={device.id}>{device.name} · {device.platform}{device.online ? '' : ' · Offline'}</option>{/each}
+          {#each candidates as device (device.id)}<option value={device.id}>{device.name} · {device.platform} · {(device.computerId ?? device.id).slice(0, 6).toUpperCase()}</option>{/each}
         </select>
         <button class="button primary" disabled={!selected || $sharing.busy} onclick={invite}>Invite</button>
       </div>
-      {#if candidates.length === 0}<p class="muted">Sign in to Sanser on another computer to make it available here.</p>{/if}
+      {#if candidates.length === 0}<p class="muted">Open Sanser and sign in on the other computer. Only online viewers can receive a new invitation.</p>{/if}
     {/if}
     {#if $sharing.error}<div class="notice error" role="alert">{$sharing.error}</div>{/if}
   {/if}

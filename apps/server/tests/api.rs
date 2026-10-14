@@ -881,6 +881,10 @@ async fn sharing_capacity_consent_ownership_and_stop_are_transactional() {
             "sanserVersion":"2.1.22","crossPlatform":true,"nativeTransport":true,"codecs":["h264"],"routeAddress":"192.168.1.20"
         })),Some(access)).await;
         assert!(status.is_success(), "{body}");
+        assert_eq!(
+            body["sanserVersion"], "2.1.22",
+            "registration must retain the client version, not the server version"
+        );
         let (status, body, _) = server
             .request(
                 Method::POST,
@@ -908,6 +912,35 @@ async fn sharing_capacity_consent_ownership_and_stop_are_transactional() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let invite_path = format!("{path}/invite");
+    server
+        .request(
+            Method::POST,
+            "/api/v2/devices/offline",
+            Some(json!({"deviceId":peers[4]})),
+            Some(access),
+        )
+        .await;
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &invite_path,
+            Some(json!({"viewerDeviceId":peers[4]})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an offline registration must not receive a new invitation"
+    );
+    server
+        .request(
+            Method::POST,
+            "/api/v2/devices/heartbeat",
+            Some(json!({"deviceId":peers[4],"streaming":false})),
+            Some(access),
+        )
+        .await;
     let (a, b, c, d) = tokio::join!(
         server.request(
             Method::POST,

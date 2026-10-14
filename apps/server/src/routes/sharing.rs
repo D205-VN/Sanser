@@ -155,6 +155,7 @@ pub async fn invite(
     let viewer = devices::fetch_owned(&state, &auth.user_id, &viewer_id).await?;
     let host = devices::fetch_owned(&state, &auth.user_id, &group.host_device_id).await?;
     ensure_role(&viewer, "client")?;
+    super::sessions::ensure_device_online(&state, &viewer)?;
     if viewer.id == host.id
         || (host.computer_id.is_some() && host.computer_id == viewer.computer_id)
     {

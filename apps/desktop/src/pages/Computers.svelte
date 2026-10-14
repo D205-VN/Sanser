@@ -12,6 +12,7 @@
   import { host as hostStore } from '../stores/host';
   import { presence } from '../stores/presence';
   import { session } from '../stores/session';
+  import { sharing } from '../stores/sharing';
 
   let { runtime, navigate }: { runtime: RuntimeStatus; navigate: (page: Page) => void } = $props();
   let devices = $state<Device[]>([]);
@@ -237,7 +238,7 @@
 <section class="page computers-page">
   <header class="page-header">
     <div><h1>Your computers<span class="heading-count" aria-hidden="true">{remoteDevices.length}</span></h1><p>Choose a computer to connect.</p></div>
-    <div class="button-row"><button class="button" onclick={() => navigate('host')}>Share this computer</button><button class="button" onclick={() => void loadDevices()} disabled={loading}><Icon name="refresh" />{loading ? 'Refreshing…' : 'Refresh'}</button></div>
+    <div class="button-row"><button class="button" onclick={() => navigate('host')}>Share this computer</button><button class="button" onclick={() => { void loadDevices(); void sharing.refresh(); }} disabled={loading}><Icon name="refresh" />{loading ? 'Refreshing…' : 'Refresh'}</button></div>
   </header>
 
   {#if $connection.session && ['pending', 'accepted', 'connecting', 'connected'].includes($connection.session.status)}

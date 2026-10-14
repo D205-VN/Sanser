@@ -110,7 +110,7 @@
   {#if runtime.platform.toLowerCase().includes('mac') && canHost}
     <details class="sharing-help"><summary>Mac permissions</summary><p>Allow Screen Recording in System Settings to share your screen. Allow Accessibility for remote keyboard and mouse control.</p></details>
   {/if}
-  {#if runtime.capabilities.multiViewerHost === true}<SharingPanel {runtime} />{/if}
+  {#if runtime.capabilities.multiViewerHost === true}<SharingPanel />{/if}
   <div class="grid two host-grid">
     <article class="card card-body stack">
       <div><h2 class="card-title">Screen sharing</h2><p class="card-subtitle">Your main display is shared during a connection.</p></div>

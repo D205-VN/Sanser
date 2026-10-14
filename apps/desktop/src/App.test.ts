@@ -1,7 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { connection } from './stores/connection';
 import type { ConnectionSession } from './lib/types';
+
+const sharingActions = vi.hoisted(() => ({ respond: vi.fn().mockResolvedValue(undefined), refresh: vi.fn().mockResolvedValue(undefined) }));
 
 const api = vi.hoisted(() => ({
   devices: vi.fn().mockResolvedValue({ items: [] }),
@@ -21,7 +23,28 @@ vi.mock('./lib/platform', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/platform')>();
   return { ...actual, loadNativePreferences: vi.fn().mockResolvedValue(null), saveNativePreferences: vi.fn().mockResolvedValue(undefined) };
 });
+vi.mock('./stores/sharing', async () => {
+  const { writable } = await import('svelte/store');
+  return { sharing: { ...writable({ groups: [], devices: [], ownGroup: null, supported: true, paused: false, busy: false, error: null, peerErrors: {} }),
+    initialize: vi.fn().mockResolvedValue(undefined), shutdown: vi.fn().mockResolvedValue(undefined), refresh: sharingActions.refresh, respond: sharingActions.respond } };
+});
+vi.mock('./stores/presence', async () => {
+  const { writable } = await import('svelte/store');
+  return { presence: { ...writable({ deviceId: null, online: false, busy: false, routeAddress: null, error: null }), start: vi.fn(), stop: vi.fn() } };
+});
+import { sharing, type SharingState } from './stores/sharing';
+import type { Writable } from 'svelte/store';
+import { presence, type PresenceState } from './stores/presence';
+import type { SharingGroup } from './lib/types';
 import App from './App.svelte';
+
+const sharingState = sharing as unknown as Writable<SharingState>;
+const presenceState = presence as unknown as Writable<PresenceState>;
+
+beforeEach(() => {
+  sharingState.update((state) => ({ ...state, groups: [], devices: [], ownGroup: null, error: null }));
+  presenceState.set({ deviceId: null, online: false, busy: false, routeAddress: null, error: null });
+});
 
 afterEach(() => { cleanup(); connection.clear(); vi.restoreAllMocks(); });
 
@@ -119,4 +142,27 @@ it('shows one named computer for both roles and keeps older registrations availa
   expect(screen.queryByRole('heading', { name: 'Sanser Host' })).not.toBeInTheDocument();
   await fireEvent.click(screen.getByText('Older offline registrations (1)'));
   expect(await screen.findByRole('heading', { name: 'Sanser Host' })).toBeInTheDocument();
+});
+
+it('shows Join for this computer before a sharing session exists', async () => {
+  const group: SharingGroup = { id: 'sharing-group', hostDeviceId: 'remote-host', state: 'preparing', networkMode: 'auto', qualityProfile: 'balanced', maxViewers: 3, createdAt: 1, updatedAt: 1, members: [
+    { id: 'invitation', viewerDeviceId: 'local-viewer', state: 'invited', accessMode: 'view-only', createdAt: 1, updatedAt: 1 }
+  ] };
+  sharingState.update((state) => ({ ...state, groups: [group] }));
+  presenceState.set({ deviceId: 'local-viewer', online: true, busy: false, routeAddress: null, error: null });
+  render(App);
+  await screen.findByRole('heading', { name: 'Your computers' });
+  const join = await screen.findByRole('button', { name: 'Join' });
+  expect(join).toBeEnabled();
+  await fireEvent.click(join);
+  expect(sharingActions.respond).toHaveBeenCalledWith(group, group.members[0], true);
+});
+
+it('surfaces an invitation loading failure and offers a retry on Computers', async () => {
+  sharingState.update((state) => ({ ...state, error: 'Server restarting' }));
+  render(App);
+  await screen.findByRole('heading', { name: 'Your computers' });
+  expect(screen.getByText(/Screen sharing invitations could not be loaded/)).toBeInTheDocument();
+  await fireEvent.click(screen.getByRole('button', { name: 'Retry invitations' }));
+  expect(sharingActions.refresh).toHaveBeenCalled();
 });
