@@ -67,6 +67,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::p2p_gather,
             commands::p2p_punch,
             relay::relay_start,
+            relay::relay_peer_failure,
             relay::relay_stop
         ])
         .build(context)?

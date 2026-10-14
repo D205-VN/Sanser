@@ -20,6 +20,8 @@ export interface HostState {
   launchingSessionId: string | null;
   failedP2pSessionId: string | null;
   engineRunning: boolean;
+  sharingActive?: boolean;
+  sharingViewers?: number;
   error: string | null;
   errorCode: string | null;
 }
@@ -49,6 +51,7 @@ export interface HostStore extends Readable<HostState> {
   disconnect(sessionId: string): Promise<void>;
   retry(sessionId: string): Promise<void>;
   setEngineRunning(running: boolean): void;
+  setSharingActive(active: boolean, viewers?: number): void;
 }
 
 export function createHostStore(): HostStore {
@@ -128,7 +131,7 @@ export function createHostStore(): HostStore {
       !current.deviceId ||
       !request.requesterReadyAt ||
       request.transport !== 'native' ||
-      current.engineRunning ||
+      current.sharingActive || current.engineRunning ||
       current.launchingSessionId
     ) return;
     if (!force && (retryCounts.get(request.id) ?? 0) >= 3) return;
@@ -261,10 +264,12 @@ export function createHostStore(): HostStore {
     sessionPollInFlight = true;
     try {
       const response = await client.hostSessions(current.deviceId);
+      response.items=response.items.filter((item) => !item.sharingId);
       const live = get(store);
       if (generation !== lifecycleGeneration || !live.online || live.deviceId !== current.deviceId) return;
       store.update((state) => ({ ...state, sessions: response.items, error: state.error === pollError ? null : state.error }));
       pollError = null;
+      if (get(store).sharingActive) return;
       const launchingId = get(store).launchingSessionId;
       const generationStillAccepted = () => get(store).sessions.some((item) =>
         item.id === nativeGeneration?.id && item.status === 'accepted' &&
@@ -427,7 +432,7 @@ export function createHostStore(): HostStore {
         const activeClient = session.client();
         if (!activeClient || !current.online || !current.deviceId) return;
         void activeClient
-          .heartbeatDevice(current.deviceId, current.engineRunning, current.routeAddress ?? undefined)
+          .heartbeatDevice(current.deviceId, current.engineRunning || (current.sharingViewers ?? 0)>0, current.routeAddress ?? undefined)
           .then(() => {
             if (generation !== lifecycleGeneration) return;
             store.update((state) => ({ ...state, error: state.error === 'Host heartbeat failed; retrying' ? null : state.error }));
@@ -569,6 +574,9 @@ export function createHostStore(): HostStore {
       retryAfter.delete(sessionId);
       store.update((state) => ({ ...state, failedP2pSessionId: null, error: null }));
       await startAcceptedSession(target, true);
+    },
+    setSharingActive(active: boolean, viewers = 0): void {
+      store.update((state) => ({ ...state, sharingActive: active, sharingViewers: viewers }));
     },
     setEngineRunning(running: boolean): void {
       store.update((state) => ({ ...state, engineRunning: running }));

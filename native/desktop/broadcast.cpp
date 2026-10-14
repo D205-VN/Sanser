@@ -158,7 +158,10 @@ HostOutput::HostOutput(const Options& options):options_(options) {
 }
 HostOutput::~HostOutput() { stop(); }
 void HostOutput::start() {
-  if(broadcast_) broadcast_->add({options_.viewerId,options_.peer,options_.port,options_.token,options_.bitrate});
+  if(broadcast_) {
+    broadcast_->add({options_.viewerId,options_.peer,options_.port,options_.token,options_.bitrate});
+    std::cout<<"SNSHARE_ACK request="<<options_.viewerId<<" accepted=1"<<std::endl;
+  }
   else single_->start();
 }
 void HostOutput::stop() { if(broadcast_) broadcast_->stop(); else single_->stop(); }

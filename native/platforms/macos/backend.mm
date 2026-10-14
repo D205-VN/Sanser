@@ -116,8 +116,8 @@ public:
   CVPixelBufferRef take() { std::lock_guard lock(mutex_); auto value=latest_; latest_=nullptr; return value; }
 private:
   void clear() { if(session_) { VTDecompressionSessionWaitForAsynchronousFrames(session_); VTDecompressionSessionInvalidate(session_); CFRelease(session_); session_=nullptr; } if(format_) { CFRelease(format_); format_=nullptr; } }
-  static void output(void* context,void*,OSStatus status,VTDecodeInfoFlags,CVImageBufferRef image,CMTime,CMTime) { if(status!=noErr || !image) return; auto& self=*static_cast<Decoder*>(context); std::lock_guard lock(self.mutex_); if(self.latest_) CVPixelBufferRelease(self.latest_); self.latest_=CVPixelBufferRetain(image); }
-  Bytes sps_,pps_; VTDecompressionSessionRef session_=nullptr; CMVideoFormatDescriptionRef format_=nullptr; CVPixelBufferRef latest_=nullptr; std::mutex mutex_;
+  static void output(void* context,void*,OSStatus status,VTDecodeInfoFlags,CVImageBufferRef image,CMTime,CMTime) { if(status!=noErr || !image) return; auto& self=*static_cast<Decoder*>(context); std::lock_guard lock(self.mutex_); if(self.latest_) CVPixelBufferRelease(self.latest_); self.latest_=CVPixelBufferRetain(image); if(!self.reported_) { self.reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; } }
+  Bytes sps_,pps_; VTDecompressionSessionRef session_=nullptr; CMVideoFormatDescriptionRef format_=nullptr; CVPixelBufferRef latest_=nullptr; std::mutex mutex_; bool reported_=false;
 };
 class Injector {
 public:
@@ -376,7 +376,7 @@ int runMac(bool host,int argc,char** argv) {
     Peer peer(options); Decoder decoder; std::atomic<unsigned> decodeFailures{0}; std::string decodeError;
     peer.onFrame=[&](Frame frame) { try { decoder.decode(frame); decodeFailures=0; } catch(const std::exception& error) { decodeError=error.what(); ++decodeFailures; peer.requestKeyframe(); } };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
-    window.releasedWhenClosed=NO; window.title=@"Sanser · Remote desktop · Control+Option+Escape releases input";
+    window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Control+Option+Escape releases input" : @"Sanser · View only";
     SanserRemoteView* view=[[SanserRemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
     if (options.ultraLowLatency) { ((CAMetalLayer*)view.layer).displaySyncEnabled=NO; }
     window.contentView=view; window.acceptsMouseMovedEvents=YES; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];

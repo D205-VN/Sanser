@@ -109,6 +109,10 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::sessions::native_ready),
         )
         .route(
+            "/api/v2/sessions/{id}/native-started",
+            post(routes::sessions::native_started),
+        )
+        .route(
             "/api/v2/sessions/{id}/accept",
             post(routes::sessions::accept),
         )
@@ -132,6 +136,14 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::sharing::respond),
         )
         .route("/api/v2/sharing/{id}/stop", post(routes::sharing::stop))
+        .route(
+            "/api/v2/sharing/{id}/heartbeat",
+            post(routes::sharing::heartbeat),
+        )
+        .route(
+            "/api/v2/sharing/{id}/members/{member}/remove",
+            post(routes::sharing::remove),
+        )
         .route("/api/v2/health", get(routes::system::health))
         .route("/api/v2/readiness", get(routes::system::readiness))
         .route("/api/v2/events", get(websocket::events_socket))

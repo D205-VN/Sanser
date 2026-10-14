@@ -269,26 +269,41 @@ pub async fn get_local_route_address(server_url: String) -> Result<Option<String
 }
 
 #[tauri::command]
-pub fn launch_engine(
+pub async fn launch_engine(
     app: AppHandle,
-    engines: State<'_, EngineManager>,
     p2p: State<'_, P2pSessionManager>,
     relay: State<'_, crate::relay::RelayManager>,
     mut request: LaunchEngineRequest,
 ) -> Result<(), DesktopError> {
     let reserved_socket = if request.relay {
         relay.verify_launch(&request)?;
-        request.relay_transport = relay.transport(request.kind);
+        request.relay_transport = relay.transport(
+            request.kind,
+            request.session_id.as_deref().unwrap_or_default(),
+        );
         None
     } else {
         relay.stop_for_engine(request.kind);
         p2p.take_selected_socket(&mut request)?
     };
-    let result = engines.launch(&app, &request, reserved_socket);
-    if result.is_err() && request.relay {
-        relay.stop_for_engine(request.kind);
-    }
-    result
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = app
+            .state::<EngineManager>()
+            .launch(&app, &request, reserved_socket);
+        if result.is_err() && request.relay {
+            if let Some(id) = request
+                .session_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            {
+                app.state::<crate::relay::RelayManager>()
+                    .stop_peer(request.kind, id);
+            }
+        }
+        result
+    })
+    .await
+    .map_err(|_| DesktopError::Process("native launch task failed".into()))?
 }
 
 #[tauri::command]
@@ -306,16 +321,22 @@ pub fn stop_engine(
 pub async fn sharing_engine_add_peer(
     app: AppHandle,
     p2p: State<'_, P2pSessionManager>,
+    relay: State<'_, crate::relay::RelayManager>,
     mut request: LaunchEngineRequest,
 ) -> Result<(), DesktopError> {
     // Sharing currently uses per-viewer Direct sockets. Never replace the
     // existing host/relay process to add one member.
-    if request.relay || request.sharing_id.is_none() {
+    if request.sharing_id.is_none() {
         return Err(DesktopError::InvalidRequest(
             "a Direct sharing peer is required".into(),
         ));
     }
-    let socket = p2p.take_selected_socket(&mut request)?;
+    let socket = if request.relay {
+        relay.verify_launch(&request)?;
+        None
+    } else {
+        p2p.take_selected_socket(&mut request)?
+    };
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<EngineManager>()
             .add_sharing_peer(&request, socket)
@@ -352,7 +373,9 @@ pub fn get_engine_status(
     kind: EngineKind,
 ) -> Result<EngineStatus, DesktopError> {
     let mut status = engines.status(&app, kind)?;
-    if let Some(failure) = relay.take_failure(kind) {
+    if !engines.is_sharing(kind)
+        && let Some(failure) = relay.take_failure(kind)
+    {
         let _ = engines.stop(kind);
         status.running = false;
         status.process_id = None;
@@ -409,11 +432,16 @@ struct P2pTransportSocket {
 
 #[derive(Default)]
 pub struct P2pSessionManager {
-    transport: Mutex<Option<P2pTransport>>,
+    transport: Mutex<std::collections::HashMap<uuid::Uuid, P2pTransport>>,
 }
 
 impl P2pSessionManager {
-    fn lock_transport(&self) -> Result<std::sync::MutexGuard<'_, Option<P2pTransport>>, String> {
+    fn lock_transport(
+        &self,
+    ) -> Result<
+        std::sync::MutexGuard<'_, std::collections::HashMap<uuid::Uuid, P2pTransport>>,
+        String,
+    > {
         self.transport
             .lock()
             .map_err(|_| "P2P transport state is unavailable".to_owned())
@@ -421,11 +449,11 @@ impl P2pSessionManager {
 
     fn clear_if_current(&self, session_id: uuid::Uuid, attempt_id: uuid::Uuid) {
         if let Ok(mut transport) = self.transport.lock()
-            && transport.as_ref().is_some_and(|current| {
+            && transport.get(&session_id).is_some_and(|current| {
                 current.session_id == session_id && current.attempt_id == attempt_id
             })
         {
-            *transport = None;
+            transport.remove(&session_id);
         }
     }
 
@@ -442,7 +470,7 @@ impl P2pSessionManager {
             .transport
             .lock()
             .map_err(|_| DesktopError::Process("P2P transport state is unavailable".into()))?;
-        let Some(current) = transport.as_ref() else {
+        let Some(current) = transport.get(&session_id) else {
             if request.udp_connect.is_some() || request.udp_bind_port.is_some() {
                 return Err(DesktopError::Process(
                     "the selected P2P socket is no longer reserved".into(),
@@ -481,7 +509,7 @@ impl P2pSessionManager {
         }
         request.direct_probe.clone_from(&current.selected_probe);
         request.direct_attempt_id = Some(current.attempt_id.to_string());
-        Ok(transport.take().and_then(|mut selected| {
+        Ok(transport.remove(&session_id).and_then(|mut selected| {
             let index = selected.selected_socket?;
             (index < selected.sockets.len()).then(|| selected.sockets.swap_remove(index).socket)
         }))
@@ -493,12 +521,7 @@ pub fn p2p_stop(manager: State<'_, P2pSessionManager>, attempt_id: String) -> Re
     let attempt_id = uuid::Uuid::parse_str(attempt_id.trim())
         .map_err(|_| "P2P attemptId must be a UUID".to_owned())?;
     let mut current = manager.lock_transport()?;
-    if current
-        .as_ref()
-        .is_some_and(|transport| transport.attempt_id == attempt_id)
-    {
-        *current = None;
-    }
+    current.retain(|_, transport| transport.attempt_id != attempt_id);
     Ok(())
 }
 
@@ -565,14 +588,20 @@ pub async fn p2p_gather(
                 candidates: Vec::new(),
             });
         }
-        *current = Some(P2pTransport {
+        if !current.contains_key(&session_id) && current.len() >= 4 {
+            return Err("At most four P2P negotiations may run concurrently".into());
+        }
+        current.insert(
             session_id,
-            attempt_id,
-            sockets,
-            selected_socket: None,
-            selected_probe: None,
-            phase: P2pTransportPhase::Gathering,
-        });
+            P2pTransport {
+                session_id,
+                attempt_id,
+                sockets,
+                selected_socket: None,
+                selected_probe: None,
+                phase: P2pTransportPhase::Gathering,
+            },
+        );
     }
     let ipv4_config = GathererConfig {
         stun_servers,
@@ -645,7 +674,7 @@ pub async fn p2p_gather(
         .collect::<HashSet<_>>();
     {
         let mut current = manager.lock_transport()?;
-        let Some(transport) = current.as_mut().filter(|transport| {
+        let Some(transport) = current.get_mut(&session_id).filter(|transport| {
             transport.session_id == session_id && transport.attempt_id == attempt_id
         }) else {
             return Err("P2P gathering was superseded by another attempt".into());
@@ -815,7 +844,7 @@ pub async fn p2p_punch(
     let sockets = {
         let current = manager.lock_transport()?;
         let transport = current
-            .as_ref()
+            .get(&session_id)
             .filter(|transport| {
                 transport.session_id == session_id && transport.attempt_id == attempt_id
             })
@@ -905,7 +934,7 @@ pub async fn p2p_punch(
     };
     {
         let mut current = manager.lock_transport()?;
-        let Some(transport) = current.as_mut().filter(|transport| {
+        let Some(transport) = current.get_mut(&session_id).filter(|transport| {
             transport.session_id == session_id && transport.attempt_id == attempt_id
         }) else {
             return Err("P2P connectivity check was superseded".into());
@@ -1094,5 +1123,43 @@ mod tests {
             candidate.mapping_protocol,
             sanser_p2p::MappingProtocol::Manual
         );
+    }
+
+    #[tokio::test]
+    async fn releasing_one_viewer_socket_keeps_the_other_reservation() {
+        let manager = P2pSessionManager::default();
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let attempt = uuid::Uuid::new_v4();
+        let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let port = socket.local_addr().unwrap().port();
+        for session in [a, b] {
+            manager.lock_transport().unwrap().insert(
+                session,
+                P2pTransport {
+                    session_id: session,
+                    attempt_id: attempt,
+                    sockets: vec![P2pTransportSocket {
+                        socket: Arc::clone(&socket),
+                        candidates: vec![],
+                    }],
+                    selected_socket: Some(0),
+                    selected_probe: None,
+                    phase: P2pTransportPhase::Selected,
+                },
+            );
+        }
+        manager.clear_if_current(a, uuid::Uuid::new_v4());
+        assert_eq!(manager.lock_transport().unwrap().len(), 2);
+        manager.clear_if_current(a, attempt);
+        assert!(manager.lock_transport().unwrap().contains_key(&b));
+        let mut request:LaunchEngineRequest=serde_json::from_value(serde_json::json!({ "kind":"host","sessionId":b,"codec":"h264","fps":60,"bitrateKbps":25000,"width":1920,"height":1080,"networkMode":"direct","udpBindPort":port })).unwrap();
+        assert!(
+            manager
+                .take_selected_socket(&mut request)
+                .unwrap()
+                .is_some()
+        );
+        assert!(manager.lock_transport().unwrap().is_empty());
     }
 }

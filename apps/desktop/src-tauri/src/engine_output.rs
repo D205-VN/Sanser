@@ -79,7 +79,7 @@ impl EngineOutput {
         log: Option<File>,
         metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
     ) -> std::io::Result<Self> {
-        Self::start_observed(reader, log, metrics, None)
+        Self::start_observed(reader, log, metrics, None, None)
     }
 
     pub(crate) fn start_observed(
@@ -87,6 +87,7 @@ impl EngineOutput {
         log: Option<File>,
         metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
         acknowledgements: Option<mpsc::SyncSender<SharingAck>>,
+        first_frame: Option<Arc<std::sync::atomic::AtomicBool>>,
     ) -> std::io::Result<Self> {
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_BYTES)));
         let worker_tail = Arc::clone(&tail);
@@ -100,6 +101,7 @@ impl EngineOutput {
                     &worker_tail,
                     metrics.as_ref(),
                     acknowledgements.as_ref(),
+                    first_frame.as_deref(),
                 );
                 let _ = complete.send(());
             })?;
@@ -131,6 +133,7 @@ fn drain(
     tail: &Mutex<VecDeque<u8>>,
     metrics: Option<&mpsc::SyncSender<crate::connection_report::Sample>>,
     acknowledgements: Option<&mpsc::SyncSender<SharingAck>>,
+    first_frame: Option<&std::sync::atomic::AtomicBool>,
 ) {
     let mut buffer = [0_u8; 4096];
     let mut written = 0;
@@ -148,9 +151,15 @@ fn drain(
             tail.drain(..excess);
             tail.extend(&buffer[..length]);
         }
-        if metrics.is_some() || acknowledgements.is_some() {
+        if metrics.is_some() || acknowledgements.is_some() || first_frame.is_some() {
             for byte in &buffer[..length] {
                 if *byte == b'\n' {
+                    if !oversized
+                        && line == b"SNV2_FIRST_FRAME decoded=1"
+                        && let Some(first_frame) = first_frame
+                    {
+                        first_frame.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if !oversized
                         && let Some(metrics) = metrics
                         && let Some(sample) = crate::connection_report::parse_sample(&line)
@@ -191,11 +200,37 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn only_decoded_frame_event_marks_video_received() -> std::io::Result<()> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = Arc::new(AtomicBool::new(false));
+        let output = EngineOutput::start_observed(
+            Cursor::new(b"SNSHARE_STATUS viewers=3 readyViewers=3\n"),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&flag)),
+        )?;
+        let _ = output.exit_message(String::new());
+        assert!(!flag.load(Ordering::Relaxed));
+        let output = EngineOutput::start_observed(
+            Cursor::new(b"SNV2_FIRST_FRAME decoded=1\n"),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&flag)),
+        )?;
+        let _ = output.exit_message(String::new());
+        assert!(flag.load(Ordering::Relaxed));
+        Ok(())
+    }
+
+    #[test]
     fn sharing_ack_is_bounded_and_works_without_metrics() -> std::io::Result<()> {
         let request = uuid::Uuid::new_v4();
         let bytes=format!("SNSHARE_ACK request={request} accepted=1\nSNSHARE_ACK request={request} accepted=0 extra=token\n").into_bytes();
         let (sender, receiver) = mpsc::sync_channel(1);
-        let output = EngineOutput::start_observed(Cursor::new(bytes), None, None, Some(sender))?;
+        let output =
+            EngineOutput::start_observed(Cursor::new(bytes), None, None, Some(sender), None)?;
         assert_eq!(
             receiver
                 .recv_timeout(Duration::from_secs(1))

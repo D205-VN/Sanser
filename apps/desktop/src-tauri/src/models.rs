@@ -154,6 +154,7 @@ pub struct EngineStatus {
     pub installed: bool,
     pub running: bool,
     pub process_id: Option<u32>,
+    pub video_received: bool,
     pub last_error: Option<String>,
     pub startup_failure: Option<NativeStartupFailure>,
 }

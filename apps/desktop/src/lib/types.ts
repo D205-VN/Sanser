@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.1.21' as const;
+export const SANSER_VERSION = '2.1.22' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
@@ -51,6 +51,7 @@ export interface EngineStatus {
   kind: EngineKind;
   installed: boolean;
   running: boolean;
+  videoReceived?: boolean;
   processId: number | null;
   lastError: string | null;
   startupFailure?: 'no-udp' | 'unexpected-peer' | 'no-video' | 'auth-rejected' | 'incomplete-video' | 'decode-failed' | null;
@@ -172,6 +173,7 @@ export interface DeviceRegistration {
 }
 
 export interface ConnectionSession {
+  sharingId?: string;
   accessMode?: 'control' | 'view-only';
   wireProtocol?: 'legacy' | 'snv2';
   id: string;
@@ -206,6 +208,8 @@ export interface NativeSessionCredentials {
 }
 
 export interface SharingMember {
+  sessionId?: string;
+  startedAt?: number;
   id: string;
   viewerDeviceId: string;
   state: 'invited' | 'accepted' | 'declined' | 'removed';
@@ -214,11 +218,13 @@ export interface SharingMember {
   updatedAt: number;
 }
 
-/** Control-plane state only; preparing/accepted does not mean media is flowing. */
+/** Consent/session state; startedAt records the viewer's decoded first frame. */
 export interface SharingGroup {
   id: string;
   hostDeviceId: string;
-  state: 'preparing' | 'stopped';
+  state: 'preparing' | 'active' | 'stopped';
+  networkMode: Exclude<NetworkMode, 'manual'>;
+  qualityProfile: Exclude<QualityProfile, 'custom'>;
   maxViewers: number;
   createdAt: number;
   updatedAt: number;

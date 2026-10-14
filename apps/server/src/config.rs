@@ -314,7 +314,11 @@ fn validate_neon_database_url(
         .host_str()
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| ConfigError::Invalid("DATABASE_URL must include a Neon host".into()))?;
-    if !host.ends_with(".neon.tech") {
+    // Config::test alone can use an isolated loopback PostgreSQL service in CI.
+    // Config::from_env retains the production Neon/TLS restriction.
+    let local_test = allow_test_schema_option
+        && matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1");
+    if !host.ends_with(".neon.tech") && !local_test {
         return Err(ConfigError::Invalid(
             "DATABASE_URL host must be a Neon endpoint ending in .neon.tech".into(),
         ));
@@ -346,7 +350,9 @@ fn validate_neon_database_url(
         .filter(|(key, _)| key == "sslmode")
         .map(|(_, value)| value.as_ref())
         .collect::<Vec<_>>();
-    if ssl_modes.len() != 1 || ssl_modes[0] != "require" {
+    if ssl_modes.len() != 1
+        || (ssl_modes[0] != "require" && !(local_test && ssl_modes[0] == "disable"))
+    {
         return Err(ConfigError::Invalid(
             "DATABASE_URL must contain sslmode=require for Neon TLS".into(),
         ));

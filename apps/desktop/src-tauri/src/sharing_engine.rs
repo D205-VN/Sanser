@@ -47,12 +47,11 @@ impl SharingPeer {
             || request.input_enabled
             || request.audio_enabled
             || request.relative_mouse
-            || request.relay
             || !matches!(request.codec, VideoCodec::Auto | VideoCodec::H264)
             || !(1_000..=200_000).contains(&request.bitrate_kbps)
         {
             return Err(invalid(
-                "sharing requires a view-only SNV2/H.264 Direct host without audio",
+                "sharing requires a view-only SNV2/H.264 host without audio",
             ));
         }
         let parse = |value: &str| {
@@ -190,7 +189,7 @@ mod tests {
         assert!(SharingPeer::from_request(&request).is_err());
         request.input_enabled = false;
         request.relay = true;
-        assert!(SharingPeer::from_request(&request).is_err());
+        assert!(SharingPeer::from_request(&request)?.is_some());
         request.relay = false;
         request.audio_enabled = true;
         assert!(SharingPeer::from_request(&request).is_err());

@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, Version-2.0.0, feature/multi-viewer-sharing]
+    branches: [main, Version-2.0.0]
 
 permissions:
   contents: read
@@ -17,6 +17,27 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  server-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: sanser_test
+          POSTGRES_USER: sanser_test
+          POSTGRES_PASSWORD: isolated-ci-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sanser_test -d sanser_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://sanser_test:isolated-ci-password@127.0.0.1:5432/sanser_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p sanser-server --test api -- --ignored
+
   policy:
     runs-on: ubuntu-latest
     steps:

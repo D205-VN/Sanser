@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { connection } from '../stores/connection';
+import { SANSER_VERSION } from '../lib/types';
 
 const mocks = vi.hoisted(() => ({ check: vi.fn(), relaunch: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => true }));
@@ -25,7 +26,7 @@ it('checks manually and reports that the current version is up to date', async (
   const component = renderUpdater();
   await component.checkForUpdates();
   expect(await screen.findByRole('heading', { name: 'You’re up to date' })).toBeInTheDocument();
-  expect(screen.getByRole('dialog')).toHaveTextContent('Sanser 2.1.21');
+  expect(screen.getByRole('dialog')).toHaveTextContent(`Sanser ${SANSER_VERSION}`);
   await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 });

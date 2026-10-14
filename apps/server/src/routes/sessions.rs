@@ -50,6 +50,31 @@ pub struct NativeReadyRequest {
     device_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeStartedRequest {
+    device_id: String,
+    requester_ready_at: i64,
+}
+
+pub async fn native_started(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(value): Path<String>,
+    ApiJson(request): ApiJson<NativeStartedRequest>,
+) -> Result<StatusCode, AppError> {
+    let session = validate_uuid(&value, "sessionId")?;
+    let device = validate_uuid(&request.device_id, "deviceId")?;
+    let changed=sqlx::query("UPDATE sharing_members AS member SET started_at=COALESCE(started_at,$1),updated_at=$1 WHERE member.user_id=$2 AND member.viewer_device_id=$3 AND member.session_id=$4 AND member.state='accepted' AND EXISTS(SELECT 1 FROM connection_sessions AS session WHERE session.id=member.session_id AND session.user_id=$2 AND session.state='accepted' AND session.requester_device_id=$3 AND session.requester_ready_at=$5)")
+        .bind(now_unix()).bind(&auth.user_id).bind(device).bind(session).bind(request.requester_ready_at).execute(&state.pool).await.map_err(AppError::from_db)?.rows_affected();
+    if changed != 1 {
+        return Err(AppError::Conflict(
+            "sharing generation is no longer active".into(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListSessionsQuery {
@@ -178,7 +203,7 @@ pub async fn create(
     let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
     let locked_devices = sqlx::query_scalar::<_, String>(
         "SELECT id FROM devices WHERE user_id = $1 AND id IN ($2, $3) \
-         ORDER BY id FOR UPDATE",
+         ORDER BY id FOR NO KEY UPDATE",
     )
     .bind(&auth.user_id)
     .bind(&requester_id)
@@ -212,7 +237,7 @@ pub async fn create(
     }
     let reserved = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM sharing_members WHERE viewer_device_id IN ($1,$2) AND state IN ('invited','accepted')) \
-         OR EXISTS(SELECT 1 FROM sharing_groups WHERE host_device_id IN ($1,$2) AND state='preparing')",
+         OR EXISTS(SELECT 1 FROM sharing_groups WHERE host_device_id IN ($1,$2) AND state IN ('preparing','active'))",
     ).bind(&host_id).bind(&requester_id).fetch_one(&mut *transaction).await.map_err(AppError::from_db)?;
     if reserved {
         return Err(AppError::Conflict(
@@ -322,7 +347,9 @@ pub async fn credentials(
     // Candidate gathering selects the actual direct endpoint, while relay mode
     // targets a local loopback bridge. Keep this compatibility field bounded
     // even when a relay-capable peer has no advertisable LAN address.
-    let wire_protocol = if device_id == session.host_device_id {
+    let wire_protocol = if session.sharing_id.is_some() {
+        "snv2"
+    } else if device_id == session.host_device_id {
         native_wire_protocol(&device, &peer)?
     } else {
         native_wire_protocol(&peer, &device)?
@@ -422,6 +449,15 @@ pub async fn native_ready(
     let now = now_unix();
     // Recheck every session invariant in the write itself. A concurrent
     // transition then affects zero rows and is reported as a conflict below.
+    let mut tx = state.pool.begin().await.map_err(AppError::from_db)?;
+    if let Some(sharing) = &current.sharing_id {
+        sqlx::query("SELECT id FROM sharing_groups WHERE id=$1 AND user_id=$2 FOR UPDATE")
+            .bind(sharing)
+            .bind(&auth.user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(AppError::from_db)?;
+    }
     let updated = sqlx::query(
         "UPDATE connection_sessions SET requester_ready_at = \
          GREATEST(COALESCE(requester_ready_at + 1, $1), $1), \
@@ -433,7 +469,7 @@ pub async fn native_ready(
     .bind(&id)
     .bind(&auth.user_id)
     .bind(&device_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(AppError::from_db)?;
     if updated.rows_affected() != 1 {
@@ -441,6 +477,9 @@ pub async fn native_ready(
             "session state changed before native readiness was recorded".into(),
         ));
     }
+    sqlx::query("UPDATE sharing_members SET started_at=NULL WHERE session_id=$1 AND user_id=$2 AND state='accepted'")
+        .bind(&id).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    tx.commit().await.map_err(AppError::from_db)?;
     events::publish(
         &state,
         &auth.user_id,
@@ -564,6 +603,15 @@ async fn transition_to_ended(
         .transpose()?
         .flatten();
     let now = now_unix();
+    let mut tx = state.pool.begin().await.map_err(AppError::from_db)?;
+    if let Some(sharing) = &current.sharing_id {
+        sqlx::query("SELECT id FROM sharing_groups WHERE id=$1 AND user_id=$2 FOR UPDATE")
+            .bind(sharing)
+            .bind(&auth.user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(AppError::from_db)?;
+    }
     let updated = sqlx::query(
         "UPDATE connection_sessions SET state = $1, ended_at = $2, updated_at = $3, \
          disconnect_reason = $4 WHERE id = $5 AND user_id = $6 AND state IN ('pending', 'accepted')",
@@ -574,7 +622,7 @@ async fn transition_to_ended(
     .bind(&reason)
     .bind(&current.id)
     .bind(&auth.user_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(AppError::from_db)?;
     if updated.rows_affected() != 1 {
@@ -582,15 +630,18 @@ async fn transition_to_ended(
             "session state changed concurrently".into(),
         ));
     }
+    sqlx::query("UPDATE sharing_members SET state='removed',updated_at=$1 WHERE session_id=$2 AND user_id=$3 AND state='accepted'")
+        .bind(now).bind(&current.id).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
     sqlx::query(
-        "UPDATE devices SET streaming = FALSE, updated_at = $1 WHERE id = $2 AND user_id = $3",
+        "UPDATE devices SET streaming = EXISTS(SELECT 1 FROM connection_sessions WHERE host_device_id=$2 AND user_id=$3 AND state='accepted'), updated_at = $1 WHERE id = $2 AND user_id = $3",
     )
     .bind(now)
     .bind(&current.host_device_id)
     .bind(&auth.user_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(AppError::from_db)?;
+    tx.commit().await.map_err(AppError::from_db)?;
     events::publish(
         state,
         &auth.user_id,
@@ -644,6 +695,7 @@ fn row_to_session(row: sqlx::postgres::PgRow) -> Result<ConnectionSession, AppEr
             "view-only" => SessionAccess::ViewOnly,
             _ => return Err(AppError::Internal),
         },
+        sharing_id: row.try_get("sharing_id").map_err(AppError::from_db)?,
         network_mode: parse_network_mode(&network_mode)?,
         quality_profile: row.try_get("quality_profile").map_err(AppError::from_db)?,
         requested_codec: row.try_get("requested_codec").map_err(AppError::from_db)?,
@@ -713,7 +765,7 @@ fn permission_token(key: &[u8], access: SessionAccess, token: String) -> Result<
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }
 
-fn supports_view_only(version: &str) -> bool {
+pub(crate) fn supports_view_only(version: &str) -> bool {
     let parts = version
         .split('.')
         .map(str::parse::<u32>)
@@ -798,7 +850,7 @@ fn normalize_codec(value: &str) -> Result<String, AppError> {
     }
 }
 
-fn parse_network_mode(value: &str) -> Result<NetworkMode, AppError> {
+pub(crate) fn parse_network_mode(value: &str) -> Result<NetworkMode, AppError> {
     match value {
         "auto" => Ok(NetworkMode::Auto),
         "direct" | "directonly" => Ok(NetworkMode::DirectOnly),
@@ -811,7 +863,7 @@ fn parse_network_mode(value: &str) -> Result<NetworkMode, AppError> {
     }
 }
 
-const fn network_mode_str(mode: NetworkMode) -> &'static str {
+pub(crate) const fn network_mode_str(mode: NetworkMode) -> &'static str {
     match mode {
         NetworkMode::Auto => "auto",
         NetworkMode::DirectOnly => "direct",

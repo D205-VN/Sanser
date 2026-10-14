@@ -40,7 +40,7 @@ const SIGNAL_MESSAGES_PER_MINUTE: u16 = 240;
 
 #[derive(Default)]
 pub struct SignalHub {
-    peers: Mutex<HashMap<PeerKey, SignalPeer>>,
+    peers: Mutex<HashMap<PeerKey, Vec<SignalPeer>>>,
     candidate_budgets: Mutex<HashMap<CandidateSessionKey, CandidateSessionBudget>>,
 }
 
@@ -101,25 +101,29 @@ impl SignalHub {
     async fn register(&self, key: PeerKey) -> (Uuid, mpsc::Receiver<ForwardedSignal>) {
         let connection_id = Uuid::new_v4();
         let (sender, receiver) = mpsc::channel(OUTBOUND_SIGNAL_CAPACITY);
-        self.peers.lock().await.insert(
-            key,
-            SignalPeer {
-                connection_id,
-                sender,
-            },
-        );
+        let mut peers = self.peers.lock().await;
+        let connections = peers.entry(key).or_default();
+        if connections.len() >= 4 {
+            connections.remove(0);
+        }
+        connections.push(SignalPeer {
+            connection_id,
+            sender,
+        });
         (connection_id, receiver)
     }
 
     async fn remove(&self, key: &PeerKey, connection_id: Uuid) {
         let removed = {
             let mut peers = self.peers.lock().await;
-            if peers
-                .get(key)
-                .is_some_and(|peer| peer.connection_id == connection_id)
-            {
-                peers.remove(key);
-                true
+            if let Some(connections) = peers.get_mut(key) {
+                connections.retain(|peer| peer.connection_id != connection_id);
+                if connections.is_empty() {
+                    peers.remove(key);
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -136,17 +140,36 @@ impl SignalHub {
     }
 
     async fn forward(&self, key: &PeerKey, signal: ForwardedSignal) -> Result<(), &'static str> {
-        let sender = self
+        let senders = self
             .peers
             .lock()
             .await
             .get(key)
-            .map(|peer| peer.sender.clone())
+            .map(|peers| {
+                peers
+                    .iter()
+                    .map(|peer| peer.sender.clone())
+                    .collect::<Vec<_>>()
+            })
             .ok_or("target_offline")?;
-        sender.try_send(signal).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => "target_backpressure",
-            mpsc::error::TrySendError::Closed(_) => "target_offline",
-        })
+        let mut delivered = false;
+        let mut backpressure = false;
+        // A host has one bounded signaling receiver per viewer negotiation.
+        // Each receiver filters by authenticated session/device/generation.
+        for sender in senders {
+            match sender.try_send(signal.clone()) {
+                Ok(()) => delivered = true,
+                Err(mpsc::error::TrySendError::Full(_)) => backpressure = true,
+                Err(mpsc::error::TrySendError::Closed(_)) => {}
+            }
+        }
+        if delivered {
+            Ok(())
+        } else if backpressure {
+            Err("target_backpressure")
+        } else {
+            Err("target_offline")
+        }
     }
 
     async fn reserve_candidates(
@@ -1199,5 +1222,29 @@ mod tests {
         assert!(SignalError::new("target_offline", "offline").is_transient_delivery_failure());
         assert!(SignalError::new("target_backpressure", "busy").is_transient_delivery_failure());
         assert!(!SignalError::new("forbidden", "forbidden").is_transient_delivery_failure());
+    }
+
+    #[tokio::test]
+    async fn concurrent_viewer_signaling_connections_do_not_replace_each_other() {
+        let hub = SignalHub::default();
+        let key = PeerKey {
+            user_id: "owner".into(),
+            device_id: "host".into(),
+        };
+        let (first, mut a) = hub.register(key.clone()).await;
+        let (_, mut b) = hub.register(key.clone()).await;
+        let signal = ForwardedSignal {
+            session_id: "viewer-a".into(),
+            sender_device_id: "viewer".into(),
+            target_device_id: "host".into(),
+            signal_type: "p2p.candidates".into(),
+            payload: serde_json::json!({}),
+        };
+        hub.forward(&key, signal.clone()).await.unwrap();
+        assert_eq!(a.try_recv().unwrap().session_id, "viewer-a");
+        assert_eq!(b.try_recv().unwrap().session_id, "viewer-a");
+        hub.remove(&key, first).await;
+        hub.forward(&key, signal).await.unwrap();
+        assert_eq!(b.try_recv().unwrap().session_id, "viewer-a");
     }
 }

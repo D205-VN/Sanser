@@ -46,6 +46,7 @@ struct EngineChild {
     output: EngineOutput,
     acknowledgements: std::sync::mpsc::Receiver<crate::engine_output::SharingAck>,
     sharing: Option<crate::sharing_engine::SharingHost>,
+    first_frame: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl EngineChild {
@@ -60,10 +61,16 @@ impl EngineChild {
             let _ = process.wait();
             return Err(std::io::Error::other("native stderr pipe is missing"));
         };
+        let first_frame = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (acknowledgements, ack_receiver) = std::sync::mpsc::sync_channel(16);
         if let Some(stdout) = process.stdout.take()
-            && let Err(error) =
-                EngineOutput::start_observed(stdout, None, metrics.clone(), Some(acknowledgements))
+            && let Err(error) = EngineOutput::start_observed(
+                stdout,
+                None,
+                metrics.clone(),
+                Some(acknowledgements),
+                Some(Arc::clone(&first_frame)),
+            )
         {
             let _ = process.kill();
             let _ = process.wait();
@@ -79,6 +86,7 @@ impl EngineChild {
                 output,
                 acknowledgements: ack_receiver,
                 sharing: None,
+                first_frame,
             }),
             Err(error) => {
                 let _ = process.kill();
@@ -104,7 +112,10 @@ impl EngineChild {
                 "unable to send native sharing command".into(),
             ));
         }
-        let deadline = Instant::now() + Duration::from_secs(3);
+        self.wait_sharing_ack(request, Duration::from_secs(3))
+    }
+    fn wait_sharing_ack(&mut self, request: Uuid, timeout: Duration) -> Result<(), DesktopError> {
+        let deadline = Instant::now() + timeout;
         loop {
             match self
                 .acknowledgements
@@ -701,6 +712,16 @@ fn stabilize_child(child: &mut EngineChild) -> Result<(), String> {
 }
 
 impl EngineManager {
+    pub fn is_sharing(&self, kind: EngineKind) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state
+                .children
+                .get(&kind)
+                .is_some_and(|child| child.sharing.is_some())
+        })
+    }
+    // Validate/probe, reserve ports and stabilize the managed process in one lifecycle operation.
+    #[allow(clippy::too_many_lines)]
     pub fn launch(
         &self,
         app: &AppHandle,
@@ -808,8 +829,15 @@ impl EngineManager {
             state.last_errors.insert(request.kind, message.clone());
             return Err(DesktopError::Process(message));
         }
+        if let Some(peer) = sharing {
+            let viewer = peer.viewer;
+            child.sharing = Some(crate::sharing_engine::SharingHost::new(peer));
+            if let Err(error) = child.wait_sharing_ack(viewer, Duration::from_secs(20)) {
+                let _ = stop_child(&mut child);
+                return Err(error);
+            }
+        }
         state.last_errors.remove(&request.kind);
-        child.sharing = sharing.map(crate::sharing_engine::SharingHost::new);
         state.children.insert(request.kind, child);
         Ok(())
     }
@@ -904,11 +932,13 @@ impl EngineManager {
         let mut running = false;
         let mut process_id = None;
         let mut exited = false;
+        let mut video_received = false;
         if let Some(child) = state.children.get_mut(&kind) {
             match child.process.try_wait() {
                 Ok(None) => {
                     running = true;
                     process_id = Some(child.process.id());
+                    video_received = child.first_frame.load(std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Some(status)) => {
                     let message = child
@@ -931,6 +961,7 @@ impl EngineManager {
             installed,
             running,
             process_id,
+            video_received,
             last_error: state
                 .last_errors
                 .get(&kind)

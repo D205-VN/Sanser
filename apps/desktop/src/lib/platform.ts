@@ -110,6 +110,7 @@ export interface RelayStartRequest {
   accessToken: string;
   sessionCredential: string;
   preferredEnginePort?: number;
+  sharingId?: string;
 }
 
 export interface RelayStartResult {
@@ -123,8 +124,13 @@ export async function startRelay(request: RelayStartRequest): Promise<RelayStart
   return invoke<RelayStartResult>('relay_start', { request });
 }
 
-export async function stopRelay(kind: Extract<EngineKind, 'host' | 'client'>): Promise<void> {
-  if (isTauriRuntime()) await invoke('relay_stop', { kind });
+export async function stopRelay(kind: Extract<EngineKind, 'host' | 'client'>, sessionId?: string): Promise<void> {
+  if (isTauriRuntime()) await invoke('relay_stop', { kind, sessionId });
+}
+
+export async function relayPeerFailure(kind: 'host' | 'client', sessionId: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  return invoke('relay_peer_failure', { kind, sessionId });
 }
 
 export async function exportDiagnostics(contents: string): Promise<DiagnosticsExport> {

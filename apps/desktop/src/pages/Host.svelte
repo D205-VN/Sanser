@@ -1,6 +1,8 @@
 <script lang="ts">
   import StatusPill from '../components/StatusPill.svelte';
   import Toggle from '../components/Toggle.svelte';
+  import SharingPanel from '../components/SharingPanel.svelte';
+  import { sharing } from '../stores/sharing';
   import type { ConnectionSession, RuntimeStatus } from '../lib/types';
   import { diagnostics } from '../stores/diagnostics';
   import { host } from '../stores/host';
@@ -23,6 +25,7 @@
     actionError = null;
     try {
       if ($host.online) {
+        if ($host.sharingActive) await sharing.stop();
         await host.offline();
       }
       else {
@@ -107,6 +110,7 @@
   {#if runtime.platform.toLowerCase().includes('mac') && canHost}
     <details class="sharing-help"><summary>Mac permissions</summary><p>Allow Screen Recording in System Settings to share your screen. Allow Accessibility for remote keyboard and mouse control.</p></details>
   {/if}
+  {#if runtime.capabilities.multiViewerHost === true}<SharingPanel {runtime} />{/if}
   <div class="grid two host-grid">
     <article class="card card-body stack">
       <div><h2 class="card-title">Screen sharing</h2><p class="card-subtitle">Your main display is shared during a connection.</p></div>

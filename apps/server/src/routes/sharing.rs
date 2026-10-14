@@ -1,5 +1,5 @@
-//! Sharing control plane. `accepted` means invitation consent, not streaming.
-//! Native fan-out integration must activate media in a subsequent stage.
+//! Consent creates independent authenticated view-only sessions. `accepted`
+//! means permission to connect; first-frame status is reported by the engines.
 use crate::{
     auth::AuthContext,
     error::{ApiJson, AppError},
@@ -13,6 +13,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use sanser_core::NetworkMode;
 use serde::Deserialize;
 use sqlx::Row;
 use uuid::Uuid;
@@ -23,6 +24,13 @@ pub struct CreateSharing {
     host_device_id: String,
     #[serde(default = "default_limit")]
     max_viewers: i16,
+    #[serde(default)]
+    network_mode: NetworkMode,
+    #[serde(default = "default_quality")]
+    quality_profile: String,
+}
+fn default_quality() -> String {
+    "balanced".into()
 }
 fn default_limit() -> i16 {
     3
@@ -54,7 +62,11 @@ fn limit(value: i16) -> Result<i16, AppError> {
     }
 }
 fn ensure_role(device: &crate::models::Device, role: &str) -> Result<(), AppError> {
-    if device.device_role == role && device.native_transport && device.cross_platform {
+    if device.device_role == role
+        && device.native_transport
+        && device.cross_platform
+        && super::sessions::supports_view_only(&device.sanser_version)
+    {
         Ok(())
     } else {
         Err(AppError::Conflict(
@@ -67,7 +79,7 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthContext,
 ) -> Result<Json<Page<SharingGroup>>, AppError> {
-    let ids = sqlx::query_scalar::<_, String>("SELECT id FROM sharing_groups WHERE user_id=$1 AND state='preparing' ORDER BY updated_at DESC LIMIT 20")
+    let ids = sqlx::query_scalar::<_, String>("SELECT id FROM sharing_groups WHERE user_id=$1 AND state IN ('preparing','active') ORDER BY updated_at DESC LIMIT 20")
         .bind(&auth.user_id).fetch_all(&state.pool).await.map_err(AppError::from_db)?;
     let mut items = Vec::new();
     for value in ids {
@@ -92,6 +104,19 @@ pub async fn create(
 ) -> Result<Json<SharingGroup>, AppError> {
     let host_id = id(&request.host_device_id)?;
     let max_viewers = limit(request.max_viewers)?;
+    if request.network_mode == NetworkMode::Manual {
+        return Err(AppError::Validation(
+            "sharing supports Auto, Direct or Relay".into(),
+        ));
+    }
+    if !matches!(
+        request.quality_profile.as_str(),
+        "auto" | "competitive" | "balanced" | "quality"
+    ) {
+        return Err(AppError::Validation(
+            "invalid sharing quality profile".into(),
+        ));
+    }
     let host = devices::fetch_owned(&state, &auth.user_id, &host_id).await?;
     ensure_role(&host, "host")?;
     super::sessions::ensure_device_online(&state, &host)?;
@@ -102,7 +127,7 @@ pub async fn create(
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::from_db)?;
-    let busy = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sharing_groups WHERE host_device_id=$1 AND state='preparing') OR EXISTS(SELECT 1 FROM connection_sessions WHERE state IN ('pending','accepted') AND (host_device_id=$1 OR requester_device_id=$1)) OR EXISTS(SELECT 1 FROM sharing_members WHERE viewer_device_id=$1 AND state IN ('invited','accepted'))")
+    let busy = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sharing_groups WHERE host_device_id=$1 AND state IN ('preparing','active')) OR EXISTS(SELECT 1 FROM connection_sessions WHERE state IN ('pending','accepted') AND (host_device_id=$1 OR requester_device_id=$1)) OR EXISTS(SELECT 1 FROM sharing_members WHERE viewer_device_id=$1 AND state IN ('invited','accepted'))")
         .bind(&host_id).fetch_one(&mut *tx).await.map_err(AppError::from_db)?;
     if busy {
         return Err(AppError::Conflict(
@@ -111,8 +136,9 @@ pub async fn create(
     }
     let sharing_id = Uuid::new_v4().to_string();
     let now = now_unix();
-    sqlx::query("INSERT INTO sharing_groups(id,user_id,host_device_id,max_viewers,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5)")
+    sqlx::query("INSERT INTO sharing_groups(id,user_id,host_device_id,max_viewers,created_at,updated_at,network_mode,quality_profile) VALUES($1,$2,$3,$4,$5,$5,$6,$7)")
         .bind(&sharing_id).bind(&auth.user_id).bind(&host_id).bind(max_viewers).bind(now)
+        .bind(super::sessions::network_mode_str(request.network_mode)).bind(&request.quality_profile)
         .execute(&mut *tx).await.map_err(AppError::from_db)?;
     tx.commit().await.map_err(AppError::from_db)?;
     Ok(Json(fetch(&state, &auth.user_id, &sharing_id).await?))
@@ -149,7 +175,7 @@ pub async fn invite(
     if locked
         .try_get::<String, _>("state")
         .map_err(AppError::from_db)?
-        != "preparing"
+        == "stopped"
     {
         return Err(AppError::Conflict("sharing group has stopped".into()));
     }
@@ -159,7 +185,7 @@ pub async fn invite(
         .fetch_one(&mut *tx)
         .await
         .map_err(AppError::from_db)?;
-    let busy = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sharing_members WHERE viewer_device_id=$1 AND state IN ('invited','accepted')) OR EXISTS(SELECT 1 FROM connection_sessions WHERE state IN ('pending','accepted') AND (host_device_id=$1 OR requester_device_id=$1)) OR EXISTS(SELECT 1 FROM sharing_groups WHERE host_device_id=$1 AND state='preparing')")
+    let busy = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM sharing_members WHERE viewer_device_id=$1 AND state IN ('invited','accepted')) OR EXISTS(SELECT 1 FROM connection_sessions WHERE state IN ('pending','accepted') AND (host_device_id=$1 OR requester_device_id=$1)) OR EXISTS(SELECT 1 FROM sharing_groups WHERE host_device_id=$1 AND state IN ('preparing','active'))")
         .bind(&viewer_id).fetch_one(&mut *tx).await.map_err(AppError::from_db)?;
     if busy {
         return Err(AppError::Conflict(
@@ -209,7 +235,15 @@ pub async fn respond(
     let sharing_id = id(&value)?;
     let member_id = id(&member)?;
     let viewer_id = id(&request.viewer_device_id)?;
-    devices::fetch_owned(&state, &auth.user_id, &viewer_id).await?;
+    let viewer = devices::fetch_owned(&state, &auth.user_id, &viewer_id).await?;
+    let group = fetch(&state, &auth.user_id, &sharing_id).await?;
+    if request.accept {
+        let host = devices::fetch_owned(&state, &auth.user_id, &group.host_device_id).await?;
+        ensure_role(&host, "host")?;
+        ensure_role(&viewer, "client")?;
+        super::sessions::ensure_device_online(&state, &host)?;
+        super::sessions::ensure_device_online(&state, &viewer)?;
+    }
     let mut tx = state.pool.begin().await.map_err(AppError::from_db)?;
     let group_state = sqlx::query_scalar::<_, String>(
         "SELECT state FROM sharing_groups WHERE id=$1 AND user_id=$2 FOR UPDATE",
@@ -220,39 +254,119 @@ pub async fn respond(
     .await
     .map_err(AppError::from_db)?
     .ok_or(AppError::NotFound)?;
-    if group_state != "preparing" {
+    if group_state == "stopped" {
         return Err(AppError::Conflict("sharing group has stopped".into()));
     }
+    let member_state=sqlx::query_scalar::<_,String>("SELECT state FROM sharing_members WHERE id=$1 AND sharing_id=$2 AND user_id=$3 AND viewer_device_id=$4 FOR UPDATE")
+        .bind(&member_id).bind(&sharing_id).bind(&auth.user_id).bind(&viewer_id).fetch_optional(&mut *tx).await.map_err(AppError::from_db)?
+        .ok_or_else(|| AppError::Conflict("invitation belongs to another viewer".into()))?;
+    if member_state == "accepted" && request.accept {
+        tx.commit().await.map_err(AppError::from_db)?;
+        return Ok(Json(fetch(&state, &auth.user_id, &sharing_id).await?));
+    }
+    if member_state != "invited" {
+        return Err(AppError::Conflict("invitation is no longer pending".into()));
+    }
+    let now = now_unix();
+    let session_id = if request.accept {
+        sqlx::query("SELECT id FROM devices WHERE id=$1 AND user_id=$2 FOR UPDATE")
+            .bind(&viewer_id)
+            .bind(&auth.user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(AppError::from_db)?;
+        let busy=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM connection_sessions WHERE user_id=$1 AND state IN ('pending','accepted') AND (requester_device_id=$2 OR host_device_id=$2))")
+            .bind(&auth.user_id).bind(&viewer_id).fetch_one(&mut *tx).await.map_err(AppError::from_db)?;
+        if busy {
+            return Err(AppError::Conflict(
+                "viewer already has an active media session".into(),
+            ));
+        }
+        let session_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO connection_sessions(id,user_id,requester_device_id,host_device_id,state,access_mode,network_mode,quality_profile,requested_codec,selected_transport,sharing_id,created_at,updated_at,accepted_at) VALUES($1,$2,$3,$4,'accepted','view-only',$5,$6,'h264','native',$7,$8,$8,$8)")
+            .bind(&session_id).bind(&auth.user_id).bind(&viewer_id).bind(&group.host_device_id)
+            .bind(super::sessions::network_mode_str(group.network_mode)).bind(&group.quality_profile).bind(&sharing_id).bind(now)
+            .execute(&mut *tx).await.map_err(AppError::from_db)?;
+        Some(session_id)
+    } else {
+        None
+    };
     let next = if request.accept {
         "accepted"
     } else {
         "declined"
     };
-    let changed=sqlx::query("UPDATE sharing_members SET state=$1,updated_at=$2 WHERE id=$3 AND sharing_id=$4 AND user_id=$5 AND viewer_device_id=$6 AND state='invited'")
-        .bind(next).bind(now_unix()).bind(&member_id).bind(&sharing_id).bind(&auth.user_id).bind(&viewer_id)
-        .execute(&mut *tx).await.map_err(AppError::from_db)?.rows_affected();
-    if changed != 1 {
-        return Err(AppError::Conflict(
-            "invitation is no longer pending or belongs to another viewer".into(),
-        ));
+    sqlx::query("UPDATE sharing_members SET state=$1,updated_at=$2,session_id=$3 WHERE id=$4 AND user_id=$5")
+        .bind(next).bind(now).bind(&session_id).bind(&member_id).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    sqlx::query("UPDATE sharing_groups SET state=CASE WHEN $1 THEN 'active' ELSE state END,updated_at=$2 WHERE id=$3 AND user_id=$4")
+        .bind(request.accept).bind(now).bind(&sharing_id).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    tx.commit().await.map_err(AppError::from_db)?;
+    events::publish(
+        &state,
+        &auth.user_id,
+        session_id.as_deref(),
+        "sharing.updated",
+        serde_json::json!({"sharingId":sharing_id}),
+    )
+    .await?;
+    Ok(Json(fetch(&state, &auth.user_id, &sharing_id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SharingHeartbeat {
+    host_device_id: String,
+}
+pub async fn heartbeat(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(value): Path<String>,
+    ApiJson(request): ApiJson<SharingHeartbeat>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let sharing_id = id(&value)?;
+    let host = id(&request.host_device_id)?;
+    let updated=sqlx::query("UPDATE sharing_groups SET updated_at=$1 WHERE id=$2 AND user_id=$3 AND host_device_id=$4 AND state IN ('preparing','active')")
+        .bind(now_unix()).bind(sharing_id).bind(&auth.user_id).bind(host).execute(&state.pool).await.map_err(AppError::from_db)?.rows_affected();
+    if updated != 1 {
+        return Err(AppError::NotFound);
     }
-    sqlx::query("UPDATE sharing_groups SET updated_at=$1 WHERE id=$2 AND user_id=$3")
-        .bind(now_unix())
-        .bind(&sharing_id)
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+pub async fn remove(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path((value, member)): Path<(String, String)>,
+) -> Result<Json<SharingGroup>, AppError> {
+    let sharing = id(&value)?;
+    let member = id(&member)?;
+    let mut tx = state.pool.begin().await.map_err(AppError::from_db)?;
+    sqlx::query("SELECT id FROM sharing_groups WHERE id=$1 AND user_id=$2 FOR UPDATE")
+        .bind(&sharing)
         .bind(&auth.user_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(AppError::from_db)?;
+        .map_err(AppError::from_db)?
+        .ok_or(AppError::NotFound)?;
+    let session=sqlx::query_scalar::<_,Option<String>>("SELECT session_id FROM sharing_members WHERE id=$1 AND sharing_id=$2 AND user_id=$3 FOR UPDATE")
+        .bind(&member).bind(&sharing).bind(&auth.user_id).fetch_optional(&mut *tx).await.map_err(AppError::from_db)?.ok_or(AppError::NotFound)?;
+    let now = now_unix();
+    if let Some(session) = session {
+        sqlx::query("UPDATE connection_sessions SET state='disconnected',ended_at=$1,updated_at=$1,disconnect_reason='sharing_member_removed' WHERE id=$2 AND user_id=$3 AND state IN ('pending','accepted')")
+            .bind(now).bind(session).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    }
+    sqlx::query("UPDATE sharing_members SET state='removed',updated_at=$1 WHERE id=$2 AND user_id=$3 AND state IN ('invited','accepted')")
+        .bind(now).bind(&member).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
     tx.commit().await.map_err(AppError::from_db)?;
     events::publish(
         &state,
         &auth.user_id,
         None,
         "sharing.updated",
-        serde_json::json!({"sharingId":sharing_id}),
+        serde_json::json!({"sharingId":sharing}),
     )
     .await?;
-    Ok(Json(fetch(&state, &auth.user_id, &sharing_id).await?))
+    Ok(Json(fetch(&state, &auth.user_id, &sharing).await?))
 }
 pub async fn stop(
     State(state): State<AppState>,
@@ -280,6 +394,10 @@ pub async fn stop(
     .map_err(AppError::from_db)?;
     sqlx::query("UPDATE sharing_members SET state='removed',updated_at=$1 WHERE sharing_id=$2 AND user_id=$3 AND state IN ('invited','accepted')")
         .bind(now).bind(&sharing_id).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    sqlx::query("UPDATE connection_sessions SET state='disconnected',ended_at=$1,updated_at=$1,disconnect_reason='sharing_stopped' WHERE sharing_id=$2 AND user_id=$3 AND state IN ('pending','accepted')")
+        .bind(now).bind(&sharing_id).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    sqlx::query("UPDATE devices SET streaming=FALSE,updated_at=$1 WHERE user_id=$2 AND id=(SELECT host_device_id FROM sharing_groups WHERE id=$3 AND user_id=$2)")
+        .bind(now).bind(&auth.user_id).bind(&sharing_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
     tx.commit().await.map_err(AppError::from_db)?;
     events::publish(
         &state,
@@ -309,6 +427,8 @@ async fn fetch(state: &AppState, user: &str, value: &str) -> Result<SharingGroup
                 viewer_device_id: r.try_get("viewer_device_id")?,
                 state: r.try_get("state")?,
                 access_mode: SessionAccess::ViewOnly,
+                session_id: r.try_get("session_id")?,
+                started_at: r.try_get("started_at")?,
                 created_at: r.try_get("created_at")?,
                 updated_at: r.try_get("updated_at")?,
             })
@@ -320,6 +440,11 @@ async fn fetch(state: &AppState, user: &str, value: &str) -> Result<SharingGroup
         host_device_id: row.try_get("host_device_id").map_err(AppError::from_db)?,
         state: row.try_get("state").map_err(AppError::from_db)?,
         max_viewers: row.try_get("max_viewers").map_err(AppError::from_db)?,
+        network_mode: super::sessions::parse_network_mode(
+            &row.try_get::<String, _>("network_mode")
+                .map_err(AppError::from_db)?,
+        )?,
+        quality_profile: row.try_get("quality_profile").map_err(AppError::from_db)?,
         created_at: row.try_get("created_at").map_err(AppError::from_db)?,
         updated_at: row.try_get("updated_at").map_err(AppError::from_db)?,
         members,

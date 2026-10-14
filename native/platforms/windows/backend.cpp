@@ -15,6 +15,7 @@
 #include "mf_video_packet_encoder.h"
 #include <algorithm>
 #include <memory>
+#include <iostream>
 #include <set>
 #include <stdexcept>
 using Microsoft::WRL::ComPtr;
@@ -116,12 +117,13 @@ private:
         const auto offset=(static_cast<std::size_t>(y)*width+x)*4;
         image.pixels[offset]=clamp((298*luminance+516*u+128)>>8); image.pixels[offset+1]=clamp((298*luminance-100*u-208*v+128)>>8); image.pixels[offset+2]=clamp((298*luminance+409*v+128)>>8); image.pixels[offset+3]=255;
       }
-      buffer->Unlock(); output_(std::move(image));
+      buffer->Unlock(); output_(std::move(image)); if(!reported_) { reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; }
     }
   }
-  ComPtr<IMFTransform> decoder_; ComPtr<IMFMediaType> type_; std::function<void(Image)> output_; LONGLONG time_=0;
+  ComPtr<IMFTransform> decoder_; ComPtr<IMFMediaType> type_; std::function<void(Image)> output_; LONGLONG time_=0; bool reported_=false;
 };
 struct WindowState {
+  bool viewOnly=false;
   Peer* peer=nullptr; std::mutex mutex; std::shared_ptr<const Image> image;
   bool released=false; RECT video{};
   // Auto-reset event coalesces decoded frames instead of queuing a UI message
@@ -134,6 +136,7 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   auto* state=reinterpret_cast<WindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE) { state=static_cast<WindowState*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state)); }
   if(!state) return DefWindowProcW(window,message,w,l);
+  if(state->viewOnly && ((message>=WM_KEYFIRST && message<=WM_KEYLAST) || (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST))) return DefWindowProcW(window,message,w,l);
   if(message==WM_CLOSE) { DestroyWindow(window); return 0; }
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
   if(message==WM_ERASEBKGND) return 1;
@@ -216,7 +219,7 @@ int runWindows(bool host,int argc,char** argv) {
     }
     peer.stop(); return 0;
   }
-  Peer peer(options); WindowState state; state.peer=&peer;
+  Peer peer(options); WindowState state; state.peer=&peer; state.viewOnly=!options.input;
   // Decoder COM objects belong to the receive thread, not the window thread.
   std::unique_ptr<Runtime> runtime; std::unique_ptr<Decoder> decoder;
   std::atomic<unsigned> decodeFailures{0}; std::string decodeError;
@@ -231,7 +234,7 @@ int runWindows(bool host,int argc,char** argv) {
   peer.onStopped=[&] { decoder.reset(); runtime.reset(); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
-  HWND window=CreateWindowExW(0,klass.lpszClassName,L"Sanser · Remote desktop · Ctrl+Alt+Escape releases input",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
+  HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+Escape releases input" : L"Sanser · View only",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
   if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); peer.start();
   MSG message{}; bool open=true;
   while(open && peer.running() && decodeFailures<10) {

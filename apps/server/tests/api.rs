@@ -125,7 +125,8 @@ impl TestServer {
             !parsed.query_pairs().any(|(key, _)| key == "options"),
             "TEST_DATABASE_URL may not override PostgreSQL connection options"
         );
-        Config::test(database_url.clone()).expect("TEST_DATABASE_URL must be a TLS Neon URL");
+        Config::test(database_url.clone())
+            .expect("TEST_DATABASE_URL must be a dedicated Neon or loopback test URL");
 
         let admin_database_url = without_channel_binding(&database_url);
         let admin_pool = PgPoolOptions::new()
@@ -957,7 +958,110 @@ async fn sharing_capacity_consent_ownership_and_stop_are_transactional() {
         )
         .await;
     assert!(status.is_success(), "{accepted}");
-    assert_eq!(accepted["state"], "preparing");
+    assert_eq!(accepted["state"], "active");
+    let media_id = accepted["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == member_id)
+        .unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, ready, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{media_id}/native-ready"),
+            Some(json!({"deviceId":chosen_viewer})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success(), "{ready}");
+    let epoch = ready["requesterReadyAt"].as_i64().unwrap();
+    let (status, credential, _) = server
+        .request(
+            Method::GET,
+            &format!(
+                "/api/v2/sessions/{media_id}/credentials?deviceId={}",
+                peers[0]
+            ),
+            None,
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success());
+    assert_eq!(credential["wireProtocol"], "snv2");
+    assert_eq!(credential["accessMode"], "view-only");
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{media_id}/native-started"),
+            Some(json!({"deviceId":wrong_viewer,"requesterReadyAt":epoch})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{media_id}/native-started"),
+            Some(json!({"deviceId":chosen_viewer,"requesterReadyAt":epoch})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let mut sessions = vec![media_id.clone()];
+    for another in members.iter().skip(1) {
+        let (status, response, _) = server
+            .request(
+                Method::POST,
+                &format!("{path}/members/{}/respond", another["id"].as_str().unwrap()),
+                Some(json!({"viewerDeviceId":another["viewerDeviceId"],"accept":true})),
+                Some(access),
+            )
+            .await;
+        assert!(status.is_success(), "{response}");
+        let sid = response["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == another["id"])
+            .unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(!sessions.contains(&sid));
+        sessions.push(sid);
+    }
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("{path}/members/{member_id}/remove"),
+            None,
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success());
+    let (_, removed, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/sessions/{media_id}"),
+            None,
+            Some(access),
+        )
+        .await;
+    assert_eq!(removed["state"], "disconnected");
+    for sid in sessions.iter().skip(1) {
+        let (_, survivor, _) = server
+            .request(
+                Method::GET,
+                &format!("/api/v2/sessions/{sid}"),
+                None,
+                Some(access),
+            )
+            .await;
+        assert_eq!(survivor["state"], "accepted");
+    }
     let (_, stopped, _) = server
         .request(Method::POST, &format!("{path}/stop"), None, Some(access))
         .await;

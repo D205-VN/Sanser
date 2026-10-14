@@ -65,6 +65,8 @@ pub struct ConnectionSession {
     pub host_device_id: String,
     pub state: String,
     pub access_mode: SessionAccess,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sharing_id: Option<String>,
     pub network_mode: NetworkMode,
     pub quality_profile: String,
     pub requested_codec: String,
@@ -106,6 +108,8 @@ pub struct SharingGroup {
     pub host_device_id: String,
     pub state: String,
     pub max_viewers: i16,
+    pub network_mode: NetworkMode,
+    pub quality_profile: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub members: Vec<SharingMember>,
@@ -118,6 +122,10 @@ pub struct SharingMember {
     pub viewer_device_id: String,
     pub state: String,
     pub access_mode: SessionAccess,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }

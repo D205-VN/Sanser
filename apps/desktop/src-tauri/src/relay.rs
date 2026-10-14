@@ -52,39 +52,57 @@ struct RelayBridge {
 
 #[derive(Default)]
 pub struct RelayManager {
-    bridges: Arc<Mutex<HashMap<EngineKind, RelayBridge>>>,
-    failures: Arc<Mutex<HashMap<EngineKind, String>>>,
+    bridges: Arc<Mutex<HashMap<(EngineKind, uuid::Uuid), RelayBridge>>>,
+    failures: Arc<Mutex<HashMap<(EngineKind, uuid::Uuid), String>>>,
 }
 
 impl RelayManager {
-    pub fn transport(&self, kind: EngineKind) -> Option<String> {
+    pub fn transport(&self, kind: EngineKind, session: &str) -> Option<String> {
+        let session = uuid::Uuid::parse_str(session).ok()?;
         self.bridges
             .lock()
             .ok()?
-            .get(&kind)
+            .get(&(kind, session))
             .map(|bridge| bridge.transport.to_owned())
     }
 
     fn stop(&self, kind: EngineKind) {
         if let Ok(mut failures) = self.failures.lock() {
-            failures.remove(&kind);
+            failures.retain(|key, _| key.0 != kind);
+        }
+        if let Ok(mut bridges) = self.bridges.lock() {
+            let keys = bridges
+                .keys()
+                .filter(|key| key.0 == kind)
+                .copied()
+                .collect::<Vec<_>>();
+            for key in keys {
+                if let Some(bridge) = bridges.remove(&key) {
+                    let _ = bridge.stop.send(());
+                }
+            }
+        }
+    }
+    pub fn stop_peer(&self, kind: EngineKind, session: uuid::Uuid) {
+        if let Ok(mut failures) = self.failures.lock() {
+            failures.remove(&(kind, session));
         }
         if let Ok(mut bridges) = self.bridges.lock()
-            && let Some(bridge) = bridges.remove(&kind)
+            && let Some(bridge) = bridges.remove(&(kind, session))
         {
             let _ = bridge.stop.send(());
         }
     }
-
     pub fn stop_for_engine(&self, kind: EngineKind) {
         self.stop(kind);
     }
-
+    pub fn take_peer_failure(&self, kind: EngineKind, session: uuid::Uuid) -> Option<String> {
+        self.failures.lock().ok()?.remove(&(kind, session))
+    }
     pub fn take_failure(&self, kind: EngineKind) -> Option<String> {
-        self.failures
-            .lock()
-            .ok()
-            .and_then(|mut failures| failures.remove(&kind))
+        let mut failures = self.failures.lock().ok()?;
+        let key = failures.keys().find(|key| key.0 == kind).copied()?;
+        failures.remove(&key)
     }
 
     pub fn verify_launch(&self, request: &LaunchEngineRequest) -> Result<(), DesktopError> {
@@ -100,7 +118,7 @@ impl RelayManager {
             .bridges
             .lock()
             .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?;
-        let bridge = bridges.get(&request.kind).ok_or_else(|| {
+        let bridge = bridges.get(&(request.kind, session_id)).ok_or_else(|| {
             DesktopError::Process("the authenticated relay bridge is not ready".into())
         })?;
         let engine_port = match request.kind {
@@ -142,6 +160,8 @@ pub struct RelayStartRequest {
     access_token: String,
     session_credential: String,
     preferred_engine_port: Option<u16>,
+    #[serde(default)]
+    sharing_id: Option<String>,
 }
 
 impl Drop for RelayStartRequest {
@@ -207,7 +227,31 @@ pub async fn relay_start(
         ));
     }
 
-    manager.stop(request.kind);
+    if let Some(group) = &request.sharing_id {
+        uuid::Uuid::parse_str(group)
+            .map_err(|_| DesktopError::InvalidRequest("sharingId must be a UUID".into()))?;
+        if request.kind != EngineKind::Host {
+            return Err(DesktopError::InvalidRequest(
+                "only a host uses multiple sharing relay bridges".into(),
+            ));
+        }
+        manager.stop_peer(request.kind, session_id);
+        if manager
+            .bridges
+            .lock()
+            .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?
+            .keys()
+            .filter(|key| key.0 == request.kind)
+            .count()
+            >= 3
+        {
+            return Err(DesktopError::Process(
+                "sharing relay viewer limit reached".into(),
+            ));
+        }
+    } else {
+        manager.stop(request.kind);
+    }
     let engine_reservation = tokio::net::UdpSocket::bind((
         Ipv4Addr::UNSPECIFIED,
         request.preferred_engine_port.unwrap_or(0),
@@ -342,7 +386,7 @@ pub async fn relay_start(
         .bridges
         .lock()
         .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?
-        .insert(request.kind, bridge);
+        .insert((request.kind, session_id), bridge);
     let bridges = Arc::clone(&manager.bridges);
     let failures = Arc::clone(&manager.failures);
     let kind = request.kind;
@@ -356,14 +400,14 @@ pub async fn relay_start(
         };
         if let Ok(mut active) = bridges.lock()
             && active
-                .get(&kind)
+                .get(&(kind, session_id))
                 .is_some_and(|bridge| bridge.id == bridge_id)
         {
-            active.remove(&kind);
+            active.remove(&(kind, session_id));
             if let Some(failure) = failure
                 && let Ok(mut recorded) = failures.lock()
             {
-                recorded.insert(kind, failure);
+                recorded.insert((kind, session_id), failure);
             }
         }
     });
@@ -376,8 +420,30 @@ pub async fn relay_start(
 
 #[tauri::command]
 #[allow(clippy::needless_pass_by_value)]
-pub fn relay_stop(manager: State<'_, RelayManager>, kind: EngineKind) {
-    manager.stop(kind);
+pub fn relay_stop(
+    manager: State<'_, RelayManager>,
+    kind: EngineKind,
+    session_id: Option<String>,
+) -> Result<(), DesktopError> {
+    if let Some(session) = session_id {
+        let session = uuid::Uuid::parse_str(&session)
+            .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+        manager.stop_peer(kind, session);
+    } else {
+        manager.stop(kind);
+    }
+    Ok(())
+}
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)]
+pub fn relay_peer_failure(
+    manager: State<'_, RelayManager>,
+    kind: EngineKind,
+    session_id: String,
+) -> Result<Option<String>, DesktopError> {
+    let session = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    Ok(manager.take_peer_failure(kind, session))
 }
 
 fn relay_endpoint(
@@ -1002,5 +1068,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(failure.contains("authentication repeatedly failed"));
+    }
+
+    #[test]
+    fn removing_one_relay_viewer_does_not_stop_other_viewers_or_local_client() {
+        let manager = RelayManager::default();
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let mut receivers = Vec::new();
+        for (kind, session) in [
+            (EngineKind::Host, a),
+            (EngineKind::Host, b),
+            (EngineKind::Client, a),
+        ] {
+            let (stop, receiver) = oneshot::channel();
+            receivers.push(receiver);
+            manager.bridges.lock().unwrap().insert(
+                (kind, session),
+                RelayBridge {
+                    transport: "udp",
+                    id: uuid::Uuid::new_v4(),
+                    session_id: session,
+                    engine_port: 50000,
+                    proxy_port: 50001,
+                    stop,
+                },
+            );
+        }
+        manager.stop_peer(EngineKind::Host, a);
+        assert!(receivers[0].try_recv().is_ok());
+        assert!(receivers[1].try_recv().is_err());
+        assert!(receivers[2].try_recv().is_err());
+        assert!(
+            manager
+                .transport(EngineKind::Host, &b.to_string())
+                .is_some()
+        );
+        manager.stop_for_engine(EngineKind::Host);
+        assert!(receivers[1].try_recv().is_ok());
+        assert!(receivers[2].try_recv().is_err());
     }
 }

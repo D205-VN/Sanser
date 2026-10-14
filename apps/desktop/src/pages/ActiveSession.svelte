@@ -193,7 +193,7 @@
       if (controller.signal.aborted) return;
       const credentials = await client.sessionCredentials(target.id, localDeviceId);
       if (isAborted(controller.signal) || !componentActive || $connection.session?.id !== target.id || $session.mode !== 'cloud') return;
-      connection.authorizeNative(credentials);
+      connection.authorizeNative(credentials, ready.requesterReadyAt);
       diagnostics.add({
         level: 'info',
         category: 'session',
@@ -286,6 +286,9 @@
     try {
       if ($connection.engineRunning) {
         const status = await engineStatus('client');
+        if (status.running && status.videoReceived && current.sharingId && current.requesterReadyAt && localDeviceId) {
+          await client.markSharingStarted(current.id, localDeviceId, current.requesterReadyAt);
+        }
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (!componentActive || $connection.session?.id !== current.id) return;
         if (!status.running) {
@@ -395,7 +398,7 @@
   {/if}
   <div class="stream-stage" class:has-metrics={metrics !== null}>
     {#if $connection.engineRunning}
-      <div class="native-stage-message"><span class="capture-dot"></span><h2>Remote window opened</h2><p>Switch to the remote window to view and control the computer. If the screen stays blank, check connection details.</p><button class="button" onclick={() => navigate('diagnostics')}>View connection details</button></div>
+      <div class="native-stage-message"><span class="capture-dot"></span><h2>Remote window opened</h2><p>Switch to the remote window to {sessionState?.accessMode === 'view-only' ? 'view the shared screen' : 'view and control the computer'}. If the screen stays blank, check connection details.</p><button class="button" onclick={() => navigate('diagnostics')}>View connection details</button></div>
     {:else if sessionState}
       <div class="native-stage-message">
         <span class="capture-dot waiting"></span>

@@ -4,7 +4,7 @@
   import BrandMark from './components/BrandMark.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import { runtimeStatus, stopEngine } from './lib/platform';
-  import type { Page, RuntimeStatus } from './lib/types';
+  import type { Page, RuntimeStatus, SharingGroup, SharingMember } from './lib/types';
   import ActiveSession from './pages/ActiveSession.svelte';
   import About from './pages/About.svelte';
   import Computers from './pages/Computers.svelte';
@@ -17,6 +17,7 @@
   import { preferences } from './stores/preferences';
   import { presence } from './stores/presence';
   import { session } from './stores/session';
+  import { sharing } from './stores/sharing';
   import Updater from './components/Updater.svelte';
 
   let updater = $state<{ checkForUpdates: (manual?: boolean) => Promise<void> }>();
@@ -30,6 +31,28 @@
   let signingOut = $state(false);
   let browserOnline = $state(navigator.onLine);
   let autoOnlineAccountId = $state<string | null>(null);
+  let sharingActionError = $state<string | null>(null);
+  const invitations = $derived($sharing.groups.flatMap((group) => group.members
+    .filter((member) => member.viewerDeviceId === $presence.deviceId && (member.state === 'invited' || member.state === 'accepted') && member.sessionId !== $connection.session?.id)
+    .map((member) => ({ group, member }))));
+  const watchingCount = $derived($sharing.paused ? 0 : $sharing.ownGroup?.members.filter((member) => member.state === 'accepted' && member.startedAt !== undefined).length ?? 0);
+
+  $effect(() => {
+    if (runtime && $session.mode === 'cloud' && !signingOut) void sharing.initialize(runtime);
+    else if ($session.mode === 'signedOut') void sharing.shutdown();
+  });
+
+  async function respondInvitation(group: SharingGroup, member: SharingMember, accept: boolean): Promise<void> {
+    sharingActionError = null;
+    try { await sharing.respond(group, member, accept); if (accept) navigate('session'); }
+    catch (error) { sharingActionError = error instanceof Error ? error.message : 'Unable to respond to the invitation'; }
+  }
+
+  async function stopSharing(): Promise<void> {
+    sharingActionError = null;
+    try { await sharing.stop(); }
+    catch (error) { sharingActionError = error instanceof Error ? error.message : 'Unable to stop sharing'; }
+  }
 
   const pageMeta: Record<Page, { section: string; label: string }> = {
     computers: { section: 'Workspace', label: 'Computers' },
@@ -88,6 +111,7 @@
     try {
       const activeSession = $connection.session;
       const client = session.client();
+      await sharing.shutdown();
       connection.clear();
       if (activeSession && client) {
         await client.disconnectSession(activeSession.id).catch(() => undefined);
@@ -173,6 +197,7 @@
           <strong>{pageMeta[page].label}</strong>
         </div>
         <div class="title-actions">
+          {#if $sharing.ownGroup}<span class="sharing-indicator" role="status">{$sharing.paused ? 'Sharing paused' : 'Sharing'} · {watchingCount} watching <button class="button small danger" disabled={$sharing.busy} onclick={stopSharing}>Stop</button></span>{/if}
           <span class="title-account">{$session.account?.email}</span>
           <button class="button small ghost" disabled={signingOut} onclick={signOut}>{signingOut ? 'Signing out…' : 'Sign out'}</button>
           {#if updateAvailable}<button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button>{/if}
@@ -180,6 +205,10 @@
       </header>
       <main bind:this={pageContainer} class:session-scroll={page === 'session'} class="page-scroll">
         {#if signOutError}<div class="notice error" role="alert">{signOutError}</div>{/if}
+        {#if sharingActionError}<div class="notice error" role="alert">{sharingActionError}</div>{/if}
+        {#each invitations as invitation (invitation.member.id)}
+          <div class="notice sharing-invitation" role="status"><div><strong>{$sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? 'A computer in your account'} invited you to view its screen.</strong><p>View only · Your keyboard and mouse remain on this computer.</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? 'Open shared screen' : 'Join'}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>Decline</button>{/if}</span></div>
+        {/each}
         {#if !browserOnline}<div class="notice warning" role="status">You are offline. Check your connection; your saved settings are still available.</div>{/if}
         <div class="persistent-session" hidden={page !== 'session'}><ActiveSession {runtime} {navigate} /></div>
         {#if page === 'computers'}<Computers {runtime} {navigate} />
@@ -195,4 +224,7 @@
 
 <style>
   .welcome-update { position: fixed; top: 16px; right: 20px; z-index: 10; }
+  .sharing-indicator { display: inline-flex; align-items: center; gap: 10px; color: var(--accent); font-size: 13px; }
+  .sharing-invitation { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+  .sharing-invitation p { margin: 6px 0 0; }
 </style>

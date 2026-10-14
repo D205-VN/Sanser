@@ -13,15 +13,16 @@ struct HealthResponse {
     status: &'static str,
     version: &'static str,
     protocol_version: u8,
-    features: [&'static str; 5],
+    features: [&'static str; 6],
 }
 
-const FEATURES: [&str; 5] = [
+const FEATURES: [&str; 6] = [
     "device-roles",
     "cross-platform-native",
     "session-idle-7d",
     "view-only-sessions",
     "sharing-control-plane",
+    "sharing-media",
 ];
 
 pub async fn health() -> impl IntoResponse {

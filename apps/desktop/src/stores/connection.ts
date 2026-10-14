@@ -80,7 +80,7 @@ function createConnectionStore() {
     setEngineRunning(running: boolean): void {
       store.update((state) => ({ ...state, engineRunning: running, error: null }));
     },
-    authorizeNative(credentials: NativeSessionCredentials): void {
+    authorizeNative(credentials: NativeSessionCredentials, requesterReadyAt?: string): void {
       store.update((state) => {
         if (!state.session || state.session.id !== credentials.sessionId) return state;
         return {
@@ -92,6 +92,7 @@ function createConnectionStore() {
             sessionToken: credentials.sessionToken,
             wireProtocol: credentials.wireProtocol,
             accessMode: state.session.accessMode === 'view-only' ? 'view-only' : credentials.accessMode ?? state.session.accessMode,
+            requesterReadyAt: requesterReadyAt ?? state.session.requesterReadyAt,
             credentialExpiresAt: credentials.expiresAt
           },
           error: null

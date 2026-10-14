@@ -125,6 +125,7 @@ function normalizeConnectionSession(raw: RawSession): ConnectionSession {
     requesterDeviceId: raw.requesterDeviceId ?? '',
     accessMode: raw.accessMode === 'view-only' ? 'view-only' : 'control',
     hostDeviceId: raw.hostDeviceId ?? '',
+    sharingId: raw.sharingId,
     status: raw.status ?? raw.state ?? 'pending',
     transport: selected === 'native' || selected === 'webrtc' ? selected : null,
     networkMode: raw.networkMode ?? 'auto',
@@ -298,8 +299,13 @@ export class ApiClient {
     return this.request('/api/v2/sharing');
   }
 
-  async createSharingGroup(hostDeviceId: string, maxViewers = 3): Promise<SharingGroup> {
-    return this.request('/api/v2/sharing', { method: 'POST', body: { hostDeviceId, maxViewers } });
+  async supportsSharingMedia(): Promise<boolean> {
+    const health = await this.request<{ features?: string[] }>('/api/v2/health');
+    return health.features?.includes('sharing-media') === true;
+  }
+
+  async createSharingGroup(hostDeviceId: string, maxViewers = 3, networkMode: Exclude<NetworkMode, 'manual'> = 'auto', qualityProfile: Exclude<QualityProfile, 'custom'> = 'balanced'): Promise<SharingGroup> {
+    return this.request('/api/v2/sharing', { method: 'POST', body: { hostDeviceId, maxViewers, networkMode, qualityProfile } });
   }
 
   async getSharingGroup(id: string): Promise<SharingGroup> {
@@ -320,6 +326,20 @@ export class ApiClient {
 
   async stopSharingGroup(id: string): Promise<SharingGroup> {
     return this.request(`/api/v2/sharing/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+  }
+
+  async removeSharingViewer(id: string, memberId: string): Promise<SharingGroup> {
+    return this.request(`/api/v2/sharing/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/remove`, { method: 'POST' });
+  }
+
+  async sharingHeartbeat(id: string, hostDeviceId: string): Promise<void> {
+    await this.request(`/api/v2/sharing/${encodeURIComponent(id)}/heartbeat`, { method: 'POST', body: { hostDeviceId } });
+  }
+
+  async markSharingStarted(id: string, deviceId: string, requesterReadyAt: string): Promise<void> {
+    await this.request(`/api/v2/sessions/${encodeURIComponent(id)}/native-started`, {
+      method: 'POST', body: { deviceId, requesterReadyAt: Math.floor(Date.parse(requesterReadyAt) / 1000) }
+    });
   }
 
   async hostSessions(hostDeviceId: string): Promise<PageEnvelope<ConnectionSession>> {
