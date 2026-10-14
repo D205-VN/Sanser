@@ -134,8 +134,8 @@ used by this fixture.
 
 The `v2.1.22` workflow published a GitHub **Preview prerelease** with nine assets:
 Mac DMG/ZIP/updater bundle, Windows installer/portable executable, updater
-signatures, platform manifest and SHA-256 checksums. The previous 2.1.21 stable
-release remains latest. See `docs/releases/v2.1.22.md` for scope and use.
+signatures, platform manifest and SHA-256 checksums. The 2.1.22 release remains a historical Preview; 2.2.1 carries this
+implementation to the latest update channel. See `docs/releases/v2.2.1.md` for current release scope and use.
 
 Still required on real devices:
 

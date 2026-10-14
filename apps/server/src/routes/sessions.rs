@@ -947,6 +947,7 @@ mod tests {
         assert!(!supports_view_only("future"));
         assert!(!supports_view_only("2.1.22-beta"));
         assert!(supports_view_only("2.1.22"));
+        assert!(supports_view_only("2.2.1"));
         assert!(
             serde_json::from_str::<CreateSessionRequest>(
                 r#"{"hostDeviceId":"h","accessMode":"view-only"}"#
