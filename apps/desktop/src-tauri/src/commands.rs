@@ -14,7 +14,7 @@
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use url::{Host, Url};
 
 use crate::{
@@ -196,6 +196,7 @@ pub fn get_runtime_status(
             p2p_v2: Capability::available(),
             cross_platform_host: host_probe.compatible && host_probe.cross_platform,
             cross_platform_client: client_probe.compatible && client_probe.cross_platform,
+            multi_viewer_host: host_probe.compatible && host_probe.multi_viewer_host,
             host_audio: false,
             client_audio: false,
             host_codecs: if host_probe.hevc {
@@ -299,6 +300,48 @@ pub fn stop_engine(
     let result = engines.stop(kind);
     relay.stop_for_engine(kind);
     result
+}
+
+#[tauri::command]
+pub async fn sharing_engine_add_peer(
+    app: AppHandle,
+    p2p: State<'_, P2pSessionManager>,
+    mut request: LaunchEngineRequest,
+) -> Result<(), DesktopError> {
+    // Sharing currently uses per-viewer Direct sockets. Never replace the
+    // existing host/relay process to add one member.
+    if request.relay || request.sharing_id.is_none() {
+        return Err(DesktopError::InvalidRequest(
+            "a Direct sharing peer is required".into(),
+        ));
+    }
+    let socket = p2p.take_selected_socket(&mut request)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<EngineManager>()
+            .add_sharing_peer(&request, socket)
+    })
+    .await
+    .map_err(|_| DesktopError::Process("native sharing task failed".into()))?
+}
+
+#[tauri::command]
+pub async fn sharing_engine_remove_peer(
+    app: AppHandle,
+    sharing_id: String,
+    viewer_id: String,
+) -> Result<(), DesktopError> {
+    let parse = |value: &str| {
+        uuid::Uuid::parse_str(value)
+            .map_err(|_| DesktopError::InvalidRequest("sharing identifiers must be UUIDs".into()))
+    };
+    let group = parse(&sharing_id)?;
+    let viewer = parse(&viewer_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<EngineManager>()
+            .remove_sharing_peer(group, viewer)
+    })
+    .await
+    .map_err(|_| DesktopError::Process("native sharing task failed".into()))?
 }
 
 #[tauri::command]

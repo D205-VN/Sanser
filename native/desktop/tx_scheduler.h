@@ -11,13 +11,15 @@ namespace sanser::desktop {
 // Reserve independent lanes so video capacity cannot evict input/control/audio.
 class TxScheduler {
 public:
-  enum Lane : std::size_t { Control, InputLane, Audio, Video, Count };
+  enum Lane : std::size_t { Control, InputLane, Audio, Video, Repair, Count };
   struct Packet {
     std::vector<std::uint8_t> bytes;
     std::chrono::steady_clock::time_point queued;
     std::uint64_t frame = 0;
+    bool repair = false;
   };
   bool push(Lane lane, Packet packet) {
+    packet.repair=lane==Repair;
     const std::size_t limit = lane == Video ? 5 * 1024 * 1024 : 256 * 1024;
     if (bytes_[lane] + packet.bytes.size() > limit) return false;
     bytes_[lane] += packet.bytes.size();
@@ -36,14 +38,15 @@ public:
       }
     }
     if (videoDue && !queues_[Video].empty()) return take(Video);
+    if (videoDue && !queues_[Repair].empty()) return take(Repair);
     return std::nullopt;
   }
-  bool hasVideo() const { return !queues_[Video].empty(); }
-  std::size_t nextVideoBytes() const { return hasVideo() ? queues_[Video].front().bytes.size() : 0; }
+  bool hasVideo() const { return !queues_[Video].empty() || !queues_[Repair].empty(); }
+  std::size_t nextVideoBytes() const { return !queues_[Video].empty() ? queues_[Video].front().bytes.size() : !queues_[Repair].empty() ? queues_[Repair].front().bytes.size() : 0; }
   bool hasPriority() const {
     return latestMove_ || !queues_[Control].empty() || !queues_[InputLane].empty() || !queues_[Audio].empty();
   }
-  void clearVideo() { queues_[Video].clear(); bytes_[Video] = 0; }
+  void clearVideo() { queues_[Video].clear(); bytes_[Video] = 0; queues_[Repair].clear(); bytes_[Repair]=0; }
 private:
   Packet take(std::size_t lane) {
     auto value = std::move(queues_[lane].front()); queues_[lane].pop_front();

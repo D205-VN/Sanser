@@ -30,6 +30,7 @@ export interface Capability {
 export interface RuntimeCapabilities {
   crossPlatformHost?: boolean;
   crossPlatformClient?: boolean;
+  multiViewerHost?: boolean;
   hostAudio?: boolean;
   clientAudio?: boolean;
   hostCodecs?: VideoCodec[];
@@ -262,6 +263,8 @@ export interface SessionMetrics {
 }
 
 export interface LaunchEngineRequest {
+  sharingId?: string;
+  sharingViewerId?: string;
   ultraLowLatency?: boolean;
   directCheck?: 'passed' | 'relay-selected' | 'timeout' | 'no-direct-route' | 'gather-failed' | 'signaling-failed' | 'failed';
   wireProtocol?: 'legacy' | 'snv2';

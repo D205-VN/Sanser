@@ -8,6 +8,7 @@
 #include <wmcodecdsp.h>
 #include <wrl/client.h>
 #include "transport.h"
+#include "broadcast.h"
 #include "engine.h"
 #include "keyboard.h"
 #include "desktop_duplication.h"
@@ -173,27 +174,42 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
 int runWindows(bool host,int argc,char** argv) {
   SetProcessDPIAware(); const auto options=parseOptions(host,argc,argv);
   if(host) {
-    DesktopDuplicator display; display.initialize(); Peer peer(options); Injector injector(display);
+    DesktopDuplicator display; display.initialize(); HostOutput peer(options); Injector injector(display);
     VideoPacketEncodeOptions encoding; encoding.fps=options.fps; encoding.bitrate=options.bitrate; encoding.codec=VideoCodec::H264;
-    encoding.live=options.ultraLowLatency;
-    encoding.gpuDevice=options.ultraLowLatency ? display.gpuDevice() : nullptr;
-    MfVideoPacketEncoder encoder(options.width,options.height,encoding);
-    display.setGpuCapture(encoder.usingGpuInput());
-    if(options.ultraLowLatency && !encoder.usingGpuInput())
+    encoding.live=options.sharing || options.ultraLowLatency;
+    encoding.gpuDevice=encoding.live ? display.gpuDevice() : nullptr;
+    auto encoder=std::make_unique<MfVideoPacketEncoder>(options.width,options.height,encoding);
+    display.setGpuCapture(encoder->usingGpuInput());
+    if(options.ultraLowLatency && !encoder->usingGpuInput())
       throw std::runtime_error("Ultra Low Latency requires GPU capture and hardware encoding on Windows. Choose Balanced if the GPU path is unavailable.");
-    std::atomic<bool> force{true};
-    peer.onInput=[&](Input event) { injector.apply(event); }; peer.onKeyframe=[&] { force=true; }; PeerStop shutdown{peer}; peer.start();
-    FrameBgra frame;
+    peer.onInput=[&](Input event) { injector.apply(event); }; HostOutputStop shutdown{peer}; peer.start();
+    FrameBgra cached; bool hasCached=false, force=false;
+    auto generation=display.generation();
     const auto mediaStart=Clock::now();
     while(peer.running()) {
       const auto began=Clock::now();
+      peer.pumpControl();
+      force=peer.takeKeyframeRequest() || force;
       if(peer.ready()) {
-        if(force.exchange(false)) encoder.requestKeyframe();
+        FrameBgra frame;
         const bool captured=display.captureFrame(frame, options.ultraLowLatency ? 2 : 16);
+        if(display.recovering()) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+        if(generation!=display.generation()) {
+          if(encoding.gpuDevice && encoding.gpuDevice!=display.gpuDevice()) {
+            encoding.gpuDevice=display.gpuDevice();
+            encoder=std::make_unique<MfVideoPacketEncoder>(options.width,options.height,encoding);
+            display.setGpuCapture(encoder->usingGpuInput());
+          }
+          generation=display.generation(); hasCached=false; cached=FrameBgra{}; force=true;
+        }
         if(captured && options.ultraLowLatency && !frame.texture)
           throw std::runtime_error("Ultra Low Latency requires GPU capture. The display is using CPU capture; choose Balanced.");
+        if(captured) { cached=frame; hasCached=true; }
+        // Late viewers receive a fresh IDR even if the desktop is unchanged.
+        const bool refresh=force && hasCached;
+        if(refresh) { encoder->requestKeyframe(); force=false; }
         const auto timestamp=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-mediaStart).count())+1;
-        auto packets=captured ? encoder.encodeFrame(frame,timestamp) : encoder.drain();
+        auto packets=captured || refresh ? encoder->encodeFrame(captured ? frame : cached,timestamp) : encoder->drain();
         for(auto& packet:packets) peer.video(Frame{std::move(packet.payload),options.width,options.height,packet.keyframe});
       }
       std::this_thread::sleep_until(began+std::chrono::microseconds(1000000/options.fps));

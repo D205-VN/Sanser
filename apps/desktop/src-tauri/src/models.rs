@@ -38,6 +38,10 @@ pub struct LaunchEngineRequest {
     pub ultra_low_latency: bool,
     pub kind: EngineKind,
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub sharing_id: Option<String>,
+    #[serde(default)]
+    pub sharing_viewer_id: Option<String>,
     pub address: Option<String>,
     pub port: Option<u16>,
     pub codec: VideoCodec,
@@ -136,6 +140,7 @@ pub struct RuntimeCapabilities {
     pub p2p_v2: Capability,
     pub cross_platform_host: bool,
     pub cross_platform_client: bool,
+    pub multi_viewer_host: bool,
     pub host_audio: bool,
     pub client_audio: bool,
     pub host_codecs: Vec<VideoCodec>,

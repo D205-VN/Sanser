@@ -76,6 +76,16 @@ export async function launchEngine(request: LaunchEngineRequest): Promise<void> 
   await invoke('launch_engine', { request });
 }
 
+export async function addSharingPeer(request: LaunchEngineRequest): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('Native sharing requires the Sanser desktop app');
+  await invoke('sharing_engine_add_peer', { request });
+}
+
+export async function removeSharingPeer(sharingId: string, viewerId: string): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('Native sharing requires the Sanser desktop app');
+  await invoke('sharing_engine_remove_peer', { sharingId, viewerId });
+}
+
 export async function stopEngine(kind: EngineKind): Promise<void> {
   if (!isTauriRuntime()) throw new Error('Native engine requires the Sanser desktop app');
   await invoke('stop_engine', { kind });

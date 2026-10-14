@@ -7289,7 +7289,7 @@ int main(int argc, char** argv) {
       std::cout << "{\"product\":\"Sanser\",\"version\":\"" << sanser::kVersion
                 << "\",\"protocolVersion\":" << static_cast<unsigned>(sanser::kProtocolVersion)
                 << ",\"engine\":\"host-windows\","
-                   "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,"
+                   "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,\"multiViewerHost\":true,"
                    "\"h264EncoderImplementation\":true,"
                    "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,"
                    "\"inputImplementation\":true,\"gamepadImplementation\":true}\n";

@@ -81,6 +81,51 @@ int main() {
     }
     const std::string token(48,'r');
     {
+      Stub remote; Options options; options.host=true; options.input=false; options.token=token;
+      options.bitrate=100000000; options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer host(options); PacketCodec clientCodec(token,false),foreignCodec(std::string(48,'f'),false);
+      std::atomic<unsigned> keyframes{0}; host.onKeyframe=[&] { ++keyframes; };
+      PeerStop stop{host}; host.start();
+      wire::Header request; request.keyId=123; request.sequence=1; request.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,clientCodec.seal(request,{'S','A','K','1'}));
+      const auto readyDeadline=Clock::now()+std::chrono::seconds(1);
+      while(!host.ready() && Clock::now()<readyDeadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.ready(),"repair host handshake");
+      host.video(Frame{Bytes(2500,0x6a),1280,720,true});
+      std::uint64_t frame=0,lastSequence=0; unsigned fragments=0;
+      const auto deadline=Clock::now()+std::chrono::seconds(1);
+      Bytes missing;
+      while(fragments<3 && Clock::now()<deadline) {
+        const auto packet=clientCodec.open(remote.receive()); if(!packet || packet->first.packetType!=wire::PacketType::Video) continue;
+        frame=packet->first.frameId; lastSequence=std::max(lastSequence,packet->first.sequence); ++fragments;
+        if(packet->second[0]==0 && packet->second[1]==1) missing=packet->second;
+      }
+      check(fragments==3 && !missing.empty(),"repair source has three fragments");
+      Bytes nack{'S','V','N','1'}; for(int i=7;i>=0;--i) nack.push_back(static_cast<std::uint8_t>(frame>>(i*8)));
+      nack.insert(nack.end(),{0,1,0,1}); // one missing fragment, index one
+      request.sequence=2; request.packetType=wire::PacketType::Nack;
+      remote.send(options.port,foreignCodec.seal(request,nack));
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      check(host.repairedDatagrams()==0,"foreign viewer credential cannot access repair cache");
+      const auto datagram=clientCodec.seal(request,nack); remote.send(options.port,datagram);
+      bool repaired=false;
+      while(Clock::now()<deadline && !repaired) {
+        const auto packet=clientCodec.open(remote.receive()); if(!packet || packet->first.packetType!=wire::PacketType::Video) continue;
+        if(packet->first.flags & wire::kFlagRetransmitted) {
+          check(packet->first.sequence>lastSequence && packet->first.frameId==frame && packet->second==missing,"repair uses fresh authentication sequence with original frame and fragment");
+          repaired=true;
+        }
+      }
+      check(repaired && host.repairedDatagrams()==1,"authenticated NACK recovers missing fragment");
+      remote.send(options.port,datagram); std::this_thread::sleep_for(std::chrono::milliseconds(15));
+      check(host.repairedDatagrams()==1,"replayed NACK cannot amplify repair traffic");
+      std::this_thread::sleep_for(std::chrono::milliseconds(160));
+      request.sequence=3; remote.send(options.port,clientCodec.seal(request,nack));
+      const auto expired=Clock::now()+std::chrono::seconds(1);
+      while(host.repairCacheMisses()==0 && Clock::now()<expired) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.repairCacheMisses()==1 && keyframes>0,"expired repair cache requests a fresh keyframe");
+    }
+    {
       Stub remote; Options options; options.host=true; options.ultraLowLatency=true; options.token=token;
       options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
       Peer host(options); PacketCodec clientCodec(token,false);

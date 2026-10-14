@@ -24,6 +24,8 @@
 namespace sanser::desktop {
 namespace {
 std::atomic<bool> stopRequested{false};
+std::mutex nativeCommandMutex;
+std::vector<std::string> nativeCommands;
 constexpr std::size_t chunkSize = 1000, maxFrame = 4 * 1024 * 1024;
 void u16(Bytes& b, std::uint16_t n) { b.push_back(static_cast<std::uint8_t>(n >> 8)); b.push_back(static_cast<std::uint8_t>(n)); }
 void u32(Bytes& b, std::uint32_t n) { u16(b, static_cast<std::uint16_t>(n >> 16)); u16(b, static_cast<std::uint16_t>(n)); }
@@ -91,7 +93,20 @@ sockaddr_in endpoint(const std::string& value) {
 Options parseOptions(bool host, int argc, char** argv) {
   Options o; o.host = host;
   if (std::getenv("SANSER_CONTROL_STDIN")) {
-    std::thread([] { char line[16]; while(std::fgets(line,sizeof(line),stdin)) { if(std::string_view(line)=="stop\n") break; } stopRequested=true; }).detach();
+    std::thread([] {
+      std::string line; bool oversized=false; int c;
+      while((c=std::fgetc(stdin))!=EOF) {
+        if(c!='\n') { if(line.size()<1024) line.push_back(static_cast<char>(c)); else oversized=true; continue; }
+        if(!oversized && line=="stop") break;
+        if(!oversized) {
+          std::lock_guard lock(nativeCommandMutex);
+          if(nativeCommands.size()>=32) break;
+          nativeCommands.push_back(std::move(line));
+        }
+        line.clear(); oversized=false;
+      }
+      stopRequested=true;
+    }).detach();
   }
   const char* secret = std::getenv("SANSER_NATIVE_SESSION_TOKEN");
   if (secret) o.token = secret;
@@ -102,6 +117,8 @@ Options parseOptions(bool host, int argc, char** argv) {
     auto number = [&]() -> std::uint32_t { const auto v = value(); std::size_t used = 0; const auto n = std::stoul(v, &used); if (used != v.size() || n > std::numeric_limits<std::uint32_t>::max()) throw std::runtime_error("Invalid numeric engine argument"); return static_cast<std::uint32_t>(n); };
     if (arg == "--snv2" || arg == "--udp-video" || arg == "--low-latency-encoder" || arg == "--udp-pacing") continue;
     if (arg == "--ultra-low-latency") o.ultraLowLatency = true;
+    else if (arg == "--share-host") o.sharing = true;
+    else if (arg == "--share-peer-id") o.viewerId = value();
     else if (arg == "--disable-input") o.input = false;
     else if (arg == "--disable-audio") continue;
     else if (arg == "--relative-mouse") throw std::runtime_error("SNV2 currently supports absolute mouse mode; select Auto or Absolute");
@@ -116,9 +133,16 @@ Options parseOptions(bool host, int argc, char** argv) {
     else throw std::runtime_error("Unsupported engine argument: " + arg);
   }
   if (o.port == 0 || o.peer.empty() || o.fps < 1 || o.fps > 120 || o.width < 64 || o.height < 64 || o.width > 3840 || o.height > 2160 || o.bitrate < 1000000 || o.bitrate > 200000000) throw std::runtime_error("Invalid native session configuration");
+  if(o.sharing && (!host || o.input || o.viewerId.empty())) throw std::runtime_error("Sharing requires a host, viewer identifier and disabled input");
+  if(!o.sharing && !o.viewerId.empty()) throw std::runtime_error("Viewer identifier requires sharing mode");
   o.width &= ~1U; o.height &= ~1U;
   return o;
 }
+std::vector<std::string> takeNativeCommands() {
+  std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
+  result.swap(nativeCommands); return result;
+}
+bool nativeStopRequested() { return stopRequested.load(); }
 Bytes encodeInput(const Input& input) {
   Bytes out{static_cast<std::uint8_t>(input.kind), static_cast<std::uint8_t>(input.down)};
   u16(out, input.x); u16(out, input.y); u16(out, input.code); u16(out, static_cast<std::uint16_t>(input.delta)); return out;
@@ -184,16 +208,33 @@ std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b) {
   if (frame.width < 64 || frame.height < 64 || frame.width > 3840 || frame.height > 2160) return std::nullopt;
   return frame;
 }
+std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_point now) {
+  std::vector<Repair> result; expired=false;
+  for(auto it=frames_.begin();it!=frames_.end();) {
+    auto& partial=it->second;
+    if(now-partial.started>std::chrono::milliseconds(180)) { expired=true; it=frames_.erase(it); continue; }
+    if(partial.repairAttempts<3 && now-partial.lastRepair>=std::chrono::milliseconds(20) &&
+       now-partial.started>=std::chrono::milliseconds(partial.seen.back() ? 3 : 30) && result.size()<4) {
+      Repair request{it->first,{}};
+      for(std::size_t i=0;i<partial.seen.size() && request.missing.size()<32;++i) if(!partial.seen[i]) request.missing.push_back(static_cast<std::uint16_t>(i));
+      if(!request.missing.empty()) { result.push_back(std::move(request)); partial.lastRepair=now; ++partial.repairAttempts; }
+    }
+    ++it;
+  }
+  return result;
+}
+
 Peer::Peer(const Options& o) : options_(o), codec_(o.token, o.host) {
 #ifdef _WIN32
   WSADATA data{}; if (WSAStartup(MAKEWORD(2,2), &data) != 0) throw std::runtime_error("Winsock unavailable");
 #endif
+  try {
   std::random_device random; do { generation_=random(); } while(generation_==0);
   const auto remote = endpoint(o.peer);
   const auto fd = ::socket(AF_INET, SOCK_DGRAM, 0); socket_ = static_cast<std::intptr_t>(fd);
   if (socket_ == -1) throw std::runtime_error("Unable to create media socket");
   sockaddr_in local{}; local.sin_family = AF_INET; local.sin_port = htons(o.port); local.sin_addr.s_addr = htonl(INADDR_ANY);
-  if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 || ::connect(fd, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) != 0) { closeSocket(fd); socket_=-1; throw std::runtime_error("Unable to bind/connect native UDP socket"); }
+  if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 || ::connect(fd, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) != 0) throw std::runtime_error("Unable to bind/connect native UDP socket");
 #ifdef _WIN32
   DWORD timeout=2; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
   setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
@@ -202,13 +243,26 @@ Peer::Peer(const Options& o) : options_(o), codec_(o.token, o.host) {
   setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
 #endif
   int buffer = 4*1024*1024; setsockopt(fd,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&buffer),sizeof(buffer));
+  } catch(...) {
+    if(socket_!=-1) closeSocket(static_cast<Socket>(socket_));
+    socket_=-1;
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    throw;
+  }
 }
 Peer::~Peer() { stop(); if (socket_ != -1) closeSocket(static_cast<Socket>(socket_));
 #ifdef _WIN32
   WSACleanup();
 #endif
 }
-void Peer::start() { if (running_.exchange(true)) return; lastReceived_=Clock::now(); sender_=std::thread([this] { sendLoop(); }); worker_=std::thread([this] { loop(); }); }
+void Peer::start() {
+  if (running_.exchange(true)) return;
+  lastReceived_=Clock::now();
+  try { sender_=std::thread([this] { sendLoop(); }); worker_=std::thread([this] { loop(); }); }
+  catch(...) { running_=false; sendReady_.notify_all(); if(sender_.joinable()) sender_.join(); throw; }
+}
 void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); }
 void Peer::datagram(const Bytes& b) { ::send(static_cast<Socket>(socket_), reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()), 0); }
 void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable) {
@@ -218,33 +272,97 @@ void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream
   auto b=codec_.seal(h,body);
   const auto now = Clock::now();
   if (type == snv2::PacketType::Disconnect) { datagram(b); return; }
-  const auto lane = type == snv2::PacketType::Video ? TxScheduler::Video
+  const auto lane = type == snv2::PacketType::Video ? ((flags & snv2::kFlagRetransmitted) ? TxScheduler::Repair : TxScheduler::Video)
     : reliable ? TxScheduler::InputLane
     : type == snv2::PacketType::Audio ? TxScheduler::Audio : TxScheduler::Control;
   if (type == snv2::PacketType::MouseMove) tx_.latestInput({b, now, 0});
   else if (!tx_.push(lane, {b, now, frame})) {
-    if (lane == TxScheduler::Video) { tx_.clearVideo(); outgoingNeedsKeyframe_ = true; }
-    else running_ = false; // Stop/reset rather than silently losing key-up.
+    if (lane == TxScheduler::Video) { tx_.clearVideo(); outgoingNeedsKeyframe_ = true; ++videoQueueDrops_; }
+    else if(lane!=TxScheduler::Repair) running_ = false; // Stop/reset rather than silently losing key-up.
     return;
   }
   if (reliable) pending_.emplace(h.sequence, Pending{std::move(b),now,now,1,false});
   sendReady_.notify_one();
 }
 void Peer::video(const Frame& frame) {
+  videoPrepared(std::make_shared<const PreparedFrame>(prepareFrame(frame)));
+}
+PreparedFrame prepareFrame(Frame frame) {
+  if(frame.data.empty() || frame.data.size()>maxFrame-8 || frame.width<64 || frame.height<64 || frame.width>3840 || frame.height>2160)
+    throw std::runtime_error("Invalid encoded video frame");
+  Bytes prefix; u32(prefix,frame.width); u32(prefix,frame.height);
+  frame.data.insert(frame.data.begin(),prefix.begin(),prefix.end());
+  return {std::move(frame.data),frame.keyframe};
+}
+void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
+  const auto& frame=*prepared;
   std::lock_guard lock(videoMutex_);
   if (!ready_ || !running_) return;
   if (outgoingNeedsKeyframe_ && !frame.keyframe) { if (onKeyframe) onKeyframe(); return; }
   if (frame.keyframe) outgoingNeedsKeyframe_ = false;
-  Bytes bytes; u32(bytes,frame.width); u32(bytes,frame.height); bytes.insert(bytes.end(),frame.data.begin(),frame.data.end());
-  if (bytes.size()>maxFrame) return;
-  const auto id=++frame_; const auto count=(bytes.size()+chunkSize-1)/chunkSize;
+  const auto& bytes=frame.payload;
+  if (bytes.size()<=8 || bytes.size()>maxFrame) return;
+  const auto id=++frame_;
+  videoCacheBytes_+=bytes.size();
+  videoCache_.emplace(id,CachedVideo{std::move(prepared),Clock::now(),{}, {}});
+  while(videoCache_.size()>16 || videoCacheBytes_>8*1024*1024) {
+    videoCacheBytes_-=videoCache_.begin()->second.frame->payload.size(); videoCache_.erase(videoCache_.begin());
+  }
+  const auto count=(bytes.size()+chunkSize-1)/chunkSize;
   for (std::size_t i=0; i<count && running_; ++i) {
-    Bytes fragment; u16(fragment,static_cast<std::uint16_t>(i)); u16(fragment,static_cast<std::uint16_t>(count)); u32(fragment,static_cast<std::uint32_t>(bytes.size()));
-    const auto offset=i*chunkSize; fragment.insert(fragment.end(),bytes.begin()+static_cast<std::ptrdiff_t>(offset),bytes.begin()+static_cast<std::ptrdiff_t>(std::min(offset+chunkSize,bytes.size())));
-    transmit(snv2::PacketType::Video,fragment,1,id,frame.keyframe ? snv2::kFlagKeyFrame : 0);
+    sendVideoFragment(frame,id,i,false);
     if (outgoingNeedsKeyframe_) { if (onKeyframe) onKeyframe(); break; }
   }
 }
+void Peer::sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair) {
+  const auto count=(frame.payload.size()+chunkSize-1)/chunkSize;
+  Bytes fragment; u16(fragment,static_cast<std::uint16_t>(index)); u16(fragment,static_cast<std::uint16_t>(count)); u32(fragment,static_cast<std::uint32_t>(frame.payload.size()));
+  const auto offset=index*chunkSize;
+  fragment.insert(fragment.end(),frame.payload.begin()+static_cast<std::ptrdiff_t>(offset),frame.payload.begin()+static_cast<std::ptrdiff_t>(std::min(offset+chunkSize,frame.payload.size())));
+  transmit(snv2::PacketType::Video,fragment,1,id,static_cast<std::uint16_t>((frame.keyframe ? snv2::kFlagKeyFrame : 0) | (repair ? snv2::kFlagRetransmitted : 0)));
+}
+void Peer::queueVideoRepair(const Bytes& bytes) {
+  if(bytes.size()<16 || std::memcmp(bytes.data(),"SVN1",4)!=0) return;
+  std::uint64_t id=0; for(std::size_t i=4;i<12;++i) id=(id<<8)|bytes[i];
+  const auto count=r16(bytes.data()+12);
+  if(count==0 || count>32 || bytes.size()!=14+static_cast<std::size_t>(count)*2) return;
+  bool missing=false;
+  {
+    std::lock_guard lock(videoMutex_);
+    const auto found=videoCache_.find(id);
+    if(found==videoCache_.end() || Clock::now()-found->second.sent>std::chrono::milliseconds(150)) missing=true;
+    else {
+      auto& cached=found->second;
+      if(Clock::now()-cached.lastRequest<std::chrono::milliseconds(10)) return;
+      const auto fragments=(cached.frame->payload.size()+chunkSize-1)/chunkSize;
+      std::set<std::uint16_t> requested;
+      for(std::size_t i=0;i<count;++i) {
+        const auto index=r16(bytes.data()+14+i*2);
+        if(index>=fragments || !requested.insert(index).second) return;
+      }
+      if(cached.repair.size()+requested.size()>64) return;
+      cached.lastRequest=Clock::now();
+      for(auto index:requested) if(std::find(cached.repair.begin(),cached.repair.end(),index)==cached.repair.end()) cached.repair.push_back(index);
+    }
+  }
+  if(missing) { ++repairCacheMisses_; if(onKeyframe) onKeyframe(); }
+}
+void Peer::serviceVideoRepairs() {
+  std::lock_guard lock(videoMutex_);
+  unsigned budget=8;
+  for(auto it=videoCache_.begin();it!=videoCache_.end();) {
+    if(Clock::now()-it->second.sent>std::chrono::milliseconds(150)) {
+      videoCacheBytes_-=it->second.frame->payload.size(); it=videoCache_.erase(it); continue;
+    }
+    auto& cached=it->second;
+    while(budget && !cached.repair.empty()) {
+      const auto index=cached.repair.front(); cached.repair.pop_front();
+      sendVideoFragment(*cached.frame,it->first,index,true); ++repairedDatagrams_; --budget;
+    }
+    ++it;
+  }
+}
+
 void Peer::input(const Input& input) {
   if (!ready_ || !options_.input || options_.host) return;
   const bool reliable=input.kind!=Input::Move;
@@ -257,17 +375,21 @@ void Peer::requestKeyframe() {
 void Peer::process(const Bytes& bytes) {
   const auto packet=codec_.open(bytes); if (!packet) return;
   const auto& [h,b]=*packet; if (h.streamId>2 || h.keyId==0) return;
-  if(h.keyId!=peerGeneration_) {
+  const bool generationChanged=h.keyId!=peerGeneration_;
+  if(generationChanged) {
     if(previousGenerations_.contains(h.keyId)) return;
     if(previousGenerations_.size()>=16) { running_=false; return; }
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
     peerGeneration_=h.keyId; peerSack_=false; for(auto& window:replay_) window=ReplayWindow{};
     reassembler_=Reassembler{}; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
+    if(options_.host) { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
     if(options_.host && onInput) onInput(Input{});
   }
   if (h.streamId==2 && h.sequence<=deliveredInput_) { acknowledgeInput(); return; }
   if (!replay_[h.streamId].accept(h.sequence)) { if (h.streamId==2) acknowledgeInput(); return; }
-  lastReceived_=Clock::now(); ready_=true;
+  lastReceived_=Clock::now();
+  const bool becameReady=!ready_.exchange(true);
+  if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
   if (h.packetType==snv2::PacketType::Disconnect) { running_=false; return; }
   if (h.packetType==snv2::PacketType::NetworkFeedback && (b.size()==8 || b.size()==16)) {
@@ -283,6 +405,7 @@ void Peer::process(const Bytes& bytes) {
     }
     return;
   }
+  if (h.packetType==snv2::PacketType::Nack && options_.host) { queueVideoRepair(b); return; }
   if (h.packetType==snv2::PacketType::KeyframeRequest && options_.host) { if(onKeyframe) onKeyframe(); return; }
   if (h.packetType==snv2::PacketType::Video && !options_.host && h.streamId==1) {
     auto frame=reassembler_.push(h,b);
@@ -344,7 +467,8 @@ void Peer::sendLoop() {
           continue;
         }
         if (packet->frame && now-packet->queued>std::chrono::milliseconds(options_.ultraLowLatency ? 40 : 100)) {
-          tx_.clearVideo(); outgoingNeedsKeyframe_=true; continue;
+          if(!packet->repair) { tx_.clearVideo(); outgoingNeedsKeyframe_=true; ++videoQueueDrops_; }
+          continue;
         }
       }
       datagram(packet->bytes);
@@ -374,6 +498,18 @@ void Peer::loop() {
       }
       std::array<char,1500> buffer{}; const auto received=recv(static_cast<Socket>(socket_),buffer.data(),static_cast<int>(buffer.size()),0);
       if(received>0) process(Bytes(buffer.begin(),buffer.begin()+received));
+      if(options_.host) serviceVideoRepairs();
+      else {
+        bool expired=false;
+        for(const auto& repair:reassembler_.repairs(expired)) {
+          Bytes request{'S','V','N','1'};
+          for(int i=7;i>=0;--i) request.push_back(static_cast<std::uint8_t>(repair.frame>>(i*8)));
+          u16(request,static_cast<std::uint16_t>(repair.missing.size()));
+          for(auto index:repair.missing) u16(request,index);
+          transmit(snv2::PacketType::Nack,request);
+        }
+        if(expired) requestKeyframe();
+      }
     }
   } catch (...) { running_=false; }
   try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {}

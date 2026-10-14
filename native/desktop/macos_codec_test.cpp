@@ -1,9 +1,10 @@
 #include <iostream>
 #include <exception>
-namespace sanser::desktop { void testMacVideoCodec(); void testMacMetalPresenter(); }
+namespace sanser::desktop { void testMacVideoCodec(); void testMacBroadcastCodec(); void testMacMetalPresenter(); }
 int main() {
   try {
     sanser::desktop::testMacVideoCodec();
+    sanser::desktop::testMacBroadcastCodec();
     std::cout<<"VideoToolbox: synthetic frame encoded, encrypted, transferred, decoded and color-checked\n";
     sanser::desktop::testMacMetalPresenter();
     std::cout<<"Metal: offscreen pixels and aspect ratio verified\n";

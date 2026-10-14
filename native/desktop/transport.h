@@ -14,6 +14,7 @@
 #include <vector>
 #include <bitset>
 #include <set>
+#include <memory>
 
 namespace sanser::desktop {
 using Bytes = std::vector<std::uint8_t>;
@@ -22,6 +23,8 @@ struct Options {
   bool host = false;
   bool ultraLowLatency = false;
   bool input = true;
+  bool sharing = false;
+  std::string viewerId;
   std::string peer;
   std::uint16_t port = 0;
   std::uint32_t width = 1920, height = 1080, fps = 60, bitrate = 20000000;
@@ -39,6 +42,9 @@ struct Input {
 Bytes encodeInput(const Input& input);
 std::optional<Input> decodeInput(const Bytes& bytes);
 struct Frame { Bytes data; std::uint32_t width = 0, height = 0; bool keyframe = false; };
+// Prefix and encoded payload are prepared once, then authenticated per peer.
+struct PreparedFrame { Bytes payload; bool keyframe = false; };
+PreparedFrame prepareFrame(Frame frame);
 class PacketCodec {
 public:
   PacketCodec(const std::string& token, bool host);
@@ -58,8 +64,10 @@ private:
 class Reassembler {
 public:
   std::optional<Frame> push(const snv2::Header& header, const Bytes& payload);
+  struct Repair { std::uint64_t frame; std::vector<std::uint16_t> missing; };
+  std::vector<Repair> repairs(bool& expired,Clock::time_point now=Clock::now());
 private:
-  struct Partial { Bytes data; std::vector<bool> seen; std::uint16_t received = 0; Clock::time_point started; bool keyframe = false; };
+  struct Partial { Bytes data; std::vector<bool> seen; std::uint16_t received = 0; Clock::time_point started; bool keyframe = false; Clock::time_point lastRepair{}; unsigned repairAttempts=0; };
   std::map<std::uint64_t, Partial> frames_;
   std::uint64_t lastFrame_ = 0;
 };
@@ -71,15 +79,21 @@ public:
   Peer& operator=(const Peer&) = delete;
   void start();
   void stop();
+  void cancel() { running_=false; sendReady_.notify_all(); }
   bool running() const { return running_.load(); }
   bool ready() const { return ready_.load(); }
   void video(const Frame& frame);
+  void videoPrepared(std::shared_ptr<const PreparedFrame> frame);
   void input(const Input& input);
   void requestKeyframe();
   std::function<void(Frame)> onFrame;
   std::function<void(Input)> onInput;
   std::function<void()> onKeyframe;
   std::function<void()> onStopped;
+  std::function<void()> onReady;
+  std::uint64_t videoQueueDrops() const { return videoQueueDrops_.load(); }
+  std::uint64_t repairedDatagrams() const { return repairedDatagrams_.load(); }
+  std::uint64_t repairCacheMisses() const { return repairCacheMisses_.load(); }
 private:
   void loop();
   void sendLoop();
@@ -88,6 +102,9 @@ private:
                 std::uint64_t frame = 0, std::uint16_t flags = 0, bool reliable = false);
   void datagram(const Bytes& bytes);
   void process(const Bytes& bytes);
+  void queueVideoRepair(const Bytes& bytes);
+  void serviceVideoRepairs();
+  void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair);
   Options options_;
   PacketCodec codec_;
   std::intptr_t socket_ = -1;
@@ -98,6 +115,8 @@ private:
   std::condition_variable sendReady_;
   TxScheduler tx_;
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
+  std::atomic<std::uint64_t> videoQueueDrops_{0};
+  std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0};
   std::uint32_t generation_ = 0, peerGeneration_ = 0;
   std::set<std::uint32_t> previousGenerations_;
   std::uint64_t lastVideo_ = 0, lastMouse_ = 0;
@@ -107,6 +126,9 @@ private:
   std::map<std::uint64_t, Pending> pending_;
   std::map<std::uint64_t, Input> receivedInputs_;
   Reassembler reassembler_;
+  struct CachedVideo { std::shared_ptr<const PreparedFrame> frame; Clock::time_point sent; std::deque<std::uint16_t> repair; Clock::time_point lastRequest{}; };
+  std::map<std::uint64_t,CachedVideo> videoCache_;
+  std::size_t videoCacheBytes_=0;
   Clock::time_point lastReceived_ = Clock::now(), lastKeyframe_{};
   bool needKeyframe_ = true;
 };

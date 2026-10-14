@@ -26,7 +26,10 @@ int main() {
       require(next && next->bytes.front()==expected, "pacing video must not hold priority lanes");
     }
     require(!scheduler.pop(false), "video pacing remains respected");
+    require(scheduler.push(TxScheduler::Repair, {{8},now,1}), "queue repair in its own lane");
     require(scheduler.pop(true)->frame==1, "video resumes after priority traffic");
+    auto repair=scheduler.pop(true);
+    require(repair && repair->repair && repair->bytes.front()==8,"repair follows realtime video");
     require(!scheduler.push(TxScheduler::Video, {Bytes(6*1024*1024),now,2}), "video lane memory bounded");
     require(scheduler.push(TxScheduler::InputLane, {{7},now,0}), "video overflow cannot consume key-up capacity");
     const std::string token(48,'a'); PacketCodec host(token,true),client(token,false),wrong(std::string(48,'b'),false);
@@ -67,6 +70,11 @@ int main() {
     Bytes frame{0,0,7,128,0,0,4,56}; frame.resize(2508,77); h.frameId=1; h.flags=snv2::kFlagKeyFrame;
     Reassembler frames; require(!frames.push(h,fragment(frame,2)),"partial frame"); require(!frames.push(h,fragment(frame,0)),"out of order partial"); require(!frames.push(h,fragment(frame,0)),"duplicate fragment"); auto ready=frames.push(h,fragment(frame,1)); require(ready && ready->width==1920 && ready->height==1080 && ready->keyframe && ready->data==Bytes(2500,77),"reassembled frame");
     require(!frames.push(h,fragment(frame,0)),"completed frame cannot replay"); h.frameId=2; auto malformed=fragment(frame,0); malformed[2]=255; require(!frames.push(h,malformed),"invalid fragment count");
+    require(!frames.push(h,fragment(frame,0)) && !frames.push(h,fragment(frame,2)),"missing fragment remains incomplete");
+    bool expired=false;
+    const auto requests=frames.repairs(expired,Clock::now()+std::chrono::milliseconds(4));
+    require(!expired && requests.size()==1 && requests.front().frame==2 && requests.front().missing==std::vector<std::uint16_t>{1},"NACK names only the missing fragment");
+    require(frames.push(h,fragment(frame,1)).has_value(),"repaired fragment completes the existing assembly");
     std::cout<<"Transport: encryption, tamper, replay, input and reassembly passed\n";
     return 0;
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

@@ -44,6 +44,8 @@ const INHERITED_ENVIRONMENT: [&str; 7] = [
 struct EngineChild {
     process: Child,
     output: EngineOutput,
+    acknowledgements: std::sync::mpsc::Receiver<crate::engine_output::SharingAck>,
+    sharing: Option<crate::sharing_engine::SharingHost>,
 }
 
 impl EngineChild {
@@ -58,8 +60,10 @@ impl EngineChild {
             let _ = process.wait();
             return Err(std::io::Error::other("native stderr pipe is missing"));
         };
+        let (acknowledgements, ack_receiver) = std::sync::mpsc::sync_channel(16);
         if let Some(stdout) = process.stdout.take()
-            && let Err(error) = EngineOutput::start_recording(stdout, None, metrics.clone())
+            && let Err(error) =
+                EngineOutput::start_observed(stdout, None, metrics.clone(), Some(acknowledgements))
         {
             let _ = process.kill();
             let _ = process.wait();
@@ -70,11 +74,58 @@ impl EngineChild {
             debug_log_path.and_then(open_private_log),
             metrics,
         ) {
-            Ok(output) => Ok(Self { process, output }),
+            Ok(output) => Ok(Self {
+                process,
+                output,
+                acknowledgements: ack_receiver,
+                sharing: None,
+            }),
             Err(error) => {
                 let _ = process.kill();
                 let _ = process.wait();
                 Err(error)
+            }
+        }
+    }
+
+    fn sharing_command(&mut self, request: Uuid, command: &[u8]) -> Result<(), DesktopError> {
+        let input = self.process.stdin.as_mut().ok_or_else(|| {
+            DesktopError::Process("native sharing control pipe is unavailable".into())
+        })?;
+        if input
+            .write_all(command)
+            .and_then(|()| input.flush())
+            .is_err()
+        {
+            if let Some(sharing) = self.sharing.as_mut() {
+                sharing.desynchronized = true;
+            }
+            return Err(DesktopError::Process(
+                "unable to send native sharing command".into(),
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match self
+                .acknowledgements
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(ack) if ack.request == request => {
+                    return if ack.accepted {
+                        Ok(())
+                    } else {
+                        Err(DesktopError::Process(
+                            "native host rejected this sharing peer".into(),
+                        ))
+                    };
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    if let Some(sharing) = self.sharing.as_mut() {
+                        sharing.desynchronized = true;
+                    }
+                    return Err(DesktopError::Process("native sharing acknowledgement timed out; existing viewers remain active, stop and restart sharing before changing membership".into()));
+                }
             }
         }
     }
@@ -150,6 +201,8 @@ struct SidecarCapabilities {
     hevc_decoder_implementation: bool,
     #[serde(default)]
     cross_platform: bool,
+    #[serde(default)]
+    multi_viewer_host: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +213,7 @@ pub struct SidecarProbe {
     pub native_direct: bool,
     pub hevc: bool,
     pub cross_platform: bool,
+    pub multi_viewer_host: bool,
     pub reason: Option<String>,
 }
 
@@ -171,6 +225,7 @@ impl SidecarProbe {
             native_direct: false,
             hevc: false,
             cross_platform: false,
+            multi_viewer_host: false,
             reason: Some(reason.into()),
         }
     }
@@ -269,6 +324,7 @@ fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
                 native_direct: capabilities.native_direct,
                 hevc,
                 cross_platform: capabilities.cross_platform,
+                multi_viewer_host: capabilities.multi_viewer_host,
                 reason: (!capabilities.native_direct).then(|| {
                     "Native sidecar does not advertise the authenticated direct transport"
                         .to_owned()
@@ -422,9 +478,25 @@ fn validate_wire_protocol(request: &LaunchEngineRequest) -> Result<bool, Desktop
     Ok(cross_platform)
 }
 
+fn host_endpoint(request: &LaunchEngineRequest, port: u16) -> Result<String, DesktopError> {
+    let address = request
+        .address
+        .as_deref()
+        .ok_or_else(|| DesktopError::InvalidRequest("host target address is required".into()))?
+        .parse::<IpAddr>()
+        .map_err(|_| DesktopError::InvalidRequest("host target address must be an IP".into()))?;
+    if !address.is_ipv4() {
+        return Err(DesktopError::InvalidRequest(
+            "authenticated native direct transport currently requires an IPv4 route".into(),
+        ));
+    }
+    Ok(endpoint(address, port))
+}
+
 fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError> {
     let cross_platform = validate_wire_protocol(request)?;
     validate_common(request)?;
+    let sharing = crate::sharing_engine::SharingPeer::from_request(request)?;
     if request.kind == EngineKind::LocalServer {
         return Err(DesktopError::Unavailable(
             "local server mode is disabled; use the deployed PostgreSQL/Neon API".into(),
@@ -442,21 +514,6 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
 
     match request.kind {
         EngineKind::Host => {
-            let address = request
-                .address
-                .as_deref()
-                .ok_or_else(|| {
-                    DesktopError::InvalidRequest("host target address is required".into())
-                })?
-                .parse::<IpAddr>()
-                .map_err(|_| {
-                    DesktopError::InvalidRequest("host target address must be an IP".into())
-                })?;
-            if !address.is_ipv4() {
-                return Err(DesktopError::InvalidRequest(
-                    "authenticated native direct transport currently requires an IPv4 route".into(),
-                ));
-            }
             let mut args = vec![
                 "--encode-pipe".into(),
                 native_codec(request.codec).into(),
@@ -473,7 +530,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 "--stream-height".into(),
                 request.height.to_string(),
                 "--udp-connect".into(),
-                endpoint(address, port),
+                host_endpoint(request, port)?,
                 "--low-latency-encoder".into(),
                 "--udp-pacing".into(),
             ];
@@ -490,6 +547,13 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 // Legacy Windows capture otherwise defaults to a 250 ms
                 // screenshot interval, overriding the requested stream FPS.
                 args.extend(["--interval-ms", "0", "--no-stream-cursor"].map(str::to_owned));
+            }
+            if let Some(sharing) = sharing {
+                args.extend([
+                    "--share-host".into(),
+                    "--share-peer-id".into(),
+                    sharing.viewer.to_string(),
+                ]);
             }
             if request.ultra_low_latency {
                 args.push("--ultra-low-latency".into());
@@ -652,6 +716,7 @@ impl EngineManager {
             DesktopError::Unavailable(format!("{} is not bundled", sidecar_name(request.kind)))
         })?;
         let probe = probe_path(&path, request.kind);
+        let sharing = crate::sharing_engine::SharingPeer::from_request(request)?;
         if !probe.compatible {
             return Err(DesktopError::Unavailable(probe.reason.unwrap_or_else(
                 || "native sidecar capability probe failed".into(),
@@ -660,6 +725,11 @@ impl EngineManager {
         if !probe.native_direct {
             return Err(DesktopError::Unavailable(
                 "native sidecar does not advertise the authenticated direct transport".into(),
+            ));
+        }
+        if sharing.is_some() && !probe.multi_viewer_host {
+            return Err(DesktopError::Unavailable(
+                "installed native host does not support multi-viewer sharing".into(),
             ));
         }
         if request.codec == VideoCodec::Hevc && !probe.hevc {
@@ -739,7 +809,77 @@ impl EngineManager {
             return Err(DesktopError::Process(message));
         }
         state.last_errors.remove(&request.kind);
+        child.sharing = sharing.map(crate::sharing_engine::SharingHost::new);
         state.children.insert(request.kind, child);
+        Ok(())
+    }
+
+    pub fn add_sharing_peer(
+        &self,
+        request: &LaunchEngineRequest,
+        reserved_socket: Option<Arc<tokio::net::UdpSocket>>,
+    ) -> Result<(), DesktopError> {
+        let _ = build_args(request)?;
+        let peer = crate::sharing_engine::SharingPeer::from_request(request)?.ok_or_else(|| {
+            DesktopError::InvalidRequest("sharing configuration is required".into())
+        })?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state is unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Host)
+            .ok_or_else(|| DesktopError::Process("sharing host is not running".into()))?;
+        if child
+            .process
+            .try_wait()
+            .map_err(|_| DesktopError::Process("unable to inspect sharing host".into()))?
+            .is_some()
+        {
+            return Err(DesktopError::Process("sharing host has exited".into()));
+        }
+        child
+            .sharing
+            .as_ref()
+            .ok_or_else(|| {
+                DesktopError::Process("running host is a single-peer remote-control session".into())
+            })?
+            .validate_add(&peer)?;
+        let nonce = Uuid::new_v4();
+        let command = peer.add_command(nonce, validated_session_token(request)?);
+        drop(reserved_socket);
+        child.sharing_command(nonce, command.as_bytes())?;
+        if let Some(sharing) = child.sharing.as_mut() {
+            sharing.add(peer);
+        }
+        Ok(())
+    }
+
+    pub fn remove_sharing_peer(&self, group: Uuid, viewer: Uuid) -> Result<(), DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state is unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Host)
+            .ok_or_else(|| DesktopError::Process("sharing host is not running".into()))?;
+        let sharing = child
+            .sharing
+            .as_ref()
+            .ok_or_else(|| DesktopError::Process("running host is not a sharing host".into()))?;
+        if !sharing.validate_remove(group, viewer)? {
+            return Ok(());
+        }
+        let nonce = Uuid::new_v4();
+        child.sharing_command(
+            nonce,
+            format!("share-remove\t{nonce}\t{viewer}\n").as_bytes(),
+        )?;
+        if let Some(sharing) = child.sharing.as_mut() {
+            sharing.remove(viewer);
+        }
         Ok(())
     }
 
@@ -815,6 +955,8 @@ mod tests {
             direct_check: None,
             kind,
             session_id: Some("018f4d89-5e8b-7a80-bd1e-cb7cb9f43189".into()),
+            sharing_id: None,
+            sharing_viewer_id: None,
             address: Some("192.0.2.10".into()),
             port: Some(50_000),
             codec: VideoCodec::Auto,
@@ -835,6 +977,34 @@ mod tests {
             direct_attempt_id: None,
             wire_protocol: None,
         }
+    }
+
+    #[test]
+    fn sharing_args_select_one_snv2_host_and_never_enable_input() -> Result<(), DesktopError> {
+        let mut value = request(EngineKind::Host);
+        let viewer = Uuid::new_v4().to_string();
+        value.sharing_id = Some(Uuid::new_v4().to_string());
+        value.sharing_viewer_id = Some(viewer.clone());
+        value.wire_protocol = Some("snv2".into());
+        value.input_enabled = false;
+        value.audio_enabled = false;
+        value.udp_bind_port = Some(50002);
+        let args = build_args(&value)?;
+        assert!(args.contains(&"--snv2".into()));
+        assert!(args.contains(&"--share-host".into()));
+        assert!(args.contains(&viewer));
+        assert!(args.contains(&"--disable-input".into()));
+        assert!(
+            !args.contains(
+                value
+                    .session_token
+                    .as_ref()
+                    .ok_or_else(|| DesktopError::InvalidRequest("test token missing".into()))?
+            )
+        );
+        value.wire_protocol = Some("legacy".into());
+        assert!(build_args(&value).is_err());
+        Ok(())
     }
 
     #[test]

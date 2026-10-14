@@ -4,6 +4,7 @@
 #import <CoreImage/CoreImage.h>
 #import <ApplicationServices/ApplicationServices.h>
 #include "transport.h"
+#include "broadcast.h"
 #include "engine.h"
 #import "metal_presenter.h"
 #include "keyboard.h"
@@ -26,7 +27,10 @@ std::vector<Bytes> nals(const Bytes& bytes) {
 void appendNal(Bytes& out,const std::uint8_t* data,std::size_t size) { out.insert(out.end(),{0,0,0,1}); out.insert(out.end(),data,data+size); }
 class Encoder {
 public:
-  Encoder(const Options& options,Peer& peer) : options_(options),peer_(peer) {
+  Encoder(const Options& options,Peer& peer) : Encoder(options,[&peer] { return peer.ready(); },[&peer](Frame frame) { peer.video(frame); }) {}
+  Encoder(const Options& options,HostOutput& output) : Encoder(options,[&output] { return output.ready(); },[&output](Frame frame) { output.video(std::move(frame)); }) {}
+  Encoder(const Options& options,std::function<bool()> ready,std::function<void(Frame)> publish)
+      : options_(options),ready_(std::move(ready)),publish_(std::move(publish)) {
     requireStatus(VTCompressionSessionCreate(nullptr,options.width,options.height,kCMVideoCodecType_H264,nullptr,nullptr,nullptr,output,this,&session_),"Create H.264 encoder");
     VTSessionSetProperty(session_,kVTCompressionPropertyKey_RealTime,kCFBooleanTrue);
     VTSessionSetProperty(session_,kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse);
@@ -35,9 +39,22 @@ public:
     requireStatus(VTSessionSetProperties(session_,(__bridge CFDictionaryRef)values),"Configure H.264 encoder");
     requireStatus(VTCompressionSessionPrepareToEncodeFrames(session_),"Prepare encoder");
   }
-  ~Encoder() { if(session_) { VTCompressionSessionCompleteFrames(session_,kCMTimeInvalid); VTCompressionSessionInvalidate(session_); CFRelease(session_); } }
+  ~Encoder() { if(session_) { VTCompressionSessionCompleteFrames(session_,kCMTimeInvalid); VTCompressionSessionInvalidate(session_); CFRelease(session_); } if(lastPixels_) CVPixelBufferRelease(lastPixels_); }
   void encode(CVPixelBufferRef pixels,CMTime time) {
-    if(!peer_.ready()) return;
+    std::lock_guard lock(encodeMutex_);
+    if(lastPixels_) CVPixelBufferRelease(lastPixels_);
+    lastPixels_=CVPixelBufferRetain(pixels);
+    if(CMTimeCompare(time,lastTime_)<=0) time=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
+    lastTime_=time;
+    if(ready_()) submit(pixels,time);
+  }
+  void refresh() {
+    std::lock_guard lock(encodeMutex_);
+    if(!lastPixels_ || !ready_()) return;
+    lastTime_=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
+    submit(lastPixels_,lastTime_);
+  }
+  void submit(CVPixelBufferRef pixels,CMTime time) {
     const bool force=force_.exchange(false);
     const auto properties=force ? (__bridge CFDictionaryRef)@{(__bridge NSString*)kVTEncodeFrameOptionKey_ForceKeyFrame:@YES} : nullptr;
     if(VTCompressionSessionEncodeFrame(session_,pixels,time,CMTimeMake(1,options_.fps),properties,nullptr,nullptr)!=noErr) failed_=true;
@@ -63,10 +80,12 @@ private:
       Bytes data(size); requireStatus(CMBlockBufferCopyDataBytes(block,0,size,data.data()),"Read encoded frame");
       std::size_t offset=0;
       while(offset+4<=data.size()) { std::uint32_t length=0; for(int i=0;i<4;++i) length=(length<<8)|data[offset++]; if(length==0 || length>data.size()-offset) return; appendNal(frame.data,data.data()+offset,length); offset+=length; }
-      self.peer_.video(frame);
+      self.publish_(std::move(frame));
     } catch(...) { self.failed_=true; }
   }
-  Options options_; Peer& peer_; VTCompressionSessionRef session_=nullptr;
+  Options options_; std::function<bool()> ready_; std::function<void(Frame)> publish_;
+  VTCompressionSessionRef session_=nullptr;
+  CVPixelBufferRef lastPixels_=nullptr; CMTime lastTime_=kCMTimeZero; std::mutex encodeMutex_;
   std::atomic<bool> force_{true},failed_{false};
 };
 class Decoder {
@@ -243,6 +262,77 @@ void testMacVideoCodec() {
   }
 }
 
+// One VideoToolbox session, two initial viewers and a third joining an idle
+// desktop. Each decoder must receive the same freshly encoded keyframe.
+void testMacBroadcastCodec() {
+  @autoreleasepool {
+    Options options; options.host=true; options.input=false; options.width=640; options.height=360; options.bitrate=100000000;
+    Broadcaster group(options);
+    std::array<Decoder,3> decoders;
+    std::vector<std::unique_ptr<Peer>> clients;
+    std::random_device random;
+    auto join=[&](unsigned index) {
+      for(unsigned attempt=0;attempt<20;++attempt) {
+        const auto port=static_cast<std::uint16_t>(30000+random()%20000);
+        const auto token=std::string(48,static_cast<char>('a'+index));
+        Options client=options; client.host=false; client.port=port+1; client.peer="127.0.0.1:"+std::to_string(port); client.token=token;
+        std::unique_ptr<Peer> receiver;
+        try { receiver=std::make_unique<Peer>(client); group.add({std::to_string(index),"127.0.0.1:"+std::to_string(port+1),port,token,options.bitrate}); }
+        catch(...) { continue; }
+        receiver->onFrame=[&,index](Frame frame) { decoders[index].decode(frame); };
+        receiver->start(); clients.push_back(std::move(receiver)); return;
+      }
+      throw std::runtime_error("Broadcast codec test could not bind sockets");
+    };
+    std::atomic<unsigned> encoded{0};
+    Encoder encoder(options,[&] { return group.ready(); },[&](Frame frame) { ++encoded; group.publish(std::move(frame)); });
+    struct Stop {
+      Broadcaster& group; std::vector<std::unique_ptr<Peer>>& clients;
+      ~Stop() { for(auto& client:clients) client->stop(); group.stop(); }
+    } stop{group,clients};
+    struct Pixel { CVPixelBufferRef value=nullptr; ~Pixel() { if(value) CVPixelBufferRelease(value); } } source;
+    NSDictionary* attributes=@{(__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey:@{}};
+    requireStatus(CVPixelBufferCreate(nullptr,640,360,kCVPixelFormatType_32BGRA,(__bridge CFDictionaryRef)attributes,&source.value),"Create sharing test frame");
+    CVPixelBufferLockBaseAddress(source.value,0);
+    auto* bytes=static_cast<std::uint8_t*>(CVPixelBufferGetBaseAddress(source.value));
+    const auto stride=CVPixelBufferGetBytesPerRow(source.value);
+    for(unsigned y=0;y<360;++y) for(unsigned x=0;x<640;++x) { auto* pixel=bytes+y*stride+x*4; pixel[0]=30; pixel[1]=100; pixel[2]=200; pixel[3]=255; }
+    CVPixelBufferUnlockBaseAddress(source.value,0);
+    // Cache before a viewer is ready, then refresh without a new capture.
+    encoder.encode(source.value,CMTimeMake(1,60));
+    auto waitReady=[&](std::size_t count) {
+      const auto deadline=Clock::now()+std::chrono::seconds(3);
+      while(Clock::now()<deadline) {
+        const auto peers=group.stats();
+        if(peers.size()==count && std::all_of(peers.begin(),peers.end(),[](const auto& peer) { return peer.ready; })) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      throw std::runtime_error("Broadcast codec handshake timed out");
+    };
+    auto verify=[&](unsigned index) {
+      Pixel decoded;
+      const auto deadline=Clock::now()+std::chrono::seconds(3);
+      while(!decoded.value && Clock::now()<deadline) { decoded.value=decoders[index].take(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+      if(!decoded.value || encoder.failed() || CVPixelBufferGetWidth(decoded.value)!=640 || CVPixelBufferGetHeight(decoded.value)!=360)
+        throw std::runtime_error("Sharing viewer did not decode the keyframe");
+      CVPixelBufferLockBaseAddress(decoded.value,kCVPixelBufferLock_ReadOnly);
+      const auto* pixel=static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(decoded.value));
+      const bool matches=std::abs(static_cast<int>(pixel[0])-30)<25 && std::abs(static_cast<int>(pixel[1])-100)<25 && std::abs(static_cast<int>(pixel[2])-200)<25;
+      CVPixelBufferUnlockBaseAddress(decoded.value,kCVPixelBufferLock_ReadOnly);
+      if(!matches) throw std::runtime_error("Sharing decoded colors differ");
+    };
+    join(0); join(1); waitReady(2);
+    encoder.keyframe(); encoder.refresh(); verify(0); verify(1);
+    if(encoded!=1 || group.publishedFrames()!=1) throw std::runtime_error("Sharing encoded separately per viewer");
+    join(2); waitReady(3);
+    encoder.keyframe(); encoder.refresh(); verify(0); verify(1); verify(2);
+    if(encoded!=2 || group.publishedFrames()!=2) throw std::runtime_error("Late join encoded separately per viewer");
+    group.remove("1"); clients[1]->stop();
+    encoder.keyframe(); encoder.refresh(); verify(0); verify(2);
+    if(encoded!=3) throw std::runtime_error("Removing a viewer restarted or duplicated encoding");
+  }
+}
+
 #endif
 int runMac(bool host,int argc,char** argv) {
   @autoreleasepool {
@@ -260,11 +350,11 @@ int runMac(bool host,int argc,char** argv) {
         const double scale=std::min(static_cast<double>(options.width)/display.width,static_cast<double>(options.height)/display.height);
         options.width=std::max(64U,static_cast<std::uint32_t>(display.width*scale)&~1U);
         options.height=std::max(64U,static_cast<std::uint32_t>(display.height*scale)&~1U);
-        Peer peer(options); Encoder encoder(options,peer); Injector injector(display.displayID);
-        peer.onInput=[&](Input event) { injector.apply(event); }; peer.onKeyframe=[&] { encoder.keyframe(); };
+        HostOutput peer(options); Encoder encoder(options,peer); Injector injector(display.displayID);
+        peer.onInput=[&](Input event) { injector.apply(event); };
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
-        SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3; config.showsCursor=YES; config.pixelFormat=kCVPixelFormatType_32BGRA;
+        SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3; config.showsCursor=options.sharing ? NO : YES; config.pixelFormat=kCVPixelFormatType_32BGRA;
         SCStream* stream=[[SCStream alloc] initWithFilter:filter configuration:config delegate:capture];
         dispatch_queue_t queue=dispatch_queue_create("sanser.capture",DISPATCH_QUEUE_SERIAL);
         CaptureStop captureStop{stream,capture,queue};
@@ -273,9 +363,12 @@ int runMac(bool host,int argc,char** argv) {
         [stream startCaptureWithCompletionHandler:^(NSError* error) { dispatch_async(dispatch_get_main_queue(), ^{ failed=error!=nil; started=true; }); }];
         while(!started && Clock::now()<deadline) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         if(!started || failed) throw std::runtime_error("Screen capture could not start; check Screen Recording permission");
-        PeerStop shutdown{peer};
-        peer.start();
-        while(peer.running() && !capture.failed && !encoder.failed()) [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+        HostOutputStop shutdown{peer}; peer.start();
+        while(peer.running() && !capture.failed && !encoder.failed()) {
+          peer.pumpControl();
+          if(peer.takeKeyframeRequest()) { encoder.keyframe(); encoder.refresh(); }
+          [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+        }
         peer.stop(); return capture.failed || encoder.failed() ? 1 : 0;
       } else throw std::runtime_error("Hosting requires macOS 12.3 or newer");
     }

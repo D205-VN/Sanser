@@ -13,6 +13,26 @@ const DEBUG_FILE_BYTES: usize = 2 * 1024 * 1024;
 
 const STARTUP_ERROR_PREFIX: &str = "SNU1 UDP render listener error: [startup:";
 
+#[derive(Debug, PartialEq)]
+pub(crate) struct SharingAck {
+    pub request: uuid::Uuid,
+    pub accepted: bool,
+}
+
+fn sharing_ack(line: &[u8]) -> Option<SharingAck> {
+    let line = std::str::from_utf8(line).ok()?.trim_end_matches('\r');
+    let fields = line.strip_prefix("SNSHARE_ACK request=")?;
+    let (request, accepted) = fields.split_once(" accepted=")?;
+    Some(SharingAck {
+        request: uuid::Uuid::parse_str(request).ok()?,
+        accepted: match accepted {
+            "1" => true,
+            "0" => false,
+            _ => return None,
+        },
+    })
+}
+
 /// Classify only an explicit terminal native startup failure. A user closing
 /// the viewer, a crash or a generic timeout must never trigger auto-reopening.
 pub(crate) fn startup_failure(message: &str) -> Option<crate::models::NativeStartupFailure> {
@@ -59,13 +79,28 @@ impl EngineOutput {
         log: Option<File>,
         metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
     ) -> std::io::Result<Self> {
+        Self::start_observed(reader, log, metrics, None)
+    }
+
+    pub(crate) fn start_observed(
+        reader: impl Read + Send + 'static,
+        log: Option<File>,
+        metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
+        acknowledgements: Option<mpsc::SyncSender<SharingAck>>,
+    ) -> std::io::Result<Self> {
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_BYTES)));
         let worker_tail = Arc::clone(&tail);
         let (complete, completed) = mpsc::channel();
         thread::Builder::new()
             .name("sanser-engine-output".into())
             .spawn(move || {
-                drain(reader, log, &worker_tail, metrics.as_ref());
+                drain(
+                    reader,
+                    log,
+                    &worker_tail,
+                    metrics.as_ref(),
+                    acknowledgements.as_ref(),
+                );
                 let _ = complete.send(());
             })?;
         Ok(Self { tail, completed })
@@ -95,6 +130,7 @@ fn drain(
     mut log: Option<File>,
     tail: &Mutex<VecDeque<u8>>,
     metrics: Option<&mpsc::SyncSender<crate::connection_report::Sample>>,
+    acknowledgements: Option<&mpsc::SyncSender<SharingAck>>,
 ) {
     let mut buffer = [0_u8; 4096];
     let mut written = 0;
@@ -112,14 +148,21 @@ fn drain(
             tail.drain(..excess);
             tail.extend(&buffer[..length]);
         }
-        if let Some(metrics) = &metrics {
+        if metrics.is_some() || acknowledgements.is_some() {
             for byte in &buffer[..length] {
                 if *byte == b'\n' {
                     if !oversized
+                        && let Some(metrics) = metrics
                         && let Some(sample) = crate::connection_report::parse_sample(&line)
                     {
                         // Disk writing occurs in another worker; never block the native engine.
                         let _ = metrics.try_send(sample);
+                    }
+                    if !oversized
+                        && let Some(acknowledgements) = acknowledgements
+                        && let Some(ack) = sharing_ack(&line)
+                    {
+                        let _ = acknowledgements.try_send(ack);
                     }
                     line.clear();
                     oversized = false;
@@ -146,6 +189,27 @@ fn drain(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn sharing_ack_is_bounded_and_works_without_metrics() -> std::io::Result<()> {
+        let request = uuid::Uuid::new_v4();
+        let bytes=format!("SNSHARE_ACK request={request} accepted=1\nSNSHARE_ACK request={request} accepted=0 extra=token\n").into_bytes();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let output = EngineOutput::start_observed(Cursor::new(bytes), None, None, Some(sender))?;
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .map_err(std::io::Error::other)?,
+            SharingAck {
+                request,
+                accepted: true
+            }
+        );
+        let _ = output.exit_message(String::new());
+        assert!(receiver.try_recv().is_err());
+        assert!(sharing_ack(b"SNSHARE_ACK request=token accepted=1").is_none());
+        Ok(())
+    }
 
     #[test]
     fn a_full_report_queue_does_not_block_output_draining() -> std::io::Result<()> {
