@@ -18,7 +18,7 @@ Native:   Authenticated SNV2 media engines
 - Short-lived access tokens, refresh-token rotation/revocation and Argon2id passwords.
 - Typed Tauri commands and sidecar allowlists; Node.js is not a packaged runtime.
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
-- Windows C++20 host and Objective-C++20 macOS client migration paths.
+- Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
 Platform streaming features are enabled only when the corresponding v2 native engine reports a real capability. The UI labels unavailable work explicitly; it does not expose functional-looking controls without a backend.
 
@@ -30,6 +30,9 @@ apps/server                  Axum + Tokio API/signaling server
 crates/sanser-*              Rust protocol/core/network/auth/storage modules
 native/host-windows          Windows capture/encode/audio/input engine
 native/client-macos          macOS receive/decode/render/audio/input engine
+native/desktop               Shared cross-platform session/transport engine
+native/platforms/macos       macOS ScreenCaptureKit/VideoToolbox backend
+native/platforms/windows     Windows Media Foundation/input/window backend
 native/protocol              Portable C++ SNV2 authentication and STUN codecs
 ```
 
@@ -170,7 +173,9 @@ Expected release artifact names and unverified platform items are tracked in [th
 
 - Windows host requests capture, audio and firewall access only when hosting; administrator privileges are not required for normal operation.
 - macOS client requests Accessibility/Input Monitoring when remote input capture is enabled and microphone permission only when microphone forwarding is enabled.
-- Screen Recording is not requested on macOS until a future macOS host is actually enabled.
+- macOS hosting is implemented with ScreenCaptureKit and VideoToolbox on macOS 12.3 or newer. Screen Recording is requested when hosting starts; Accessibility is needed when remote input is enabled.
+- Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; their audio and HEVC support remain incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
+- Screen sharing currently supports one host and one viewer per session. Broadcasting to multiple viewers is not implemented.
 
 ## Migration
 
