@@ -186,16 +186,7 @@ pub async fn register(
     };
     let os_version = optional_label(&request.os_version, "osVersion", 120)?;
     let gpu = optional_label(&request.gpu, "gpu", 240)?;
-    let version_prefix = SANSER_VERSION
-        .rsplitn(2, '.')
-        .last()
-        .unwrap_or(SANSER_VERSION);
-    let client_prefix = request
-        .sanser_version
-        .rsplitn(2, '.')
-        .last()
-        .unwrap_or(&request.sanser_version);
-    if client_prefix != version_prefix {
+    if !compatible_client_version(&request.sanser_version) {
         return Err(AppError::Validation(format!(
             "sanserVersion must be compatible with {SANSER_VERSION}"
         )));
@@ -734,4 +725,55 @@ fn default_codecs() -> Vec<String> {
 
 const fn default_true() -> bool {
     true
+}
+
+// Product minor releases can share protocol v2. Keep 2.1 desktops registered
+// during the 2.2 rollout; capabilities and session-level feature gates still
+// decide what each peer can use. Future minor/major clients remain unverified.
+fn compatible_client_version(value: &str) -> bool {
+    fn parts(value: &str) -> Option<[u32; 3]> {
+        if value.len() > 32 {
+            return None;
+        }
+        let mut segments = value.split('.');
+        let mut result = [0; 3];
+        for field in &mut result {
+            let text = segments.next()?;
+            if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            *field = text.parse().ok()?;
+        }
+        segments.next().is_none().then_some(result)
+    }
+    let (Some(client), Some(server)) = (parts(value), parts(SANSER_VERSION)) else {
+        return false;
+    };
+    client[0] == server[0] && (1..=server[1]).contains(&client[1])
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::compatible_client_version;
+
+    #[test]
+    fn minor_release_rollout_keeps_supported_old_clients_and_rejects_unverified_versions() {
+        for value in ["2.1.21", "2.1.22", "2.2.1", "2.2.999"] {
+            assert!(compatible_client_version(value), "{value}");
+        }
+        for value in [
+            "",
+            "2.0.8",
+            "2.3.0",
+            "3.2.1",
+            "2.2",
+            "2.2.x",
+            "2.2.1-beta",
+            "2.2.1.0",
+            "+2.2.1",
+            "2.2.99999999999999999999999999999999",
+        ] {
+            assert!(!compatible_client_version(value), "{value}");
+        }
+    }
 }
