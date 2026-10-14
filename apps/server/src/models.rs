@@ -64,6 +64,7 @@ pub struct ConnectionSession {
     pub requester_device_id: String,
     pub host_device_id: String,
     pub state: String,
+    pub access_mode: SessionAccess,
     pub network_mode: NetworkMode,
     pub quality_profile: String,
     pub requested_codec: String,
@@ -79,6 +80,46 @@ pub struct ConnectionSession {
     pub ended_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disconnect_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionAccess {
+    #[default]
+    Control,
+    ViewOnly,
+}
+
+impl SessionAccess {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::ViewOnly => "view-only",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharingGroup {
+    pub id: String,
+    pub host_device_id: String,
+    pub state: String,
+    pub max_viewers: i16,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub members: Vec<SharingMember>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharingMember {
+    pub id: String,
+    pub viewer_device_id: String,
+    pub state: String,
+    pub access_mode: SessionAccess,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]

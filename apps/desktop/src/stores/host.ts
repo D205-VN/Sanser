@@ -205,7 +205,7 @@ export function createHostStore(): HostStore {
         height: size.height,
         networkMode: request.networkMode,
         audioEnabled: credentials.wireProtocol !== 'snv2' && settings.host.audioEnabled,
-        inputEnabled: settings.host.inputEnabled,
+        inputEnabled: settings.host.inputEnabled && request.accessMode !== 'view-only' && credentials.accessMode !== 'view-only',
         relativeMouse: false,
         sessionToken: credentials.sessionToken,
         udpBindPort: relayRoute?.enginePort ?? route?.localPort,

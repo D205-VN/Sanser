@@ -8,7 +8,8 @@ import type {
   LoginSession,
   NativeSessionCredentials,
   NetworkMode,
-  QualityProfile
+  QualityProfile,
+  SharingGroup
 } from './types';
 
 export class ApiError extends Error {
@@ -122,6 +123,7 @@ function normalizeConnectionSession(raw: RawSession): ConnectionSession {
   return {
     id: raw.id ?? '',
     requesterDeviceId: raw.requesterDeviceId ?? '',
+    accessMode: raw.accessMode === 'view-only' ? 'view-only' : 'control',
     hostDeviceId: raw.hostDeviceId ?? '',
     status: raw.status ?? raw.state ?? 'pending',
     transport: selected === 'native' || selected === 'webrtc' ? selected : null,
@@ -281,13 +283,43 @@ export class ApiClient {
     requesterDeviceId: string,
     networkMode: NetworkMode,
     qualityProfile: QualityProfile,
-    requestedCodec: 'auto' | 'h264' | 'hevc'
+    requestedCodec: 'auto' | 'h264' | 'hevc',
+    accessMode: 'control' | 'view-only' = 'control'
   ): Promise<ConnectionSession> {
     const response = await this.request<RawSession>('/api/v2/sessions', {
       method: 'POST',
-      body: { hostDeviceId, requesterDeviceId, networkMode, qualityProfile, requestedCodec }
+      body: { hostDeviceId, requesterDeviceId, networkMode, qualityProfile, requestedCodec,
+        ...(accessMode === 'view-only' ? { accessMode } : {}) }
     });
     return normalizeConnectionSession(response);
+  }
+
+  async sharingGroups(): Promise<PageEnvelope<SharingGroup>> {
+    return this.request('/api/v2/sharing');
+  }
+
+  async createSharingGroup(hostDeviceId: string, maxViewers = 3): Promise<SharingGroup> {
+    return this.request('/api/v2/sharing', { method: 'POST', body: { hostDeviceId, maxViewers } });
+  }
+
+  async getSharingGroup(id: string): Promise<SharingGroup> {
+    return this.request(`/api/v2/sharing/${encodeURIComponent(id)}`);
+  }
+
+  async inviteViewer(id: string, viewerDeviceId: string): Promise<SharingGroup> {
+    return this.request(`/api/v2/sharing/${encodeURIComponent(id)}/invite`, {
+      method: 'POST', body: { viewerDeviceId }
+    });
+  }
+
+  async respondSharingInvitation(id: string, memberId: string, viewerDeviceId: string, accept: boolean): Promise<SharingGroup> {
+    return this.request(`/api/v2/sharing/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/respond`, {
+      method: 'POST', body: { viewerDeviceId, accept }
+    });
+  }
+
+  async stopSharingGroup(id: string): Promise<SharingGroup> {
+    return this.request(`/api/v2/sharing/${encodeURIComponent(id)}/stop`, { method: 'POST' });
   }
 
   async hostSessions(hostDeviceId: string): Promise<PageEnvelope<ConnectionSession>> {

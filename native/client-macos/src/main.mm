@@ -60,6 +60,7 @@ namespace {
 
 sanser::LatencyPolicy gLatencyPolicy;
 std::atomic<bool> gShowLatencyOverlay{false};
+bool gViewOnly = false;
 std::atomic<bool> gHostCapturePaused{false};
 bool gOverlayShortcutDown = false;
 constexpr unsigned short kOverlayShortcutKeyCode = 0x1C; // macOS ANSI 8 (number row)
@@ -573,6 +574,11 @@ class NativeInputSender {
 #endif
 public:
   NativeInputSender() : inputSessionId_(randomHex(8)), worker_(&NativeInputSender::workerLoop, this) {}
+  void setViewOnly(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    viewOnly_ = enabled;
+    if (enabled) { queue_.clear(); urgentQueue_.clear(); pendingBatches_.clear(); }
+  }
 
   void setUdpTarget(int fd, const UdpEndpoint& endpoint) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -687,6 +693,9 @@ public:
   bool sendJson(const std::string& original) {
     const auto queuedAt = steadyMicros(); // T0 includes waiting for sender mutex.
     std::lock_guard<std::mutex> lock(mutex_);
+    if (viewOnly_ && !(isControlHello(original) || isControlPing(original) ||
+        isStreamStats(original) || isUdpRepairStats(original) || isRenderStats(original) ||
+        isKeyframeRequest(original) || isVideoNack(original))) return false;
     std::string json = original;
     if (isUdp_ && !json.empty() && json.front() == '{')
       json.insert(1, "\"clientQueuedMicros\":" + std::to_string(queuedAt) + ",");
@@ -1609,6 +1618,7 @@ private:
   static constexpr std::size_t maxQueueSize_ = 512;
   static constexpr std::size_t maxUrgentQueueSize_ = 256;
   static constexpr std::size_t maxPriorityMoveFlush_ = 2;
+  bool viewOnly_ = false;
   static constexpr std::size_t maxPriorityPointerPrefix_ = 2;
   static constexpr std::size_t maxPriorityBatchEvents_ = 4;
   static constexpr std::size_t maxBackpressureQueueSize_ = 96;
@@ -3042,6 +3052,7 @@ std::string pasteboardText() {
 }
 
 bool sendCommandShortcut(NSEvent* event) {
+  if (gViewOnly) return false;
   if (([event modifierFlags] & NSEventModifierFlagCommand) == 0) return false;
   NSString* key = [[[event charactersIgnoringModifiers] lowercaseString] copy];
   if (!key || [key length] == 0) return false;
@@ -3071,10 +3082,12 @@ void logPointerEvent(const char* type,
                      NSView* view,
                      std::uint32_t buttons = 0,
                      bool dragging = false) {
+  if (gViewOnly) return;
   sendNativeInputJson(pointerEventJson(type, event, view, buttons, dragging));
 }
 
 void logKeyEvent(const char* type, NSEvent* event) {
+  if (gViewOnly) return;
   sendNativeInputJson(keyEventJson(type, event));
 }
 
@@ -6016,6 +6029,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)pollMouseLocation {
+  if (gViewOnly) return;
   NSWindow* window = [self window];
   if (!window || ![window isVisible]) return;
   if (gRelativeMouse && gMouseGrabbed) {
@@ -6053,6 +6067,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
     return;
   }
   if (sendCommandShortcut(event)) return;
+  if (gViewOnly) { [super keyDown:event]; return; }
   logKeyEvent("key-down", event);
 }
 
@@ -8116,6 +8131,8 @@ int runVideoRenderTcp(std::uint16_t port,
       throw std::runtime_error("Metal is not available on this Mac.");
     }
 
+    relativeMouse = relativeMouse && !gViewOnly;
+    hideCursor = hideCursor && !gViewOnly;
     gRelativeMouse = relativeMouse;
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -8129,7 +8146,7 @@ int runVideoRenderTcp(std::uint16_t port,
                                                    styleMask:style
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
-    [window setTitle:@"Sanser Native Client - SNV1 Metal Render"];
+    [window setTitle:gViewOnly ? @"Sanser · View only" : @"Sanser Native Client - SNV1 Metal Render"];
     [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary
                                   | NSWindowCollectionBehaviorFullScreenAllowsTiling];
 
@@ -8220,6 +8237,7 @@ int runVideoRenderTcp(std::uint16_t port,
     [[NSRunLoop mainRunLoop] addTimer:gamepadPollTimer forMode:NSRunLoopCommonModes];
 
     auto inputSender = std::make_shared<NativeInputSender>();
+    inputSender->setViewOnly(gViewOnly);
     inputSender->setAuthRequired(!gExpectedSessionToken.empty(), gExpectedSessionToken);
     gNativeInputSender = inputSender;
     auto avSyncClock = std::make_shared<AvSyncClock>();
@@ -8370,7 +8388,9 @@ Options parseOptions(int argc, char** argv) {
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "--ultra-low-latency") {
+    if (arg == "--disable-input") {
+      gViewOnly = true;
+    } else if (arg == "--ultra-low-latency") {
       gLatencyPolicy.ultra = true;
       gShowLatencyOverlay = true;
     } else if (arg == "--stats-overlay") {

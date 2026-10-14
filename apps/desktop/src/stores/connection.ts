@@ -91,6 +91,7 @@ function createConnectionStore() {
             port: credentials.basePort,
             sessionToken: credentials.sessionToken,
             wireProtocol: credentials.wireProtocol,
+            accessMode: state.session.accessMode === 'view-only' ? 'view-only' : credentials.accessMode ?? state.session.accessMode,
             credentialExpiresAt: credentials.expiresAt
           },
           error: null

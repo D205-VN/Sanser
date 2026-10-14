@@ -64,6 +64,10 @@ pub async fn ready(pool: &PgPool) -> bool {
 
 pub async fn cleanup(pool: &PgPool, now: i64, offline_before: i64, pending_before: i64) {
     let operations = [
+        sqlx::query("UPDATE sharing_groups AS sharing SET state='stopped',updated_at=$1 WHERE sharing.state='preparing' AND (sharing.updated_at < $2 OR EXISTS(SELECT 1 FROM devices WHERE id=sharing.host_device_id AND online=FALSE))")
+            .bind(now).bind(now-15*60).execute(pool).await,
+        sqlx::query("UPDATE sharing_members AS member SET state='removed',updated_at=$1 WHERE member.state IN ('invited','accepted') AND EXISTS(SELECT 1 FROM sharing_groups WHERE id=member.sharing_id AND state='stopped')")
+            .bind(now).execute(pool).await,
         sqlx::query("DELETE FROM access_tokens WHERE expires_at < $1 OR revoked_at < $2")
             .bind(now)
             .bind(now - 7 * 86_400)

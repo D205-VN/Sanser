@@ -58,6 +58,27 @@ int main() {
   WSADATA winsock{}; if(WSAStartup(MAKEWORD(2,2),&winsock)!=0) return 1;
 #endif
   try {
+    {
+      Stub remote; Options options; options.host=true; options.input=false;
+      const std::string token="view-only-host-authenticated-test-token";
+      options.token=token; options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer host(options); PacketCodec clientCodec(token,false);
+      std::atomic<unsigned> injected{0}, requests{0};
+      host.onInput=[&](Input input) { if(input.kind!=Input::Reset) ++injected; };
+      host.onKeyframe=[&] { ++requests; };
+      PeerStop stop{host}; host.start();
+      wire::Header h; h.keyId=123; h.sequence=1; h.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,clientCodec.seal(h,{'S','A','K','1'}));
+      h.streamId=2; h.sequence=1; h.packetType=wire::PacketType::Keyboard;
+      remote.send(options.port,clientCodec.seal(h,encodeInput({Input::Key,0,0,4,0,true})));
+      h.streamId=0; h.sequence=2; h.packetType=wire::PacketType::MouseMove;
+      remote.send(options.port,clientCodec.seal(h,encodeInput({Input::Move,100,200})));
+      h.sequence=3; h.packetType=wire::PacketType::KeyframeRequest;
+      remote.send(options.port,clientCodec.seal(h,{}));
+      const auto deadline=Clock::now()+std::chrono::seconds(1);
+      while(requests==0 && Clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      check(requests==1 && injected==0,"view-only host must reject authenticated keyboard/mouse while servicing keyframe requests");
+    }
     const std::string token(48,'r');
     {
       Stub remote; Options options; options.host=true; options.ultraLowLatency=true; options.token=token;

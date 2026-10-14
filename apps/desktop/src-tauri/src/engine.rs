@@ -506,7 +506,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 "0".into(),
                 "--udp-video".into(),
             ];
-            if !request.input_enabled && cross_platform {
+            if !request.input_enabled {
                 args.push("--disable-input".into());
             }
             if request.relative_mouse {
@@ -950,6 +950,16 @@ mod tests {
         let args = build_args(&disabled)?;
         assert!(args.iter().any(|argument| argument == "--disable-input"));
         assert!(!args.iter().any(|arg| arg == "--control-connect"));
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_mac_viewer_disables_input_without_disabling_control() -> Result<(), DesktopError> {
+        let mut viewer = request(EngineKind::Client);
+        viewer.input_enabled = false;
+        let args = build_args(&viewer)?;
+        assert!(args.iter().any(|arg| arg == "--disable-input"));
+        assert!(args.iter().any(|arg| arg == "--udp-video"));
         Ok(())
     }
 

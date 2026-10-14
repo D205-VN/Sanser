@@ -132,8 +132,8 @@
         height: size.height,
         networkMode: target.networkMode,
         audioEnabled: target.wireProtocol !== 'snv2' && $preferences.host.audioEnabled,
-        inputEnabled: $preferences.host.inputEnabled,
-        relativeMouse: target.wireProtocol !== 'snv2' && $preferences.input.mouseMode === 'relative',
+        inputEnabled: target.accessMode !== 'view-only' && $preferences.host.inputEnabled,
+        relativeMouse: target.accessMode !== 'view-only' && target.wireProtocol !== 'snv2' && $preferences.input.mouseMode === 'relative',
         sessionToken: target.sessionToken,
         udpConnect: relayResult
           ? `127.0.0.1:${relayResult.proxyPort}`
@@ -207,7 +207,8 @@
         port: credentials.basePort,
         sessionToken: credentials.sessionToken,
         wireProtocol: credentials.wireProtocol,
-        credentialExpiresAt: credentials.expiresAt
+        credentialExpiresAt: credentials.expiresAt,
+        accessMode: target.accessMode === 'view-only' ? 'view-only' : credentials.accessMode ?? target.accessMode
       }, controller.signal);
     } catch (error) {
       if (isAborted(controller.signal) || $connection.session?.id !== target.id) return;

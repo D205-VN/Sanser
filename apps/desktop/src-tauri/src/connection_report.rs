@@ -496,6 +496,9 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
+// These assertions check exact decoded/serialized constants, not approximate
+// floating-point results from real latency measurements.
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     fn request() -> LaunchEngineRequest {

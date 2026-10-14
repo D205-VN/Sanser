@@ -43,6 +43,11 @@ int main() {
         sender.setControlAuthenticated(true);
         sender.setPacketAuthEnabled(true);
         sender.setUdpTarget(senderFd.get(), target);
+        sender.setViewOnly(true);
+        for (const std::string& type : {"key-down", "pointer-move", "pointer-down", "wheel", "clipboard", "gamepad-state", "input-reset"}) {
+          requireLatency(!sender.sendJson("{\"type\":\"" + type + "\"}"),
+            "view-only must reject remote input before queueing it");
+        }
         const auto originalSent = steadyMicros();
         requireLatency(sender.sendJson("{\"type\":\"control-ping\",\"sentSteadyMicros\":" +
           std::to_string(originalSent) + "}"), "enqueue real control ping");
@@ -55,6 +60,7 @@ int main() {
         std::uint64_t clientSequence = 0;
         requireLatency(unwrapSecureControlEnvelope(envelope, token, "c2h", clientSequence, request),
           "measurement fields covered by packet authentication");
+        sender.setViewOnly(false);
         gExpectedSessionToken = token;
         gHostPacketAuthVerified = true;
         gLastHostSecureSequence = 0;

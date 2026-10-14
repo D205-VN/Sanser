@@ -850,3 +850,145 @@ async fn migration_and_cleanup_work_on_neon_postgres() {
     assert!(!online);
     server.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn sharing_capacity_consent_ownership_and_stop_are_transactional() {
+    let server = TestServer::new().await.expect("test server");
+    let auth = server.register("sharing-owner@example.test").await;
+    let access = auth["accessToken"].as_str().expect("token");
+    let foreign = server.register("sharing-foreign@example.test").await;
+    let foreign_access = foreign["accessToken"].as_str().expect("foreign token");
+    let mut peers = Vec::new();
+    for index in 0..5 {
+        let id = Uuid::new_v4().to_string();
+        let (status, body, _) = server.request(Method::POST, "/api/v2/devices/register", Some(json!({
+            "id":id,"name":format!("Sharing peer {index}"),"computerId":Uuid::new_v4().to_string(),
+            "deviceRole":if index == 0 {"host"} else {"client"},"platform":if index == 0 {"windows-x86_64"} else {"macos-aarch64"},
+            "sanserVersion":"2.1.22","crossPlatform":true,"nativeTransport":true,"codecs":["h264"],"routeAddress":"192.168.1.20"
+        })),Some(access)).await;
+        assert!(status.is_success(), "{body}");
+        let (status, body, _) = server
+            .request(
+                Method::POST,
+                "/api/v2/devices/heartbeat",
+                Some(json!({"deviceId":id,"streaming":false})),
+                Some(access),
+            )
+            .await;
+        assert!(status.is_success(), "{body}");
+        peers.push(id);
+    }
+    let (status, group, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/sharing",
+            Some(json!({"hostDeviceId":peers[0]})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success(), "{group}");
+    let sharing = group["id"].as_str().expect("sharing ID");
+    let path = format!("/api/v2/sharing/{sharing}");
+    let (status, _, _) = server
+        .request(Method::GET, &path, None, Some(foreign_access))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let invite_path = format!("{path}/invite");
+    let (a, b, c, d) = tokio::join!(
+        server.request(
+            Method::POST,
+            &invite_path,
+            Some(json!({"viewerDeviceId":peers[1]})),
+            Some(access)
+        ),
+        server.request(
+            Method::POST,
+            &invite_path,
+            Some(json!({"viewerDeviceId":peers[2]})),
+            Some(access)
+        ),
+        server.request(
+            Method::POST,
+            &invite_path,
+            Some(json!({"viewerDeviceId":peers[3]})),
+            Some(access)
+        ),
+        server.request(
+            Method::POST,
+            &invite_path,
+            Some(json!({"viewerDeviceId":peers[4]})),
+            Some(access)
+        )
+    );
+    let responses = [a, b, c, d];
+    assert_eq!(responses.iter().filter(|r| r.0.is_success()).count(), 3);
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|r| r.0 == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let (_, invited, _) = server.request(Method::GET, &path, None, Some(access)).await;
+    let members = invited["members"].as_array().expect("members");
+    assert_eq!(members.len(), 3);
+    let member = &members[0];
+    let chosen_viewer = member["viewerDeviceId"].as_str().expect("chosen viewer");
+    let wrong_viewer = members[1]["viewerDeviceId"].as_str().expect("other viewer");
+    assert_eq!(member["accessMode"], "view-only");
+    let member_id = member["id"].as_str().expect("member ID");
+    let respond_path = format!("{path}/members/{member_id}/respond");
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &respond_path,
+            Some(json!({"viewerDeviceId":wrong_viewer,"accept":true})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, accepted, _) = server
+        .request(
+            Method::POST,
+            &respond_path,
+            Some(json!({"viewerDeviceId":chosen_viewer,"accept":true})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success(), "{accepted}");
+    assert_eq!(accepted["state"], "preparing");
+    let (_, stopped, _) = server
+        .request(Method::POST, &format!("{path}/stop"), None, Some(access))
+        .await;
+    assert_eq!(stopped["state"], "stopped");
+    assert!(
+        stopped["members"]
+            .as_array()
+            .expect("members")
+            .iter()
+            .all(|m| m["state"] == "removed")
+    );
+    let (status, restarted, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/sharing",
+            Some(json!({"hostDeviceId":peers[0]})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success(), "{restarted}");
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!(
+                "/api/v2/sharing/{}/invite",
+                restarted["id"].as_str().expect("new ID")
+            ),
+            Some(json!({"viewerDeviceId":peers[1]})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success());
+    server.close().await;
+}

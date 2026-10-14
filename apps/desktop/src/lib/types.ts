@@ -171,6 +171,7 @@ export interface DeviceRegistration {
 }
 
 export interface ConnectionSession {
+  accessMode?: 'control' | 'view-only';
   wireProtocol?: 'legacy' | 'snv2';
   id: string;
   requesterDeviceId: string;
@@ -191,6 +192,7 @@ export interface ConnectionSession {
 }
 
 export interface NativeSessionCredentials {
+  accessMode?: 'control' | 'view-only';
   wireProtocol?: 'legacy' | 'snv2';
   sessionId: string;
   deviceId: string;
@@ -200,6 +202,26 @@ export interface NativeSessionCredentials {
   expiresAt: number;
   /** Ephemeral and memory-only. Never persist or include in diagnostics. */
   sessionToken: string;
+}
+
+export interface SharingMember {
+  id: string;
+  viewerDeviceId: string;
+  state: 'invited' | 'accepted' | 'declined' | 'removed';
+  accessMode: 'view-only';
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Control-plane state only; preparing/accepted does not mean media is flowing. */
+export interface SharingGroup {
+  id: string;
+  hostDeviceId: string;
+  state: 'preparing' | 'stopped';
+  maxViewers: number;
+  createdAt: number;
+  updatedAt: number;
+  members: SharingMember[];
 }
 
 export interface IceServerConfiguration {

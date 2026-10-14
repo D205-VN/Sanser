@@ -16,7 +16,7 @@ use crate::{
     auth::{AuthContext, audit},
     error::{ApiJson, AppError},
     events,
-    models::{ConnectionSession, Device, Page},
+    models::{ConnectionSession, Device, Page, SessionAccess},
     routes::devices,
     state::AppState,
     time::now_unix,
@@ -25,6 +25,8 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateSessionRequest {
+    #[serde(default)]
+    access_mode: SessionAccess,
     #[serde(default)]
     requester_device_id: Option<String>,
     host_device_id: String,
@@ -59,6 +61,7 @@ pub struct ListSessionsQuery {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeSessionCredentials {
+    access_mode: SessionAccess,
     session_id: String,
     device_id: String,
     peer_device_id: String,
@@ -136,6 +139,14 @@ pub async fn create(
     }
     let requester = devices::fetch_owned(&state, &auth.user_id, &requester_id).await?;
     ensure_device_online(&state, &requester)?;
+    if request.access_mode == SessionAccess::ViewOnly
+        && (!supports_view_only(&host.sanser_version)
+            || !supports_view_only(&requester.sanser_version))
+    {
+        return Err(AppError::Conflict(
+            "View-only sessions require Sanser 2.1.22 or newer on both computers".into(),
+        ));
+    }
 
     let quality_profile = normalize_quality(&request.quality_profile)?;
     let requested_codec = normalize_codec(&request.requested_codec)?;
@@ -199,6 +210,15 @@ pub async fn create(
             "one of the devices already has an active session".into(),
         ));
     }
+    let reserved = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM sharing_members WHERE viewer_device_id IN ($1,$2) AND state IN ('invited','accepted')) \
+         OR EXISTS(SELECT 1 FROM sharing_groups WHERE host_device_id IN ($1,$2) AND state='preparing')",
+    ).bind(&host_id).bind(&requester_id).fetch_one(&mut *transaction).await.map_err(AppError::from_db)?;
+    if reserved {
+        return Err(AppError::Conflict(
+            "one of the devices is reserved for a sharing group".into(),
+        ));
+    }
 
     let now = now_unix();
     let id = Uuid::new_v4().to_string();
@@ -221,6 +241,13 @@ pub async fn create(
     .execute(&mut *transaction)
     .await
     .map_err(AppError::from_db)?;
+    sqlx::query("UPDATE connection_sessions SET access_mode=$1 WHERE id=$2 AND user_id=$3")
+        .bind(request.access_mode.as_str())
+        .bind(&id)
+        .bind(&auth.user_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AppError::from_db)?;
     transaction.commit().await.map_err(AppError::from_db)?;
     let session = fetch_owned(&state, &auth.user_id, &id).await?;
     events::publish(
@@ -317,13 +344,18 @@ pub async fn credentials(
             "native session credential has expired; announce readiness again".into(),
         ));
     }
-    let session_token = derive_session_token(
+    let mut session_token = derive_session_token(
         state.config.session_credential_key.as_slice(),
         &session.id,
         &session.requester_device_id,
         &session.host_device_id,
         credential_epoch,
         expires_at,
+    )?;
+    session_token = permission_token(
+        state.config.session_credential_key.as_slice(),
+        session.access_mode,
+        session_token,
     )?;
     audit(
         &state.pool,
@@ -345,6 +377,7 @@ pub async fn credentials(
             (header::PRAGMA, "no-cache"),
         ],
         Json(NativeSessionCredentials {
+            access_mode: session.access_mode,
             session_id: session.id,
             device_id,
             peer_device_id,
@@ -602,6 +635,15 @@ fn row_to_session(row: sqlx::postgres::PgRow) -> Result<ConnectionSession, AppEr
             .map_err(AppError::from_db)?,
         host_device_id: row.try_get("host_device_id").map_err(AppError::from_db)?,
         state: row.try_get("state").map_err(AppError::from_db)?,
+        access_mode: match row
+            .try_get::<String, _>("access_mode")
+            .map_err(AppError::from_db)?
+            .as_str()
+        {
+            "control" => SessionAccess::Control,
+            "view-only" => SessionAccess::ViewOnly,
+            _ => return Err(AppError::Internal),
+        },
         network_mode: parse_network_mode(&network_mode)?,
         quality_profile: row.try_get("quality_profile").map_err(AppError::from_db)?,
         requested_codec: row.try_get("requested_codec").map_err(AppError::from_db)?,
@@ -661,6 +703,24 @@ fn native_wire_protocol(host: &Device, requester: &Device) -> Result<&'static st
     ))
 }
 
+fn permission_token(key: &[u8], access: SessionAccess, token: String) -> Result<String, AppError> {
+    if access == SessionAccess::Control {
+        return Ok(token);
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| AppError::Internal)?;
+    mac.update(b"sanser-view-only-session-v1\0");
+    mac.update(token.as_bytes());
+    Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn supports_view_only(version: &str) -> bool {
+    let parts = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>();
+    parts.is_ok_and(|parts| parts.len() == 3 && (parts[0], parts[1], parts[2]) >= (2, 1, 22))
+}
+
 fn select_transport(
     requested: Option<&str>,
     mode: NetworkMode,
@@ -696,7 +756,7 @@ fn select_transport(
     }
 }
 
-fn ensure_device_online(state: &AppState, device: &Device) -> Result<(), AppError> {
+pub(crate) fn ensure_device_online(state: &AppState, device: &Device) -> Result<(), AppError> {
     let offline_before = now_unix().saturating_sub(
         i64::try_from(state.config.device_offline_after.as_secs()).unwrap_or(i64::MAX),
     );
@@ -801,6 +861,41 @@ fn default_active_state() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn permission_is_bound_to_the_native_credential() -> Result<(), AppError> {
+        let key = [7; 32];
+        let token = "original-native-token".to_owned();
+        assert_eq!(
+            permission_token(&key, SessionAccess::Control, token.clone())?,
+            token
+        );
+        let viewing = permission_token(&key, SessionAccess::ViewOnly, token.clone())?;
+        assert_ne!(viewing, token);
+        assert_eq!(
+            permission_token(&key, SessionAccess::ViewOnly, token)?,
+            viewing
+        );
+        Ok(())
+    }
+    #[test]
+    fn view_only_cannot_be_silently_downgraded_by_an_old_host() {
+        assert!(!supports_view_only("2.1.21"));
+        assert!(!supports_view_only("future"));
+        assert!(!supports_view_only("2.1.22-beta"));
+        assert!(supports_view_only("2.1.22"));
+        assert!(
+            serde_json::from_str::<CreateSessionRequest>(
+                r#"{"hostDeviceId":"h","accessMode":"view-only"}"#
+            )
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_str::<CreateSessionRequest>(
+                r#"{"hostDeviceId":"h","accessMode":"admin"}"#
+            )
+            .is_err()
+        );
+    }
 
     fn device(platform: &str, role: &str, cross_platform: bool) -> Device {
         Device {

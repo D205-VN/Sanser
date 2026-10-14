@@ -121,6 +121,17 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::sessions::disconnect),
         )
         .route("/api/v2/network/ice", get(routes::network::ice))
+        .route(
+            "/api/v2/sharing",
+            get(routes::sharing::list).post(routes::sharing::create),
+        )
+        .route("/api/v2/sharing/{id}", get(routes::sharing::get))
+        .route("/api/v2/sharing/{id}/invite", post(routes::sharing::invite))
+        .route(
+            "/api/v2/sharing/{id}/members/{member}/respond",
+            post(routes::sharing::respond),
+        )
+        .route("/api/v2/sharing/{id}/stop", post(routes::sharing::stop))
         .route("/api/v2/health", get(routes::system::health))
         .route("/api/v2/readiness", get(routes::system::readiness))
         .route("/api/v2/events", get(websocket::events_socket))

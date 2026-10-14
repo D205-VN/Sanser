@@ -8,6 +8,32 @@ afterEach(() => {
 });
 
 describe('normalizeServerUrl', () => {
+  it('keeps invitation consent separate from creating a media session', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
+      id: 'group', state: 'preparing', members: []
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new ApiClient('https://sanser.example', () => Promise.resolve('token'));
+    await client.createSharingGroup('host');
+    await client.inviteViewer('group', 'viewer');
+    const agreed = await client.respondSharingInvitation('group', 'member', 'viewer', true);
+    expect(agreed.state).toBe('preparing');
+    expect(fetchMock.mock.calls.every(([url]) => typeof url === 'string' && url.includes('/api/v2/sharing'))).toBe(true);
+    const request = fetchMock.mock.calls[2]?.[1];
+    expect(JSON.parse(typeof request?.body === 'string' ? request.body : '{}')).toEqual({ viewerDeviceId: 'viewer', accept: true });
+  });
+  it('preserves the server-issued view-only permission', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      id: 'session-id', hostDeviceId: 'host-id', requesterDeviceId: 'viewer-id',
+      state: 'pending', accessMode: 'view-only'
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new ApiClient('https://sanser.example', () => Promise.resolve('token'));
+    const created = await client.createSession('host-id', 'viewer-id', 'auto', 'balanced', 'h264', 'view-only');
+    expect(created.accessMode).toBe('view-only');
+    const init = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(typeof init?.body === 'string' ? init.body : '{}')).toHaveProperty('accessMode', 'view-only');
+  });
   it('allows HTTPS and loopback HTTP', () => {
     expect(normalizeServerUrl('https://sanser.example/')).toBe('https://sanser.example');
     expect(normalizeServerUrl('http://127.0.0.1:5174')).toBe('http://127.0.0.1:5174');
