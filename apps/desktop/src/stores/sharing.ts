@@ -1,5 +1,5 @@
 import { get, writable } from 'svelte/store';
-import { coordinateP2pConnection, directCheckFailure } from '../lib/p2pSignaling';
+import { coordinateP2pConnection, directCheckFailure, releaseP2pConnection } from '../lib/p2pSignaling';
 import { addSharingPeer, engineStatus, launchEngine, relayPeerFailure, removeSharingPeer, startRelay, stopEngine, stopRelay } from '../lib/platform';
 import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
 import type { Device, LaunchEngineRequest, RuntimeStatus, SharingGroup, SharingMember } from '../lib/types';
@@ -29,7 +29,8 @@ export function createSharingStore() {
   let runtime: RuntimeStatus | null = null;
   let generation = 0;
   let timer: number | undefined;
-  let polling = false;
+  let pollingGeneration: number | null = null;
+  let shutdownTask: Promise<void> | null = null;
   let lastHeartbeat = 0;
   let nativeStarted = false;
   const hasNative = (): boolean => nativeStarted;
@@ -38,7 +39,7 @@ export function createSharingStore() {
   let nativeQueue: Promise<void> = Promise.resolve();
   const peers = new Map<string, { sessionId: string; readyAt: string; relay: boolean }>();
   const tasks = new Map<string, { controller: AbortController; promise: Promise<void> }>();
-  const retryAfter = new Map<string, number>();
+  const retryAfter = new Map<string, { readyAt: string; at: number }>();
 
   function errorForPeer(id: string, error: string | null): void {
     store.update((state) => {
@@ -77,13 +78,13 @@ export function createSharingStore() {
     const sessionId = member.sessionId;
     const cancelled = () => signal.aborted || epoch !== generation || !get(host).online || get(store).ownGroup?.id !== group.id;
     let relay: Awaited<ReturnType<typeof startRelay>> | null = null;
+    let direct: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
     let installed = false;
     try {
       await removeNative(group.id, member.id);
       const credentials = await api.sessionCredentials(sessionId, hostId);
       if (credentials.accessMode !== 'view-only' || credentials.wireProtocol !== 'snv2') throw new Error('Sharing requires updated view-only session credentials');
       if (cancelled()) return;
-      let direct: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
       let directCheck: LaunchEngineRequest['directCheck'] = 'passed';
       try {
         if (group.networkMode === 'relay') throw new Error('Relay selected');
@@ -122,18 +123,19 @@ export function createSharingStore() {
     } catch (error) {
       if (!cancelled()) {
         errorForPeer(member.id, message(error));
-        retryAfter.set(member.id, Date.now() + 10_000);
+        retryAfter.set(member.id, { readyAt, at: Date.now() + 10_000 });
         diagnostics.add({ level: 'warn', category: 'session', message: 'A sharing viewer could not connect; other viewers remain active' });
       }
     } finally {
       if (relay && !installed) await stopRelay('host', sessionId).catch(() => undefined);
+      if (direct && !installed) await releaseP2pConnection(direct).catch(() => undefined);
     }
   }
 
   async function poll(): Promise<void> {
     const api = session.client(); const epoch = generation;
-    if (!api || polling || !get(store).supported || accountId !== get(session).account?.id) return;
-    polling = true;
+    if (!api || pollingGeneration === epoch || !get(store).supported || accountId !== get(session).account?.id) return;
+    pollingGeneration = epoch;
     try {
       const [groups, devices] = await Promise.all([api.sharingGroups(), api.devices()]);
       if (epoch !== generation) return;
@@ -163,7 +165,7 @@ export function createSharingStore() {
         if (!member || member.state !== 'accepted') await removeNative(own.id, memberId);
         else if (peer.relay) {
           const failure = await relayPeerFailure('host', peer.sessionId);
-          if (failure) { await removeNative(own.id, memberId); errorForPeer(memberId, failure); retryAfter.set(memberId, Number.POSITIVE_INFINITY); }
+          if (failure) { await removeNative(own.id, memberId); errorForPeer(memberId, failure); retryAfter.set(memberId, { readyAt: peer.readyAt, at: Number.POSITIVE_INFINITY }); }
         }
       }
       const sessions = await api.hostSessions(own.hostDeviceId);
@@ -172,13 +174,14 @@ export function createSharingStore() {
         const current = sessions.items.find((item) => item.id === member.sessionId && item.status === 'accepted');
         if (member.state !== 'accepted' || !current?.requesterReadyAt || tasks.has(member.id)) continue;
         if (peers.get(member.id)?.readyAt === current.requesterReadyAt) continue;
-        if (Date.now() < (retryAfter.get(member.id) ?? 0)) continue;
+        const retry = retryAfter.get(member.id);
+        if (retry?.readyAt === current.requesterReadyAt && Date.now() < retry.at) continue;
         const controller = new AbortController();
         const promise = attach(own, member, current.requesterReadyAt, controller.signal, epoch).finally(() => tasks.delete(member.id));
         tasks.set(member.id, { controller, promise });
       }
     } catch (error) { if (epoch === generation) store.update((state) => ({ ...state, error: message(error) })); }
-    finally { polling = false; }
+    finally { if (pollingGeneration === epoch) pollingGeneration = null; }
   }
 
   async function action<T>(operation: () => Promise<T>): Promise<T> {
@@ -189,9 +192,26 @@ export function createSharingStore() {
     finally { store.update((state) => ({ ...state, busy: false })); }
   }
 
+  function shutdown(): Promise<void> {
+    if (shutdownTask) return shutdownTask;
+    generation += 1;
+    if (timer !== undefined) window.clearInterval(timer);
+    timer = undefined;
+    const own = get(store).ownGroup; const api = session.client();
+    shutdownTask = (async () => {
+      await haltNative(own?.id);
+      if (own && api) await api.stopSharingGroup(own.id).catch(() => undefined);
+      accountId = null; runtime = null; ownedGroupId = null; stoppedGroupId = null;
+      lastHeartbeat = 0; store.set({ ...initial });
+    })().finally(() => { shutdownTask = null; });
+    return shutdownTask;
+  }
+
   return {
     subscribe: store.subscribe,
     async initialize(value: RuntimeStatus): Promise<void> {
+      if (shutdownTask) await shutdownTask;
+      if (accountId && accountId !== get(session).account?.id) await shutdown();
       const account = get(session).account?.id;
       if (!account || (accountId === account && get(store).supported)) return;
       generation += 1; const epoch = generation; accountId = account; runtime = value;
@@ -200,7 +220,10 @@ export function createSharingStore() {
         const supported = await api.supportsSharingMedia();
         if (epoch !== generation) return;
         store.update((state) => ({ ...state, supported, error: supported ? null : 'Update the Sanser server to enable screen sharing invitations.' }));
-        if (supported) { await poll(); timer = window.setInterval(() => void poll(), 2000); }
+        if (supported) {
+          await poll();
+          if (epoch === generation && accountId === get(session).account?.id) timer = window.setInterval(() => void poll(), 2000);
+        }
       } catch (error) { if (epoch === generation) store.update((state) => ({ ...state, error: message(error) })); }
     },
     refresh: poll,
@@ -266,13 +289,7 @@ export function createSharingStore() {
         await poll();
       });
     },
-    async shutdown(): Promise<void> {
-      generation += 1; if (timer !== undefined) window.clearInterval(timer); timer = undefined;
-      const own = get(store).ownGroup; const api = session.client();
-      await haltNative(own?.id);
-      if (own && api) await api.stopSharingGroup(own.id).catch(() => undefined);
-      accountId = null; runtime = null; ownedGroupId = null; lastHeartbeat = 0; store.set({ ...initial });
-    }
+    shutdown
   };
 }
 export const sharing = createSharingStore();

@@ -1,5 +1,9 @@
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -31,7 +35,7 @@ struct SharingNotice {
   HWND window=nullptr;
   explicit SharingNotice(HostOutput& output,bool enabled) {
     if(!enabled) return;
-    WNDCLASSW klass{}; klass.lpfnWndProc=sharingNoticeProc; klass.hInstance=GetModuleHandleW(nullptr); klass.lpszClassName=L"SanserSharingNotice"; klass.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1); klass.hCursor=LoadCursorW(nullptr,IDC_ARROW); RegisterClassW(&klass);
+    WNDCLASSW klass{}; klass.lpfnWndProc=sharingNoticeProc; klass.hInstance=GetModuleHandleW(nullptr); klass.lpszClassName=L"SanserSharingNotice"; klass.hbrBackground=reinterpret_cast<HBRUSH>(COLOR_WINDOW+1); klass.hCursor=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)); RegisterClassW(&klass);
     RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0);
     window=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Sanser sharing",WS_POPUP|WS_BORDER,area.right-380,area.top+12,360,56,nullptr,nullptr,klass.hInstance,&output);
     if(!window) throw std::runtime_error("Unable to show the screen-sharing indicator");

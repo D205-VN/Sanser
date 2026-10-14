@@ -4,10 +4,16 @@ import type { LaunchEngineRequest } from './types';
 import { diagnostics, networkDiagnostics, type DirectSelectionDiagnostics } from '../stores/diagnostics';
 
 export interface P2pPunchResult {
+  attemptId?: string;
   localPort: number;
   remoteAddress: string;
   remotePort: number;
   selection?: DirectSelectionDiagnostics;
+}
+
+/** Release a selected port if a caller cancels before the native engine consumes it. */
+export async function releaseP2pConnection(result: P2pPunchResult): Promise<void> {
+  if (result.attemptId) await invoke('p2p_stop', { attemptId: result.attemptId });
 }
 
 interface P2pGatherResult {
@@ -183,7 +189,7 @@ export async function coordinateP2pConnection(
       // The selected socket remains reserved in Rust until launch_engine
       // releases it immediately before the native sidecar binds the same port.
       websocket.close();
-      resolve(result);
+      resolve({ ...result, attemptId });
     };
 
     const send = (type: string, payload: Record<string, unknown>): boolean => {

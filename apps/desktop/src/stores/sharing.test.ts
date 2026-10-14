@@ -5,9 +5,9 @@ const mocks = vi.hoisted(() => ({
   api: { supportsSharingMedia: vi.fn(), sharingGroups: vi.fn(), devices: vi.fn(), createSharingGroup: vi.fn(),
     sessionCredentials: vi.fn(), hostSessions: vi.fn(), sharingHeartbeat: vi.fn(), getAccessToken: vi.fn(),
     removeSharingViewer: vi.fn(), stopSharingGroup: vi.fn(), respondSharingInvitation: vi.fn(), getSession: vi.fn() },
-  coordinate: vi.fn(), launch: vi.fn(), add: vi.fn(), remove: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), relayFailure: vi.fn()
+  coordinate: vi.fn(), release: vi.fn(), launch: vi.fn(), add: vi.fn(), remove: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), relayFailure: vi.fn()
 }));
-vi.mock('../lib/p2pSignaling', () => ({ coordinateP2pConnection: mocks.coordinate, directCheckFailure: () => 'failed' }));
+vi.mock('../lib/p2pSignaling', () => ({ coordinateP2pConnection: mocks.coordinate, releaseP2pConnection: mocks.release, directCheckFailure: () => 'failed' }));
 vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, addSharingPeer: mocks.add, removeSharingPeer: mocks.remove,
   stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, relayPeerFailure: mocks.relayFailure,
   engineStatus: () => Promise.resolve({ running: true }) }));
@@ -44,7 +44,7 @@ beforeEach(() => {
   mocks.api.sessionCredentials.mockImplementation((id: string) => Promise.resolve({ wireProtocol: 'snv2', accessMode: 'view-only', sessionToken: `${id}-` + 'a'.repeat(48) }));
   mocks.api.hostSessions.mockImplementation(() => Promise.resolve({ items: group.members.filter((member) => member.sessionId).map((member) => ({ id: member.sessionId, status: 'accepted', requesterReadyAt: '2026-10-14T00:00:00Z' })) }));
   mocks.coordinate.mockImplementation((_api: unknown, id: string) => Promise.resolve({ localPort: 50000 + Number(id.slice(-1)) * 2, remotePort: 50001 + Number(id.slice(-1)) * 2, remoteAddress: '192.0.2.1' }));
-  mocks.launch.mockResolvedValue(undefined); mocks.add.mockResolvedValue(undefined); mocks.remove.mockResolvedValue(undefined); mocks.stop.mockResolvedValue(undefined);
+  mocks.release.mockResolvedValue(undefined); mocks.launch.mockResolvedValue(undefined); mocks.add.mockResolvedValue(undefined); mocks.remove.mockResolvedValue(undefined); mocks.stop.mockResolvedValue(undefined);
   mocks.stopRelay.mockResolvedValue(undefined); mocks.relayFailure.mockResolvedValue(null); mocks.api.stopSharingGroup.mockResolvedValue(undefined);
 });
 afterEach(async () => { for (const store of stores) await store.shutdown(); stores = []; vi.useRealTimers(); });
@@ -103,4 +103,48 @@ it('rejects a response for another computer before calling the consent API', asy
   const store = createSharingStore(); stores.push(store);
   await expect(store.respond(group, { id: 'foreign', viewerDeviceId: 'another-computer', state: 'invited', accessMode: 'view-only', createdAt: 1, updatedAt: 1 }, true)).rejects.toThrow('another computer');
   expect(mocks.api.respondSharingInvitation).not.toHaveBeenCalled();
+});
+
+it('allows a viewer to retry a failed relay with a fresh ready generation without disturbing other viewers', async () => {
+  mocks.coordinate.mockImplementation((_api: unknown, id: string) => id === 'session-2'
+    ? Promise.reject(new Error('No direct route')) : Promise.resolve({ localPort: 50100, remotePort: 50101, remoteAddress: '192.0.2.1' }));
+  mocks.relay.mockResolvedValue({ enginePort: 52000, proxyPort: 52001, transport: 'wss' });
+  const store = await startedStore();
+  mocks.relayFailure.mockResolvedValueOnce('relay peer offline');
+  await store.refresh(); await vi.advanceTimersByTimeAsync(1);
+  expect(mocks.relay).toHaveBeenCalledTimes(1);
+  mocks.api.hostSessions.mockResolvedValue({ items: group.members.map((member) => ({ id: member.sessionId, status: 'accepted', requesterReadyAt: '2026-10-14T00:00:01Z' })) });
+  await store.refresh(); await vi.advanceTimersByTimeAsync(1);
+  expect(mocks.relay).toHaveBeenCalledTimes(2);
+  expect(mocks.stop).not.toHaveBeenCalled();
+});
+
+it('waits for a pending shutdown before initializing again', async () => {
+  const store = await startedStore();
+  let finishStop!: () => void;
+  mocks.api.stopSharingGroup.mockReturnValueOnce(new Promise<void>((resolve) => { finishStop = resolve; }));
+  const ending = store.shutdown();
+  const duplicate = store.shutdown();
+  const starting = store.initialize(runtime);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(mocks.api.supportsSharingMedia).toHaveBeenCalledTimes(1);
+  group = { ...group, members: [] }; mocks.api.sharingGroups.mockResolvedValue({ items: [] });
+  finishStop(); await Promise.all([ending, duplicate, starting]);
+  expect(mocks.api.supportsSharingMedia).toHaveBeenCalledTimes(2);
+  expect(get(store).supported).toBe(true);
+  expect(get(store).ownGroup).toBeNull();
+});
+
+it('releases a selected Direct port if sharing stops before native launch', async () => {
+  mocks.api.sharingGroups.mockResolvedValueOnce({ items: [] });
+  const store = createSharingStore(); stores.push(store); await store.initialize(runtime); await store.create();
+  group = { ...group, state: 'active', members: [{ id: 'member-1', viewerDeviceId: 'viewer-1', sessionId: 'session-1', state: 'accepted', accessMode: 'view-only', createdAt: 1, updatedAt: 1 }] };
+  let finishCheck!: (result: object) => void;
+  mocks.coordinate.mockReturnValueOnce(new Promise((resolve) => { finishCheck = resolve; }));
+  await store.refresh(); await vi.advanceTimersByTimeAsync(1);
+  const stopping = store.stop();
+  finishCheck({ attemptId: 'cancelled-attempt', localPort: 50100, remotePort: 50101, remoteAddress: '192.0.2.1' });
+  await stopping;
+  expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ attemptId: 'cancelled-attempt' }));
+  expect(mocks.launch).not.toHaveBeenCalled();
 });

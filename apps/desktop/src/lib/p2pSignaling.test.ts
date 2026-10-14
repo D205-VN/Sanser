@@ -233,7 +233,7 @@ describe('coordinateP2pConnection', () => {
       payload: { generation: 1 }
     });
 
-    await expect(negotiation).resolves.toEqual(punchResult);
+    await expect(negotiation).resolves.toEqual({ ...punchResult, attemptId });
     expect(invokeMock).toHaveBeenCalledWith('p2p_punch', {
       request: {
         sessionId,
@@ -348,7 +348,7 @@ it.each(['iso', 'seconds', 'number'] as const)('isolates retry generations using
   expect(invokeMock).not.toHaveBeenCalledWith('p2p_punch', expect.anything());
   expect(signals(socket).slice(-2).every(message => message.payload.generation === epoch)).toBe(true);
   socket.receive({ sessionId, senderDeviceId: peerDeviceId, type: 'p2p.candidatesAck', payload: { generation: epoch } });
-  await expect(pending).resolves.toEqual(punchResult);
+  await expect(pending).resolves.toEqual({ ...punchResult, attemptId });
 });
 
 it.each([0, -1, 1.5, '1.5', 0x1_0000_0000, 'bad-epoch', '2026-10-04T00:00:00.500Z'])('rejects invalid candidate generation %s before gathering', async (epoch) => {

@@ -824,7 +824,10 @@ async fn migration_and_cleanup_work_on_neon_postgres() {
         .fetch_one(&server.state.pool)
         .await
         .expect("migration metadata");
-    assert_eq!(migrations, 3);
+    assert_eq!(
+        migrations,
+        i64::try_from(sqlx::migrate!("./migrations").iter().count()).expect("migration count")
+    );
     assert!(db::ready(&server.state.pool).await);
 
     let auth = server.register("cleanup@example.test").await;
@@ -1019,6 +1022,57 @@ async fn sharing_capacity_consent_ownership_and_stop_are_transactional() {
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    let streaming = sqlx::query_scalar::<_, bool>("SELECT streaming FROM devices WHERE id=$1")
+        .bind(&peers[0])
+        .fetch_one(&server.state.pool)
+        .await
+        .unwrap();
+    assert!(
+        streaming,
+        "only an acknowledged decoded frame marks the host streaming"
+    );
+    let (status, refreshed, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{media_id}/native-ready"),
+            Some(json!({"deviceId":chosen_viewer})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success());
+    let next_epoch = refreshed["requesterReadyAt"].as_i64().unwrap();
+    assert!(next_epoch > epoch);
+    let streaming = sqlx::query_scalar::<_, bool>("SELECT streaming FROM devices WHERE id=$1")
+        .bind(&peers[0])
+        .fetch_one(&server.state.pool)
+        .await
+        .unwrap();
+    assert!(
+        !streaming,
+        "a retried generation has not decoded a frame yet"
+    );
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{media_id}/native-started"),
+            Some(json!({"deviceId":chosen_viewer,"requesterReadyAt":epoch})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "stale decoder reports cannot revive a previous generation"
+    );
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{media_id}/native-started"),
+            Some(json!({"deviceId":chosen_viewer,"requesterReadyAt":next_epoch})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     let mut sessions = vec![media_id.clone()];
     for another in members.iter().skip(1) {
         let (status, response, _) = server
@@ -1060,6 +1114,28 @@ async fn sharing_capacity_consent_ownership_and_stop_are_transactional() {
         )
         .await;
     assert_eq!(removed["state"], "disconnected");
+    let streaming = sqlx::query_scalar::<_, bool>("SELECT streaming FROM devices WHERE id=$1")
+        .bind(&peers[0])
+        .fetch_one(&server.state.pool)
+        .await
+        .unwrap();
+    assert!(
+        !streaming,
+        "accepted viewers without decoded frames do not count as watching"
+    );
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/sessions/{media_id}/native-started"),
+            Some(json!({"deviceId":chosen_viewer,"requesterReadyAt":next_epoch})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "removal invalidates subsequent first-frame reports"
+    );
     for sid in sessions.iter().skip(1) {
         let (_, survivor, _) = server
             .request(

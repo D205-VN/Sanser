@@ -51,17 +51,57 @@ struct RelayBridge {
 }
 
 #[derive(Default)]
+struct RelayState {
+    bridges: HashMap<(EngineKind, uuid::Uuid), RelayBridge>,
+    pending: HashMap<(EngineKind, uuid::Uuid), uuid::Uuid>,
+}
+
+struct RelayReservation {
+    state: Arc<Mutex<RelayState>>,
+    key: (EngineKind, uuid::Uuid),
+    id: uuid::Uuid,
+}
+
+impl RelayReservation {
+    fn install(&self, bridge: RelayBridge) -> Result<(), DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?;
+        if state.pending.get(&self.key) != Some(&self.id) {
+            return Err(DesktopError::Process(
+                "relay negotiation was cancelled or replaced".into(),
+            ));
+        }
+        state.pending.remove(&self.key);
+        state.bridges.insert(self.key, bridge);
+        Ok(())
+    }
+}
+
+impl Drop for RelayReservation {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock()
+            && state.pending.get(&self.key) == Some(&self.id)
+        {
+            state.pending.remove(&self.key);
+        }
+    }
+}
+
+#[derive(Default)]
 pub struct RelayManager {
-    bridges: Arc<Mutex<HashMap<(EngineKind, uuid::Uuid), RelayBridge>>>,
+    state: Arc<Mutex<RelayState>>,
     failures: Arc<Mutex<HashMap<(EngineKind, uuid::Uuid), String>>>,
 }
 
 impl RelayManager {
     pub fn transport(&self, kind: EngineKind, session: &str) -> Option<String> {
         let session = uuid::Uuid::parse_str(session).ok()?;
-        self.bridges
+        self.state
             .lock()
             .ok()?
+            .bridges
             .get(&(kind, session))
             .map(|bridge| bridge.transport.to_owned())
     }
@@ -70,14 +110,16 @@ impl RelayManager {
         if let Ok(mut failures) = self.failures.lock() {
             failures.retain(|key, _| key.0 != kind);
         }
-        if let Ok(mut bridges) = self.bridges.lock() {
-            let keys = bridges
+        if let Ok(mut state) = self.state.lock() {
+            state.pending.retain(|key, _| key.0 != kind);
+            let keys = state
+                .bridges
                 .keys()
                 .filter(|key| key.0 == kind)
                 .copied()
                 .collect::<Vec<_>>();
             for key in keys {
-                if let Some(bridge) = bridges.remove(&key) {
+                if let Some(bridge) = state.bridges.remove(&key) {
                     let _ = bridge.stop.send(());
                 }
             }
@@ -87,10 +129,11 @@ impl RelayManager {
         if let Ok(mut failures) = self.failures.lock() {
             failures.remove(&(kind, session));
         }
-        if let Ok(mut bridges) = self.bridges.lock()
-            && let Some(bridge) = bridges.remove(&(kind, session))
-        {
-            let _ = bridge.stop.send(());
+        if let Ok(mut state) = self.state.lock() {
+            state.pending.remove(&(kind, session));
+            if let Some(bridge) = state.bridges.remove(&(kind, session)) {
+                let _ = bridge.stop.send(());
+            }
         }
     }
     pub fn stop_for_engine(&self, kind: EngineKind) {
@@ -105,6 +148,53 @@ impl RelayManager {
         failures.remove(&key)
     }
 
+    fn reserve(
+        &self,
+        kind: EngineKind,
+        session: uuid::Uuid,
+        sharing: bool,
+    ) -> Result<RelayReservation, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?;
+        let key = (kind, session);
+        let occupied = state
+            .bridges
+            .keys()
+            .chain(state.pending.keys())
+            .filter(|item| item.0 == kind && **item != key)
+            .count();
+        if sharing && occupied >= 3 {
+            return Err(DesktopError::Process(
+                "sharing relay viewer limit reached".into(),
+            ));
+        }
+        if !sharing {
+            state.pending.retain(|item, _| item.0 != kind);
+            let keys = state
+                .bridges
+                .keys()
+                .filter(|item| item.0 == kind)
+                .copied()
+                .collect::<Vec<_>>();
+            for old in keys {
+                if let Some(bridge) = state.bridges.remove(&old) {
+                    let _ = bridge.stop.send(());
+                }
+            }
+        } else if let Some(bridge) = state.bridges.remove(&key) {
+            let _ = bridge.stop.send(());
+        }
+        let id = uuid::Uuid::new_v4();
+        state.pending.insert(key, id);
+        Ok(RelayReservation {
+            state: Arc::clone(&self.state),
+            key,
+            id,
+        })
+    }
+
     pub fn verify_launch(&self, request: &LaunchEngineRequest) -> Result<(), DesktopError> {
         if !request.relay {
             return Ok(());
@@ -114,13 +204,16 @@ impl RelayManager {
             .as_deref()
             .and_then(|value| uuid::Uuid::parse_str(value).ok())
             .ok_or_else(|| DesktopError::InvalidRequest("relay sessionId must be a UUID".into()))?;
-        let bridges = self
-            .bridges
+        let state = self
+            .state
             .lock()
             .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?;
-        let bridge = bridges.get(&(request.kind, session_id)).ok_or_else(|| {
-            DesktopError::Process("the authenticated relay bridge is not ready".into())
-        })?;
+        let bridge = state
+            .bridges
+            .get(&(request.kind, session_id))
+            .ok_or_else(|| {
+                DesktopError::Process("the authenticated relay bridge is not ready".into())
+            })?;
         let engine_port = match request.kind {
             EngineKind::Host => request.udp_bind_port,
             EngineKind::Client => request.port,
@@ -235,22 +328,14 @@ pub async fn relay_start(
                 "only a host uses multiple sharing relay bridges".into(),
             ));
         }
-        manager.stop_peer(request.kind, session_id);
-        if manager
-            .bridges
-            .lock()
-            .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?
-            .keys()
-            .filter(|key| key.0 == request.kind)
-            .count()
-            >= 3
-        {
-            return Err(DesktopError::Process(
-                "sharing relay viewer limit reached".into(),
-            ));
+    }
+    let reservation = manager.reserve(request.kind, session_id, request.sharing_id.is_some())?;
+    if let Ok(mut failures) = manager.failures.lock() {
+        if request.sharing_id.is_some() {
+            failures.remove(&(request.kind, session_id));
+        } else {
+            failures.retain(|key, _| key.0 != request.kind);
         }
-    } else {
-        manager.stop(request.kind);
     }
     let engine_reservation = tokio::net::UdpSocket::bind((
         Ipv4Addr::UNSPECIFIED,
@@ -382,12 +467,8 @@ pub async fn relay_start(
         proxy_port,
         stop: stop_tx,
     };
-    manager
-        .bridges
-        .lock()
-        .map_err(|_| DesktopError::Process("relay state is unavailable".into()))?
-        .insert((request.kind, session_id), bridge);
-    let bridges = Arc::clone(&manager.bridges);
+    reservation.install(bridge)?;
+    let bridges = Arc::clone(&manager.state);
     let failures = Arc::clone(&manager.failures);
     let kind = request.kind;
     tauri::async_runtime::spawn(async move {
@@ -400,10 +481,11 @@ pub async fn relay_start(
         };
         if let Ok(mut active) = bridges.lock()
             && active
+                .bridges
                 .get(&(kind, session_id))
                 .is_some_and(|bridge| bridge.id == bridge_id)
         {
-            active.remove(&(kind, session_id));
+            active.bridges.remove(&(kind, session_id));
             if let Some(failure) = failure
                 && let Ok(mut recorded) = failures.lock()
             {
@@ -1083,7 +1165,7 @@ mod tests {
         ] {
             let (stop, receiver) = oneshot::channel();
             receivers.push(receiver);
-            manager.bridges.lock().unwrap().insert(
+            manager.state.lock().unwrap().bridges.insert(
                 (kind, session),
                 RelayBridge {
                     transport: "udp",
@@ -1107,5 +1189,62 @@ mod tests {
         manager.stop_for_engine(EngineKind::Host);
         assert!(receivers[1].try_recv().is_ok());
         assert!(receivers[2].try_recv().is_err());
+    }
+    #[test]
+    fn pending_relay_negotiations_count_toward_capacity_and_release_on_failure() {
+        let manager = RelayManager::default();
+        let mut reservations = Vec::new();
+        for _ in 0..3 {
+            reservations.push(
+                manager
+                    .reserve(EngineKind::Host, uuid::Uuid::new_v4(), true)
+                    .unwrap(),
+            );
+        }
+        assert!(
+            manager
+                .reserve(EngineKind::Host, uuid::Uuid::new_v4(), true)
+                .is_err()
+        );
+        reservations.pop();
+        assert!(
+            manager
+                .reserve(EngineKind::Host, uuid::Uuid::new_v4(), true)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .reserve(EngineKind::Client, uuid::Uuid::new_v4(), false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_stopped_or_replaced_negotiation_cannot_install_a_late_bridge() {
+        let manager = RelayManager::default();
+        let session = uuid::Uuid::new_v4();
+        let stale = manager.reserve(EngineKind::Host, session, true).unwrap();
+        let current = manager.reserve(EngineKind::Host, session, true).unwrap();
+        drop(stale);
+        assert_eq!(
+            manager.state.lock().unwrap().pending.get(&current.key),
+            Some(&current.id)
+        );
+        manager.stop_peer(EngineKind::Host, session);
+        let (stop, _) = oneshot::channel();
+        let bridge = RelayBridge {
+            transport: "udp",
+            id: uuid::Uuid::new_v4(),
+            session_id: session,
+            engine_port: 50000,
+            proxy_port: 50001,
+            stop,
+        };
+        assert!(current.install(bridge).is_err());
+        assert!(
+            manager
+                .transport(EngineKind::Host, &session.to_string())
+                .is_none()
+        );
     }
 }

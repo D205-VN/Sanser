@@ -65,13 +65,22 @@ pub async fn native_started(
 ) -> Result<StatusCode, AppError> {
     let session = validate_uuid(&value, "sessionId")?;
     let device = validate_uuid(&request.device_id, "deviceId")?;
+    let mut tx = state.pool.begin().await.map_err(AppError::from_db)?;
+    // Use the same group lock as ready/retry, member removal and stop. A late
+    // decoder report cannot mark a stopped or replaced generation as watching.
+    let sharing = sqlx::query_scalar::<_, String>("SELECT sharing.id FROM sharing_groups AS sharing JOIN connection_sessions AS session ON session.sharing_id=sharing.id AND session.user_id=sharing.user_id WHERE session.id=$1 AND sharing.user_id=$2 AND sharing.state='active' FOR UPDATE OF sharing")
+        .bind(&session).bind(&auth.user_id).fetch_optional(&mut *tx).await.map_err(AppError::from_db)?
+        .ok_or_else(|| AppError::Conflict("sharing generation is no longer active".into()))?;
+    let now = now_unix();
     let changed=sqlx::query("UPDATE sharing_members AS member SET started_at=COALESCE(started_at,$1),updated_at=$1 WHERE member.user_id=$2 AND member.viewer_device_id=$3 AND member.session_id=$4 AND member.state='accepted' AND EXISTS(SELECT 1 FROM connection_sessions AS session WHERE session.id=member.session_id AND session.user_id=$2 AND session.state='accepted' AND session.requester_device_id=$3 AND session.requester_ready_at=$5)")
-        .bind(now_unix()).bind(&auth.user_id).bind(device).bind(session).bind(request.requester_ready_at).execute(&state.pool).await.map_err(AppError::from_db)?.rows_affected();
+        .bind(now).bind(&auth.user_id).bind(device).bind(session).bind(request.requester_ready_at).execute(&mut *tx).await.map_err(AppError::from_db)?.rows_affected();
     if changed != 1 {
         return Err(AppError::Conflict(
             "sharing generation is no longer active".into(),
         ));
     }
+    super::sharing::refresh_streaming(&mut tx, &auth.user_id, &sharing, now).await?;
+    tx.commit().await.map_err(AppError::from_db)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -479,6 +488,9 @@ pub async fn native_ready(
     }
     sqlx::query("UPDATE sharing_members SET started_at=NULL WHERE session_id=$1 AND user_id=$2 AND state='accepted'")
         .bind(&id).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    if let Some(sharing) = &current.sharing_id {
+        super::sharing::refresh_streaming(&mut tx, &auth.user_id, sharing, now).await?;
+    }
     tx.commit().await.map_err(AppError::from_db)?;
     events::publish(
         &state,

@@ -333,6 +333,17 @@ pub async fn heartbeat(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+pub(super) async fn refresh_streaming(
+    connection: &mut sqlx::PgConnection,
+    user: &str,
+    sharing: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    sqlx::query("UPDATE devices SET streaming=EXISTS(SELECT 1 FROM sharing_members AS member JOIN connection_sessions AS session ON session.id=member.session_id AND session.user_id=member.user_id WHERE member.sharing_id=$3 AND member.user_id=$2 AND member.state='accepted' AND member.started_at IS NOT NULL AND session.state='accepted'),updated_at=$1 WHERE user_id=$2 AND id=(SELECT host_device_id FROM sharing_groups WHERE id=$3 AND user_id=$2)")
+        .bind(now).bind(user).bind(sharing).execute(connection).await.map_err(AppError::from_db)?;
+    Ok(())
+}
+
 pub async fn remove(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -357,6 +368,7 @@ pub async fn remove(
     }
     sqlx::query("UPDATE sharing_members SET state='removed',updated_at=$1 WHERE id=$2 AND user_id=$3 AND state IN ('invited','accepted')")
         .bind(now).bind(&member).bind(&auth.user_id).execute(&mut *tx).await.map_err(AppError::from_db)?;
+    refresh_streaming(&mut tx, &auth.user_id, &sharing, now).await?;
     tx.commit().await.map_err(AppError::from_db)?;
     events::publish(
         &state,
