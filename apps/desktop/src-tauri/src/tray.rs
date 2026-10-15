@@ -28,15 +28,21 @@ pub fn configure_background_timers(config: &mut tauri::Config) {
 }
 
 pub(crate) fn show_main(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let result = window
-            .show()
-            .and_then(|()| window.unminimize())
-            .and_then(|()| window.set_focus());
-        if let Err(error) = result {
-            eprintln!("Unable to restore the existing Sanser window: {error}");
+    // The single-instance callback runs inside a synchronous WM_COPYDATA
+    // handler. Let it return before asking WebView2/DWM to restore the window;
+    // window work on this worker is dispatched back through Tauri's event loop.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(window) = app.get_webview_window("main") {
+            let result = window
+                .show()
+                .and_then(|()| window.unminimize())
+                .and_then(|()| window.set_focus());
+            if let Err(error) = result {
+                eprintln!("Unable to restore the existing Sanser window: {error}");
+            }
         }
-    }
+    });
 }
 
 pub fn install(app: &App) -> Result<(), Box<dyn std::error::Error>> {

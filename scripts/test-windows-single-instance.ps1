@@ -68,13 +68,16 @@ try {
     foreach ($attempt in 1..3) {
         if (-not [SanserWindowSmoke]::PostMessageW($window, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Unable to close Sanser to tray' }
         Wait-Until { -not [SanserWindowSmoke]::IsWindowVisible($window) } 'Closing Sanser did not hide its window'
+        Write-Output "Cycle ${attempt}: original window hidden; launching second process."
         $secondary = Start-Process -FilePath $executable -PassThru
-        if (-not $secondary.WaitForExit(30000) -or $secondary.ExitCode -ne 0) { throw 'Second launch did not exit successfully' }
+        if (-not $secondary.WaitForExit(30000)) { throw "Second launch timed out; originalVisible=$([SanserWindowSmoke]::IsWindowVisible($window)); secondaryPID=$($secondary.Id)" }
+        if ($secondary.ExitCode -ne 0) { throw "Second launch returned exit code $($secondary.ExitCode)" }
         Wait-Until { [SanserWindowSmoke]::IsWindowVisible($window) } 'Second launch did not restore the original window'
         $primary.Refresh()
         if ($primary.HasExited) { throw 'Restoring the window replaced the original process' }
         $instances = @(Get-Process -Name sanser | Where-Object { $_.Path -eq $executable })
         if ($instances.Count -ne 1 -or $instances[0].Id -ne $primary.Id) { throw 'Duplicate Sanser processes remain' }
+        Write-Output "Cycle ${attempt}: original PID $($primary.Id) restored and second process exited."
     }
 
     [void][SanserWindowSmoke]::ShowWindow($window, 6)

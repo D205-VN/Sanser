@@ -28,6 +28,14 @@ int main() {
     for(unsigned y=0;y<2;++y) for(unsigned x=0;x<4;++x) {
       const auto offset=(y*4+x)*4; image[offset]=y ? 200 : 20; image[offset+1]=70; image[offset+2]=110; image[offset+3]=255;
     }
+    // GDI lazily creates process-wide brush/font caches on the first paint.
+    // Warm both image and waiting-text paths before measuring owned handles.
+    {
+      WindowPresenter warmup; RECT video{};
+      require(warmup.paint(target.dc,80,80,image.data(),4,2,video),"Warmup image paint failed");
+      require(warmup.paint(target.dc,80,80,nullptr,0,0,video),"Warmup text paint failed");
+    }
+    GdiFlush();
     const auto handles=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
     {
       WindowPresenter presenter; RECT video{};
@@ -44,7 +52,9 @@ int main() {
       require(video.right==0 && video.bottom==0,"Minimized window retained stale input bounds");
       require(presenter.paint(target.dc,80,80,nullptr,0,0,video),"Waiting screen paint failed");
     }
-    require(GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)==handles,"Presenter leaked GDI resources across resize or destruction");
+    GdiFlush();
+    const auto after=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+    if(after!=handles) throw std::runtime_error("GDI handles before="+std::to_string(handles)+" after="+std::to_string(after));
     std::cout<<"Windows presenter: frame colors, orientation, letterbox, resize, minimize and GDI cleanup verified\n";
     return 0;
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
