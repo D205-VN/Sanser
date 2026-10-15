@@ -101,6 +101,42 @@ bad feedback sample do not lower bitrate; repeated delivery deficits reduce it
 within bounds and sustained healthy delivery recovers it gradually. Feedback is
 rate-limited. This is a conservative controller, not a completed GCC/BBR estimator.
 
+### Recovery hardening (2.2.4)
+
+The delivery slot and authenticated Peer recovery callbacks now request an IDR
+through a per-viewer gate instead of writing an unrestricted shared flag.
+Repeated failures from that viewer retry after 500 ms, then 1 s, then at most
+once every 2 s. Three seconds without a recovery signal restores a fast first
+request for a new incident. The existing group coalescing interval still applies;
+eligible requests from multiple viewers consume a single shared encode request.
+A fresh encoded IDR cancels older pending demands, including when it replaces a
+queued P-frame. Enqueueing the IDR does not reset failure backoff, since it is not
+proof of reception or successful decoding. Dependent P-frames are still withheld
+after a reference is lost.
+
+This limits keyframe storms; it does **not** isolate image quality. All viewers
+still receive the same encoded stream and the shared bitrate remains the
+lowest active viewer budget. There is no automatic slow-viewer eviction, separate
+quality tier or per-viewer encoder. Increasing the three-viewer limit is deferred.
+
+Native `SNSHARE_PEER` output once a second records the viewer identifier, ready/
+running state, submitted/dispatched/replaced frames, reference/send-queue drops,
+keyframe signals versus granted requests, repairs/cache misses and recommended
+bitrate. Credentials and screen/input contents are not logged. These counters
+are native diagnostics; they are not yet a per-viewer dashboard or proof that a
+frame was decoded/displayed.
+
+Automated coverage includes virtual-time backoff/coalescing tests and two
+authenticated loopback viewers, one paced at 1 Mb/s. That test calls the real
+encoder-request API while publishing frames; the earlier test supplied fixed
+IDRs and could not detect excessive group-wide recovery requests. This is not
+a substitute for real Windows/Mac capture plus Network Link Conditioner testing.
+
+Desktop dependencies are aligned on Tauri 2.12: JavaScript API 2.12.4,
+Rust crate 2.12.4 and CLI 2.12.3 (the CLI's current published patch).
+The [Tauri dependency update guide](https://v2.tauri.app/develop/updating-dependencies/)
+requires the API npm package and Rust crate to share a minor version.
+
 ## Desktop and transport lifecycle
 
 Sharing uses per-session P2P reservations, signaling receivers and relay bridges.

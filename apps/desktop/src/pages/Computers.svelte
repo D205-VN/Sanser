@@ -39,6 +39,12 @@
     if (!Number.isFinite(date.getTime())) return 'Not reported';
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
+  function availabilityLabel(device: Device, blockReason: string | null): string {
+    if (!device.online) return device.lastSeenAt ? `Last seen ${lastSeenLabel(device.lastSeenAt)}` : 'Waiting for this computer to come online';
+    if (device.streaming) return 'A screen session is in progress';
+    if (device.deviceRole === 'client') return 'Enable Host on this computer to connect';
+    return blockReason ? 'Online' : 'Available for a connection';
+  }
   const remoteDevices = $derived(groupComputers(devices, [$presence.deviceId, $hostStore.deviceId]));
   let showOlder = $state(false);
   const olderCount = $derived(remoteDevices.filter((device) => isOlderRegistration(device)).length);
@@ -237,8 +243,8 @@
 
 <section class="page computers-page">
   <header class="page-header">
-    <div><h1>Your computers<span class="heading-count" aria-hidden="true">{remoteDevices.length}</span></h1><p>Choose a computer to connect.</p></div>
-    <div class="button-row"><button class="button" onclick={() => navigate('host')}>Share this computer</button><button class="button" onclick={() => { void loadDevices(); void sharing.refresh(); }} disabled={loading}><Icon name="refresh" />{loading ? 'Refreshing…' : 'Refresh'}</button></div>
+    <div><h1>Your computers<span class="heading-count" aria-hidden="true">{remoteDevices.length}</span></h1><p>Choose a computer to connect. <span class="online-summary"><i aria-hidden="true"></i>{onlineCount} online</span></p></div>
+    <div class="button-row"><button class="button" onclick={() => { void loadDevices(); void sharing.refresh(); }} disabled={loading}><Icon name="refresh" />{loading ? 'Refreshing…' : 'Refresh'}</button><button class="button primary" onclick={() => navigate('host')}><Icon name="host" />Share this computer</button></div>
   </header>
 
   {#if $connection.session && ['pending', 'accepted', 'connecting', 'connected'].includes($connection.session.status)}
@@ -252,7 +258,7 @@
     <label class="search-box"><Icon name="search" /><input type="search" bind:value={query} placeholder="Search computers" aria-label="Search computers" /></label>
     <div class="filter-tabs" role="group" aria-label="Computer status">
       {#each ['all', 'online', 'offline', 'pinned'] as option}
-        <button class:active={filter === option} aria-pressed={filter === option} onclick={() => (filter = option as typeof filter)}>{option === 'all' ? 'All computers' : option}<span class="filter-count">{option === 'all' ? remoteDevices.length : option === 'online' ? onlineCount : option === 'pinned' ? pinnedCount : remoteDevices.length - onlineCount}</span></button>
+        <button class:active={filter === option} aria-pressed={filter === option} onclick={() => (filter = option as typeof filter)}>{option === 'all' ? 'All computers' : option.charAt(0).toUpperCase() + option.slice(1)}<span class="filter-count">{option === 'all' ? remoteDevices.length : option === 'online' ? onlineCount : option === 'pinned' ? pinnedCount : remoteDevices.length - onlineCount}</span></button>
       {/each}
     </div>
     <div class="layout-switch" role="group" aria-label="Computer layout"><button class:active={layout === 'grid'} aria-pressed={layout === 'grid'} aria-label="Card view" onclick={() => layout = 'grid'}><Icon name="grid" /></button><button class:active={layout === 'list'} aria-pressed={layout === 'list'} aria-label="List view" onclick={() => layout = 'list'}><Icon name="list" /></button></div>
@@ -280,12 +286,12 @@
                   <button class="button small ghost" type="button" onclick={() => (editingId = null)}>Cancel</button>
                 </form>
               {:else}
-                <div><h2>{device.pinned ? '★ ' : ''}{device.name}</h2><p>{platformLabel(device.platform)} · {(device.computerId ?? device.id).slice(0, 6).toUpperCase()} · {device.deviceRole === 'client' ? 'Sharing is off' : 'Remote computer'}</p></div>
+                <div><h2>{device.name}</h2><p>{platformLabel(device.platform)}<span class="device-id" title="Computer ID">{(device.computerId ?? device.id).slice(0, 6).toUpperCase()}</span>{#if device.deviceRole === 'client'}<span>Sharing is off</span>{/if}</p></div>
               {/if}
             </div>
             <StatusPill state={device.online ? 'online' : 'offline'} label={device.streaming ? 'Streaming' : device.online ? 'Online' : 'Offline'} />
           </div>
-          {#if device.lastSeenAt}<p class="device-last-seen" title={device.lastSeenAt}>Last seen {lastSeenLabel(device.lastSeenAt)}</p>{/if}
+          <div class="device-availability"><span class="device-last-seen">{availabilityLabel(device, blockReason)}</span>{#if device.requesterId && $preferences.trustedDeviceIds.includes(device.requesterId)}<span class="trusted-label">Trusted</span>{/if}</div>
           <div class="computer-actions">
             <button class="button primary" disabled={blockReason !== null || connectingId !== null} title={blockReason ?? 'Request a secure session'} onclick={() => connect(device)}>{connectingId === device.id ? 'Requesting…' : 'Connect'}<Icon name="arrow" /></button>
             <button class="button small ghost" disabled={actionId !== null} aria-pressed={device.pinned} onclick={() => togglePin(device)}><Icon name="pin" />{device.pinned ? 'Pinned' : 'Pin'}</button>
@@ -299,14 +305,14 @@
               </div>
             </details>
           </div>
-          {#if blockReason}<div class="connect-reason"><Icon name="about" /><span>{blockReason}</span></div>{/if}
+          {#if blockReason && blockReason !== 'This computer is offline'}<div class="connect-reason"><Icon name="about" /><span>{blockReason}</span></div>{/if}
 
         </article>
       {/each}
     </div>
   {/if}
   {#if olderCount > 0 && filter === 'all'}
-    <details class="card card-body" bind:open={showOlder}>
+    <details class="card card-body archived-computers" bind:open={showOlder}>
       <summary>Older offline registrations ({olderCount})</summary>
       <p>These entries were saved by earlier versions. They cannot be identified reliably until those computers reconnect. Use Rename or Remove computer to organize them.</p>
     </details>

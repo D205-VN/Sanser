@@ -1,4 +1,5 @@
 #include "broadcast.h"
+#include "broadcast_recovery.h"
 #include <array>
 #include <iostream>
 #include <random>
@@ -36,6 +37,35 @@ void connect(Broadcaster& host,Viewer& viewer,const Options& source,const std::s
 std::size_t count(Viewer& viewer) { std::lock_guard lock(viewer.mutex); return viewer.frames.size(); }
 int main() {
   try {
+    {
+      // Virtual time verifies recovery deadlines without relying on CPU/thread
+      // scheduling. A published IDR is not evidence that congestion recovered.
+      SharingKeyframeRecovery slow, healthy;
+      const auto start=Clock::time_point{}+std::chrono::seconds(100);
+      slow.request(start);
+      require(slow.take(start),"first viewer recovery must be immediate");
+      for(unsigned ms=1;ms<500;++ms) {
+        slow.request(start+std::chrono::milliseconds(ms));
+        require(!slow.take(start+std::chrono::milliseconds(ms)),"repeat requests must not create a keyframe storm");
+      }
+      require(slow.take(start+std::chrono::milliseconds(500)),"bounded retry must not lose a pending recovery");
+      slow.keyframe();
+      slow.request(start+std::chrono::milliseconds(600));
+      require(!slow.take(start+std::chrono::milliseconds(600)),"publishing an IDR must not reset a failing viewer's backoff");
+      healthy.request(start+std::chrono::milliseconds(600));
+      require(healthy.take(start+std::chrono::milliseconds(600)),"one viewer's backoff must not delay another viewer's first recovery");
+      slow.keyframe();
+      require(!slow.take(start+std::chrono::milliseconds(1500)),"a fresh IDR satisfies an older pending demand even after the cooldown expires");
+      slow.request(start+std::chrono::milliseconds(1501));
+      require(slow.take(start+std::chrono::milliseconds(1501)),"second retry after one second");
+      slow.request(start+std::chrono::milliseconds(1600));
+      require(!slow.take(start+std::chrono::milliseconds(3400)),"persistent failures back off to two seconds");
+      require(slow.take(start+std::chrono::milliseconds(3501)),"persistent viewer retains a bounded recovery opportunity");
+      slow.keyframe();
+      slow.request(start+std::chrono::milliseconds(7000));
+      require(slow.take(start+std::chrono::milliseconds(7000)),"a quiet interval restores fast recovery for a new loss episode");
+      require(slow.signals()>slow.requests(),"stats distinguish coalesced signals from encoder requests");
+    }
     Options source; source.host=true; source.input=false; source.bitrate=100000000;
     Broadcaster host(source); std::array<Viewer,3> viewers;
     for(std::size_t i=0;i<3;++i) connect(host,viewers[i],source,"viewer-"+std::to_string(i),static_cast<char>('a'+i));
@@ -65,6 +95,33 @@ int main() {
     require(waitFor([&] { std::lock_guard lock(viewers[0].mutex); return viewers[0].frames.back().data==Bytes(2500,0x4f); }),"healthy viewer recovers latest frame without waiting for slow viewer");
     require(count(viewers[0])>10 && count(viewers[2])>10,"healthy viewers keep receiving while another link is constrained");
     host.stop(); require(!host.running() && host.stats().empty(),"group stop joins workers and clears peers");
+
+    {
+      // Drive the encoder request API too. The earlier slow-viewer test only
+      // supplied preselected IDRs and could not detect group-wide IDR storms.
+      auto ultra=source; ultra.ultraLowLatency=true;
+      Broadcaster group(ultra); Viewer healthy,slow;
+      connect(group,healthy,ultra,"healthy",'h');
+      connect(group,slow,ultra,"constrained",'q',1000000);
+      require(group.bitrate()==1000000,"single encoder still follows the lowest active viewer budget");
+      unsigned keyframes=0;
+      for(unsigned i=0;i<240;++i) {
+        const bool requested=group.takeKeyframeRequest();
+        if(requested) ++keyframes;
+        group.publish(Frame{Bytes(20000,static_cast<std::uint8_t>(i)),1280,720,requested || i==0});
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      bool constrained=false; std::uint64_t slowRequests=0;
+      for(const auto& peer:group.stats()) {
+        if(peer.id=="constrained") { constrained=peer.sendQueueDrops>0; slowRequests=peer.keyframeRequests; }
+      }
+      require(constrained,"test must actually saturate the constrained viewer");
+      require(slowRequests>=2,"failed viewer still receives recovery retries");
+      require(keyframes<=8,"constrained viewer must not force an IDR every 100 ms");
+      require(count(healthy)>100,"healthy viewer continues while constrained viewer is recovering");
+      std::cout<<"Broadcast recovery: published="<<group.publishedFrames()<<" forcedKeyframes="<<keyframes
+        <<" constrainedRequests="<<slowRequests<<" healthyFrames="<<count(healthy)<<'\n';
+    }
     require(!parseSharingCommand("share-add\tnonce\tv\t1\t127.0.0.1:1\tshort",1000000),"reject short IPC credential");
     require(!parseSharingCommand(std::string(1025,'x'),1000000),"bounded IPC command");
     require(parseSharingCommand("share-remove\tnonce\tv",1000000).has_value(),"valid remove command");

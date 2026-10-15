@@ -21,7 +21,7 @@
 <aside class="sidebar">
   <div class="brand">
     <BrandMark size={38} label="Sanser" />
-    <div><strong>Sanser</strong></div>
+    <div><strong>Sanser</strong><span>Remote desktop</span></div>
 
   </div>
 
@@ -46,4 +46,9 @@
     </div>
   </nav>
 
+  <button class="sidebar-computer" class:online={$hostStore.online} onclick={() => navigate('host')} title="Manage screen sharing on this computer">
+    <span class="sidebar-computer-icon"><Icon name="monitor" /></span>
+    <span><strong>This computer</strong><small>{$hostStore.online ? 'Available to share' : 'Screen sharing off'}</small></span>
+    <i aria-hidden="true"></i>
+  </button>
 </aside>

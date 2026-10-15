@@ -1,5 +1,6 @@
 <script lang="ts">
   import { get } from 'svelte/store';
+  import Icon from './Icon.svelte';
   import { sharingViewerCandidates } from '../lib/sharingInvitations';
   import type { SharingMember } from '../lib/types';
   import { host } from '../stores/host';
@@ -28,7 +29,7 @@
 
 <article class="card card-body stack sharing-panel">
   <div class="sharing-heading">
-    <div><h2 class="card-title">Share with multiple computers</h2><p class="card-subtitle">Up to 3 computers can watch. Viewers cannot control your mouse or keyboard.</p></div>
+    <div class="panel-heading"><span class="panel-icon"><Icon name="computers" /></span><div><h2 class="card-title">Share with multiple computers <span class="view-only-label">View only</span></h2><p class="card-subtitle">Invite up to 3 computers to watch your screen.</p></div></div>
     {#if group}<button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.stop())}>Stop sharing</button>{/if}
   </div>
   {#if actionError}<div class="notice error" role="alert">{actionError}</div>{/if}
@@ -45,7 +46,7 @@
     {#if active.length < group.maxViewers}
       <div class="invite-row">
         <label for="sharing-viewer">Invite a computer</label>
-        <select id="sharing-viewer" bind:value={selected} disabled={$sharing.busy || candidates.length === 0}>
+        <select class="select" id="sharing-viewer" bind:value={selected} disabled={$sharing.busy || candidates.length === 0}>
           <option value="">Choose a computer…</option>
           {#each candidates as device (device.id)}<option value={device.id}>{device.name} · {device.platform} · {(device.computerId ?? device.id).slice(0, 6).toUpperCase()}</option>{/each}
         </select>
@@ -61,7 +62,7 @@
   .sharing-panel { margin: 0 0 24px; }
   .sharing-heading, .viewer-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .viewer-row { padding: 14px 0; border-bottom: 1px solid var(--border); }
-  .viewer-row p { margin: 5px 0 0; color: var(--text-muted); font-size: 13px; }
+  .viewer-row p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
   .sharing-count { color: var(--accent); margin: 0; }
   .invite-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .invite-row select { flex: 1; min-width: 200px; }

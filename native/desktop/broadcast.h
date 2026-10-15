@@ -15,6 +15,8 @@ struct ViewerStats {
   std::string id;
   bool ready=false, running=false;
   std::uint64_t submitted=0, dispatched=0, replaced=0, referenceDrops=0, sendQueueDrops=0, repaired=0, repairCacheMisses=0;
+  std::uint64_t keyframeSignals=0, keyframeRequests=0;
+  std::uint32_t recommendedBitrate=0;
 };
 
 // One prepared encoded payload, independent crypto/queues/workers per viewer.
@@ -41,7 +43,7 @@ private:
   mutable std::mutex peersMutex_;
   std::mutex lifecycleMutex_, publishMutex_, keyframeMutex_;
   std::map<std::string,std::shared_ptr<Delivery>> peers_;
-  std::atomic<bool> running_{true}, keyframeRequested_{true};
+  std::atomic<bool> running_{true};
   std::atomic<std::uint64_t> published_{0};
   Clock::time_point lastKeyframeRequest_{};
 };
@@ -65,6 +67,7 @@ private:
   std::unique_ptr<Peer> single_;
   std::unique_ptr<Broadcaster> broadcast_;
   std::atomic<bool> keyframeRequested_{true};
+  Clock::time_point lastStats_{};
 };
 struct HostOutputStop { HostOutput& output; ~HostOutputStop() { output.stop(); } };
 

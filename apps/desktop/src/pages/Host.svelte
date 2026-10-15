@@ -1,5 +1,6 @@
 <script lang="ts">
   import StatusPill from '../components/StatusPill.svelte';
+  import Icon from '../components/Icon.svelte';
   import Toggle from '../components/Toggle.svelte';
   import SharingPanel from '../components/SharingPanel.svelte';
   import { sharing } from '../stores/sharing';
@@ -92,9 +93,9 @@
   }
 </script>
 
-<section class="page">
+<section class="page host-page">
   <header class="page-header">
-    <div><h1>Host</h1><p>Let your other computers access this screen.</p></div>
+    <div><h1>Share this computer</h1><p>Manage who can see and control your screen.</p></div>
     <StatusPill state={$host.online ? 'online' : 'offline'} label={$host.online ? 'Online' : 'Offline'} />
   </header>
 
@@ -102,7 +103,7 @@
     <div class="notice warning" role="alert">Screen sharing on this Mac requires a Sanser server update. After the server is updated, select “Check again”.</div>
   {:else if actionError ?? $host.error}<div class="notice error" role="alert">{actionError ?? $host.error}</div>{/if}
   <div class="host-hero card">
-    <div class="host-state-orb" class:online={$host.online}><span></span></div>
+    <div class="host-state-orb" class:online={$host.online}><Icon name="monitor" /></div>
     <div><h2>{$host.online ? 'This computer is visible' : needsServerUpdate ? 'Screen sharing is unavailable' : 'This computer is private'}</h2><p>{$host.online ? 'Your other computers can request access.' : needsServerUpdate ? 'Your screen is not being shared.' : 'Go online when you want to share your screen.'}</p></div>
     <button class:danger={$host.online} class:primary={!$host.online} class="button" disabled={$host.busy || (!canHost && !$host.online)} title={!canHost && !$host.online ? runtime.capabilities.hostEngine.reason ?? 'The Host engine is unavailable' : undefined} onclick={toggleHost}>{$host.busy ? 'Working…' : $host.online ? 'Go offline' : needsServerUpdate ? 'Check again' : 'Go online'}</button>
   </div>
@@ -113,13 +114,13 @@
   {#if runtime.capabilities.multiViewerHost === true}<SharingPanel />{/if}
   <div class="grid two host-grid">
     <article class="card card-body stack">
-      <div><h2 class="card-title">Screen sharing</h2><p class="card-subtitle">Your main display is shared during a connection.</p></div>
+      <div class="panel-heading"><span class="panel-icon"><Icon name="monitor" /></span><div><h2 class="card-title">Screen sharing</h2><p class="card-subtitle">Choose what a connected computer can use.</p></div></div>
       {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="System audio" description="Share sound from this computer." onchange={(value) => updateHost('audioEnabled', value)} />{/if}
       <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Remote input" description="Allow the other computer to use your keyboard and mouse." onchange={(value) => updateHost('inputEnabled', value)} />
     </article>
 
     <article class="card card-body stack">
-      <div><h2 class="card-title">Connection requests</h2><p class="card-subtitle">Approve who can access this computer.</p></div>
+      <div class="panel-heading"><span class="panel-icon"><Icon name="link" /></span><div><h2 class="card-title">Connection requests</h2><p class="card-subtitle">You decide who can access this computer.</p></div></div>
       <Toggle
         checked={$preferences.host.autoAcceptOwnDevices}
         disabled={!canHost}
@@ -147,8 +148,8 @@
       {/if}
     </article>
 
-    <article class="card card-body stack">
-      <div><h2 class="card-title">Current client</h2><p class="card-subtitle">The computer currently accessing your screen.</p></div>
+    <article class="card card-body stack current-client">
+      <div class="panel-heading"><span class="panel-icon"><Icon name="session" /></span><div><h2 class="card-title">Current client</h2><p class="card-subtitle">The computer currently accessing your screen.</p></div></div>
       {#if activeSession}
         <div class="empty compact-empty"><div>
           <h3>Client {activeSession.requesterDeviceId.slice(0, 8)}</h3>

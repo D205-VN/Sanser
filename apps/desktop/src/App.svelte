@@ -194,13 +194,15 @@
     <div class="content-shell">
       <header class="titlebar">
         <div class="title-context">
+          <span>{pageMeta[page].section}</span><span class="breadcrumb-divider" aria-hidden="true">/</span>
           <strong>{pageMeta[page].label}</strong>
         </div>
         <div class="title-actions">
           {#if $sharing.ownGroup}<span class="sharing-indicator" role="status">{$sharing.paused ? 'Sharing paused' : 'Sharing'} · {watchingCount} watching <button class="button small danger" disabled={$sharing.busy} onclick={stopSharing}>Stop</button></span>{/if}
-          <span class="title-account">{$session.account?.email}</span>
+          <span class="account-avatar" aria-hidden="true">{($session.account?.email ?? 'S').slice(0, 1).toUpperCase()}</span>
+          <span class="title-account" title={$session.account?.email}>{$session.account?.email}</span>
           <button class="button small ghost" disabled={signingOut} onclick={signOut}>{signingOut ? 'Signing out…' : 'Sign out'}</button>
-          {#if updateAvailable}<button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button>{/if}
+          {#if updateAvailable}<button class="button small primary" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button>{/if}
         </div>
       </header>
       <main bind:this={pageContainer} class:session-scroll={page === 'session'} class="page-scroll">

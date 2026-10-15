@@ -375,10 +375,11 @@
 </script>
 
 <section class="session-page">
+  <header class="page-header"><div><h1>Active session</h1><p>{sessionState?.accessMode === 'view-only' ? 'Watch the shared screen in its own window.' : 'Your connection and remote desktop, in one place.'}</p></div></header>
   {#if sessionState}<div class="session-toolbar">
     <div class="session-identity">
       <StatusPill state={$connection.engineRunning ? 'online' : 'warning'} label={$connection.engineRunning ? 'Window open' : sessionState.status} />
-
+      {#if activeRoute}<span class="session-route"><Icon name="link" />{activeRoute === 'direct' ? 'Direct connection' : 'Relay connection'}</span>{/if}
     </div>
     <div class="session-actions">
 

@@ -1,4 +1,5 @@
 #include "broadcast.h"
+#include "broadcast_recovery.h"
 #include <algorithm>
 #include <cctype>
 #include <iostream>
@@ -25,11 +26,12 @@ struct Broadcaster::Delivery {
   std::atomic<bool> running{true};
   bool awaitingKeyframe=true;
   std::atomic<std::uint64_t> submitted{0}, dispatched{0}, replaced{0}, referenceDrops{0};
-  std::atomic<bool>& force;
-  Delivery(ViewerSpec viewer,Options options,std::atomic<bool>& keyframe)
-      :spec(std::move(viewer)),peer(options),force(keyframe) {
-    peer.onKeyframe=[this] { std::lock_guard lock(mutex); awaitingKeyframe=true; force=true; };
-    peer.onReady=[this] { std::lock_guard lock(mutex); awaitingKeyframe=true; force=true; };
+  SharingKeyframeRecovery recovery;
+  Delivery(ViewerSpec viewer,Options options)
+      :spec(std::move(viewer)),peer(options) {
+    const auto request=[this] { std::lock_guard lock(mutex); awaitingKeyframe=true; recovery.request(Clock::now()); };
+    peer.onKeyframe=request;
+    peer.onReady=request;
     // No input injector callback is installed. Peer also enforces input=false.
   }
   ~Delivery() { stop(); }
@@ -48,7 +50,13 @@ struct Broadcaster::Delivery {
     if(!running || !peer.running() || !peer.ready()) return;
     std::lock_guard lock(mutex);
     ++submitted;
-    if(pending) { ++replaced; awaitingKeyframe=true; force=true; }
+    if(pending) {
+      ++replaced;
+      // Replacing a reference with an IDR heals the chain; it must not demand
+      // yet another group-wide IDR. A P-frame replacement still needs recovery.
+      if(!frame->keyframe) { awaitingKeyframe=true; recovery.request(Clock::now()); }
+    }
+    if(frame->keyframe) recovery.keyframe();
     pending=frame;
     wake.notify_one();
   }
@@ -62,7 +70,7 @@ struct Broadcaster::Delivery {
           if(!running) break;
           frame=std::move(pending);
           if(!frame) continue;
-          if(awaitingKeyframe && !frame->keyframe) { ++referenceDrops; force=true; continue; }
+          if(awaitingKeyframe && !frame->keyframe) { ++referenceDrops; recovery.request(Clock::now()); continue; }
           if(frame->keyframe) awaitingKeyframe=false;
         }
         peer.videoPrepared(frame);
@@ -70,6 +78,17 @@ struct Broadcaster::Delivery {
       }
     } catch(...) {}
     running=false; peer.cancel();
+  }
+  bool takeKeyframeRequest(Clock::time_point now) {
+    std::lock_guard lock(mutex);
+    return running && peer.running() && peer.ready() && recovery.take(now);
+  }
+  ViewerStats stats() {
+    std::lock_guard lock(mutex);
+    return {spec.id,peer.ready(),peer.running() && running,
+      submitted.load(),dispatched.load(),replaced.load(),referenceDrops.load(),
+      peer.videoQueueDrops(),peer.repairedDatagrams(),peer.repairCacheMisses(),
+      recovery.signals(),recovery.requests(),peer.recommendedBitrate()};
   }
 };
 
@@ -90,11 +109,10 @@ void Broadcaster::add(ViewerSpec viewer) {
       throw std::runtime_error("Each sharing viewer requires an independent endpoint, port and credential");
   }
   auto options=source_; options.token=viewer.token; options.peer=viewer.endpoint; options.port=viewer.localPort; options.bitrate=viewer.bitrate;
-  auto delivery=std::make_shared<Delivery>(std::move(viewer),options,keyframeRequested_);
+  auto delivery=std::make_shared<Delivery>(std::move(viewer),options);
   delivery->start();
   try { peers_.emplace(delivery->spec.id,delivery); }
   catch(...) { delivery->stop(); throw; }
-  keyframeRequested_=true;
 }
 void Broadcaster::remove(const std::string& id) {
   std::lock_guard lifecycle(lifecycleMutex_);
@@ -122,15 +140,19 @@ bool Broadcaster::ready() const {
   return std::any_of(peers_.begin(),peers_.end(),[](const auto& entry) { return entry.second->running && entry.second->peer.running() && entry.second->peer.ready(); });
 }
 bool Broadcaster::takeKeyframeRequest() {
-  std::lock_guard lock(keyframeMutex_);
+  std::lock_guard keyframeLock(keyframeMutex_);
   const auto now=Clock::now();
-  if(!keyframeRequested_ || now-lastKeyframeRequest_<std::chrono::milliseconds(source_.ultraLowLatency ? 100 : 300)) return false;
-  lastKeyframeRequest_=now; return keyframeRequested_.exchange(false);
+  if(now-lastKeyframeRequest_<std::chrono::milliseconds(source_.ultraLowLatency ? 100 : 300)) return false;
+  std::lock_guard peersLock(peersMutex_);
+  bool requested=false;
+  // Consume all eligible viewers together, coalescing them into one encode.
+  for(const auto& [id,peer]:peers_) { (void)id; requested=peer->takeKeyframeRequest(now) || requested; }
+  if(requested) lastKeyframeRequest_=now;
+  return requested;
 }
 std::vector<ViewerStats> Broadcaster::stats() const {
   std::lock_guard lock(peersMutex_); std::vector<ViewerStats> result;
-  for(const auto& [id,peer]:peers_) result.push_back({id,peer->peer.ready(),peer->peer.running() && peer->running,
-    peer->submitted.load(),peer->dispatched.load(),peer->replaced.load(),peer->referenceDrops.load(),peer->peer.videoQueueDrops(),peer->peer.repairedDatagrams(),peer->peer.repairCacheMisses()});
+  for(const auto& [id,peer]:peers_) { (void)id; result.push_back(peer->stats()); }
   return result;
 }
 std::uint32_t Broadcaster::bitrate() const {
@@ -193,6 +215,18 @@ void HostOutput::pumpControl() {
       if(command) std::cout<<"SNSHARE_ACK request="<<command->requestId<<" accepted=0"<<std::endl;
       std::cerr<<"SNSHARE_COMMAND rejected=1"<<std::endl;
     }
+  }
+  if(broadcast_ && Clock::now()-lastStats_>=std::chrono::seconds(1)) {
+    lastStats_=Clock::now();
+    for(const auto& peer:broadcast_->stats()) {
+      std::cout<<"SNSHARE_PEER viewer="<<peer.id<<" ready="<<peer.ready<<" running="<<peer.running
+        <<" submitted="<<peer.submitted<<" dispatched="<<peer.dispatched<<" replaced="<<peer.replaced
+        <<" referenceDrops="<<peer.referenceDrops<<" sendQueueDrops="<<peer.sendQueueDrops
+        <<" keyframeSignals="<<peer.keyframeSignals<<" keyframeRequests="<<peer.keyframeRequests
+        <<" repaired="<<peer.repaired<<" repairCacheMisses="<<peer.repairCacheMisses
+        <<" bitrate="<<peer.recommendedBitrate<<'\n';
+    }
+    std::cout.flush();
   }
 }
 }

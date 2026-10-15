@@ -1,9 +1,9 @@
-# Sanser 2.2.3
+# Sanser 2.2.4
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.3
+Product:  Sanser 2.2.4
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,10 +20,14 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.3 includes one-encoder screen sharing for up to three view-only
-computers in the same account. See [Release notes](docs/releases/v2.2.3.md) and
+Sanser 2.2.4 includes one-encoder screen sharing for up to three view-only
+computers in the same account. See [Release notes](docs/releases/v2.2.4.md) and
 [implementation/validation progress](docs/multi-viewer-progress.md). Version
-2.2.3 is published to the latest automatic-update channel.
+2.2.4 is published to the latest automatic-update channel.
+This update refreshes the desktop workspace, bounds repeated shared-keyframe
+requests per viewer and aligns the Tauri JavaScript/Rust dependencies on 2.12.
+The shared encoder still follows the lowest viewer bitrate; the previously
+observed 200–300 ms route RTT is not claimed fixed.
 
 On the host, select **Host → Go online → Start sharing → Invite**. Each invited
 computer selects **Join**. Use **Remove** for one viewer or **Stop sharing** for
@@ -181,7 +185,7 @@ For a local unsigned verification bundle only:
 npm run desktop:bundle:local
 ```
 
-Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.3.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
+Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.4.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
 
 ## Operating-system permissions
 
@@ -189,7 +193,7 @@ Current release scope and remaining platform validation are tracked in [the rele
 - macOS client requests Accessibility/Input Monitoring when remote input capture is enabled and microphone permission only when microphone forwarding is enabled.
 - macOS hosting is implemented with ScreenCaptureKit and VideoToolbox on macOS 12.3 or newer. Screen Recording is requested when hosting starts; Accessibility is needed when remote input is enabled.
 - Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; their audio and HEVC support remain incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
-- Sanser 2.2.3 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
+- Sanser 2.2.4 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
 
 ## Migration
 

@@ -1,6 +1,6 @@
 # Release
 
-The current release is [Sanser 2.2.3](releases/v2.2.3.md), published to the latest
+The current release is [Sanser 2.2.4](releases/v2.2.4.md), published to the latest
 automatic-update channel with Mac/Windows installers and signed updater bundles.
 See [sharing implementation and validation progress](multi-viewer-progress.md)
 for the remaining real-device checks.

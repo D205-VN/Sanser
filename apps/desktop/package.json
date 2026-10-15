@@ -1,7 +1,7 @@
 {
   "name": "@sanser/desktop",
   "private": true,
-  "version": "2.2.3",
+  "version": "2.2.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-process": "^2.2.0",
     "@tauri-apps/plugin-updater": "^2.2.0",
     "svelte": "^5.38.0"
@@ -21,7 +21,7 @@
   "devDependencies": {
     "@eslint/js": "^9.33.0",
     "@sveltejs/vite-plugin-svelte": "^6.1.0",
-    "@tauri-apps/cli": "^2.8.0",
+    "@tauri-apps/cli": "^2.12.3",
     "@testing-library/jest-dom": "^6.6.4",
     "@testing-library/svelte": "^5.2.8",
     "@types/node": "^24.3.0",
