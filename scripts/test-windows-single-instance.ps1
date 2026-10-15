@@ -16,11 +16,13 @@ public static class SanserWindowSmoke {
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr window, StringBuilder title, int count);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(IntPtr window, StringBuilder name, int count);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr window, uint message, UIntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string className, string title);
+    public static string ClassName(IntPtr window) { var name = new StringBuilder(256); GetClassNameW(window, name, name.Capacity); return name.ToString(); }
     public static IntPtr FindMainWindow(uint processId) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((window, parameter) => {
@@ -29,7 +31,8 @@ public static class SanserWindowSmoke {
             if (owner != processId) return true;
             var title = new StringBuilder(256);
             GetWindowTextW(window, title, title.Capacity);
-            if (!title.ToString().StartsWith("Sanser ", StringComparison.Ordinal) || !IsWindowVisible(window)) return true;
+            if (!title.ToString().StartsWith("Sanser ", StringComparison.Ordinal) || !IsWindowVisible(window)
+                || ClassName(window) == "ConsoleWindowClass" || ClassName(window) == "CASCADIA_HOSTING_WINDOW_CLASS") return true;
             found = window;
             return false;
         }, IntPtr.Zero);
@@ -68,15 +71,22 @@ try {
     $primary = Start-Sanser 'primary'
     Wait-Until {
         $primary.Refresh()
+        if ($primary.HasExited) { throw 'Primary Sanser exited before setup completed' }
+        return (Test-Path $logs[0]) -and [bool](Select-String -Path $logs[0] -SimpleMatch 'Sanser lifecycle: setup completed' -Quiet)
+    } 'Primary Sanser did not complete setup'
+    Wait-Until {
+        $primary.Refresh()
         if ($primary.HasExited) { throw 'Primary Sanser exited during startup' }
         return [SanserWindowSmoke]::FindMainWindow([uint32]$primary.Id) -ne [IntPtr]::Zero
     } 'Primary Sanser did not create its main window'
     $window = [SanserWindowSmoke]::FindMainWindow([uint32]$primary.Id)
+    Write-Output "Main window class: $([SanserWindowSmoke]::ClassName($window))"
     Write-Output "Instance guard window present: $([SanserWindowSmoke]::FindWindowW('com.sanser.desktop-sic', 'com.sanser.desktop-siw') -ne [IntPtr]::Zero)"
 
     foreach ($attempt in 1..3) {
         if (-not [SanserWindowSmoke]::PostMessageW($window, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Unable to close Sanser to tray' }
         Wait-Until { -not [SanserWindowSmoke]::IsWindowVisible($window) } 'Closing Sanser did not hide its window'
+        Wait-Until { [bool](Select-String -Path $logs[0] -SimpleMatch 'Sanser lifecycle: hide requested' -Quiet) } 'Close request did not reach the Sanser main window handler'
         $primary.Refresh()
         if ($primary.HasExited) { throw 'Closing the main window terminated the original process' }
         Write-Output "Cycle ${attempt}: original window hidden; launching second process."

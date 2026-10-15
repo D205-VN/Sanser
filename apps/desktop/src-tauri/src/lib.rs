@@ -49,6 +49,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(debug_assertions)]
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                eprintln!("Sanser lifecycle: close event label={}", window.label());
+            }
             if cfg!(target_os = "windows")
                 && window.label() == "main"
                 && let tauri::WindowEvent::CloseRequested { api, .. } = event
