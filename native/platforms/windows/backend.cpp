@@ -217,7 +217,7 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     return 0;
   }
   if(message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN || message==WM_LBUTTONUP || message==WM_RBUTTONDOWN || message==WM_RBUTTONUP || message==WM_MBUTTONDOWN || message==WM_MBUTTONUP || message==WM_MOUSEWHEEL) {
-    if(message==WM_LBUTTONDOWN && state->released) { state->released=false; SetFocus(window); SetWindowTextW(window,L"Sanser · Remote desktop · Ctrl+Alt+Escape releases input"); }
+    if(message==WM_LBUTTONDOWN && state->released) { SetFocus(window); state->released=false; SetWindowTextW(window,L"Sanser · Remote desktop · Ctrl+Alt+Escape releases input"); }
     if(state->released) return 0;
     POINT point{static_cast<short>(LOWORD(l)),static_cast<short>(HIWORD(l))}; if(message==WM_MOUSEWHEEL) ScreenToClient(window,&point);
     const auto& r=state->video; if(r.right<=r.left || r.bottom<=r.top) return 0;
@@ -237,12 +237,22 @@ void testWindowsInput() {
   HWND window=CreateWindowW(klass.lpszClassName,L"Input test",WS_OVERLAPPEDWINDOW,0,0,640,480,nullptr,nullptr,klass.hInstance,&state);
   require(window!=nullptr,"Create native input test window");
   struct Close { HWND window; ~Close() { if(IsWindow(window)) DestroyWindow(window); } } close{window};
-  state.video={0,0,640,480}; state.released=true;
+  // A real click is permitted only after a picture exists. Focus changes may
+  // synchronously paint the window; a waiting/empty picture clears video bounds.
+  state.image=std::make_shared<const Image>(Image{Bytes(64*48*4,127),64,48});
+  state.video={0,0,640,480}; state.released=true; events.clear();
   SendMessageW(window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(100,50));
   SendMessageW(window,WM_LBUTTONUP,0,MAKELPARAM(100,50));
-  require(!state.released && events.size()==2 && events[0].kind==Input::Button && events[0].down && !events[1].down,"Resume click must forward both down and up");
+  std::vector<Input> clicks;
+  for(const auto& event:events) if(event.kind==Input::Button) clicks.push_back(event);
+  if(state.released || clicks.size()!=2) {
+    std::cerr<<"Resume input released="<<state.released<<" events="<<events.size()<<" clickEvents="<<clicks.size()<<" video="<<state.video.right<<'x'<<state.video.bottom<<'\n';
+    for(const auto& event:events) std::cerr<<"Input kind="<<static_cast<int>(event.kind)<<" down="<<event.down<<'\n';
+  }
+  require(!state.released && clicks.size()==2 && clicks[0].down && !clicks[1].down,"Resume click must forward both down and up");
+  events.clear();
   SendMessageW(window,WM_KEYDOWN,'A',0); SendMessageW(window,WM_KEYUP,'A',0);
-  require(events.size()==4 && events[2].kind==Input::Key && events[2].code==4 && events[2].down && !events[3].down,"Windows virtual-key fallback did not forward ordinary typing");
+  require(events.size()==2 && events[0].kind==Input::Key && events[0].code==4 && events[0].down && !events[1].down,"Windows virtual-key fallback did not forward ordinary typing");
   require(windowsHid(VK_RETURN,(0x1cLL<<16)|(1LL<<24))==88,"Keypad Enter lost its extended scan code");
   SendMessageW(window,WM_KILLFOCUS,0,0);
   require(state.released && events.back().kind==Input::Reset,"Focus loss did not release remote keys/buttons");
