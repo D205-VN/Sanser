@@ -471,8 +471,8 @@ fn validate_common(request: &LaunchEngineRequest) -> Result<(), DesktopError> {
     }
     if !(640..=7680).contains(&request.width)
         || !(360..=4320).contains(&request.height)
-        || request.width % 2 != 0
-        || request.height % 2 != 0
+        || !request.width.is_multiple_of(2)
+        || !request.height.is_multiple_of(2)
     {
         return Err(DesktopError::InvalidRequest(
             "resolution is outside supported even dimensions".into(),

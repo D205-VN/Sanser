@@ -27,14 +27,14 @@ pub fn configure_background_timers(config: &mut tauri::Config) {
     }
 }
 
-fn show_main(app: &AppHandle) {
+pub(crate) fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let result = window
             .show()
             .and_then(|()| window.unminimize())
             .and_then(|()| window.set_focus());
         if let Err(error) = result {
-            eprintln!("Unable to reopen Sanser from the system tray: {error}");
+            eprintln!("Unable to restore the existing Sanser window: {error}");
         }
     }
 }

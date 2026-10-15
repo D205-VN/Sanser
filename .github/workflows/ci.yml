@@ -120,3 +120,8 @@ jobs:
       - run: npm ci
       - run: npm run desktop:stage-sidecar
       - run: cargo test --locked -p sanser-desktop --lib -- --nocapture
+      - name: Build Windows desktop lifecycle test executable
+        run: cargo build --locked -p sanser-desktop
+      - name: Restore the existing window when launched from a shortcut
+        shell: pwsh
+        run: ./scripts/test-windows-single-instance.ps1

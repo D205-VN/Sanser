@@ -290,15 +290,15 @@ pub async fn launch_engine(
         let result = app
             .state::<EngineManager>()
             .launch(&app, &request, reserved_socket);
-        if result.is_err() && request.relay {
-            if let Some(id) = request
+        if result.is_err()
+            && request.relay
+            && let Some(id) = request
                 .session_id
                 .as_deref()
                 .and_then(|id| uuid::Uuid::parse_str(id).ok())
-            {
-                app.state::<crate::relay::RelayManager>()
-                    .stop_peer(request.kind, id);
-            }
+        {
+            app.state::<crate::relay::RelayManager>()
+                .stop_peer(request.kind, id);
         }
         result
     })

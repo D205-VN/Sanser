@@ -15,6 +15,7 @@
 #include "broadcast.h"
 #include "engine.h"
 #include "keyboard.h"
+#include "window_presenter.h"
 #include "desktop_duplication.h"
 #include "mf_video_packet_encoder.h"
 #include <algorithm>
@@ -151,6 +152,7 @@ struct WindowState {
   bool viewOnly=false;
   Peer* peer=nullptr; std::mutex mutex; std::shared_ptr<const Image> image;
   bool released=false; RECT video{};
+  WindowPresenter presenter;
   // Auto-reset event coalesces decoded frames instead of queuing a UI message
   // for every frame. Painting retains a snapshot without blocking decoding.
   HANDLE frameReady=CreateEventW(nullptr,FALSE,FALSE,nullptr);
@@ -166,18 +168,20 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
   if(message==WM_ERASEBKGND) return 1;
   if(message==WM_PAINT) {
-    PAINTSTRUCT paint{}; HDC dc=BeginPaint(window,&paint); RECT area{}; GetClientRect(window,&area); FillRect(dc,&area,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    PAINTSTRUCT paint{}; HDC dc=BeginPaint(window,&paint); RECT area{}; GetClientRect(window,&area);
     std::shared_ptr<const Image> snapshot;
     { std::lock_guard lock(state->mutex); snapshot=state->image; }
-    if(snapshot && !snapshot->pixels.empty()) {
-      const auto& image=*snapshot;
-      const auto scale=std::min(static_cast<double>(area.right)/image.width,static_cast<double>(area.bottom)/image.height);
-      const auto width=static_cast<LONG>(image.width*scale),height=static_cast<LONG>(image.height*scale); const auto x=(area.right-width)/2,y=(area.bottom-height)/2;
-      state->video={x,y,x+width,y+height}; BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth=static_cast<LONG>(image.width); info.bmiHeader.biHeight=-static_cast<LONG>(image.height); info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; info.bmiHeader.biCompression=BI_RGB;
-      SetStretchBltMode(dc,COLORONCOLOR); StretchDIBits(dc,x,y,width,height,0,0,image.width,image.height,image.pixels.data(),&info,DIB_RGB_COLORS,SRCCOPY);
-    } else { SetTextColor(dc,RGB(210,220,230)); SetBkMode(dc,TRANSPARENT); DrawTextW(dc,L"Waiting for the remote desktop…",-1,&area,DT_CENTER|DT_VCENTER|DT_SINGLELINE); }
+    const auto* pixels=snapshot && !snapshot->pixels.empty() ? snapshot->pixels.data() : nullptr;
+    if(!state->presenter.paint(dc,area.right,area.bottom,pixels,snapshot ? snapshot->width : 0,snapshot ? snapshot->height : 0,state->video))
+      std::cerr<<"Unable to paint the remote desktop frame"<<std::endl;
     EndPaint(window,&paint); return 0;
   }
+  // Windows runs its own modal loop while a window is dragged or resized.
+  // Its loop cannot wait on frameReady, so keep repainting the latest frame
+  // with a short-lived timer until normal event processing resumes.
+  if(message==WM_ENTERSIZEMOVE) { SetTimer(window,1,16,nullptr); return 0; }
+  if(message==WM_EXITSIZEMOVE) { KillTimer(window,1); InvalidateRect(window,nullptr,FALSE); return 0; }
+  if(message==WM_TIMER && w==1) { if(WaitForSingleObject(state->frameReady,0)==WAIT_OBJECT_0) InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_SIZE) { InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_KILLFOCUS) { state->peer->input(Input{}); state->released=true; return 0; }
   if(message==WM_KEYDOWN || message==WM_SYSKEYDOWN || message==WM_KEYUP || message==WM_SYSKEYUP) {

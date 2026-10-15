@@ -23,7 +23,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(target_os = "windows") {
         tray::configure_background_timers(context.config_mut());
     }
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Register before every other plugin and before setup creates the tray or
+    // webview. A desktop shortcut restores the existing background process.
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        tray::show_main(app);
+    }));
+    builder
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineManager::default())

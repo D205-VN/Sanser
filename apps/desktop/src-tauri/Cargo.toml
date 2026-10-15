@@ -1,10 +1,10 @@
 [package]
 name = "sanser-desktop"
-version = "2.2.2"
+version = "2.2.3"
 description = "Sanser low-latency remote desktop shell"
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+rust-version = "1.90"
 
 [lib]
 name = "sanser_desktop_lib"
@@ -26,7 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 socket2.workspace = true
-tauri = { version = "2.8.5", features = ["tray-icon"] }
+tauri = { version = "2.12.4", features = ["tray-icon"] }
 tauri-plugin-process = "2.2.0"
 tauri-plugin-updater = "2.2.0"
 thiserror.workspace = true
@@ -37,6 +37,9 @@ tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 sanser-p2p = { path = "../../../crates/sanser-p2p" }
 sanser-network = { path = "../../../crates/sanser-network" }
+
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-single-instance = "=2.5.4"
 
 [lints]
 workspace = true

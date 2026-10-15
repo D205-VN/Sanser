@@ -187,9 +187,8 @@ pub(super) async fn run(
                     let Ok(packet) = transport.auth.encode(Kind::Data, &encrypted) else { return Some("UDP relay sequence exhausted".into()); };
                     // Never wait behind a video write. Native ACK/NACK and rate
                     // feedback recover packet loss, including local congestion.
-                    if let Err(error) = transport.socket.try_send(&packet) {
-                        if error.kind() != std::io::ErrorKind::WouldBlock { return Some("UDP relay send failed".into()); }
-                    }
+                    if let Err(error) = transport.socket.try_send(&packet)
+                        && error.kind() != std::io::ErrorKind::WouldBlock { return Some("UDP relay send failed".into()); }
                 }
                 received = transport.socket.recv(&mut incoming) => {
                     let Ok(n) = received else { return Some("UDP relay receive failed".into()); };
@@ -197,10 +196,9 @@ pub(super) async fn run(
                     last_received = tokio::time::Instant::now();
                     if kind != Kind::Forward { continue; }
                     let Ok(plaintext) = cipher.decrypt(payload) else { continue; };
-                    if let Err(error) = local.try_send_to(&plaintext, engine) {
-                        if error.kind() != std::io::ErrorKind::WouldBlock && !(tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error)) {
+                    if let Err(error) = local.try_send_to(&plaintext, engine)
+                        && error.kind() != std::io::ErrorKind::WouldBlock && !(tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error)) {
                             return Some("UDP relay could not reach the native engine".into());
-                        }
                     }
                 }
                 _ = heartbeat.tick() => {
