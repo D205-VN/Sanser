@@ -286,7 +286,7 @@ void testWindowsMacFixture(const char* path) {
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(width,height,[&](Nv12Image image) { conversion.submit(std::move(image)); ++decoded; changed.notify_all(); });
     decoder->decode(frame);
-  },[&] { decoder.reset(); runtime.reset(); },[&] { ++keyframes; changed.notify_all(); });
+  },[&] { decoder.reset(); runtime.reset(); },[&] { ++keyframes; changed.notify_all(); },true);
   for(unsigned i=0;i<count;++i) {
     const auto size=read(); const auto key=file.get();
     if(size==0 || size>4*1024*1024 || (key!=0 && key!=1)) throw std::runtime_error("Invalid Mac access unit");
@@ -384,7 +384,7 @@ int runWindows(bool host,int argc,char** argv) {
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(frame.width,frame.height,[&](Nv12Image image) { ++decodedFrames; conversion.submit(std::move(image)); });
     decoder->decode(frame);
-  },[&] { decoder.reset(); runtime.reset(); conversion.clear(); },[&] { peer.requestKeyframe(); });
+  },[&] { decoder.reset(); runtime.reset(); conversion.clear(); },[&] { peer.requestKeyframe(); },true);
   peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);

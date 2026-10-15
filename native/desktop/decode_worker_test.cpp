@@ -14,6 +14,22 @@ int main() {
     policy.acknowledged(std::chrono::seconds(10));
     check(policy.deadline()==std::chrono::seconds(5),"blackholed input retains a finite fail-closed deadline");
 
+    {
+      std::mutex mutex; std::condition_variable wake; bool entered=false,release=false;
+      unsigned decoded=0; std::atomic<unsigned> requests{0};
+      DecodeWorker cold([&](Frame) {
+        std::unique_lock lock(mutex);
+        if(!entered) { entered=true; wake.notify_all(); wake.wait_for(lock,std::chrono::seconds(3),[&] { return release; }); }
+        ++decoded; wake.notify_all();
+      },[] {},[&] { ++requests; },true);
+      cold.submit({{1},640,360,true});
+      { std::unique_lock lock(mutex); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return entered; }),"cold decoder did not enter initialization"); }
+      for(unsigned i=0;i<20;++i) cold.submit({{2},640,360,false});
+      check(cold.dropped()==0 && requests==0,"cold startup discarded the only IDR/reference chain");
+      { std::unique_lock lock(mutex); release=true; wake.notify_all(); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return decoded==21; }),"cold decoder did not catch up its bounded reference chain"); }
+      cold.stop();
+    }
+
     std::mutex mutex; std::condition_variable wake;
     bool entered=false,release=false;
     std::vector<std::uint8_t> decoded;
