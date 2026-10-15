@@ -1,4 +1,4 @@
-add_library(sanser-native-macos STATIC backend.mm metal_presenter.mm capture_startup.mm audio_capture.mm)
+add_library(sanser-native-macos STATIC backend.mm metal_presenter.mm capture_startup.mm audio_capture.mm input_injector.mm)
 add_library(sanser-desktop-native ALIAS sanser-native-macos)
 target_link_libraries(sanser-native-macos PUBLIC sanser-desktop-transport)
 set_target_properties(sanser-native-macos PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)

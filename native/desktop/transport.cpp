@@ -8,6 +8,7 @@
 #include <string_view>
 #include <random>
 #include <cstdio>
+#include <iostream>
 #ifdef _WIN32
 #define NOMINMAX
 #include <winsock2.h>
@@ -387,6 +388,8 @@ void Peer::serviceVideoRepairs() {
 
 void Peer::input(const Input& input) {
   if (!ready_ || !options_.input || options_.host) return;
+  if(input.kind==Input::Key) ++queuedKeys_;
+  if(input.kind==Input::Button) ++queuedButtons_;
   const bool reliable=input.kind!=Input::Move;
   transmit(reliable ? snv2::PacketType::Keyboard : snv2::PacketType::MouseMove,encodeInput(input),reliable ? 2 : 0,0,reliable ? snv2::kFlagAcknowledgementRequired : 0,reliable);
 }
@@ -507,7 +510,11 @@ void Peer::process(const Bytes& bytes) {
     if(h.streamId==2) {
       if(h.sequence>deliveredInput_+64) { running_=false; return; }
       receivedInputs_.emplace(h.sequence,*event);
-      while(receivedInputs_.contains(deliveredInput_+1)) { const auto next=receivedInputs_.at(++deliveredInput_); if(onInput) onInput(next); receivedInputs_.erase(deliveredInput_); }
+      while(receivedInputs_.contains(deliveredInput_+1)) {
+        const auto next=receivedInputs_.at(++deliveredInput_);
+        if(onInput) { onInput(next); if(next.kind==Input::Key) ++deliveredKeys_; if(next.kind==Input::Button) ++deliveredButtons_; }
+        receivedInputs_.erase(deliveredInput_);
+      }
       acknowledgeInput();
     } else if(event->kind==Input::Move && h.sequence>lastMouse_) {
       lastMouse_=h.sequence;
@@ -567,10 +574,22 @@ void Peer::sendLoop() {
 }
 void Peer::loop() {
   auto lastHello=Clock::time_point{};
+  auto lastInputLog=Clock::now(); std::uint64_t lastInputCount=0;
   auto lastFeedback=Clock::now();
   try {
     while(running_ && !stopRequested) {
       const auto now=Clock::now();
+      if(std::getenv("SANSER_TELEMETRY") && now-lastInputLog>=std::chrono::seconds(1)) {
+        const auto queuedKeys=queuedKeys_.load(),queuedButtons=queuedButtons_.load();
+        const auto total=queuedKeys+queuedButtons+deliveredKeys_+deliveredButtons_;
+        if(total!=lastInputCount) {
+          std::cout<<"SNV2_INPUT_HEALTH role="<<(options_.host ? "host" : "client")
+            <<" queuedKeys="<<queuedKeys<<" queuedButtons="<<queuedButtons
+            <<" deliveredKeys="<<deliveredKeys_<<" deliveredButtons="<<deliveredButtons_<<std::endl;
+          lastInputCount=total;
+        }
+        lastInputLog=now;
+      }
       if(now-lastHello>std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 500)) {
         transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'});
         // Optional authenticated capability. Old engines safely ignore it;

@@ -1,6 +1,7 @@
 // Exercise the production jitter/decode recovery code with a deterministic clock.
 #define SANSER_LATENCY_TEST 1
 #include "src/main.mm"
+namespace sanser::desktop { void testMacRemoteView(); }
 
 namespace {
 struct NativeInputPolicyTest {
@@ -23,6 +24,7 @@ SnvPacket testPacket(std::uint64_t sequence, bool keyframe = false) {
 int main() {
   @autoreleasepool {
     try {
+      sanser::desktop::testMacRemoteView();
       // Exercise the actual asynchronous UDP sender, demux timestamps and reply
       // parser. A timing receipt must not replace the original pong's T5/T6.
       {

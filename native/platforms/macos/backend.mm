@@ -8,6 +8,7 @@
 #include "engine.h"
 #include "capture_startup.h"
 #include "audio_capture.h"
+#include "input_injector.h"
 #import "metal_presenter.h"
 #include "keyboard.h"
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <memory>
 #include <set>
 #include <random>
+#include <fstream>
 
 using namespace sanser::desktop;
 namespace {
@@ -125,40 +127,7 @@ private:
   static void output(void* context,void*,OSStatus status,VTDecodeInfoFlags,CVImageBufferRef image,CMTime,CMTime) { if(status!=noErr || !image) return; auto& self=*static_cast<Decoder*>(context); std::lock_guard lock(self.mutex_); if(self.latest_) CVPixelBufferRelease(self.latest_); self.latest_=CVPixelBufferRetain(image); if(!self.reported_) { self.reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; } }
   Bytes sps_,pps_; VTDecompressionSessionRef session_=nullptr; CMVideoFormatDescriptionRef format_=nullptr; CVPixelBufferRef latest_=nullptr; std::mutex mutex_; bool reported_=false;
 };
-class Injector {
-public:
-  explicit Injector(CGDirectDisplayID display) : bounds_(CGDisplayBounds(display)) {}
-  ~Injector() { reset(); }
-  void apply(const Input& input) {
-    if(input.kind==Input::Reset) { reset(); return; }
-    const CGPoint point=CGPointMake(bounds_.origin.x+input.x/65535.0*bounds_.size.width,bounds_.origin.y+input.y/65535.0*bounds_.size.height);
-    CGEventRef event=nullptr;
-    if(input.kind==Input::Key) {
-      const auto key=macKey(input.code); if(key<0) return;
-      if(input.down) pressed_.insert(input.code); else pressed_.erase(input.code);
-      event=CGEventCreateKeyboardEvent(nullptr,static_cast<CGKeyCode>(key),input.down);
-      CGEventFlags flags=0;
-      if(pressed_.contains(224)||pressed_.contains(228)) flags|=kCGEventFlagMaskControl;
-      if(pressed_.contains(225)||pressed_.contains(229)) flags|=kCGEventFlagMaskShift;
-      if(pressed_.contains(226)||pressed_.contains(230)) flags|=kCGEventFlagMaskAlternate;
-      if(pressed_.contains(227)||pressed_.contains(231)) flags|=kCGEventFlagMaskCommand;
-      if(event) CGEventSetFlags(event,flags);
-    } else if(input.kind==Input::Scroll) event=CGEventCreateScrollWheelEvent(nullptr,kCGScrollEventUnitLine,1,static_cast<int>(input.delta));
-    else {
-      CGEventType type=kCGEventMouseMoved; CGMouseButton button=kCGMouseButtonLeft;
-      if(input.kind==Input::Button) { button=static_cast<CGMouseButton>(input.code); if(input.down) buttons_.insert(input.code); else buttons_.erase(input.code); type=input.code==0 ? (input.down?kCGEventLeftMouseDown:kCGEventLeftMouseUp) : input.code==1 ? (input.down?kCGEventRightMouseDown:kCGEventRightMouseUp) : (input.down?kCGEventOtherMouseDown:kCGEventOtherMouseUp); }
-      else if(!buttons_.empty()) { button=static_cast<CGMouseButton>(*buttons_.begin()); type=button==kCGMouseButtonLeft?kCGEventLeftMouseDragged:button==kCGMouseButtonRight?kCGEventRightMouseDragged:kCGEventOtherMouseDragged; }
-      lastPoint_=point; event=CGEventCreateMouseEvent(nullptr,type,point,button);
-    }
-    if(event) { CGEventPost(kCGHIDEventTap,event); CFRelease(event); }
-  }
-private:
-  void reset() {
-    for(auto code:pressed_) { const auto key=macKey(code); if(key>=0) { auto event=CGEventCreateKeyboardEvent(nullptr,static_cast<CGKeyCode>(key),false); if(event) { CGEventPost(kCGHIDEventTap,event); CFRelease(event); } } } pressed_.clear();
-    for(auto button:buttons_) { auto event=CGEventCreateMouseEvent(nullptr,button==0?kCGEventLeftMouseUp:button==1?kCGEventRightMouseUp:kCGEventOtherMouseUp,lastPoint_,static_cast<CGMouseButton>(button)); if(event) { CGEventPost(kCGHIDEventTap,event); CFRelease(event); } } buttons_.clear();
-  }
-  CGRect bounds_; CGPoint lastPoint_{}; std::set<std::uint16_t> pressed_,buttons_;
-};
+
 }
 
 API_AVAILABLE(macos(12.3))
@@ -187,12 +156,12 @@ API_AVAILABLE(macos(12.3))
 - (void)stopSharing:(id)sender { (void)sender; if(self.output) self.output->stop(); }
 @end
 
-@interface SanserRemoteView : SanserMetalView
+@interface SanserSnv2RemoteView : SanserSnv2MetalView
 @property(nonatomic,assign) Peer* peer;
 @property(nonatomic,assign) BOOL released;
 - (void)pointer:(NSEvent*)event kind:(Input::Kind)kind down:(BOOL)down;
 @end
-@implementation SanserRemoteView
+@implementation SanserSnv2RemoteView
 - (BOOL)acceptsFirstResponder { return YES; }
 - (void)pointer:(NSEvent*)event kind:(Input::Kind)kind down:(BOOL)down {
   if(!self.peer || self.released || self.imageSize.width<=0 || self.imageSize.height<=0) return;
@@ -205,7 +174,7 @@ API_AVAILABLE(macos(12.3))
 - (void)mouseMoved:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
 - (void)mouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
 - (void)rightMouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
-- (void)mouseDown:(NSEvent*)event { if(self.released) { self.released=NO; self.window.title=@"Sanser · Remote desktop · Control+Option+Escape releases input"; return; } [self pointer:event kind:Input::Button down:YES]; }
+- (void)mouseDown:(NSEvent*)event { if(self.released) { self.released=NO; self.window.title=@"Sanser · Remote desktop · Control+Option+Escape releases input"; } [self.window makeFirstResponder:self]; [self pointer:event kind:Input::Button down:YES]; }
 - (void)mouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
 - (void)rightMouseDown:(NSEvent*)event { [self pointer:event kind:Input::Button down:YES]; }
 - (void)rightMouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
@@ -257,6 +226,48 @@ struct SharingNotice {
   void pump() { if(!panel) return; NSEvent* event; while((event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:YES])) [NSApp sendEvent:event]; }
 };
 #ifdef SANSER_CODEC_TEST
+void writeMacInteropFixture(const char* path) {
+  @autoreleasepool {
+    Options options; options.width=1846; options.height=1200; options.bitrate=6000000;
+    std::mutex mutex; std::vector<Frame> frames;
+    {
+      Encoder encoder(options,[] { return true; },[&](Frame frame) { std::lock_guard lock(mutex); frames.push_back(std::move(frame)); });
+      for(unsigned index=0;index<45;++index) {
+        CVPixelBufferRef pixels=nullptr;
+        NSDictionary* attributes=@{(__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey:@{}};
+        requireStatus(CVPixelBufferCreate(nullptr,options.width,options.height,kCVPixelFormatType_32BGRA,(__bridge CFDictionaryRef)attributes,&pixels),"Create interop frame");
+        CVPixelBufferLockBaseAddress(pixels,0);
+        auto* data=static_cast<std::uint8_t*>(CVPixelBufferGetBaseAddress(pixels)); const auto stride=CVPixelBufferGetBytesPerRow(pixels);
+        for(unsigned y=0;y<options.height;++y) for(unsigned x=0;x<options.width;++x) {
+          auto* color=data+y*stride+x*4; color[0]=index>=30 ? 210 : 20;
+          color[1]=index>=15 && index<30 ? 210 : 20; color[2]=index<15 ? 210 : 20; color[3]=255;
+        }
+        CVPixelBufferUnlockBaseAddress(pixels,0);
+        encoder.encode(pixels,CMTimeMake(index+1,60)); CVPixelBufferRelease(pixels);
+      }
+    } // Flush all VideoToolbox callbacks before writing the synthetic fixture.
+    if(frames.size()!=45 || !frames.front().keyframe) throw std::runtime_error("Incomplete Mac interop fixture");
+    std::ofstream file(path,std::ios::binary);
+    const auto put=[&](std::uint32_t value) { for(int i=3;i>=0;--i) file.put(static_cast<char>(value>>(i*8))); };
+    file.write("SVC1",4); put(options.width); put(options.height); put(static_cast<std::uint32_t>(frames.size()));
+    for(const auto& frame:frames) { put(static_cast<std::uint32_t>(frame.data.size())); file.put(frame.keyframe ? 1 : 0); file.write(reinterpret_cast<const char*>(frame.data.data()),static_cast<std::streamsize>(frame.data.size())); }
+    if(!file) throw std::runtime_error("Unable to write interop fixture");
+  }
+}
+// Link this test with the real legacy client too: standalone codec tests cannot
+// detect a presenter class symbol resolved to the legacy implementation.
+void testMacRemoteView() {
+  @autoreleasepool {
+    [NSApplication sharedApplication];
+    SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:NSMakeRect(0,0,320,200)];
+    if(![view respondsToSelector:@selector(presentPixels:)] || ![view respondsToSelector:@selector(imageSize)])
+      throw std::runtime_error("SNV2 presenter resolved to a legacy class without presentPixels:/imageSize");
+    CVPixelBufferRef pixels=nullptr;
+    requireStatus(CVPixelBufferCreate(nullptr,64,32,kCVPixelFormatType_32BGRA,nullptr,&pixels),"Create presenter regression frame");
+    [view presentPixels:pixels]; CVPixelBufferRelease(pixels);
+    if(view.imageSize.width!=64 || view.imageSize.height!=32) throw std::runtime_error("SNV2 view did not retain the decoded frame");
+  }
+}
 // Exercises the actual VideoToolbox encoder/decoder without capturing a screen
 // or injecting OS input. Used only by the native test executable.
 void testMacVideoCodec() {
@@ -390,12 +401,12 @@ int runMac(bool host,int argc,char** argv) {
         };
         awaitCaptureOperation([readContent](CaptureCompletion complete) { readContent(complete); },"Read available screens");
         if(!content || content.displays.count==0) throw std::runtime_error("No display is available for capture");
-        if(options.input && !AXIsProcessTrusted()) { NSDictionary* request=@{(__bridge NSString*)kAXTrustedCheckOptionPrompt:@YES}; AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)request); throw std::runtime_error("On the host Mac, allow Accessibility for Sanser, then quit and reopen Sanser before reconnecting; or turn remote input off"); }
+        if(options.input && (!AXIsProcessTrusted() || !CGPreflightPostEventAccess())) { NSDictionary* request=@{(__bridge NSString*)kAXTrustedCheckOptionPrompt:@YES}; AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)request); throw std::runtime_error("On the host Mac, allow Accessibility for Sanser, then quit and reopen Sanser before reconnecting; or turn remote input off"); }
         SCDisplay* display=content.displays.firstObject; for(SCDisplay* candidate in content.displays) if(candidate.displayID==CGMainDisplayID()) display=candidate;
         const double scale=std::min(static_cast<double>(options.width)/display.width,static_cast<double>(options.height)/display.height);
         options.width=std::max(64U,static_cast<std::uint32_t>(display.width*scale)&~1U);
         options.height=std::max(64U,static_cast<std::uint32_t>(display.height*scale)&~1U);
-        HostOutput peer(options); Encoder encoder(options,peer); Injector injector(display.displayID);
+        HostOutput peer(options); Encoder encoder(options,peer); MacInputInjector injector(CGDisplayBounds(display.displayID));
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
         peer.onInput=[&](Input event) { injector.apply(event); };
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
@@ -440,7 +451,7 @@ int runMac(bool host,int argc,char** argv) {
     peer.onFrame=[&](Frame frame) { try { decoder.decode(frame); decodeFailures=0; } catch(const std::exception& error) { decodeError=error.what(); ++decodeFailures; peer.requestKeyframe(); } };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Control+Option+Escape releases input" : @"Sanser · View only";
-    SanserRemoteView* view=[[SanserRemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+    SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
     if (options.ultraLowLatency) { ((CAMetalLayer*)view.layer).displaySyncEnabled=NO; }
     window.contentView=view; window.acceptsMouseMovedEvents=YES; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];
     Peer* peerPointer=&peer;

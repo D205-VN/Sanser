@@ -26,7 +26,7 @@ void renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> tex
 }
 }
 
-@implementation SanserMetalView {
+@implementation SanserSnv2MetalView {
   id<MTLCommandQueue> _commands;
   CIContext* _context;
   CVPixelBufferRef _pixels;
@@ -83,12 +83,12 @@ void renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> tex
   renderFrame(_context,pixels,drawable.texture,command,_colorSpace);
   _pendingRedraw=NO;
   dispatch_semaphore_t slots=_inFlight;
-  __weak SanserMetalView* weakSelf=self;
+  __weak SanserSnv2MetalView* weakSelf=self;
   [command addCompletedHandler:^(id<MTLCommandBuffer>) {
     if(pixels) CVPixelBufferRelease(pixels);
     dispatch_semaphore_signal(slots);
     dispatch_async(dispatch_get_main_queue(), ^{
-      SanserMetalView* view=weakSelf;
+      SanserSnv2MetalView* view=weakSelf;
       if(view && view->_pendingRedraw && view.window.visible) [view setNeedsDisplay:YES];
     });
   }];

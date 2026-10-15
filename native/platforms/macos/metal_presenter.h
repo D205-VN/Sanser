@@ -4,7 +4,8 @@
 
 // Native, on-demand presentation. Retains the newest frame and limits GPU work
 // to one submission; neither the WebView nor NSImage participates in video.
-@interface SanserMetalView : MTKView <MTKViewDelegate>
+// Keep the SNV2 prefix: the linked legacy client owns SanserMetalView.
+@interface SanserSnv2MetalView : MTKView <MTKViewDelegate>
 @property(nonatomic,readonly) NSSize imageSize;
 - (void)presentPixels:(CVPixelBufferRef)pixels;
 @end

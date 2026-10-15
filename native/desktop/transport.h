@@ -132,6 +132,8 @@ private:
   TxScheduler tx_;
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
   std::atomic<bool> peerAudio_{false};
+  std::atomic<std::uint64_t> queuedKeys_{0},queuedButtons_{0};
+  std::uint64_t deliveredKeys_=0,deliveredButtons_=0;
   std::uint64_t lastAudio_=0;
   std::atomic<bool> videoPaused_{false};
   mutable std::mutex feedbackMutex_;
