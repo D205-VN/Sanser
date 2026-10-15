@@ -1,5 +1,6 @@
 #include "broadcast.h"
 #include "broadcast_recovery.h"
+#include "broadcast_policy.h"
 #include <algorithm>
 #include <cctype>
 #include <iostream>
@@ -27,9 +28,14 @@ struct Broadcaster::Delivery {
   bool awaitingKeyframe=true;
   std::atomic<std::uint64_t> submitted{0}, dispatched{0}, replaced{0}, referenceDrops{0};
   SharingKeyframeRecovery recovery;
+  SharingDeliveryPolicy policy;
   Delivery(ViewerSpec viewer,Options options)
       :spec(std::move(viewer)),peer(options) {
-    const auto request=[this] { std::lock_guard lock(mutex); awaitingKeyframe=true; recovery.request(Clock::now()); };
+    const auto request=[this] {
+      std::lock_guard lock(mutex);
+      if(!policy.sendsVideo()) return;
+      awaitingKeyframe=true; recovery.request(Clock::now());
+    };
     peer.onKeyframe=request;
     peer.onReady=request;
     // No input injector callback is installed. Peer also enforces input=false.
@@ -49,6 +55,7 @@ struct Broadcaster::Delivery {
   void submit(const std::shared_ptr<const PreparedFrame>& frame) {
     if(!running || !peer.running() || !peer.ready()) return;
     std::lock_guard lock(mutex);
+    if(!policy.sendsVideo()) return;
     ++submitted;
     if(pending) {
       ++replaced;
@@ -81,14 +88,42 @@ struct Broadcaster::Delivery {
   }
   bool takeKeyframeRequest(Clock::time_point now) {
     std::lock_guard lock(mutex);
-    return running && peer.running() && peer.ready() && recovery.take(now);
+    return policy.sendsVideo() && running && peer.running() && peer.ready() && recovery.take(now);
+  }
+  void updateHealth(Clock::time_point now) {
+    std::lock_guard lock(mutex);
+    if(!running || !peer.running() || !peer.ready()) return;
+    const auto feedback=peer.videoFeedback();
+    const auto previous=policy.state();
+    policy.observe(now,{submitted.load(),replaced.load(),referenceDrops.load(),peer.videoQueueDrops(),
+      recovery.backoffMs(now),feedback.serial,feedback.deliveredBytes,
+      feedback.completedFrame,feedback.sentFrame,
+      feedback.serial>0 && now-feedback.received<std::chrono::seconds(2),feedback.congested});
+    if(previous==policy.state()) return;
+    recovery.restart();
+    if(policy.state()==SharingDeliveryPolicy::Active) return;
+    pending.reset(); awaitingKeyframe=true;
+    peer.pauseVideo(policy.state()==SharingDeliveryPolicy::Paused);
+    if(policy.state()==SharingDeliveryPolicy::Probing) recovery.request(now);
+  }
+  bool affectsBitrate() {
+    std::lock_guard lock(mutex);
+    return policy.affectsBitrate() && running && peer.running() && peer.ready();
+  }
+  bool probing() {
+    std::lock_guard lock(mutex);
+    return policy.state()==SharingDeliveryPolicy::Probing && running && peer.running() && peer.ready();
+  }
+  bool videoReady() {
+    std::lock_guard lock(mutex);
+    return policy.sendsVideo() && running && peer.running() && peer.ready();
   }
   ViewerStats stats() {
     std::lock_guard lock(mutex);
     return {spec.id,peer.ready(),peer.running() && running,
       submitted.load(),dispatched.load(),replaced.load(),referenceDrops.load(),
       peer.videoQueueDrops(),peer.repairedDatagrams(),peer.repairCacheMisses(),
-      recovery.signals(),recovery.requests(),peer.recommendedBitrate()};
+      recovery.signals(),recovery.requests(),peer.recommendedBitrate(),policy.label(),policy.pauses(),recovery.backoffMs(Clock::now())};
   }
 };
 
@@ -135,9 +170,13 @@ void Broadcaster::publish(Frame frame) {
   ++published_;
   for(const auto& [id,peer]:peers_) { (void)id; peer->submit(prepared); }
 }
+void Broadcaster::updateHealth(Clock::time_point now) {
+  std::lock_guard lock(peersMutex_);
+  for(const auto& [id,peer]:peers_) { (void)id; peer->updateHealth(now); }
+}
 bool Broadcaster::ready() const {
   std::lock_guard lock(peersMutex_);
-  return std::any_of(peers_.begin(),peers_.end(),[](const auto& entry) { return entry.second->running && entry.second->peer.running() && entry.second->peer.ready(); });
+  return std::any_of(peers_.begin(),peers_.end(),[](const auto& entry) { return entry.second->videoReady(); });
 }
 bool Broadcaster::takeKeyframeRequest() {
   std::lock_guard keyframeLock(keyframeMutex_);
@@ -156,10 +195,16 @@ std::vector<ViewerStats> Broadcaster::stats() const {
   return result;
 }
 std::uint32_t Broadcaster::bitrate() const {
-  std::lock_guard lock(peersMutex_); auto budget=source_.bitrate;
+  std::lock_guard lock(peersMutex_); auto budget=source_.bitrate; bool active=false;
   for(const auto& [id,peer]:peers_) {
     (void)id;
-    if(peer->running && peer->peer.running() && peer->peer.ready()) budget=std::min(budget,peer->peer.recommendedBitrate());
+    if(peer->affectsBitrate()) { active=true; budget=std::min(budget,peer->peer.recommendedBitrate()); }
+  }
+  // With no healthy viewers to protect, probe at the last known usable budget
+  // rather than repeatedly saturating every weak link with the source target.
+  if(!active) for(const auto& [id,peer]:peers_) {
+    (void)id;
+    if(peer->probing()) budget=std::min(budget,peer->peer.recommendedBitrate());
   }
   return budget;
 }
@@ -201,6 +246,7 @@ void HostOutput::video(Frame frame) { if(broadcast_) broadcast_->publish(std::mo
 std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : options_.bitrate; }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }
 void HostOutput::pumpControl() {
+  if(broadcast_) broadcast_->updateHealth();
   for(const auto& line:takeNativeCommands()) {
     const auto command=parseSharingCommand(line,options_.bitrate);
     try {
@@ -224,7 +270,8 @@ void HostOutput::pumpControl() {
         <<" referenceDrops="<<peer.referenceDrops<<" sendQueueDrops="<<peer.sendQueueDrops
         <<" keyframeSignals="<<peer.keyframeSignals<<" keyframeRequests="<<peer.keyframeRequests
         <<" repaired="<<peer.repaired<<" repairCacheMisses="<<peer.repairCacheMisses
-        <<" bitrate="<<peer.recommendedBitrate<<'\n';
+        <<" bitrate="<<peer.recommendedBitrate<<" videoState="<<peer.videoState
+        <<" pauses="<<peer.pauses<<" backoffMs="<<peer.backoffMs<<'\n';
     }
     std::cout.flush();
   }

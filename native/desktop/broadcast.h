@@ -17,6 +17,9 @@ struct ViewerStats {
   std::uint64_t submitted=0, dispatched=0, replaced=0, referenceDrops=0, sendQueueDrops=0, repaired=0, repairCacheMisses=0;
   std::uint64_t keyframeSignals=0, keyframeRequests=0;
   std::uint32_t recommendedBitrate=0;
+  std::string videoState="active";
+  std::uint64_t pauses=0;
+  unsigned backoffMs=0;
 };
 
 // One prepared encoded payload, independent crypto/queues/workers per viewer.
@@ -31,6 +34,7 @@ public:
   void remove(const std::string& id);
   void stop();
   void publish(Frame frame);
+  void updateHealth(Clock::time_point now=Clock::now());
   bool ready() const;
   bool running() const { return running_.load(); }
   bool takeKeyframeRequest();

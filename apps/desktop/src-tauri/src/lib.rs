@@ -77,6 +77,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .invoke_handler(tauri::generate_handler![
             commands::get_runtime_status,
             device_identity::get_device_identity,
+            device_identity::get_login_device,
             commands::load_preferences,
             commands::save_preferences,
             commands::secure_get,
@@ -87,6 +88,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::stop_engine,
             commands::sharing_engine_add_peer,
             commands::sharing_engine_remove_peer,
+            commands::sharing_engine_peer_status,
             commands::get_engine_status,
             commands::export_diagnostics,
             commands::p2p_stop,

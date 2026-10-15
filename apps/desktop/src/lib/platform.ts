@@ -1,9 +1,26 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { DiagnosticsExport, EngineKind, EngineStatus, LaunchEngineRequest, Preferences, RuntimeStatus } from './types';
+import type { DiagnosticsExport, EngineKind, EngineStatus, LaunchEngineRequest, Preferences, RuntimeStatus, SharingPeerVideoStatus } from './types';
 import { PROTOCOL_VERSION, SANSER_VERSION, unavailableCapability } from './types';
 
 export function isTauriRuntime(): boolean {
   return '__TAURI_INTERNALS__' in window;
+}
+
+export interface LoginDevice {
+  installationId: string;
+  deviceName: string;
+  platform: string;
+}
+
+export async function loginDevice(): Promise<LoginDevice> {
+  if (isTauriRuntime()) return invoke<LoginDevice>('get_login_device');
+  const key = 'sanser.login-installation.v1';
+  let installationId = localStorage.getItem(key);
+  if (!installationId || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(installationId)) {
+    installationId = crypto.randomUUID();
+    localStorage.setItem(key, installationId);
+  }
+  return { installationId, deviceName: 'Sanser browser', platform: 'browser-development' };
 }
 
 export async function runtimeStatus(): Promise<RuntimeStatus> {
@@ -84,6 +101,10 @@ export async function addSharingPeer(request: LaunchEngineRequest): Promise<void
 export async function removeSharingPeer(sharingId: string, viewerId: string): Promise<void> {
   if (!isTauriRuntime()) throw new Error('Native sharing requires the Sanser desktop app');
   await invoke('sharing_engine_remove_peer', { sharingId, viewerId });
+}
+
+export async function sharingPeerStatus(sharingId: string): Promise<SharingPeerVideoStatus[]> {
+  return isTauriRuntime() ? invoke<SharingPeerVideoStatus[]>('sharing_engine_peer_status', { sharingId }) : [];
 }
 
 export async function stopEngine(kind: EngineKind): Promise<void> {

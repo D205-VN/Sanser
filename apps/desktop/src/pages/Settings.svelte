@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import StatusPill from '../components/StatusPill.svelte';
+  import LoginSessions from '../components/LoginSessions.svelte';
   import Toggle from '../components/Toggle.svelte';
   import { normalizeServerUrl } from '../lib/api';
   import type { LoginSession, NetworkMode, Preferences, QualityProfile, RuntimeStatus, SettingsSection, VideoCodec } from '../lib/types';
@@ -265,7 +265,7 @@
         </article>
         {#if showDetails}<div id="connection-details"><Diagnostics {runtime} /></div>{/if}
       {:else if active === 'account'}
-        <article class="card card-body settings-card stack"><div><h2 class="card-title">Account</h2><p class="card-subtitle">{$session.account?.email}</p></div><div class="button-row"><button class="button" onclick={loadLoginSessions} disabled={accountBusy}>Refresh sessions</button><button class="button danger" onclick={onSignOut}>Sign out</button></div>{#if loginSessions.length > 0}<div class="login-session-list">{#each loginSessions as item (item.id)}<div><div><strong>{item.deviceName}</strong><span>{item.platform} · last seen {item.lastSeenAt}</span></div><StatusPill state={item.current ? 'online' : 'neutral'} label={item.current ? 'Current' : 'Active'} />{#if !item.current}<button class="button small danger" disabled={accountBusy} onclick={() => revokeLoginSession(item.id)}>Revoke</button>{/if}</div>{/each}</div>{:else}<div class="notice">No login-session list has been loaded yet. Select “Refresh sessions” to retrieve it from the server.</div>{/if}</article>
+        <article class="card card-body settings-card stack"><div><h2 class="card-title">Account</h2><p class="card-subtitle">{$session.account?.email}</p></div><div class="button-row"><button class="button" onclick={loadLoginSessions} disabled={accountBusy}>Refresh sessions</button><button class="button danger" onclick={onSignOut}>Sign out</button></div>{#if loginSessions.length > 0}<LoginSessions sessions={loginSessions} busy={accountBusy} onRevoke={revokeLoginSession} />{:else}<div class="notice">No login-session list has been loaded yet. Select “Refresh sessions” to retrieve it from the server.</div>{/if}</article>
       {/if}
     </div>
   </div>

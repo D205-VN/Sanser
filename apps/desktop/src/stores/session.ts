@@ -1,6 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { ApiClient, ApiError } from '../lib/api';
-import { secureDelete, secureGet, secureSet } from '../lib/platform';
+import { loginDevice, secureDelete, secureGet, secureSet } from '../lib/platform';
 import type { Account, AuthResult } from '../lib/types';
 import { diagnostics } from './diagnostics';
 
@@ -228,10 +228,10 @@ function createSessionStore() {
       }
     },
     login(serverUrl: string, email: string, password: string, remember = false): Promise<void> {
-      return authenticate(serverUrl, (client) => client.login(email.trim().toLowerCase(), password), 'Signed in successfully', remember);
+      return authenticate(serverUrl, async (client) => client.login(email.trim().toLowerCase(), password, await loginDevice()), 'Signed in successfully', remember);
     },
     register(serverUrl: string, email: string, password: string, displayName: string, remember = false): Promise<void> {
-      return authenticate(serverUrl, (client) => client.register(email.trim().toLowerCase(), password, displayName), 'Account created successfully', remember);
+      return authenticate(serverUrl, async (client) => client.register(email.trim().toLowerCase(), password, displayName, await loginDevice()), 'Account created successfully', remember);
     },
     async logout(): Promise<void> {
       const currentApi = api;

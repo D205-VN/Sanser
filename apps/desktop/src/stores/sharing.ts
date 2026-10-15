@@ -1,8 +1,8 @@
 import { get, writable } from 'svelte/store';
 import { coordinateP2pConnection, directCheckFailure, releaseP2pConnection } from '../lib/p2pSignaling';
-import { addSharingPeer, engineStatus, launchEngine, relayPeerFailure, removeSharingPeer, startRelay, stopEngine, stopRelay } from '../lib/platform';
+import { addSharingPeer, engineStatus, launchEngine, relayPeerFailure, removeSharingPeer, sharingPeerStatus, startRelay, stopEngine, stopRelay } from '../lib/platform';
 import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
-import type { Device, LaunchEngineRequest, RuntimeStatus, SharingGroup, SharingMember } from '../lib/types';
+import type { Device, LaunchEngineRequest, RuntimeStatus, SharingGroup, SharingMember, SharingPeerVideoStatus } from '../lib/types';
 import { connection } from './connection';
 import { diagnostics } from './diagnostics';
 import { host } from './host';
@@ -19,8 +19,9 @@ export interface SharingState {
   paused: boolean;
   error: string | null;
   peerErrors: Record<string, string>;
+  peerVideo: Record<string, SharingPeerVideoStatus>;
 }
-const initial: SharingState = { groups: [], devices: [], ownGroup: null, busy: false, supported: false, paused: false, error: null, peerErrors: {} };
+const initial: SharingState = { groups: [], devices: [], ownGroup: null, busy: false, supported: false, paused: false, error: null, peerErrors: {}, peerVideo: {} };
 const message = (error: unknown) => error instanceof Error ? error.message : 'Unable to update screen sharing';
 
 export function createSharingStore() {
@@ -57,6 +58,7 @@ export function createSharingStore() {
     await removeSharingPeer(group, member);
     if (peer.relay) await stopRelay('host', peer.sessionId);
     peers.delete(member);
+    store.update((state) => ({ ...state, peerVideo: Object.fromEntries(Object.entries(state.peerVideo).filter(([id]) => id !== member)) }));
   }
 
   async function haltNative(group?: string): Promise<void> {
@@ -69,6 +71,7 @@ export function createSharingStore() {
     if (hasNative()) { await stopEngine('host'); await stopRelay('host'); }
     nativeStarted = false;
     peers.clear(); retryAfter.clear();
+    store.update((state) => ({ ...state, peerVideo: {} }));
     host.setSharingActive(false);
     if (group) store.update((state) => ({ ...state, ownGroup: null }));
   }
@@ -167,7 +170,6 @@ export function createSharingStore() {
       }
       store.update((state) => ({ ...state, paused: false }));
       if (!get(host).online) { await api.stopSharingGroup(own.id); await haltNative(own.id); return; }
-      host.setSharingActive(true, own.members.filter((member) => member.state === 'accepted' && member.startedAt !== undefined).length);
       if (Date.now() - lastHeartbeat > 5000 && hostId) { await api.sharingHeartbeat(own.id, hostId); lastHeartbeat = Date.now(); }
       if (nativeStarted && !(await engineStatus('host')).running) {
         for (const member of own.members.filter((member) => member.state === 'accepted')) errorForPeer(member.id, 'Sharing host stopped. Stop sharing and start again.');
@@ -175,6 +177,14 @@ export function createSharingStore() {
         await haltNative(own.id);
         return;
       }
+      const nativeStatuses = nativeStarted ? await sharingPeerStatus(own.id) : [];
+      if (epoch !== generation || get(store).ownGroup?.id !== own.id || stoppedGroupId === own.id) return;
+      const peerVideo = Object.fromEntries(nativeStatuses.filter((status) =>
+        peers.has(status.viewerId) && own.members.some((member) => member.id === status.viewerId && member.state === 'accepted')
+      ).map((status) => [status.viewerId, status]));
+      store.update((state) => ({ ...state, peerVideo }));
+      host.setSharingActive(true, own.members.filter((member) => member.state === 'accepted' && member.startedAt !== undefined &&
+        (!peerVideo[member.id] || (peerVideo[member.id]?.videoState === 'active' && peerVideo[member.id]?.ready && peerVideo[member.id]?.running))).length);
       for (const [memberId, peer] of peers) {
         const member = own.members.find((item) => item.id === memberId);
         if (!member || member.state !== 'accepted') await removeNative(own.id, memberId);

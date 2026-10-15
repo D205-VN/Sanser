@@ -25,11 +25,13 @@ use crate::{
 pub struct RegisterRequest {
     email: String,
     password: String,
+    #[serde(default)]
     display_name: String,
     #[serde(default = "default_device_name")]
     device_name: String,
     #[serde(default = "default_platform")]
     platform: String,
+    installation_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +43,7 @@ pub struct LoginRequest {
     device_name: String,
     #[serde(default = "default_platform")]
     platform: String,
+    installation_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -55,7 +58,11 @@ pub async fn register(
 ) -> Result<Response, AppError> {
     let email = normalize_email(&request.email)?;
     validate_password(&request.password)?;
-    let display_name = clean_label(&request.display_name, "displayName", 80)?;
+    let display_name = if request.display_name.trim().is_empty() {
+        email.split('@').next().unwrap_or("Sanser user").to_owned()
+    } else {
+        clean_label(&request.display_name, "displayName", 80)?
+    };
     let device_name = clean_label(&request.device_name, "deviceName", 120)?;
     let platform = clean_label(&request.platform, "platform", 40)?;
 
@@ -73,6 +80,11 @@ pub async fn register(
         password_hash,
         &device_name,
         &platform,
+        request
+            .installation_id
+            .as_ref()
+            .map(Uuid::to_string)
+            .as_deref(),
     )
     .await?;
     audit(
@@ -120,7 +132,18 @@ pub async fn login(
         display_name: row.try_get("display_name").map_err(AppError::from_db)?,
         created_at: row.try_get("created_at").map_err(AppError::from_db)?,
     };
-    let tokens = create_login_session(&state, account.clone(), &device_name, &platform).await?;
+    let tokens = create_login_session(
+        &state,
+        account.clone(),
+        &device_name,
+        &platform,
+        request
+            .installation_id
+            .as_ref()
+            .map(Uuid::to_string)
+            .as_deref(),
+    )
+    .await?;
     audit(
         &state.pool,
         Some(&account.id),

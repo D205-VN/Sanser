@@ -1,12 +1,30 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { CONFIGURED_SERVER_URL, DEFAULT_PREFERENCES, preferences } from '../stores/preferences';
 const auth = vi.hoisted(() => ({ login: vi.fn(), register: vi.fn(), initialize: vi.fn(), logout: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../stores/session', async () => {
   const { writable } = await import('svelte/store');
   return { session: { ...writable({ busy: false, error: null }), ...auth } };
 });
 import Welcome from './Welcome.svelte';
+beforeEach(async () => { await preferences.save(structuredClone(DEFAULT_PREFERENCES)); });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+it('keeps the default server out of the form and allows explicitly choosing another server', async () => {
+  if (!CONFIGURED_SERVER_URL) return;
+  render(Welcome);
+  await waitFor(() => expect(screen.queryByLabelText('Sanser server URL')).not.toBeInTheDocument());
+  await fireEvent.click(screen.getByRole('button', { name: 'Use a different server' }));
+  expect(screen.getByLabelText('Sanser server URL')).toHaveValue(CONFIGURED_SERVER_URL);
+  await fireEvent.click(screen.getByRole('button', { name: 'Use default server' }));
+  expect(screen.queryByLabelText('Sanser server URL')).not.toBeInTheDocument();
+});
+
+it('keeps a previously chosen custom server visible rather than silently changing it', async () => {
+  await preferences.save({ ...structuredClone(DEFAULT_PREFERENCES), serverUrl: 'https://my-server.example', customServer: true });
+  render(Welcome);
+  expect(screen.getByLabelText('Sanser server URL')).toHaveValue('https://my-server.example');
+});
 
 it.each([false, true])('passes the remember-sign-in choice (%s) with the original login form', async (remember) => {
   const { container } = render(Welcome);

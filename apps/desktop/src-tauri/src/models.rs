@@ -159,6 +159,25 @@ pub struct EngineStatus {
     pub startup_failure: Option<NativeStartupFailure>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharingPeerStatus {
+    pub viewer_id: uuid::Uuid,
+    pub ready: bool,
+    pub running: bool,
+    pub video_state: SharingVideoState,
+    pub pauses: u64,
+    pub backoff_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SharingVideoState {
+    Active,
+    Paused,
+    Probing,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NativeStartupFailure {

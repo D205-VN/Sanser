@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 #include "transport.h"
 #include "broadcast.h"
+#include "decode_worker.h"
 #include "engine.h"
 #include "keyboard.h"
 #include "window_presenter.h"
@@ -255,24 +256,22 @@ int runWindows(bool host,int argc,char** argv) {
     peer.stop(); return 0;
   }
   Peer peer(options); WindowState state; state.peer=&peer; state.viewOnly=!options.input;
-  // Decoder COM objects belong to the receive thread, not the window thread.
+  // Decoder COM objects belong to the decode worker, not the socket/UI threads.
   std::unique_ptr<Runtime> runtime; std::unique_ptr<Decoder> decoder;
-  std::atomic<unsigned> decodeFailures{0}; std::string decodeError;
-  peer.onFrame=[&](Frame frame) {
-    try { if(!runtime) runtime=std::make_unique<Runtime>(); if(!decoder) { decoder=std::make_unique<Decoder>(frame.width, frame.height, [&](Image image) {
+  DecodeWorker decode([&](Frame frame) {
+    if(!runtime) runtime=std::make_unique<Runtime>(); if(!decoder) { decoder=std::make_unique<Decoder>(frame.width, frame.height, [&](Image image) {
       auto snapshot=std::make_shared<const Image>(std::move(image));
       { std::lock_guard lock(state.mutex); state.image=std::move(snapshot); }
       SetEvent(state.frameReady);
-    }); } decoder->decode(frame); decodeFailures=0; }
-    catch(const std::exception& error) { decodeError=error.what(); ++decodeFailures; decoder.reset(); peer.requestKeyframe(); }
-  };
-  peer.onStopped=[&] { decoder.reset(); runtime.reset(); };
+    }); } decoder->decode(frame);
+  },[&] { decoder.reset(); runtime.reset(); },[&] { peer.requestKeyframe(); });
+  peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
   HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+Escape releases input" : L"Sanser · View only",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
   if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); peer.start();
   MSG message{}; bool open=true;
-  while(open && peer.running() && decodeFailures<10) {
+  while(open && peer.running() && decode.failures()<10) {
     const auto wake=MsgWaitForMultipleObjectsEx(1,&state.frameReady,100,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
     if(wake==WAIT_FAILED) { peer.stop(); DestroyWindow(window); throw std::runtime_error("Remote window event wait failed"); }
     if(wake==WAIT_OBJECT_0) InvalidateRect(window,nullptr,FALSE);
@@ -281,8 +280,8 @@ int runWindows(bool host,int argc,char** argv) {
       TranslateMessage(&message); DispatchMessageW(&message);
     }
   }
-  peer.stop(); if(IsWindow(window)) DestroyWindow(window);
-  if(decodeFailures>=10) throw std::runtime_error("Unable to decode the remote video: "+decodeError);
+  peer.stop(); decode.stop(); if(IsWindow(window)) DestroyWindow(window);
+  if(decode.failures()>=10) throw std::runtime_error("Unable to decode the remote video: "+decode.error());
   return 0;
 }
 }

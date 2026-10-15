@@ -8,6 +8,36 @@ afterEach(() => {
 });
 
 describe('normalizeServerUrl', () => {
+  it.each(['login', 'register'] as const)('sends actual device labels and a stable installation ID on %s', async (action) => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(new Response('{}')));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new ApiClient('https://sanser.example', () => Promise.resolve(null));
+    const device = { installationId: '11111111-1111-4111-8111-111111111111', deviceName: 'Office Mac', platform: 'macos-aarch64' };
+    if (action === 'login') await client.login('test@example.test', 'private-password', device);
+    else await client.register('test@example.test', 'private-password', '', device);
+    const body = fetchMock.mock.calls[0]?.[1]?.body;
+    expect(JSON.parse(typeof body === 'string' ? body : '{}')).toMatchObject(device);
+  });
+
+  it('supports an older server without changing the chosen endpoint or losing device labels', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'validation', message: 'invalid JSON payload: unknown field `installationId`' } }), { status: 422 }))
+      .mockResolvedValueOnce(new Response('{}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new ApiClient('https://chosen.example', () => Promise.resolve(null));
+    await client.login('test@example.test', 'private-password', { installationId: 'stable-id', deviceName: 'Office PC', platform: 'windows-x86_64' });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://chosen.example/api/v2/auth/login', 'https://chosen.example/api/v2/auth/login']);
+    const body = fetchMock.mock.calls[1]?.[1]?.body;
+    expect(JSON.parse(typeof body === 'string' ? body : '{}')).toEqual({ email: 'test@example.test', password: 'private-password', deviceName: 'Office PC', platform: 'windows-x86_64' });
+  });
+
+  it('never retries an invalid password or unrelated validation error', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ error: { message: 'authentication is required' } }), { status: 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new ApiClient('https://sanser.example', () => Promise.resolve(null));
+    await expect(client.login('test@example.test', 'bad-password', { installationId: 'stable-id', deviceName: 'PC', platform: 'windows' })).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
   it('keeps invitation consent separate from creating a media session', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
       id: 'group', state: 'preparing', members: []

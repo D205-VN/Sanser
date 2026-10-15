@@ -272,6 +272,7 @@ void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect,
 void Peer::datagram(const Bytes& b) { ::send(static_cast<Socket>(socket_), reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()), 0); }
 void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable) {
   std::lock_guard lock(sendMutex_);
+  if(type==snv2::PacketType::Video && !(flags & snv2::kFlagRetransmitted) && videoPaused_) return;
   if (stream > 2 || (reliable && pending_.size() >= 64)) { running_=false; return; }
   snv2::Header h; h.packetType=type; h.streamId=stream; h.sequence=++sequences_[stream]; h.frameId=frame; h.flags=flags; h.keyId=generation_;
   auto b=codec_.seal(h,body);
@@ -302,7 +303,7 @@ PreparedFrame prepareFrame(Frame frame) {
 void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
   const auto& frame=*prepared;
   std::lock_guard lock(videoMutex_);
-  if (!ready_ || !running_) return;
+  if (!ready_ || !running_ || videoPaused_) return;
   if (outgoingNeedsKeyframe_ && !frame.keyframe) { if (onKeyframe) onKeyframe(); return; }
   if (frame.keyframe) outgoingNeedsKeyframe_ = false;
   const auto& bytes=frame.payload;
@@ -319,6 +320,20 @@ void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
     sendVideoFragment(frame,id,i,false);
     if (outgoingNeedsKeyframe_) { if (onKeyframe) onKeyframe(); break; }
   }
+}
+void Peer::pauseVideo(bool paused) {
+  videoPaused_=paused;
+  std::lock_guard lock(sendMutex_);
+  // Preserve priority lanes and the repair lane/cache. No fresh P-frame may
+  // follow a pause without a new IDR. Never take videoMutex_ from Delivery.
+  tx_.clearRealtimeVideo();
+  outgoingNeedsKeyframe_=true;
+  offeredBytes_=0;
+  sendReady_.notify_one();
+}
+Peer::VideoFeedback Peer::videoFeedback() const {
+  std::lock_guard lock(feedbackMutex_);
+  auto result=feedback_; result.sentFrame=frame_.load(); return result;
 }
 void Peer::sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair) {
   const auto count=(frame.payload.size()+chunkSize-1)/chunkSize;
@@ -375,6 +390,8 @@ void Peer::input(const Input& input) {
   transmit(reliable ? snv2::PacketType::Keyboard : snv2::PacketType::MouseMove,encodeInput(input),reliable ? 2 : 0,0,reliable ? snv2::kFlagAcknowledgementRequired : 0,reliable);
 }
 void Peer::requestKeyframe() {
+  std::lock_guard lock(keyframeRequestMutex_);
+  if(!running_) return;
   const auto now=Clock::now(); if (now-lastKeyframe_<std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 300)) return;
   lastKeyframe_=now; transmit(snv2::PacketType::KeyframeRequest,{});
 }
@@ -398,6 +415,14 @@ void Peer::process(const Bytes& bytes) {
   if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
   if (h.packetType==snv2::PacketType::Disconnect) { running_=false; return; }
+  if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback && b.size()==12 && std::memcmp(b.data(),"SVP1",4)==0) {
+    std::uint64_t completed=0; for(std::size_t i=4;i<12;++i) completed=(completed<<8)|b[i];
+    if(completed<=frame_.load()) {
+      std::lock_guard lock(feedbackMutex_);
+      feedback_.completedFrame=std::max(feedback_.completedFrame,completed);
+    }
+    return;
+  }
   if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback && b.size()==24 && std::memcmp(b.data(),"SVF1",4)==0) {
     if(Clock::now()-lastVideoFeedback_<std::chrono::milliseconds(250)) return;
     const auto elapsed=r32(b.data()+4); if(elapsed<250 || elapsed>2000) return;
@@ -410,6 +435,11 @@ void Peer::process(const Bytes& bytes) {
     const bool busy=offered>=32000;
     const bool loss=packets>=16 && static_cast<double>(missing)/packets>0.03;
     const bool congested=busy && (static_cast<double>(delivered)<static_cast<double>(offered)*0.85 || loss || drops>lastFeedbackDrops_);
+    {
+      std::lock_guard lock(feedbackMutex_);
+      ++feedback_.serial; feedback_.deliveredBytes=delivered;
+      feedback_.congested=congested; feedback_.received=Clock::now();
+    }
     lastFeedbackDrops_=drops;
     if(congested) {
       recoveryWindows_=0;
@@ -432,10 +462,16 @@ void Peer::process(const Bytes& bytes) {
     for (std::size_t i=8;i<b.size();++i) mask=(mask<<8)|b[i];
     std::lock_guard lock(sendMutex_);
     if (ack > sequences_[2]) return;
+    const auto now=Clock::now();
+    for(auto it=pending_.begin();it!=pending_.upper_bound(ack);++it)
+      if(!it->second.sacked) inputDelivery_.acknowledged(std::chrono::duration_cast<std::chrono::milliseconds>(now-it->second.created));
     pending_.erase(pending_.begin(),pending_.upper_bound(ack));
     for (auto& [sequence,p] : pending_) {
       const auto offset=sequence-ack-1;
-      if (offset<64 && (mask & (std::uint64_t{1}<<offset))) p.sacked=true;
+      if (offset<64 && (mask & (std::uint64_t{1}<<offset)) && !p.sacked) {
+        inputDelivery_.acknowledged(std::chrono::duration_cast<std::chrono::milliseconds>(now-p.created));
+        p.sacked=true;
+      }
     }
     return;
   }
@@ -447,7 +483,11 @@ void Peer::process(const Bytes& bytes) {
     if(frame) {
       if(lastVideo_ && h.frameId!=lastVideo_+1 && !frame->keyframe) needKeyframe_=true;
       lastVideo_=h.frameId;
-      if(!needKeyframe_ || frame->keyframe) { needKeyframe_=false; if(onFrame) onFrame(std::move(*frame)); }
+      if(!needKeyframe_ || frame->keyframe) {
+        needKeyframe_=false;
+        if(onFrame) onFrame(std::move(*frame));
+        completedVideoFrame_=h.frameId;
+      }
     }
     if (needKeyframe_) requestKeyframe(); return;
   }
@@ -524,9 +564,12 @@ void Peer::loop() {
       { std::lock_guard lock(sendMutex_);
         for(auto& [seq,p]:pending_) {
           (void)seq;
-          const auto deadline=std::chrono::milliseconds(options_.ultraLowLatency ? 120 : 1600);
-          if(now-p.created>deadline) { running_=false; break; }
-          if(!p.sacked && now-p.sent>std::chrono::milliseconds(options_.ultraLowLatency ? 12 : 80)) {
+          const auto deadline=inputDelivery_.deadline();
+          if(now-p.created>deadline) {
+            std::fprintf(stderr,"SNV2_INPUT_ACK_TIMEOUT pending=%zu deadlineMs=%lld\n",pending_.size(),static_cast<long long>(deadline.count()));
+            running_=false; break;
+          }
+          if(!p.sacked && now-p.sent>inputDelivery_.retry(options_.ultraLowLatency,p.attempts)) {
             if (!tx_.push(TxScheduler::InputLane, {p.bytes, now, 0})) { running_=false; break; }
             ++p.attempts; p.sent=now; sendReady_.notify_one();
           }
@@ -553,6 +596,11 @@ void Peer::loop() {
           u32(feedback,static_cast<std::uint32_t>(std::min<std::uint64_t>(receivedVideoDatagrams_,UINT32_MAX)));
           u32(feedback,static_cast<std::uint32_t>(std::min<std::uint64_t>(requestedVideoFragments_,UINT32_MAX)));
           transmit(snv2::PacketType::NetworkFeedback,feedback);
+          // Separate optional control message keeps the existing SVF1 wire
+          // format compatible. Completion is not a claim of display scan-out.
+          Bytes progress{'S','V','P','1'};
+          for(int i=7;i>=0;--i) progress.push_back(static_cast<std::uint8_t>(completedVideoFrame_>>(i*8)));
+          transmit(snv2::PacketType::NetworkFeedback,progress);
           receivedVideoBytes_=receivedVideoDatagrams_=requestedVideoFragments_=0; lastFeedback=now;
         }
       }

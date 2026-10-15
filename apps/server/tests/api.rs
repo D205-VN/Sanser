@@ -28,6 +28,159 @@ struct TestServer {
 
 #[tokio::test]
 #[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn password_login_replaces_only_the_same_installation_after_verification() {
+    let server = TestServer::new().await.expect("test server");
+    let installation = Uuid::new_v4().to_string();
+    let other_installation = Uuid::new_v4().to_string();
+    let registration = json!({
+        "email": "installation@example.test", "password": "StrongPass123",
+        "deviceName": "Identical computer name", "platform": "macos-aarch64",
+        "installationId": installation
+    });
+    let (status, registered, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/auth/register",
+            Some(registration),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{registered}");
+    assert_eq!(registered["account"]["displayName"], "installation");
+    let original_access = registered["accessToken"].as_str().expect("original access");
+    let login = |id: &str, password: &str| {
+        json!({
+            "email": "installation@example.test", "password": password,
+            "deviceName": "Identical computer name", "platform": "macos-aarch64",
+            "installationId": id
+        })
+    };
+    let invalid = server
+        .request(
+            Method::POST,
+            "/api/v2/auth/login",
+            Some(login(&installation, "incorrect-password")),
+            None,
+        )
+        .await;
+    assert_eq!(invalid.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        server
+            .request(Method::GET, "/api/v2/account", None, Some(original_access))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let second = server
+        .request(
+            Method::POST,
+            "/api/v2/auth/login",
+            Some(login(&other_installation, "StrongPass123")),
+            None,
+        )
+        .await;
+    assert_eq!(second.0, StatusCode::OK, "{}", second.1);
+    let second_access = second.1["accessToken"]
+        .as_str()
+        .expect("second computer access");
+    // Two simultaneous logins must not leave two live sessions on the same installation.
+    let (a, b) = tokio::join!(
+        server.request(
+            Method::POST,
+            "/api/v2/auth/login",
+            Some(login(&installation, "StrongPass123")),
+            None
+        ),
+        server.request(
+            Method::POST,
+            "/api/v2/auth/login",
+            Some(login(&installation, "StrongPass123")),
+            None
+        )
+    );
+    assert_eq!(a.0, StatusCode::OK, "{}", a.1);
+    assert_eq!(b.0, StatusCode::OK, "{}", b.1);
+    assert_eq!(
+        server
+            .request(Method::GET, "/api/v2/account", None, Some(original_access))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let refresh = server
+        .request(
+            Method::POST,
+            "/api/v2/auth/refresh",
+            Some(json!({"refreshToken": registered["refreshToken"]})),
+            None,
+        )
+        .await;
+    assert_eq!(refresh.0, StatusCode::UNAUTHORIZED);
+    let listed = server
+        .request(
+            Method::GET,
+            "/api/v2/account/sessions",
+            None,
+            Some(second_access),
+        )
+        .await;
+    assert_eq!(listed.0, StatusCode::OK, "{}", listed.1);
+    assert_eq!(listed.1.as_array().expect("sessions").len(), 2);
+    assert!(
+        listed
+            .1
+            .as_array()
+            .expect("sessions")
+            .iter()
+            .all(|item| item["deviceName"] == "Identical computer name"
+                && item["platform"] == "macos-aarch64")
+    );
+    // Installation IDs are scoped to the authenticated account, never globally.
+    let foreign = server
+        .request(
+            Method::POST,
+            "/api/v2/auth/register",
+            Some(json!({
+                "email": "other-installation-account@example.test", "password": "StrongPass123",
+                "installationId": other_installation
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(foreign.0, StatusCode::CREATED, "{}", foreign.1);
+    assert_eq!(
+        server
+            .request(Method::GET, "/api/v2/account", None, Some(second_access))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // Legacy clients remain supported and are not merged by their generic name.
+    for _ in 0..2 {
+        let legacy = server
+            .request(
+                Method::POST,
+                "/api/v2/auth/login",
+                Some(json!({"email": "installation@example.test", "password": "StrongPass123"})),
+                None,
+            )
+            .await;
+        assert_eq!(legacy.0, StatusCode::OK, "{}", legacy.1);
+    }
+    let listed = server
+        .request(
+            Method::GET,
+            "/api/v2/account/sessions",
+            None,
+            Some(second_access),
+        )
+        .await;
+    assert_eq!(listed.1.as_array().expect("sessions").len(), 4);
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
 async fn computer_registration_is_stable_per_account_and_role() {
     let server = TestServer::new().await.expect("test server");
     let auth = server.register("computer-identity@example.test").await;

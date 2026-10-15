@@ -11,6 +11,7 @@ import type {
   QualityProfile,
   SharingGroup
 } from './types';
+import type { LoginDevice } from './platform';
 
 export class ApiError extends Error {
   constructor(
@@ -164,20 +165,26 @@ export class ApiClient {
     return this.tokenProvider();
   }
 
-  async register(email: string, password: string, displayName?: string): Promise<AuthResult> {
-    return this.request('/api/v2/auth/register', {
-      method: 'POST',
-      body: { email, password, displayName: displayName?.trim() || undefined },
-      authenticated: false
-    });
+  async register(email: string, password: string, displayName?: string, device?: LoginDevice): Promise<AuthResult> {
+    return this.authenticate('/api/v2/auth/register', { email, password, displayName: displayName?.trim() || email.split('@')[0]?.slice(0, 80) || 'Sanser user' }, device);
   }
 
-  async login(email: string, password: string): Promise<AuthResult> {
-    return this.request('/api/v2/auth/login', {
-      method: 'POST',
-      body: { email, password },
-      authenticated: false
-    });
+  async login(email: string, password: string, device?: LoginDevice): Promise<AuthResult> {
+    return this.authenticate('/api/v2/auth/login', { email, password }, device);
+  }
+
+  private async authenticate(path: string, credentials: Record<string, string>, device?: LoginDevice): Promise<AuthResult> {
+    const body = { ...credentials, ...device };
+    try {
+      return await this.request(path, { method: 'POST', body, authenticated: false });
+    } catch (error) {
+      // Older servers reject the new optional identity field. Retry only that schema
+      // incompatibility, keeping the chosen server and the existing device labels.
+      if (!device || !(error instanceof ApiError) || ![400, 422].includes(error.status) ||
+          !/unknown field [`']installationId[`']/.test(error.message)) throw error;
+      const labels = { deviceName: device.deviceName, platform: device.platform };
+      return this.request(path, { method: 'POST', body: { ...credentials, ...labels }, authenticated: false });
+    }
   }
 
   async refresh(refreshToken: string): Promise<AuthResult> {

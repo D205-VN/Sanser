@@ -137,6 +137,16 @@ Rust crate 2.12.4 and CLI 2.12.3 (the CLI's current published patch).
 The [Tauri dependency update guide](https://v2.tauri.app/develop/updating-dependencies/)
 requires the API npm package and Rust crate to share a minor version.
 
+## 2.2.5: slow viewer isolation
+
+The new [viewer health policy](sharing-viewer-health.md) builds on the 2.2.4
+counters. Sustained delivery pressure now pauses fresh video for that viewer,
+keeps control/repair alive, and removes the paused/probing viewer from the
+healthy group's bitrate minimum. Bounded recovery probes require authenticated
+feedback and a completed new frame before rejoining. The host UI shows pause,
+probing and stopped-connection states. The release-specific limitations above
+describe 2.2.4; these changes are included in the 2.2.5 release.
+
 ## Desktop and transport lifecycle
 
 Sharing uses per-session P2P reservations, signaling receivers and relay bridges.

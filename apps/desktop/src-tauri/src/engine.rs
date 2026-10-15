@@ -47,6 +47,7 @@ struct EngineChild {
     acknowledgements: std::sync::mpsc::Receiver<crate::engine_output::SharingAck>,
     sharing: Option<crate::sharing_engine::SharingHost>,
     first_frame: Arc<std::sync::atomic::AtomicBool>,
+    sharing_statuses: crate::engine_output::SharingStatuses,
 }
 
 impl EngineChild {
@@ -62,6 +63,7 @@ impl EngineChild {
             return Err(std::io::Error::other("native stderr pipe is missing"));
         };
         let first_frame = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sharing_statuses = Arc::new(Mutex::new(HashMap::new()));
         let (acknowledgements, ack_receiver) = std::sync::mpsc::sync_channel(16);
         if let Some(stdout) = process.stdout.take()
             && let Err(error) = EngineOutput::start_observed(
@@ -70,6 +72,7 @@ impl EngineChild {
                 metrics.clone(),
                 Some(acknowledgements),
                 Some(Arc::clone(&first_frame)),
+                Some(Arc::clone(&sharing_statuses)),
             )
         {
             let _ = process.kill();
@@ -87,6 +90,7 @@ impl EngineChild {
                 acknowledgements: ack_receiver,
                 sharing: None,
                 first_frame,
+                sharing_statuses,
             }),
             Err(error) => {
                 let _ = process.kill();
@@ -729,6 +733,33 @@ fn stabilize_child(child: &mut EngineChild) -> Result<(), String> {
 }
 
 impl EngineManager {
+    pub fn sharing_peer_status(
+        &self,
+        group: Uuid,
+    ) -> Result<Vec<crate::models::SharingPeerStatus>, DesktopError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state is unavailable".into()))?;
+        let Some(child) = state.children.get(&EngineKind::Host) else {
+            return Ok(Vec::new());
+        };
+        let Some(host) = child.sharing.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let statuses = child
+            .sharing_statuses
+            .lock()
+            .map_err(|_| DesktopError::Process("sharing status is unavailable".into()))?;
+        Ok(statuses
+            .values()
+            .filter(|(status, observed)| {
+                observed.elapsed() < Duration::from_secs(5)
+                    && host.has_viewer(group, status.viewer_id)
+            })
+            .map(|(status, _)| status.clone())
+            .collect())
+    }
     pub fn is_sharing(&self, kind: EngineKind) -> bool {
         self.state.lock().is_ok_and(|state| {
             state
@@ -924,6 +955,9 @@ impl EngineManager {
         )?;
         if let Some(sharing) = child.sharing.as_mut() {
             sharing.remove(viewer);
+        }
+        if let Ok(mut statuses) = child.sharing_statuses.lock() {
+            statuses.remove(&viewer);
         }
         Ok(())
     }

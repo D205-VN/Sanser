@@ -25,6 +25,34 @@ pub struct DeviceIdentity {
     name: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginDevice {
+    installation_id: Uuid,
+    device_name: String,
+    platform: String,
+}
+
+#[tauri::command]
+#[allow(clippy::needless_pass_by_value)] // Tauri IPC extracts an owned AppHandle.
+pub fn get_login_device(app: AppHandle) -> Result<LoginDevice, DesktopError> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| DesktopError::Storage(error.to_string()))?;
+    let _guard = IDENTITY_LOCK
+        .lock()
+        .map_err(|_| DesktopError::Storage("Identity lock unavailable".into()))?;
+    // Only an identifier is stored here, never a password or authentication token.
+    // It survives logout and app updates, independently of the remember-sign-in choice.
+    let saved = load_or_create(&directory.join("login-device.json"), None, None)?;
+    Ok(LoginDevice {
+        installation_id: saved.computer_id,
+        device_name: computer_name(),
+        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+    })
+}
+
 fn load_or_create(
     path: &Path,
     client: Option<Uuid>,

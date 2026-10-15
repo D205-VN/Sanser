@@ -12,6 +12,8 @@
   let password = $state('');
   let displayName = $state('');
   let serverUrl = $state('');
+  let showServerSettings = $state(false);
+  const needsServerSettings = $derived(!serverUrl.trim() || serverUrl !== CONFIGURED_SERVER_URL);
   let formError = $state<string | null>(null);
 
   const canSubmit = $derived(
@@ -95,15 +97,17 @@
       {#if mode === 'register'}
         <div class="field"><label for="confirm-signup-password">Confirm password</label><input id="confirm-signup-password" class="input" type={showPassword ? 'text' : 'password'} bind:value={confirmPassword} required minlength="12" maxlength="256" autocomplete="new-password" placeholder="Enter your password again" /></div>
       {/if}
-        <details class="advanced-auth" open={!serverUrl.trim()}>
-          <summary><span>Server settings</span><small>{serverUrl.trim() ? 'Configured' : 'Required'}</small></summary>
+      {#if showServerSettings || needsServerSettings}
+        <details class="advanced-auth" open>
+          <summary><span>{serverUrl.trim() ? 'Custom server' : 'Set up a server'}</span></summary>
           <div class="field">
             <label for="server-url">Sanser server URL</label>
             <input id="server-url" class="input" type="url" bind:value={serverUrl} required spellcheck="false" autocomplete="url" placeholder="https://api.example.com" />
-            <small>Use the same server on both computers. Only sign in to a server you trust.</small>
-            {#if CONFIGURED_SERVER_URL}<button type="button" class="text-button" onclick={() => { serverUrl = CONFIGURED_SERVER_URL; }}>Use default server</button>{/if}
+            <small>This server handles sign-in and finding your computers. Use the same server on both computers.</small>
+            {#if CONFIGURED_SERVER_URL}<button type="button" class="text-button" onclick={() => { serverUrl = CONFIGURED_SERVER_URL; showServerSettings = false; }}>Use default server</button>{/if}
           </div>
         </details>
+      {/if}
 
       {#if formError ?? $session.error}<div class="notice error" role="alert">{formError ?? $session.error}</div>{/if}
 
@@ -113,6 +117,7 @@
         <span>{$session.busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}</span>
         {#if !$session.busy}<span aria-hidden="true">→</span>{/if}
       </button>
+      {#if !showServerSettings && !needsServerSettings}<div class="auth-footer"><button class="text-button" type="button" onclick={() => { showServerSettings = true; }}>Use a different server</button></div>{/if}
       {#if $session.error}<div class="auth-footer"><button class="text-button" type="button" disabled={$session.busy} onclick={retrySavedSignIn}>Retry saved sign-in</button></div>{/if}
     </form>
   </section>

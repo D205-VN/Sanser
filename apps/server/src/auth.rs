@@ -139,6 +139,7 @@ pub async fn create_login_session(
     account: Account,
     device_name: &str,
     platform: &str,
+    installation_id: Option<&str>,
 ) -> Result<AuthTokens, AppError> {
     let auth_session_id = Uuid::new_v4().to_string();
     let access_token = new_token(ACCESS_PREFIX);
@@ -148,11 +149,28 @@ pub async fn create_login_session(
     let now = now_unix();
     let access_expires_at = expires_at(state.config.access_token_ttl);
     let refresh_expires_at = expires_at(state.config.refresh_token_ttl);
+    let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
+    if let Some(installation_id) = installation_id {
+        // Serialize password logins for this account. Never merge sessions by name
+        // or platform: different computers can share both labels.
+        sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+            .bind(&account.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AppError::from_db)?;
+        sqlx::query("UPDATE auth_sessions SET revoked_at = $1 WHERE user_id = $2 AND installation_id = $3 AND revoked_at IS NULL")
+            .bind(now)
+            .bind(&account.id)
+            .bind(installation_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AppError::from_db)?;
+    }
     sqlx::query(
         "WITH inserted_session AS ( \
              INSERT INTO auth_sessions \
-                 (id, user_id, device_name, platform, created_at, last_seen_at, expires_at, revoked_at) \
-             VALUES ($1, $2, $3, $4, $5, $5, $6, NULL) \
+                 (id, user_id, device_name, platform, created_at, last_seen_at, expires_at, revoked_at, installation_id) \
+             VALUES ($1, $2, $3, $4, $5, $5, $6, NULL, $10) \
              RETURNING id \
          ), inserted_access AS ( \
              INSERT INTO access_tokens \
@@ -173,9 +191,11 @@ pub async fn create_login_session(
     .bind(&access_digest)
     .bind(access_expires_at)
     .bind(&refresh_digest)
-    .execute(&state.pool)
+    .bind(installation_id)
+    .execute(&mut *transaction)
     .await
     .map_err(AppError::from_db)?;
+    transaction.commit().await.map_err(AppError::from_db)?;
 
     Ok(AuthTokens {
         token_type: "Bearer",
@@ -194,6 +214,7 @@ pub async fn create_account_session(
     password_hash: String,
     device_name: &str,
     platform: &str,
+    installation_id: Option<&str>,
 ) -> Result<AuthTokens, AppError> {
     let auth_session_id = Uuid::new_v4().to_string();
     let access_token = new_token(ACCESS_PREFIX);
@@ -210,8 +231,8 @@ pub async fn create_account_session(
              RETURNING id \
          ), inserted_session AS ( \
              INSERT INTO auth_sessions \
-                 (id, user_id, device_name, platform, created_at, last_seen_at, expires_at, revoked_at) \
-             SELECT $6, id, $7, $8, $5, $5, $9, NULL FROM inserted_user \
+                 (id, user_id, device_name, platform, created_at, last_seen_at, expires_at, revoked_at, installation_id) \
+             SELECT $6, id, $7, $8, $5, $5, $9, NULL, $13 FROM inserted_user \
              RETURNING id \
          ), inserted_access AS ( \
              INSERT INTO access_tokens \
@@ -235,6 +256,7 @@ pub async fn create_account_session(
     .bind(&access_digest)
     .bind(access_expires_at)
     .bind(&refresh_digest)
+    .bind(installation_id)
     .execute(&state.pool)
     .await;
 

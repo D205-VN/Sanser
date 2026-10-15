@@ -210,9 +210,26 @@ int main() {
       check(cumulativeSent && secondCount==1,"SACK must retry the missing event, not the received event");
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
       check(client.running(),"ACKed input must not terminate session");
+      client.input({Input::Button,100,200,0,0,true});
+      client.input({Input::Button,100,200,0,0,false});
+      const auto delayedAck=Clock::now()+std::chrono::milliseconds(350);
+      while(Clock::now()<delayedAck) {
+        h.sequence++; h.packetType=wire::PacketType::Keepalive;
+        remote.send(options.port,hostCodec.seal(h,{'S','A','K','1'}));
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      }
+      check(client.running(),"a mouse click must not close Ultra before a 350 ms WAN ACK can arrive");
+      h.sequence++; h.packetType=wire::PacketType::NetworkFeedback;
+      remote.send(options.port,hostCodec.seal(h,ack(4,0)));
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      check(client.running(),"delayed mouse down/up ACK keeps the session open");
       client.input({Input::Key,0,0,5,0,true}); // blackhole ACKs
-      const auto expired=Clock::now()+std::chrono::milliseconds(300);
-      while(client.running() && Clock::now()<expired) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      const auto expired=Clock::now()+std::chrono::seconds(5);
+      while(client.running() && Clock::now()<expired) {
+        h.sequence++; h.packetType=wire::PacketType::Keepalive;
+        remote.send(options.port,hostCodec.seal(h,{'S','A','K','1'}));
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      }
       check(!client.running(),"reliable input must fail closed at deadline, not queue indefinitely");
     }
     std::cout<<"Input: selective ACK, lost key-down recovery, duplicate suppression and deadline passed\n";

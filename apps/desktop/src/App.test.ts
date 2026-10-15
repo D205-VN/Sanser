@@ -25,7 +25,7 @@ vi.mock('./lib/platform', async (importOriginal) => {
 });
 vi.mock('./stores/sharing', async () => {
   const { writable } = await import('svelte/store');
-  return { sharing: { ...writable({ groups: [], devices: [], ownGroup: null, supported: true, paused: false, busy: false, error: null, peerErrors: {} }),
+  return { sharing: { ...writable({ groups: [], devices: [], ownGroup: null, supported: true, paused: false, busy: false, error: null, peerErrors: {}, peerVideo: {} }),
     initialize: vi.fn().mockResolvedValue(undefined), shutdown: vi.fn().mockResolvedValue(undefined), refresh: sharingActions.refresh, respond: sharingActions.respond } };
 });
 vi.mock('./stores/presence', async () => {

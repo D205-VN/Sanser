@@ -23,7 +23,8 @@ public:
   bool take(Clock::time_point now) {
     if (!pending_ || now<nextAllowed_) return false;
     pending_=false;
-    nextAllowed_=now+std::chrono::milliseconds(attempts_==0 ? 500 : attempts_==1 ? 1000 : 2000);
+    backoffMs_=attempts_==0 ? 500 : attempts_==1 ? 1000 : 2000;
+    nextAllowed_=now+std::chrono::milliseconds(backoffMs_);
     if (attempts_<2) ++attempts_;
     ++requests_;
     return true;
@@ -31,11 +32,16 @@ public:
   // A newly published IDR satisfies older demands. Keep the backoff history:
   // enqueueing an IDR is not proof that the viewer received/decoded it.
   void keyframe() { pending_=false; }
+  void restart() { pending_=false; hasSignal_=false; attempts_=0; backoffMs_=0; }
+  unsigned backoffMs(Clock::time_point now) const {
+    return hasSignal_ && now-lastSignal_<std::chrono::seconds(3) ? backoffMs_ : 0;
+  }
   std::uint64_t signals() const { return signals_; }
   std::uint64_t requests() const { return requests_; }
 private:
   bool pending_=false, hasSignal_=false;
   unsigned attempts_=0;
+  unsigned backoffMs_=0;
   Clock::time_point nextAllowed_{}, lastSignal_{};
   std::uint64_t signals_=0, requests_=0;
 };

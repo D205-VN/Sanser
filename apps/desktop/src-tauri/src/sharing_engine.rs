@@ -119,6 +119,9 @@ pub(crate) struct SharingHost {
 }
 
 impl SharingHost {
+    pub fn has_viewer(&self, group: Uuid, viewer: Uuid) -> bool {
+        self.group == group && self.viewers.contains_key(&viewer)
+    }
     pub fn new(peer: SharingPeer) -> Self {
         Self {
             group: peer.group,
@@ -205,6 +208,8 @@ mod tests {
         let first = peer(&request(group)?)?;
         let viewer = first.viewer;
         let mut host = SharingHost::new(first);
+        assert!(host.has_viewer(group, viewer));
+        assert!(!host.has_viewer(Uuid::new_v4(), viewer));
         for index in 1..=2 {
             let mut next = request(group)?;
             next.port = Some(50001 + index * 2);
@@ -220,6 +225,7 @@ mod tests {
         assert!(host.validate_add(&peer).is_err());
         assert!(host.validate_remove(group, viewer)?);
         host.remove(viewer);
+        assert!(!host.has_viewer(group, viewer));
         assert_eq!(host.viewers.len(), 2);
         assert!(!host.validate_remove(group, viewer)?);
         assert!(host.validate_remove(Uuid::new_v4(), viewer).is_err());

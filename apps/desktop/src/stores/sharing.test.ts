@@ -5,12 +5,12 @@ const mocks = vi.hoisted(() => ({
   api: { supportsSharingMedia: vi.fn(), sharingGroups: vi.fn(), devices: vi.fn(), createSharingGroup: vi.fn(),
     sessionCredentials: vi.fn(), hostSessions: vi.fn(), sharingHeartbeat: vi.fn(), getAccessToken: vi.fn(),
     removeSharingViewer: vi.fn(), stopSharingGroup: vi.fn(), respondSharingInvitation: vi.fn(), getSession: vi.fn() },
-  coordinate: vi.fn(), release: vi.fn(), launch: vi.fn(), add: vi.fn(), remove: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), relayFailure: vi.fn()
+  coordinate: vi.fn(), release: vi.fn(), launch: vi.fn(), add: vi.fn(), remove: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), relayFailure: vi.fn(), statuses: vi.fn()
 }));
 vi.mock('../lib/p2pSignaling', () => ({ coordinateP2pConnection: mocks.coordinate, releaseP2pConnection: mocks.release, directCheckFailure: () => 'failed' }));
 vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, addSharingPeer: mocks.add, removeSharingPeer: mocks.remove,
   stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, relayPeerFailure: mocks.relayFailure,
-  engineStatus: () => Promise.resolve({ running: true }) }));
+  sharingPeerStatus: mocks.statuses, engineStatus: () => Promise.resolve({ running: true }) }));
 vi.mock('./session', async () => {
   const { writable } = await import('svelte/store');
   return { session: { ...writable({ mode: 'cloud', account: { id: 'owner' } }), client: () => mocks.api } };
@@ -37,7 +37,7 @@ let stores: ReturnType<typeof createSharingStore>[] = [];
 beforeEach(() => {
   vi.useFakeTimers(); vi.resetAllMocks();
   group = { id: 'group', hostDeviceId: 'host', state: 'preparing', networkMode: 'auto', qualityProfile: 'balanced', maxViewers: 3, createdAt: 1, updatedAt: 1, members: [] };
-  mocks.api.supportsSharingMedia.mockResolvedValue(true);
+  mocks.api.supportsSharingMedia.mockResolvedValue(true); mocks.statuses.mockResolvedValue([]);
   mocks.api.sharingGroups.mockImplementation(() => Promise.resolve({ items: [group] }));
   mocks.api.devices.mockResolvedValue({ items: [] }); mocks.api.createSharingGroup.mockImplementation(() => Promise.resolve(group));
   mocks.api.sharingHeartbeat.mockResolvedValue(undefined); mocks.api.getAccessToken.mockResolvedValue('access-token');
@@ -82,6 +82,29 @@ it('keeps existing viewers and creates an independent relay for the failed Direc
   expect(mocks.relay).toHaveBeenCalledWith(expect.objectContaining({ sharingId: 'group', sessionId: 'session-2' }));
   expect(mocks.launch.mock.calls.length + mocks.add.mock.calls.length).toBe(3);
   expect(mocks.stop).not.toHaveBeenCalled();
+});
+
+it('tracks per-viewer pause and recovery without removing the session or disturbing other viewers', async () => {
+  const store = await startedStore();
+  group = { ...group, members: group.members.map((member) => ({ ...member, startedAt: 1 })) };
+  mocks.statuses.mockResolvedValue([
+    { viewerId: 'member-1', ready: true, running: true, videoState: 'active', pauses: 0, backoffMs: 0 },
+    { viewerId: 'member-2', ready: true, running: true, videoState: 'paused', pauses: 1, backoffMs: 0 },
+    { viewerId: 'foreign-member', ready: true, running: true, videoState: 'paused', pauses: 1, backoffMs: 0 }
+  ]);
+  await store.refresh();
+  expect(get(store).peerVideo['member-2']?.videoState).toBe('paused');
+  expect(get(store).peerVideo['foreign-member']).toBeUndefined();
+  expect(get(store).ownGroup?.members.filter((member) => member.state === 'accepted')).toHaveLength(3);
+  expect(mocks.remove).not.toHaveBeenCalled(); expect(mocks.stop).not.toHaveBeenCalled();
+  mocks.statuses.mockResolvedValue([{ viewerId: 'member-2', ready: true, running: true, videoState: 'probing', pauses: 1, backoffMs: 500 }]);
+  await store.refresh();
+  expect(get(store).peerVideo['member-2']?.videoState).toBe('probing');
+  mocks.statuses.mockResolvedValue([{ viewerId: 'member-2', ready: true, running: true, videoState: 'active', pauses: 1, backoffMs: 0 }]);
+  await store.refresh();
+  expect(get(store).peerVideo['member-2']?.videoState).toBe('active');
+  await store.shutdown();
+  expect(get(store).peerVideo).toEqual({});
 });
 
 it('stops locally even when the server fails and does not restart from the old group on the next poll', async () => {

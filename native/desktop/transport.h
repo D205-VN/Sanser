@@ -2,6 +2,7 @@
 #include "snv2.h"
 #include "snv2_auth.h"
 #include "tx_scheduler.h"
+#include "input_delivery_policy.h"
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
@@ -84,6 +85,14 @@ public:
   bool ready() const { return ready_.load(); }
   void video(const Frame& frame);
   void videoPrepared(std::shared_ptr<const PreparedFrame> frame);
+  void pauseVideo(bool paused);
+  struct VideoFeedback {
+    std::uint64_t serial=0, deliveredBytes=0;
+    std::uint64_t completedFrame=0, sentFrame=0;
+    bool congested=false;
+    Clock::time_point received{};
+  };
+  VideoFeedback videoFeedback() const;
   void input(const Input& input);
   void requestKeyframe();
   std::function<void(Frame)> onFrame;
@@ -117,6 +126,9 @@ private:
   std::condition_variable sendReady_;
   TxScheduler tx_;
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
+  std::atomic<bool> videoPaused_{false};
+  mutable std::mutex feedbackMutex_;
+  VideoFeedback feedback_{};
   std::atomic<std::uint64_t> videoQueueDrops_{0};
   std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0};
   std::atomic<std::uint64_t> offeredBytes_{0};
@@ -127,10 +139,13 @@ private:
   std::uint32_t generation_ = 0, peerGeneration_ = 0;
   std::set<std::uint32_t> previousGenerations_;
   std::uint64_t lastVideo_ = 0, lastMouse_ = 0;
-  std::uint64_t sequences_[3]{}, frame_ = 0, deliveredInput_ = 0;
+  std::uint64_t sequences_[3]{}, deliveredInput_ = 0, completedVideoFrame_=0;
+  std::atomic<std::uint64_t> frame_{0};
   ReplayWindow replay_[3];
   struct Pending { Bytes bytes; Clock::time_point sent, created; unsigned attempts; bool sacked = false; };
   std::map<std::uint64_t, Pending> pending_;
+  InputDeliveryPolicy inputDelivery_;
+  std::mutex keyframeRequestMutex_;
   std::map<std::uint64_t, Input> receivedInputs_;
   Reassembler reassembler_;
   struct CachedVideo { std::shared_ptr<const PreparedFrame> frame; Clock::time_point sent; std::deque<std::uint16_t> repair; Clock::time_point lastRequest{}; };

@@ -122,6 +122,57 @@ int main() {
       std::cout<<"Broadcast recovery: published="<<group.publishedFrames()<<" forcedKeyframes="<<keyframes
         <<" constrainedRequests="<<slowRequests<<" healthyFrames="<<count(healthy)<<'\n';
     }
+    {
+      auto ultra=source; ultra.ultraLowLatency=true;
+      Broadcaster group(ultra); Viewer healthy,slow;
+      connect(group,healthy,ultra,"isolated-healthy",'i');
+      connect(group,slow,ultra,"isolated-slow",'j',1000000);
+      const auto state=[&] {
+        for(const auto& peer:group.stats()) if(peer.id=="isolated-slow") return peer.videoState;
+        return std::string("missing");
+      };
+      const auto deadline=Clock::now()+std::chrono::seconds(12);
+      unsigned published=0;
+      while(state()!="paused" && Clock::now()<deadline) {
+        group.updateHealth();
+        const bool key=group.takeKeyframeRequest() || published==0;
+        group.publish(Frame{Bytes(20000,0x5c),1280,720,key}); ++published;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      require(state()=="paused","a persistently congested viewer is automatically paused");
+      require(group.bitrate()>1000000,"paused viewer no longer sets the shared encoder bitrate");
+      std::uint64_t dispatched=0,requests=0;
+      for(const auto& peer:group.stats()) if(peer.id=="isolated-slow") { dispatched=peer.dispatched; requests=peer.keyframeRequests; }
+      const auto healthyBefore=count(healthy);
+      const auto pauseCheck=Clock::now()+std::chrono::seconds(1);
+      while(Clock::now()<pauseCheck) {
+        group.updateHealth();
+        group.publish(Frame{Bytes(20000,0x5d),1280,720,group.takeKeyframeRequest()});
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      require(healthy.peer->ready() && slow.peer->ready(),"pause retains authenticated control/keepalives for both viewers");
+      require(count(healthy)>healthyBefore+20,"healthy viewer continues while slow viewer is paused");
+      for(const auto& peer:group.stats()) if(peer.id=="isolated-slow") {
+        require(peer.dispatched<=dispatched+1,"paused delivery stops dispatching new video");
+        require(peer.keyframeRequests==requests,"paused viewer does not demand group-wide keyframes");
+      }
+      bool probing=false;
+      const auto recoveryDeadline=Clock::now()+std::chrono::seconds(10);
+      while(Clock::now()<recoveryDeadline) {
+        group.updateHealth();
+        const auto current=state();
+        if(current=="probing") {
+          probing=true;
+          require(group.bitrate()>1000000,"recovery probes cannot lower healthy viewers' bitrate");
+        }
+        if(probing && current=="active") break;
+        group.publish(Frame{Bytes(1000,0x5e),1280,720,group.takeKeyframeRequest()});
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      require(probing && state()=="active","viewer automatically rejoins only after a new frame completes and live feedback is clean");
+      require(group.bitrate()==1000000,"recovered viewer participates in the shared budget again");
+      std::cout<<"Broadcast isolation: suspended slow video, retained control, healthy frames="<<count(healthy)-healthyBefore<<", automatic verified rejoin passed\n";
+    }
     require(!parseSharingCommand("share-add\tnonce\tv\t1\t127.0.0.1:1\tshort",1000000),"reject short IPC credential");
     require(!parseSharingCommand(std::string(1025,'x'),1000000),"bounded IPC command");
     require(parseSharingCommand("share-remove\tnonce\tv",1000000).has_value(),"valid remove command");

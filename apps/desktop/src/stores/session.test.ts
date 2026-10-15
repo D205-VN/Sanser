@@ -1,7 +1,7 @@
 import { get } from 'svelte/store';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
-const storage = vi.hoisted(() => ({ secureGet: vi.fn(), secureSet: vi.fn(), secureDelete: vi.fn() }));
+const storage = vi.hoisted(() => ({ secureGet: vi.fn(), secureSet: vi.fn(), secureDelete: vi.fn(), loginDevice: vi.fn() }));
 vi.mock('../lib/platform', () => storage);
 const account = { id: 'account-1', email: 'test@example.test', displayName: 'Test' };
 const auth = { account, accessToken: 'fresh-access', refreshToken: 'fresh-refresh' };
@@ -25,6 +25,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
+  storage.loginDevice.mockResolvedValue({ installationId: '11111111-1111-4111-8111-111111111111', deviceName: 'Test Mac', platform: 'macos-aarch64' });
   now = startedAt;
   vi.spyOn(Date, 'now').mockImplementation(() => now);
   secrets = new Map([['auth_session', saved()]]);

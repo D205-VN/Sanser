@@ -17,6 +17,10 @@
     const error = $sharing.peerErrors[member.id];
     if (error) return error;
     if (member.state === 'invited') return $sharing.devices.find((device) => device.id === member.viewerDeviceId)?.online ? 'Invitation sent · waiting for approval' : 'Invited computer is offline. Remove this invitation and select its online registration.';
+    const status = $sharing.peerVideo[member.id];
+    if (status && !status.running) return 'Connection stopped · remove this viewer and invite it again.';
+    if (status?.videoState === 'paused') return 'Video paused · viewer is falling behind. Retrying automatically; other viewers continue.';
+    if (status?.videoState === 'probing') return 'Testing recovery · video resumes when delivery is stable.';
     return member.startedAt !== undefined && !$sharing.paused ? 'Watching · view only' : 'Connecting · waiting for the first frame';
   }
   async function run(operation: () => Promise<void>): Promise<void> {
@@ -39,9 +43,9 @@
     <div class="button-row"><button class="button primary" disabled={!$host.online || $sharing.busy || $host.engineRunning || $host.launchingSessionId !== null} onclick={() => run(() => sharing.create())}>Start sharing</button><span class="muted">{$host.online ? 'Only computers in your account can be invited.' : 'Go online first.'}</span></div>
   {:else}
     {#if $sharing.paused}<div class="notice">This sharing group is paused on this computer. Stop sharing and start a new group to resume.</div>{/if}
-    <p class="sharing-count" role="status">{$sharing.paused ? 0 : active.filter((member) => member.startedAt !== undefined && member.state === 'accepted').length} watching · {active.length}/{group.maxViewers} places reserved</p>
+    <p class="sharing-count" role="status">{$sharing.paused ? 0 : active.filter((member) => member.startedAt !== undefined && member.state === 'accepted' && (!$sharing.peerVideo[member.id] || ($sharing.peerVideo[member.id]?.videoState === 'active' && $sharing.peerVideo[member.id]?.ready && $sharing.peerVideo[member.id]?.running))).length} watching · {active.length}/{group.maxViewers} places reserved</p>
     {#each active as member (member.id)}
-      <div class="viewer-row"><div><strong>{name(member.viewerDeviceId)}</strong><p>{viewerState(member)}</p></div><button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.remove(member))}>Remove</button></div>
+      <div class="viewer-row"><div><strong>{name(member.viewerDeviceId)}</strong><p role="status">{viewerState(member)}</p></div><button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.remove(member))}>Remove</button></div>
     {/each}
     {#if active.length < group.maxViewers}
       <div class="invite-row">

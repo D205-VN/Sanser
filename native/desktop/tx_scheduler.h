@@ -46,7 +46,8 @@ public:
   bool hasPriority() const {
     return latestMove_ || !queues_[Control].empty() || !queues_[InputLane].empty() || !queues_[Audio].empty();
   }
-  void clearVideo() { queues_[Video].clear(); bytes_[Video] = 0; queues_[Repair].clear(); bytes_[Repair]=0; }
+  void clearRealtimeVideo() { queues_[Video].clear(); bytes_[Video]=0; }
+  void clearVideo() { clearRealtimeVideo(); queues_[Repair].clear(); bytes_[Repair]=0; }
 private:
   Packet take(std::size_t lane) {
     auto value = std::move(queues_[lane].front()); queues_[lane].pop_front();

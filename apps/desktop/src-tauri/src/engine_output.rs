@@ -1,17 +1,73 @@
 //! Continuously drain child stderr while retaining a bounded error tail.
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::File,
     io::{Read, Write},
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const TAIL_BYTES: usize = 8 * 1024;
 const DEBUG_FILE_BYTES: usize = 2 * 1024 * 1024;
 
 const STARTUP_ERROR_PREFIX: &str = "SNU1 UDP render listener error: [startup:";
+
+pub(crate) type SharingStatuses =
+    Arc<Mutex<HashMap<uuid::Uuid, (crate::models::SharingPeerStatus, Instant)>>>;
+
+fn sharing_peer_status(line: &[u8]) -> Option<crate::models::SharingPeerStatus> {
+    use crate::models::{SharingPeerStatus, SharingVideoState};
+    let line = std::str::from_utf8(line)
+        .ok()?
+        .strip_prefix("SNSHARE_PEER ")?;
+    let mut viewer = None;
+    let mut state = None;
+    let mut pauses = None;
+    let mut backoff = None;
+    let mut ready = None;
+    let mut running = None;
+    for field in line.split_ascii_whitespace() {
+        let (key, value) = field.split_once('=')?;
+        match key {
+            "viewer" if viewer.is_none() => viewer = Some(uuid::Uuid::parse_str(value).ok()?),
+            "videoState" if state.is_none() => {
+                state = Some(match value {
+                    "active" => SharingVideoState::Active,
+                    "paused" => SharingVideoState::Paused,
+                    "probing" => SharingVideoState::Probing,
+                    _ => return None,
+                });
+            }
+            "pauses" if pauses.is_none() => pauses = Some(value.parse::<u64>().ok()?),
+            "backoffMs" if backoff.is_none() => backoff = Some(value.parse::<u32>().ok()?),
+            "ready" if ready.is_none() => {
+                ready = Some(match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return None,
+                });
+            }
+            "running" if running.is_none() => {
+                running = Some(match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return None,
+                });
+            }
+            "viewer" | "videoState" | "pauses" | "backoffMs" | "ready" | "running" => return None,
+            _ => {}
+        }
+    }
+    Some(SharingPeerStatus {
+        viewer_id: viewer?,
+        ready: ready?,
+        running: running?,
+        video_state: state?,
+        pauses: pauses?,
+        backoff_ms: backoff?,
+    })
+}
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct SharingAck {
@@ -79,7 +135,7 @@ impl EngineOutput {
         log: Option<File>,
         metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
     ) -> std::io::Result<Self> {
-        Self::start_observed(reader, log, metrics, None, None)
+        Self::start_observed(reader, log, metrics, None, None, None)
     }
 
     pub(crate) fn start_observed(
@@ -88,6 +144,7 @@ impl EngineOutput {
         metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
         acknowledgements: Option<mpsc::SyncSender<SharingAck>>,
         first_frame: Option<Arc<std::sync::atomic::AtomicBool>>,
+        sharing: Option<SharingStatuses>,
     ) -> std::io::Result<Self> {
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_BYTES)));
         let worker_tail = Arc::clone(&tail);
@@ -102,6 +159,7 @@ impl EngineOutput {
                     metrics.as_ref(),
                     acknowledgements.as_ref(),
                     first_frame.as_deref(),
+                    sharing.as_ref(),
                 );
                 let _ = complete.send(());
             })?;
@@ -134,6 +192,7 @@ fn drain(
     metrics: Option<&mpsc::SyncSender<crate::connection_report::Sample>>,
     acknowledgements: Option<&mpsc::SyncSender<SharingAck>>,
     first_frame: Option<&std::sync::atomic::AtomicBool>,
+    sharing: Option<&SharingStatuses>,
 ) {
     let mut buffer = [0_u8; 4096];
     let mut written = 0;
@@ -151,9 +210,21 @@ fn drain(
             tail.drain(..excess);
             tail.extend(&buffer[..length]);
         }
-        if metrics.is_some() || acknowledgements.is_some() || first_frame.is_some() {
+        if metrics.is_some()
+            || acknowledgements.is_some()
+            || first_frame.is_some()
+            || sharing.is_some()
+        {
             for byte in &buffer[..length] {
                 if *byte == b'\n' {
+                    if !oversized
+                        && let Some(sharing) = sharing
+                        && let Some(status) = sharing_peer_status(&line)
+                        && let Ok(mut sharing) = sharing.lock()
+                        && (sharing.len() < 3 || sharing.contains_key(&status.viewer_id))
+                    {
+                        sharing.insert(status.viewer_id, (status, Instant::now()));
+                    }
                     if !oversized
                         && line == b"SNV2_FIRST_FRAME decoded=1"
                         && let Some(first_frame) = first_frame
@@ -200,6 +271,60 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn sharing_health_status_is_bounded_and_observed_without_metrics() -> std::io::Result<()> {
+        use crate::models::SharingVideoState;
+        use std::fmt::Write as _;
+        let viewers = (0..4).map(|_| uuid::Uuid::new_v4()).collect::<Vec<_>>();
+        let mut lines = String::new();
+        for id in &viewers {
+            writeln!(
+                lines,
+                "SNSHARE_PEER viewer={id} ready=1 running=1 videoState=paused pauses=2 backoffMs=2000"
+            )
+            .map_err(std::io::Error::other)?;
+        }
+        writeln!(
+            lines,
+            "SNSHARE_PEER viewer={} ready=1 running=1 videoState=probing pauses=2 backoffMs=500",
+            viewers[0]
+        )
+        .map_err(std::io::Error::other)?;
+        let sharing = Arc::new(Mutex::new(HashMap::new()));
+        let output = EngineOutput::start_observed(
+            Cursor::new(lines.into_bytes()),
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::clone(&sharing)),
+        )?;
+        let _ = output.exit_message(String::new());
+        let statuses = sharing
+            .lock()
+            .map_err(|_| std::io::Error::other("status lock"))?;
+        assert_eq!(statuses.len(), 3);
+        assert_eq!(
+            statuses[&viewers[0]].0.video_state,
+            SharingVideoState::Probing
+        );
+        assert!(!statuses.contains_key(&viewers[3]));
+        for invalid in [
+            "SNSHARE_PEER viewer=secret ready=1 running=1 videoState=paused pauses=2 backoffMs=2000".to_owned(),
+            format!(
+                "SNSHARE_PEER viewer={} ready=1 running=1 videoState=unknown pauses=2 backoffMs=2000",
+                viewers[0]
+            ),
+            format!(
+                "SNSHARE_PEER viewer={} ready=1 running=1 videoState=active videoState=paused pauses=2 backoffMs=2000",
+                viewers[0]
+            ),
+        ] {
+            assert!(sharing_peer_status(invalid.as_bytes()).is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn only_decoded_frame_event_marks_video_received() -> std::io::Result<()> {
         use std::sync::atomic::{AtomicBool, Ordering};
         let flag = Arc::new(AtomicBool::new(false));
@@ -209,6 +334,7 @@ mod tests {
             None,
             None,
             Some(Arc::clone(&flag)),
+            None,
         )?;
         let _ = output.exit_message(String::new());
         assert!(!flag.load(Ordering::Relaxed));
@@ -218,6 +344,7 @@ mod tests {
             None,
             None,
             Some(Arc::clone(&flag)),
+            None,
         )?;
         let _ = output.exit_message(String::new());
         assert!(flag.load(Ordering::Relaxed));
@@ -230,7 +357,7 @@ mod tests {
         let bytes=format!("SNSHARE_ACK request={request} accepted=1\nSNSHARE_ACK request={request} accepted=0 extra=token\n").into_bytes();
         let (sender, receiver) = mpsc::sync_channel(1);
         let output =
-            EngineOutput::start_observed(Cursor::new(bytes), None, None, Some(sender), None)?;
+            EngineOutput::start_observed(Cursor::new(bytes), None, None, Some(sender), None, None)?;
         assert_eq!(
             receiver
                 .recv_timeout(Duration::from_secs(1))

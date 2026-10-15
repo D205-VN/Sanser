@@ -366,6 +366,16 @@ pub async fn sharing_engine_remove_peer(
 }
 
 #[tauri::command]
+pub fn sharing_engine_peer_status(
+    engines: State<'_, EngineManager>,
+    sharing_id: String,
+) -> Result<Vec<crate::models::SharingPeerStatus>, DesktopError> {
+    let group = uuid::Uuid::parse_str(&sharing_id)
+        .map_err(|_| DesktopError::InvalidRequest("sharing ID must be a UUID".into()))?;
+    engines.sharing_peer_status(group)
+}
+
+#[tauri::command]
 pub fn get_engine_status(
     app: AppHandle,
     engines: State<'_, EngineManager>,
