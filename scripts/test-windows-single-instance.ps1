@@ -5,6 +5,7 @@ $executable = (Resolve-Path $ExecutablePath).Path
 $primary = $null
 $secondary = $null
 $vite = $null
+$logs = [Collections.Generic.List[string]]::new()
 
 Add-Type @'
 using System;
@@ -19,6 +20,7 @@ public static class SanserWindowSmoke {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowW(string className, string title);
     public static IntPtr FindMainWindow(uint processId) {
         IntPtr found = IntPtr.Zero;
         EnumWindows((window, parameter) => {
@@ -45,6 +47,12 @@ function Wait-Until([scriptblock]$Condition, [string]$Failure) {
     throw $Failure
 }
 
+function Start-Sanser([string]$Name) {
+    $path = Join-Path ([IO.Path]::GetTempPath()) "sanser-lifecycle-$Name.log"
+    $logs.Add($path)
+    return Start-Process -FilePath $executable -PassThru -RedirectStandardError $path
+}
+
 try {
     $start = [Diagnostics.ProcessStartInfo]::new('node')
     $start.WorkingDirectory = Join-Path $repo 'apps/desktop'
@@ -57,19 +65,22 @@ try {
         try { return (Invoke-WebRequest 'http://127.0.0.1:1420' -TimeoutSec 1).StatusCode -eq 200 } catch { return $false }
     } 'Vite did not start'
 
-    $primary = Start-Process -FilePath $executable -PassThru
+    $primary = Start-Sanser 'primary'
     Wait-Until {
         $primary.Refresh()
         if ($primary.HasExited) { throw 'Primary Sanser exited during startup' }
         return [SanserWindowSmoke]::FindMainWindow([uint32]$primary.Id) -ne [IntPtr]::Zero
     } 'Primary Sanser did not create its main window'
     $window = [SanserWindowSmoke]::FindMainWindow([uint32]$primary.Id)
+    Write-Output "Instance guard window present: $([SanserWindowSmoke]::FindWindowW('com.sanser.desktop-sic', 'com.sanser.desktop-siw') -ne [IntPtr]::Zero)"
 
     foreach ($attempt in 1..3) {
         if (-not [SanserWindowSmoke]::PostMessageW($window, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) { throw 'Unable to close Sanser to tray' }
         Wait-Until { -not [SanserWindowSmoke]::IsWindowVisible($window) } 'Closing Sanser did not hide its window'
+        $primary.Refresh()
+        if ($primary.HasExited) { throw 'Closing the main window terminated the original process' }
         Write-Output "Cycle ${attempt}: original window hidden; launching second process."
-        $secondary = Start-Process -FilePath $executable -PassThru
+        $secondary = Start-Sanser "secondary-$attempt"
         if (-not $secondary.WaitForExit(30000)) { throw "Second launch timed out; originalVisible=$([SanserWindowSmoke]::IsWindowVisible($window)); secondaryPID=$($secondary.Id)" }
         if ($secondary.ExitCode -ne 0) { throw "Second launch returned exit code $($secondary.ExitCode)" }
         Wait-Until { [SanserWindowSmoke]::IsWindowVisible($window) } 'Second launch did not restore the original window'
@@ -82,12 +93,15 @@ try {
 
     [void][SanserWindowSmoke]::ShowWindow($window, 6)
     Wait-Until { [SanserWindowSmoke]::IsIconic($window) } 'Unable to minimize the original window'
-    $secondary = Start-Process -FilePath $executable -PassThru
+    $secondary = Start-Sanser 'secondary-minimized'
     if (-not $secondary.WaitForExit(30000) -or $secondary.ExitCode -ne 0) { throw 'Launch while minimized did not exit successfully' }
     Wait-Until { -not [SanserWindowSmoke]::IsIconic($window) } 'Second launch did not unminimize the original window'
     Write-Output 'PASS: closing to tray and launching again preserves one process and restores the existing window; minimize/restore also passed.'
 }
 finally {
+    foreach ($path in $logs) {
+        if (Test-Path $path) { Get-Content $path | Where-Object { $_ -like '*Sanser lifecycle:*' } | Write-Output }
+    }
     foreach ($child in @($secondary, $primary, $vite)) {
         if ($null -ne $child -and -not $child.HasExited) { Stop-Process -Id $child.Id -Force -ErrorAction SilentlyContinue }
     }

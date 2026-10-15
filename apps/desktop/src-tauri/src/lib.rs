@@ -19,6 +19,8 @@ use tauri::Manager;
 ///
 /// Returns an error when Tauri cannot initialize or run the application.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(debug_assertions)]
+    eprintln!("Sanser lifecycle: process started");
     let mut context = tauri::generate_context!();
     if cfg!(target_os = "windows") {
         tray::configure_background_timers(context.config_mut());
@@ -28,6 +30,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // webview. A desktop shortcut restores the existing background process.
     #[cfg(windows)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        #[cfg(debug_assertions)]
+        eprintln!("Sanser lifecycle: second launch received");
         tray::show_main(app);
     }));
     builder
@@ -40,6 +44,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             if cfg!(target_os = "windows") {
                 tray::install(app)?;
             }
+            #[cfg(debug_assertions)]
+            eprintln!("Sanser lifecycle: setup completed");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -50,9 +56,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // Keep the webview, host polling and native engines alive. The
                 // tray is installed before this handler can hide the window.
                 api.prevent_close();
-                if let Err(error) = window.hide() {
-                    eprintln!("Unable to hide Sanser in the system tray: {error}");
-                }
+                #[cfg(debug_assertions)]
+                eprintln!("Sanser lifecycle: hide requested");
+                // Leave the native close callback before changing WebView2's
+                // visibility, which can synchronously send more window events.
+                let window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = window.hide() {
+                        eprintln!("Unable to hide Sanser in the system tray: {error}");
+                    }
+                    #[cfg(debug_assertions)]
+                    eprintln!("Sanser lifecycle: hide queued");
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![

@@ -33,6 +33,8 @@ pub(crate) fn show_main(app: &AppHandle) {
     // window work on this worker is dispatched back through Tauri's event loop.
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        #[cfg(debug_assertions)]
+        eprintln!("Sanser lifecycle: restore worker started");
         if let Some(window) = app.get_webview_window("main") {
             let result = window
                 .show()
@@ -41,6 +43,8 @@ pub(crate) fn show_main(app: &AppHandle) {
             if let Err(error) = result {
                 eprintln!("Unable to restore the existing Sanser window: {error}");
             }
+            #[cfg(debug_assertions)]
+            eprintln!("Sanser lifecycle: restore queued");
         }
     });
 }

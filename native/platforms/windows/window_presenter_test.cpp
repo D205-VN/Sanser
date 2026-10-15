@@ -1,6 +1,7 @@
 #include "window_presenter.h"
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace sanser::desktop;
