@@ -121,7 +121,7 @@ Options parseOptions(bool host, int argc, char** argv) {
     else if (arg == "--share-host") o.sharing = true;
     else if (arg == "--share-peer-id") o.viewerId = value();
     else if (arg == "--disable-input") o.input = false;
-    else if (arg == "--disable-audio") continue;
+    else if (arg == "--disable-audio") o.audio = false;
     else if (arg == "--relative-mouse") throw std::runtime_error("SNV2 currently supports absolute mouse mode; select Auto or Absolute");
     else if (arg == "--encode-pipe") { if (value() != "h264") throw std::runtime_error("Cross-platform sessions require H.264"); }
     else if (arg == "--control-port" || arg == "--audio-port") { if (number() != 0) throw std::runtime_error("SNV2 uses one authenticated socket"); }
@@ -136,6 +136,7 @@ Options parseOptions(bool host, int argc, char** argv) {
   if (o.port == 0 || o.peer.empty() || o.fps < 1 || o.fps > 120 || o.width < 64 || o.height < 64 || o.width > 3840 || o.height > 2160 || o.bitrate < 1000000 || o.bitrate > 200000000) throw std::runtime_error("Invalid native session configuration");
   if(o.sharing && (!host || o.input || o.viewerId.empty())) throw std::runtime_error("Sharing requires a host, viewer identifier and disabled input");
   if(!o.sharing && !o.viewerId.empty()) throw std::runtime_error("Viewer identifier requires sharing mode");
+  if(o.sharing) o.audio=false; // Group audio is not negotiated yet.
   o.width &= ~1U; o.height &= ~1U;
   return o;
 }
@@ -389,6 +390,9 @@ void Peer::input(const Input& input) {
   const bool reliable=input.kind!=Input::Move;
   transmit(reliable ? snv2::PacketType::Keyboard : snv2::PacketType::MouseMove,encodeInput(input),reliable ? 2 : 0,0,reliable ? snv2::kFlagAcknowledgementRequired : 0,reliable);
 }
+void Peer::audio(const AudioSamples& samples) {
+  if(audioReady()) transmit(snv2::PacketType::Audio,encodeAudio(samples));
+}
 void Peer::requestKeyframe() {
   std::lock_guard lock(keyframeRequestMutex_);
   if(!running_) return;
@@ -403,7 +407,7 @@ void Peer::process(const Bytes& bytes) {
     if(previousGenerations_.contains(h.keyId)) return;
     if(previousGenerations_.size()>=16) { running_=false; return; }
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
-    peerGeneration_=h.keyId; peerSack_=false; for(auto& window:replay_) window=ReplayWindow{};
+    peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; lastAudio_=0; for(auto& window:replay_) window=ReplayWindow{};
     reassembler_=Reassembler{}; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
     if(options_.host) { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
     if(options_.host && onInput) onInput(Input{});
@@ -414,6 +418,13 @@ void Peer::process(const Bytes& bytes) {
   const bool becameReady=!ready_.exchange(true);
   if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
+  if (options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','P','1'})) peerAudio_=true;
+  if(h.packetType==snv2::PacketType::Audio) {
+    if(!options_.host && options_.audio && h.streamId==0 && h.sequence>lastAudio_ && onAudio) {
+      if(auto samples=decodeAudio(b)) { lastAudio_=h.sequence; onAudio(std::move(*samples)); }
+    }
+    return;
+  }
   if (h.packetType==snv2::PacketType::Disconnect) { running_=false; return; }
   if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback && b.size()==12 && std::memcmp(b.data(),"SVP1",4)==0) {
     std::uint64_t completed=0; for(std::size_t i=4;i<12;++i) completed=(completed<<8)|b[i];
@@ -541,6 +552,7 @@ void Peer::sendLoop() {
             [&] { return !running_ || tx_.hasPriority() || (tx_.hasVideo() && Clock::now()>=nextVideo); });
           continue;
         }
+        if(packet->audio && now-packet->queued>std::chrono::milliseconds(40)) continue;
         if (packet->frame && now-packet->queued>std::chrono::milliseconds(options_.ultraLowLatency ? 40 : 100)) {
           if(!packet->repair) { tx_.clearVideo(); outgoingNeedsKeyframe_=true; ++videoQueueDrops_; }
           continue;
@@ -559,7 +571,13 @@ void Peer::loop() {
   try {
     while(running_ && !stopRequested) {
       const auto now=Clock::now();
-      if(now-lastHello>std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 500)) { transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'}); lastHello=now; }
+      if(now-lastHello>std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 500)) {
+        transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'});
+        // Optional authenticated capability. Old engines safely ignore it;
+        // hosts never send audio until a receiving client explicitly opts in.
+        if(!options_.host && options_.audio && onAudio) transmit(snv2::PacketType::Keepalive,Bytes{'S','A','P','1'});
+        lastHello=now;
+      }
       if(now-lastReceived_>std::chrono::milliseconds(options_.ultraLowLatency ? 1000 : 15000)) { running_=false; break; }
       { std::lock_guard lock(sendMutex_);
         for(auto& [seq,p]:pending_) {

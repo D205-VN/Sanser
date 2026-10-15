@@ -131,7 +131,8 @@
         width: size.width,
         height: size.height,
         networkMode: target.networkMode,
-        audioEnabled: target.wireProtocol !== 'snv2' && $preferences.host.audioEnabled,
+        audioEnabled: $preferences.host.audioEnabled &&
+          (target.wireProtocol !== 'snv2' || runtime.capabilities.clientAudio === true),
         inputEnabled: target.accessMode !== 'view-only' && $preferences.host.inputEnabled,
         relativeMouse: target.accessMode !== 'view-only' && target.wireProtocol !== 'snv2' && $preferences.input.mouseMode === 'relative',
         sessionToken: target.sessionToken,

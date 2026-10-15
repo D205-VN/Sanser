@@ -95,6 +95,20 @@ it('launches Auto Windows capture with room for native 16:10 text and higher mot
   }));
 });
 
+it.each([
+  { capable: true, enabled: true, audio: true },
+  { capable: true, enabled: false, audio: false },
+  { capable: false, enabled: true, audio: false }
+])('Mac SNV2 audio follows real capability and host consent: %j', async ({ capable, enabled, audio }) => {
+  const settings = structuredClone(DEFAULT_PREFERENCES);
+  settings.host.audioEnabled = enabled;
+  await preferences.save(settings);
+  mocks.sessions.mockResolvedValue({ items: [target] });
+  await host.online({ ...runtime, capabilities: { ...runtime.capabilities, hostAudio: capable } });
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ wireProtocol: 'snv2', audioEnabled: audio }));
+});
+
 it('keeps unsupported Mac hosting offline and exposes a server upgrade reason', async () => {
   mocks.register.mockRejectedValueOnce(new ApiError('Server update required', 422, 'server_upgrade_required', 'test'));
   await expect(host.online(runtime)).rejects.toMatchObject({ code: 'server_upgrade_required' });

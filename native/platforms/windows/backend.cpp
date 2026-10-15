@@ -14,6 +14,7 @@
 #include "transport.h"
 #include "broadcast.h"
 #include "decode_worker.h"
+#include "audio_player.h"
 #include "engine.h"
 #include "keyboard.h"
 #include "window_presenter.h"
@@ -256,6 +257,8 @@ int runWindows(bool host,int argc,char** argv) {
     peer.stop(); return 0;
   }
   Peer peer(options); WindowState state; state.peer=&peer; state.viewOnly=!options.input;
+  AudioPlayer audio(options.audio);
+  if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };
   // Decoder COM objects belong to the decode worker, not the socket/UI threads.
   std::unique_ptr<Runtime> runtime; std::unique_ptr<Decoder> decoder;
   DecodeWorker decode([&](Frame frame) {

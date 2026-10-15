@@ -197,8 +197,8 @@ pub fn get_runtime_status(
             cross_platform_host: host_probe.compatible && host_probe.cross_platform,
             cross_platform_client: client_probe.compatible && client_probe.cross_platform,
             multi_viewer_host: host_probe.compatible && host_probe.multi_viewer_host,
-            host_audio: false,
-            client_audio: false,
+            host_audio: host_probe.compatible && host_probe.snv2_audio,
+            client_audio: client_probe.compatible && client_probe.snv2_audio,
             host_codecs: if host_probe.hevc {
                 vec![
                     crate::models::VideoCodec::H264,

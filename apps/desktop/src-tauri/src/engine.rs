@@ -235,6 +235,8 @@ struct SidecarCapabilities {
     cross_platform: bool,
     #[serde(default)]
     multi_viewer_host: bool,
+    #[serde(default)]
+    snv2_audio_implementation: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +248,7 @@ pub struct SidecarProbe {
     pub hevc: bool,
     pub cross_platform: bool,
     pub multi_viewer_host: bool,
+    pub snv2_audio: bool,
     pub reason: Option<String>,
 }
 
@@ -258,6 +261,7 @@ impl SidecarProbe {
             hevc: false,
             cross_platform: false,
             multi_viewer_host: false,
+            snv2_audio: false,
             reason: Some(reason.into()),
         }
     }
@@ -357,6 +361,7 @@ fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
                 hevc,
                 cross_platform: capabilities.cross_platform,
                 multi_viewer_host: capabilities.multi_viewer_host,
+                snv2_audio: capabilities.snv2_audio_implementation,
                 reason: (!capabilities.native_direct).then(|| {
                     "Native sidecar does not advertise the authenticated direct transport"
                         .to_owned()
@@ -575,6 +580,9 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             }
             if cross_platform {
                 args.push("--snv2".into());
+                if !request.audio_enabled {
+                    args.push("--disable-audio".into());
+                }
             } else {
                 // Legacy Windows capture otherwise defaults to a 250 ms
                 // screenshot interval, overriding the requested stream FPS.
@@ -614,6 +622,9 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             }
             if cross_platform {
                 args.push("--snv2".into());
+                if !request.audio_enabled {
+                    args.push("--disable-audio".into());
+                }
             }
             if request.ultra_low_latency {
                 args.push("--ultra-low-latency".into());
@@ -1223,6 +1234,27 @@ mod tests {
     }
 
     #[test]
+    fn snv2_audio_respects_both_host_and_viewer_preferences() -> Result<(), DesktopError> {
+        for kind in [EngineKind::Host, EngineKind::Client] {
+            let mut value = request(kind);
+            value.wire_protocol = Some("snv2".into());
+            value.audio_enabled = true;
+            assert!(
+                !build_args(&value)?
+                    .iter()
+                    .any(|arg| arg == "--disable-audio")
+            );
+            value.audio_enabled = false;
+            assert!(
+                build_args(&value)?
+                    .iter()
+                    .any(|arg| arg == "--disable-audio")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rejects_zero_base_port() {
         let mut invalid = request(EngineKind::Client);
         invalid.port = Some(0);
@@ -1292,6 +1324,24 @@ mod tests {
         assert!(parsed.native_snv2);
         assert!(parsed.native_direct);
         assert!(parsed.hevc_decoder_implementation);
+        assert!(!parsed.snv2_audio_implementation);
+        // Existing legacy audio must not falsely advertise SNV2 support.
+        let legacy_audio = valid_json.replace(
+            "\"hevcDecoderImplementation\":true",
+            "\"hevcDecoderImplementation\":true,\"audioImplementation\":true",
+        );
+        assert!(
+            !parse_sidecar_capabilities(legacy_audio.as_bytes(), EngineKind::Client)?
+                .snv2_audio_implementation
+        );
+        let snv2_audio = valid_json.replace(
+            "\"hevcDecoderImplementation\":true",
+            "\"hevcDecoderImplementation\":true,\"snv2AudioImplementation\":true",
+        );
+        assert!(
+            parse_sidecar_capabilities(snv2_audio.as_bytes(), EngineKind::Client)?
+                .snv2_audio_implementation
+        );
 
         let wrong_engine_json = format!(
             r#"{{"product":"Sanser","version":"{version}","protocolVersion":2,"engine":"host-windows","nativeSnv2":true,"nativeDirect":true,"h264DecoderImplementation":true}}"#

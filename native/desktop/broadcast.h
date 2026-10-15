@@ -62,6 +62,7 @@ public:
   bool ready() const;
   bool running() const;
   void video(Frame frame);
+  void audio(const AudioSamples& samples);
   bool takeKeyframeRequest();
   void pumpControl();
   std::uint32_t bitrate() const;

@@ -4,6 +4,7 @@
 namespace sanser::desktop {
 #ifdef __APPLE__
 bool macHostAvailable();
+bool macSystemAudioAvailable();
 int runMac(bool host, int argc, char** argv);
 #elif defined(_WIN32)
 int runWindows(bool host, int argc, char** argv);

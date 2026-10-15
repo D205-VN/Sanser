@@ -3,6 +3,7 @@
 #include "snv2_auth.h"
 #include "tx_scheduler.h"
 #include "input_delivery_policy.h"
+#include "audio.h"
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
@@ -24,6 +25,7 @@ struct Options {
   bool host = false;
   bool ultraLowLatency = false;
   bool input = true;
+  bool audio = true;
   bool sharing = false;
   std::string viewerId;
   std::string peer;
@@ -94,9 +96,12 @@ public:
   };
   VideoFeedback videoFeedback() const;
   void input(const Input& input);
+  void audio(const AudioSamples& samples);
+  bool audioReady() const { return options_.audio && options_.host && peerAudio_ && ready_ && running_; }
   void requestKeyframe();
   std::function<void(Frame)> onFrame;
   std::function<void(Input)> onInput;
+  std::function<void(AudioSamples)> onAudio;
   std::function<void()> onKeyframe;
   std::function<void()> onStopped;
   std::function<void()> onReady;
@@ -126,6 +131,8 @@ private:
   std::condition_variable sendReady_;
   TxScheduler tx_;
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
+  std::atomic<bool> peerAudio_{false};
+  std::uint64_t lastAudio_=0;
   std::atomic<bool> videoPaused_{false};
   mutable std::mutex feedbackMutex_;
   VideoFeedback feedback_{};

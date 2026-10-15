@@ -16,13 +16,14 @@ vi.mock('../stores/presence', async () => {
   const { writable } = await import('svelte/store');
   return { presence: writable({ deviceId: 'local-client', online: true }) };
 });
-vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, engineStatus: mocks.status }));
+vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, engineStatus: mocks.status, saveNativePreferences: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../lib/p2pSignaling', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/p2pSignaling')>(), coordinateP2pConnection: mocks.punch }));
 import ActiveSession from './ActiveSession.svelte';
+import { DEFAULT_PREFERENCES, preferences } from '../stores/preferences';
 const runtime = { platform: 'macOS', capabilities: { clientEngine: { state: 'available' }, nativeDirect: { state: 'available' }, desktopShell: { state: 'available' } } } as RuntimeStatus;
 const target = { id: 'test-session', hostDeviceId: 'remote-host', requesterDeviceId: 'local-client', status: 'accepted', transport: 'native', networkMode: 'auto', qualityProfile: 'balanced', requestedCodec: 'auto' } as ConnectionSession;
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetAllMocks();
   connection.setPreparing(false);
   connection.begin(target);
@@ -35,6 +36,20 @@ beforeEach(() => {
   mocks.status.mockResolvedValue({ running: true, lastError: null });
   mocks.punch.mockResolvedValue({ localPort: 5000, remotePort: 6000, remoteAddress: '192.0.2.1' });
   mocks.launch.mockResolvedValue(undefined);
+  await preferences.save(structuredClone(DEFAULT_PREFERENCES));
+});
+
+it.each([
+  { capable: true, enabled: true, audio: true },
+  { capable: true, enabled: false, audio: false },
+  { capable: false, enabled: true, audio: false }
+])('Windows audio receiving follows capability and viewer preference: %j', async ({ capable, enabled, audio }) => {
+  const settings = structuredClone(DEFAULT_PREFERENCES); settings.host.audioEnabled = enabled;
+  await preferences.save(settings);
+  const windows = { ...runtime, platform: 'windows', capabilities: { ...runtime.capabilities, clientAudio: capable } };
+  render(ActiveSession, { runtime: windows, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ wireProtocol: 'snv2', audioEnabled: audio })));
 });
 afterEach(() => { cleanup(); connection.setPreparing(false); connection.clear(); vi.useRealTimers(); });
 

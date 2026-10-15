@@ -14,11 +14,13 @@ int main(int argc,char** argv) {
   const char* engine=host?"host-windows":"client-windows";
 #endif
   try {
+    bool audio=!host;
 #ifdef __APPLE__
+    audio=host && sanser::desktop::macSystemAudioAvailable();
     if (host && !sanser::desktop::macHostAvailable()) throw std::runtime_error("Hosting requires macOS 12.3 or newer");
 #endif
     if(argc==2 && std::string_view(argv[1])=="--capabilities-json") {
-      std::cout<<"{\"product\":\"Sanser\",\"version\":\""<<sanser::kVersion<<"\",\"protocolVersion\":2,\"engine\":\""<<engine<<"\",\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,\"multiViewerHost\":"<<(host?"true":"false")<<",\"h264EncoderImplementation\":"<<(host?"true":"false")<<",\"h264DecoderImplementation\":"<<(host?"false":"true")<<",\"hevcEncoderImplementation\":false,\"hevcDecoderImplementation\":false,\"audioImplementation\":false,\"inputImplementation\":true}\n"; return 0;
+      std::cout<<"{\"product\":\"Sanser\",\"version\":\""<<sanser::kVersion<<"\",\"protocolVersion\":2,\"engine\":\""<<engine<<"\",\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,\"multiViewerHost\":"<<(host?"true":"false")<<",\"h264EncoderImplementation\":"<<(host?"true":"false")<<",\"h264DecoderImplementation\":"<<(host?"false":"true")<<",\"hevcEncoderImplementation\":false,\"hevcDecoderImplementation\":false,\"audioImplementation\":"<<(audio?"true":"false")<<",\"snv2AudioImplementation\":"<<(audio?"true":"false")<<",\"inputImplementation\":true}\n"; return 0;
     }
 #ifdef __APPLE__
     return sanser::desktop::runMac(host,argc,argv);

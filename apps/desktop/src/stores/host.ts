@@ -207,7 +207,8 @@ export function createHostStore(): HostStore {
         width: size.width,
         height: size.height,
         networkMode: request.networkMode,
-        audioEnabled: credentials.wireProtocol !== 'snv2' && settings.host.audioEnabled,
+        audioEnabled: settings.host.audioEnabled &&
+          (credentials.wireProtocol !== 'snv2' || runtimeForHost.capabilities.hostAudio === true),
         inputEnabled: settings.host.inputEnabled && request.accessMode !== 'view-only' && credentials.accessMode !== 'view-only',
         relativeMouse: false,
         sessionToken: credentials.sessionToken,

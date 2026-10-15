@@ -17,9 +17,14 @@ public:
     std::chrono::steady_clock::time_point queued;
     std::uint64_t frame = 0;
     bool repair = false;
+    bool audio = false;
   };
   bool push(Lane lane, Packet packet) {
     packet.repair=lane==Repair;
+    packet.audio=lane==Audio;
+    // Audio is disposable. Drop the oldest block, never terminate a keyboard
+    // session or accumulate seconds of sound when the network is congested.
+    if(lane==Audio && queues_[lane].size()>=8) (void)take(lane);
     const std::size_t limit = lane == Video ? 5 * 1024 * 1024 : 256 * 1024;
     if (bytes_[lane] + packet.bytes.size() > limit) return false;
     bytes_[lane] += packet.bytes.size();

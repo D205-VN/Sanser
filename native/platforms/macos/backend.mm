@@ -7,6 +7,7 @@
 #include "broadcast.h"
 #include "engine.h"
 #include "capture_startup.h"
+#include "audio_capture.h"
 #import "metal_presenter.h"
 #include "keyboard.h"
 #include <algorithm>
@@ -163,11 +164,16 @@ private:
 API_AVAILABLE(macos(12.3))
 @interface SanserCapture : NSObject <SCStreamOutput,SCStreamDelegate>
 @property(nonatomic,assign) Encoder* encoder;
+@property(nonatomic,assign) AudioPacketizer* audio;
 @property(atomic,assign) BOOL failed;
 @end
 @implementation SanserCapture
 - (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
-  (void)stream; if(type!=SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample) || !self.encoder) return;
+  (void)stream;
+  if(@available(macOS 13.0,*)) {
+    if(type==SCStreamOutputTypeAudio) { if(self.audio) captureSystemAudio(sample,*self.audio); return; }
+  }
+  if(type!=SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample) || !self.encoder) return;
   auto image=CMSampleBufferGetImageBuffer(sample); if(image) self.encoder->encode(image,CMSampleBufferGetPresentationTimeStamp(sample));
 }
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error { (void)stream; std::cerr<<captureFailure(error,"Screen capture stopped")<<std::endl; self.failed=YES; }
@@ -220,12 +226,15 @@ API_AVAILABLE(macos(12.3))
 
 namespace sanser::desktop {
 bool macHostAvailable() { if (@available(macOS 12.3, *)) return true; return false; }
+bool macSystemAudioAvailable() { if (@available(macOS 13.0, *)) return true; return false; }
 struct API_AVAILABLE(macos(12.3)) CaptureStop {
   SCStream* __strong stream;
   SanserCapture* __strong capture;
   dispatch_queue_t queue;
+  dispatch_queue_t audioQueue;
   ~CaptureStop() {
     dispatch_sync(queue, ^{ capture.encoder=nullptr; });
+    dispatch_sync(audioQueue, ^{ capture.audio=nullptr; });
     [stream stopCaptureWithCompletionHandler:^(NSError*) {}];
   }
 };
@@ -387,14 +396,26 @@ int runMac(bool host,int argc,char** argv) {
         options.width=std::max(64U,static_cast<std::uint32_t>(display.width*scale)&~1U);
         options.height=std::max(64U,static_cast<std::uint32_t>(display.height*scale)&~1U);
         HostOutput peer(options); Encoder encoder(options,peer); Injector injector(display.displayID);
+        AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
         peer.onInput=[&](Input event) { injector.apply(event); };
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
+        capture.audio=&audio;
         SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
         SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3; config.showsCursor=options.sharing ? NO : YES; config.pixelFormat=kCVPixelFormatType_32BGRA;
+        if(@available(macOS 13.0,*)) {
+          config.capturesAudio=options.audio && !options.sharing;
+          config.sampleRate=audioRate; config.channelCount=audioChannels;
+          config.excludesCurrentProcessAudio=YES;
+        }
         SCStream* stream=[[SCStream alloc] initWithFilter:filter configuration:config delegate:capture];
         dispatch_queue_t queue=dispatch_queue_create("sanser.capture",DISPATCH_QUEUE_SERIAL);
-        CaptureStop captureStop{stream,capture,queue};
+        dispatch_queue_t audioQueue=dispatch_queue_create("sanser.audio.capture",DISPATCH_QUEUE_SERIAL);
+        CaptureStop captureStop{stream,capture,queue,audioQueue};
         NSError* failure=nil; if(![stream addStreamOutput:capture type:SCStreamOutputTypeScreen sampleHandlerQueue:queue error:&failure]) throw std::runtime_error(failure ? captureFailure(failure,"Create screen capture output") : "Unable to create screen capture output");
+        if(@available(macOS 13.0,*)) {
+          if(config.capturesAudio && ![stream addStreamOutput:capture type:SCStreamOutputTypeAudio sampleHandlerQueue:audioQueue error:&failure])
+            throw std::runtime_error(failure ? captureFailure(failure,"Create system audio output") : "Unable to create system audio output");
+        }
         // Stream startup gets its own deadline, independent of time spent on
         // display enumeration or the user's permission dialog.
         awaitCaptureOperation([&](CaptureCompletion complete) {
