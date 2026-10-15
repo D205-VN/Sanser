@@ -147,10 +147,21 @@ int main() {
       const auto pauseCheck=Clock::now()+std::chrono::seconds(1);
       while(Clock::now()<pauseCheck) {
         group.updateHealth();
-        group.publish(Frame{Bytes(20000,0x5d),1280,720,group.takeKeyframeRequest()});
+        (void)group.takeKeyframeRequest();
+        // This phase tests isolation, not reference-chain recovery (covered
+        // above). Independent small IDRs keep a delayed/lost synthetic P-frame
+        // from making the one-second assertion depend on a two-second repair
+        // cooldown on a busy CI runner. A paused healthy peer would still fail.
+        group.publish(Frame{Bytes(2500,0x5d),1280,720,true});
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
       require(healthy.peer->ready() && slow.peer->ready(),"pause retains authenticated control/keepalives for both viewers");
+      if(count(healthy)<=healthyBefore+20) {
+        for(const auto& peer:group.stats()) std::cerr<<"Isolation peer="<<peer.id<<" state="<<peer.videoState
+          <<" ready="<<peer.ready<<" submitted="<<peer.submitted<<" dispatched="<<peer.dispatched
+          <<" replaced="<<peer.replaced<<" referenceDrops="<<peer.referenceDrops
+          <<" sendQueueDrops="<<peer.sendQueueDrops<<" keyframes="<<peer.keyframeRequests<<'\n';
+      }
       require(count(healthy)>healthyBefore+20,"healthy viewer continues while slow viewer is paused");
       for(const auto& peer:group.stats()) if(peer.id=="isolated-slow") {
         require(peer.dispatched<=dispatched+1,"paused delivery stops dispatching new video");
