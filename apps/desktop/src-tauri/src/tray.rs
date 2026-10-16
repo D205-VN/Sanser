@@ -35,16 +35,23 @@ pub(crate) fn show_main(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         #[cfg(debug_assertions)]
         eprintln!("Sanser lifecycle: restore worker started");
-        if let Some(window) = app.get_webview_window("main") {
-            let result = window
-                .show()
-                .and_then(|()| window.unminimize())
-                .and_then(|()| window.set_focus());
-            if let Err(error) = result {
-                eprintln!("Unable to restore the existing Sanser window: {error}");
+        let handle = app.clone();
+        // Apply the three operations in one event-loop turn. Separate queued
+        // operations could unminimize a window after its next minimize action.
+        if let Err(error) = app.run_on_main_thread(move || {
+            if let Some(window) = handle.get_webview_window("main") {
+                let result = window
+                    .show()
+                    .and_then(|()| window.unminimize())
+                    .and_then(|()| window.set_focus());
+                if let Err(error) = result {
+                    eprintln!("Unable to restore the existing Sanser window: {error}");
+                }
+                #[cfg(debug_assertions)]
+                eprintln!("Sanser lifecycle: restore completed");
             }
-            #[cfg(debug_assertions)]
-            eprintln!("Sanser lifecycle: restore queued");
+        }) {
+            eprintln!("Unable to queue restoration of the Sanser window: {error}");
         }
     });
 }

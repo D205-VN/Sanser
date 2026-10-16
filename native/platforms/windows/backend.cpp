@@ -95,20 +95,40 @@ private:
   long left_,top_; std::uint32_t width_,height_; std::set<std::uint16_t> keys_,buttons_;
 };
 struct Image { Bytes pixels; std::uint32_t width=0,height=0; };
-struct Nv12Image { Bytes pixels; std::uint32_t width=0,height=0,stride=0; };
+struct Nv12Image { Bytes pixels; std::uint32_t width=0,height=0,stride=0,rows=0,left=0,top=0; };
 Image convertNv12(const Nv12Image& source) {
   const auto width=source.width,height=source.height,stride=source.stride;
+  if(!width || !height || source.left+width>stride || source.top+height>source.rows || source.rows%2
+      || source.pixels.size()<static_cast<std::size_t>(stride)*source.rows*3/2)
+    throw std::runtime_error("Invalid NV12 display aperture");
   Image image{Bytes(static_cast<std::size_t>(width)*height*4),width,height};
   const auto* data=source.pixels.data();
   auto clamp=[](int n) { return static_cast<std::uint8_t>(std::clamp(n,0,255)); };
   for(std::uint32_t y=0;y<height;++y) for(std::uint32_t x=0;x<width;++x) {
-    const int luminance=static_cast<int>(data[static_cast<std::size_t>(y)*stride+x])-16;
-    const auto uv=static_cast<std::size_t>(stride)*height+static_cast<std::size_t>(y/2)*stride+(x&~1U);
+    const auto px=x+source.left,py=y+source.top;
+    const int luminance=static_cast<int>(data[static_cast<std::size_t>(py)*stride+px])-16;
+    const auto uv=static_cast<std::size_t>(stride)*source.rows+static_cast<std::size_t>(py/2)*stride+(px&~1U);
     const int u=static_cast<int>(data[uv])-128,v=static_cast<int>(data[uv+1])-128;
     const auto offset=(static_cast<std::size_t>(y)*width+x)*4;
     image.pixels[offset]=clamp((298*luminance+516*u+128)>>8); image.pixels[offset+1]=clamp((298*luminance-100*u-208*v+128)>>8); image.pixels[offset+2]=clamp((298*luminance+409*v+128)>>8); image.pixels[offset+3]=255;
   }
   return image;
+}
+void setDisplayAperture(IMFMediaType* type,Nv12Image& image,std::uint32_t codedWidth,std::uint32_t codedHeight) {
+  image.width=codedWidth; image.height=codedHeight; image.rows=codedHeight;
+  // MF_MT_FRAME_SIZE includes H.264 macroblock padding (e.g. 1846 -> 1856).
+  // UV still starts after all coded rows, even when only a smaller aperture
+  // is displayed. Keep its storage geometry separate from visible dimensions.
+  for(const auto& key:{MF_MT_MINIMUM_DISPLAY_APERTURE,MF_MT_GEOMETRIC_APERTURE}) {
+    MFVideoArea area{}; UINT32 size=0;
+    if(FAILED(type->GetBlob(key,reinterpret_cast<UINT8*>(&area),sizeof(area),&size)) || size!=sizeof(area)) continue;
+    if(area.OffsetX.value<0 || area.OffsetY.value<0 || area.Area.cx<=0 || area.Area.cy<=0
+        || static_cast<std::uint32_t>(area.OffsetX.value)+static_cast<std::uint32_t>(area.Area.cx)>codedWidth
+        || static_cast<std::uint32_t>(area.OffsetY.value)+static_cast<std::uint32_t>(area.Area.cy)>codedHeight)
+      throw std::runtime_error("Invalid decoder display aperture");
+    image.left=static_cast<std::uint32_t>(area.OffsetX.value); image.top=static_cast<std::uint32_t>(area.OffsetY.value);
+    image.width=static_cast<std::uint32_t>(area.Area.cx); image.height=static_cast<std::uint32_t>(area.Area.cy); return;
+  }
 }
 class Decoder {
 public:
@@ -160,9 +180,10 @@ private:
       if(width<64||height<64||width>3840||height>2160||width%2||height%2) throw std::runtime_error("Invalid decoded dimensions");
       UINT32 strideValue=width; type_->GetUINT32(MF_MT_DEFAULT_STRIDE,&strideValue); const auto stride=static_cast<LONG>(strideValue);
       if(stride<static_cast<LONG>(width)||stride>16384) throw std::runtime_error("Invalid decoder stride");
+      Nv12Image image; image.stride=static_cast<std::uint32_t>(stride); setDisplayAperture(type_.Get(),image,width,height);
       BYTE* data=nullptr; DWORD size=0; check(buffer->Lock(&data,nullptr,&size),"Lock decoded frame");
       if(static_cast<std::size_t>(size)<static_cast<std::size_t>(stride)*height*3/2) { buffer->Unlock(); throw std::runtime_error("Truncated decoded image"); }
-      Nv12Image image{Bytes(data,data+static_cast<std::size_t>(stride)*height*3/2),width,height,static_cast<std::uint32_t>(stride)};
+      image.pixels.assign(data,data+static_cast<std::size_t>(stride)*height*3/2);
       buffer->Unlock(); output_(std::move(image)); if(!reported_) { reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; }
     }
   }
@@ -267,6 +288,16 @@ void testWindowsInput() {
   std::cout<<"Windows input: resume click, keyboard fallback, keypad, focus reset and view-only enforcement passed\n";
 }
 void testWindowsMacFixture(const char* path) {
+  // A padded/cropped decoder surface must use coded height for the UV plane,
+  // not the smaller display height, and must not paint macroblock padding.
+  Nv12Image padded{Bytes(8*6*3/2,128),2,2,8,6,2,2};
+  std::fill(padded.pixels.begin(),padded.pixels.begin()+8*6,16);
+  for(unsigned y=2;y<4;++y) for(unsigned x=2;x<4;++x) padded.pixels[y*8+x]=41;
+  padded.pixels[8*6+8+2]=240; padded.pixels[8*6+8+3]=110;
+  const auto cropped=convertNv12(padded);
+  for(std::size_t pixel=0;pixel<cropped.pixels.size();pixel+=4)
+    if(cropped.pixels[pixel]<240 || cropped.pixels[pixel+1]>10 || cropped.pixels[pixel+2]>10)
+      throw std::runtime_error("Padded NV12 conversion used the wrong image/chroma aperture");
   std::ifstream file(path,std::ios::binary);
   const auto read=[&]() { std::uint32_t value=0; for(unsigned i=0;i<4;++i) { const auto c=file.get(); if(c==EOF) throw std::runtime_error("Truncated Mac fixture"); value=(value<<8)|static_cast<unsigned char>(c); } return value; };
   char magic[4]{}; file.read(magic,4); if(std::string(magic,4)!="SVC1") throw std::runtime_error("Invalid Mac fixture");

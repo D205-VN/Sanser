@@ -94,6 +94,7 @@ try {
         if (-not $secondary.WaitForExit(30000)) { throw "Second launch timed out; originalVisible=$([SanserWindowSmoke]::IsWindowVisible($window)); secondaryPID=$($secondary.Id)" }
         if ($secondary.ExitCode -ne 0) { throw "Second launch returned exit code $($secondary.ExitCode)" }
         Wait-Until { [SanserWindowSmoke]::IsWindowVisible($window) } 'Second launch did not restore the original window'
+        Wait-Until { @(Select-String -Path $logs[0] -SimpleMatch 'Sanser lifecycle: restore completed').Count -ge $attempt } 'Window restoration did not finish'
         $primary.Refresh()
         if ($primary.HasExited) { throw 'Restoring the window replaced the original process' }
         $instances = @(Get-Process -Name sanser | Where-Object { $_.Path -eq $executable })
