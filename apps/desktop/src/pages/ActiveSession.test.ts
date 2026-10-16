@@ -50,8 +50,31 @@ it.each([
   render(ActiveSession, { runtime: windows, navigate: vi.fn() });
   await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
   await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ wireProtocol: 'snv2', audioEnabled: audio })));
+  expect(screen.queryByText('Sound is unavailable for this connection.')).not.toBeInTheDocument();
+  if(capable) expect(screen.queryByText('This viewer does not support sound for this connection yet.')).not.toBeInTheDocument();
+  else expect(screen.getByText('This viewer does not support sound for this connection yet.')).toBeInTheDocument();
 });
 afterEach(() => { cleanup(); connection.setPreparing(false); connection.clear(); vi.useRealTimers(); });
+
+it('explains video-only group sharing and never opts a group viewer into audio', async () => {
+  const viewer = { ...target, sharingId: 'group', wireProtocol: 'snv2' as const, accessMode: 'view-only' as const };
+  connection.begin(viewer); mocks.getSession.mockResolvedValue(viewer);
+  render(ActiveSession, { runtime: { ...runtime, capabilities: { ...runtime.capabilities, clientAudio: true } }, navigate: vi.fn() });
+  expect(screen.getByText('Multi-computer sharing currently sends video only. Sound is not included.')).toBeInTheDocument();
+  expect(screen.queryByText('Sound is unavailable for this connection.')).not.toBeInTheDocument();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ audioEnabled: false, inputEnabled: false })));
+});
+
+it('does not report unavailable audio for the legacy Mac to Windows connection', async () => {
+  const legacy = { ...target, wireProtocol: 'legacy' as const };
+  connection.begin(legacy); mocks.getSession.mockResolvedValue(legacy);
+  mocks.credentials.mockResolvedValue({ sessionId: target.id, peerRouteAddress: '192.0.2.1', basePort: 5000, sessionToken: 'test-only-token', expiresAt: 9999999999, wireProtocol: 'legacy' });
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  expect(screen.queryByText(/does not support sound/)).not.toBeInTheDocument();
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ audioEnabled: true })));
+});
 
 it('keeps a view-only session input-disabled even if credential metadata omits the restriction', async () => {
   const viewer = { ...target, accessMode: 'view-only' as const };

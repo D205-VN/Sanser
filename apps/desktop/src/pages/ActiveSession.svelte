@@ -29,6 +29,8 @@
 
   const sessionState = $derived($connection.session);
   const metrics = $derived($connection.metrics);
+  const sharingWithoutSound = $derived(sessionState?.wireProtocol === 'snv2' && !!sessionState.sharingId);
+  const soundUnavailable = $derived(sessionState?.wireProtocol === 'snv2' && !sharingWithoutSound && runtime.capabilities.clientAudio !== true);
   const nativeReady = $derived(
     sessionState?.status === 'accepted' &&
       runtime.capabilities.clientEngine.state === 'available' &&
@@ -132,6 +134,7 @@
         height: size.height,
         networkMode: target.networkMode,
         audioEnabled: $preferences.host.audioEnabled &&
+          !target.sharingId &&
           (target.wireProtocol !== 'snv2' || runtime.capabilities.clientAudio === true),
         inputEnabled: target.accessMode !== 'view-only' && $preferences.host.inputEnabled,
         relativeMouse: target.accessMode !== 'view-only' && target.wireProtocol !== 'snv2' && $preferences.input.mouseMode === 'relative',
@@ -395,8 +398,13 @@
       <li class:complete={metrics !== null}><span>03</span><div><strong>Remote desktop</strong><small>{metrics ? 'Screen data received' : $connection.engineRunning ? 'Check the remote window' : 'Not started'}</small></div></li>
     </ol>
   {/if}
-  {#if sessionState?.wireProtocol === 'snv2'}
-    <div class="notice">Sound is unavailable for this connection.{#if $preferences.input.mouseMode === 'relative'} Relative mouse capture is also unavailable.{/if}</div>
+  {#if sharingWithoutSound}
+    <div class="notice">Multi-computer sharing currently sends video only. Sound is not included.</div>
+  {:else if soundUnavailable}
+    <div class="notice">This viewer does not support sound for this connection yet.</div>
+  {/if}
+  {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && $preferences.input.mouseMode === 'relative'}
+    <div class="notice">This connection uses absolute mouse control. Relative mouse capture is not supported yet.</div>
   {/if}
   <div class="stream-stage" class:has-metrics={metrics !== null}>
     {#if $connection.engineRunning}

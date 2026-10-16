@@ -41,8 +41,22 @@ These reports retain at most 120 samples shared across metric sources. The
 percentiles describe **only retained Wire samples**, not the complete session.
 In particular, the second report contains occasional high RTT even in 2.2.1.
 The host-role 2.2.4 probe is not a matched Mac-client live RTT comparison.
-No saved 2.2.7 live client report was available in the inspected report directory;
-the user's current 199 ms observation remains to be captured and compared.
+At the initial inspection no 2.2.7 live client report was available. A subsequent
+read-only inspection on Oct 16 recovered the following newer client reports:
+
+| Local start (+07) | Version | Route | Retained Wire samples | Wire P50 / P95 | UDP echo residual P50 | Probe median |
+| --- | --- | --- | --- | --- | --- | --- |
+| Oct 16 10:09 | 2.2.1 | Direct | 14 | 184.2 / 515.1 ms | 185.1 ms | 180.23 ms |
+| Oct 16 10:09 | 2.2.1 | Direct | 11 | 186.0 / 246.1 ms | 181.3 ms | 186.92 ms |
+| Oct 16 10:12 | 2.2.7 | Direct | 15 | 185.6 / 385.1 ms | 186.2 ms | 189.68 ms |
+
+Measured application send/receive/control queues were around 0–0.1 ms at P50.
+The user's screenshot independently shows UDP echo 183.2 ms, host echo hold
+0.0 ms and Wire estimate 182.3 ms. Thus the newer test environment has high RTT
+even in 2.2.1, and the selected path was already slow during nomination. This
+does not prove a specific network cause or rule out all OS/socket effects; it
+does invalidate treating the old 10–15 ms run as a controlled version-only A/B.
+The later sanitized local snapshot is `/private/tmp/sanser-oct16-latency.json`.
 
 Existing reports do not persist the selected candidate endpoints, protocol or
 peer engine version. "Direct" alone cannot distinguish physical LAN, public

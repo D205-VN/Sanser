@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.2.8"
+version = "2.2.9"
 edition = "2024"
 license = "LicenseRef-Proprietary"
 license-file = "LICENSE"

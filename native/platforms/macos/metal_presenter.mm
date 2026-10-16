@@ -2,6 +2,7 @@
 #import <CoreImage/CoreImage.h>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -99,7 +100,9 @@ void renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> tex
 
 #ifdef SANSER_CODEC_TEST
 namespace sanser::desktop {
-void testMacMetalPresenter() {
+// The asymmetric source has a red upper half and blue lower half. Also run
+// this against the actual VideoToolbox decoded buffer, not just raw BGRA.
+void testMacMetalDecodedFrame(CVPixelBufferRef pixels) {
   @autoreleasepool {
     id<MTLDevice> device=MTLCreateSystemDefaultDevice();
     if(!device) throw std::runtime_error("Metal presentation test requires a GPU");
@@ -110,30 +113,18 @@ void testMacMetalPresenter() {
     descriptor.storageMode=MTLStorageModeShared;
     id<MTLTexture> texture=[device newTextureWithDescriptor:descriptor];
     if(!texture) throw std::runtime_error("Unable to create Metal test texture");
-    CVPixelBufferRef pixels=nullptr;
-    const auto status=CVPixelBufferCreate(nullptr,64,32,kCVPixelFormatType_32BGRA,
-      (__bridge CFDictionaryRef)@{(__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey:@{}},&pixels);
-    if(status!=kCVReturnSuccess) throw std::runtime_error("Unable to create presenter test image");
-    CVPixelBufferLockBaseAddress(pixels,0);
-    auto* data=static_cast<unsigned char*>(CVPixelBufferGetBaseAddress(pixels));
-    const auto stride=CVPixelBufferGetBytesPerRow(pixels);
-    for(unsigned y=0;y<32;++y) for(unsigned x=0;x<64;++x) {
-      auto* pixel=data+y*stride+x*4;
-      pixel[0]=y<16 ? 30 : 200; pixel[1]=100; pixel[2]=y<16 ? 200 : 30; pixel[3]=255;
-    }
-    CVPixelBufferUnlockBaseAddress(pixels,0);
     auto colorSpace=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     id<MTLCommandBuffer> command=[queue commandBuffer];
     renderFrame(context,pixels,texture,command,colorSpace);
     [command commit]; [command waitUntilCompleted];
-    CVPixelBufferRelease(pixels); CGColorSpaceRelease(colorSpace);
+    CGColorSpaceRelease(colorSpace);
     if(command.status!=MTLCommandBufferStatusCompleted) throw std::runtime_error("Metal presentation failed");
     std::vector<unsigned char> result(64*64*4);
     [texture getBytes:result.data() bytesPerRow:64*4 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];
     for(unsigned y : {20U,44U}) {
       const auto* pixel=result.data()+(y*64+32)*4;
       const int blue=y<32 ? 30 : 200, red=y<32 ? 200 : 30;
-      if(std::abs(static_cast<int>(pixel[0])-blue)>5 || std::abs(static_cast<int>(pixel[1])-100)>5 || std::abs(static_cast<int>(pixel[2])-red)>5)
+      if(std::abs(static_cast<int>(pixel[0])-blue)>25 || std::abs(static_cast<int>(pixel[1])-100)>25 || std::abs(static_cast<int>(pixel[2])-red)>25)
         throw std::runtime_error("Metal presenter changed pixel colors or orientation");
     }
     for(unsigned y : {0U,63U}) {
@@ -141,6 +132,23 @@ void testMacMetalPresenter() {
       if(bar[0]!=0 || bar[1]!=0 || bar[2]!=0) throw std::runtime_error("Metal presenter did not preserve aspect ratio");
     }
   }
+}
+void testMacMetalPresenter() {
+  CVPixelBufferRef pixels=nullptr;
+  const auto status=CVPixelBufferCreate(nullptr,64,32,kCVPixelFormatType_32BGRA,
+    (__bridge CFDictionaryRef)@{(__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey:@{}},&pixels);
+  if(status!=kCVReturnSuccess) throw std::runtime_error("Unable to create presenter test image");
+  const auto release=[](CVPixelBufferRef p) { CVPixelBufferRelease(p); };
+  std::unique_ptr<__CVBuffer,decltype(release)> owner(pixels,release);
+  CVPixelBufferLockBaseAddress(pixels,0);
+  auto* data=static_cast<unsigned char*>(CVPixelBufferGetBaseAddress(pixels));
+  const auto stride=CVPixelBufferGetBytesPerRow(pixels);
+  for(unsigned y=0;y<32;++y) for(unsigned x=0;x<64;++x) {
+    auto* pixel=data+y*stride+x*4;
+    pixel[0]=y<16 ? 30 : 200; pixel[1]=100; pixel[2]=y<16 ? 200 : 30; pixel[3]=255;
+  }
+  CVPixelBufferUnlockBaseAddress(pixels,0);
+  testMacMetalDecodedFrame(pixels);
 }
 }
 #endif

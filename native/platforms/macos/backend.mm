@@ -200,23 +200,43 @@ API_AVAILABLE(macos(12.3))
 
 @interface SanserSnv2RemoteView : SanserSnv2MetalView
 @property(nonatomic,assign) Peer* peer;
+@property(nonatomic,assign) BOOL inputEnabled;
 @property(nonatomic,assign) BOOL released;
+- (void)sendInput:(Input)input;
 - (void)pointer:(NSEvent*)event kind:(Input::Kind)kind down:(BOOL)down;
 @end
 @implementation SanserSnv2RemoteView
-- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)acceptsFirstResponder { return self.inputEnabled; }
+- (void)sendInput:(Input)input { if(self.inputEnabled && self.peer) self.peer->input(input); }
 - (void)pointer:(NSEvent*)event kind:(Input::Kind)kind down:(BOOL)down {
-  if(!self.peer || self.released || self.imageSize.width<=0 || self.imageSize.height<=0) return;
+  if(!self.inputEnabled || self.released || self.imageSize.width<=0 || self.imageSize.height<=0 || self.bounds.size.width<=0 || self.bounds.size.height<=0) return;
   auto point=[self convertPoint:event.locationInWindow fromView:nil]; const auto bounds=self.bounds;
   const auto size=self.imageSize; const auto scale=std::min(bounds.size.width/size.width,bounds.size.height/size.height);
   const auto width=size.width*scale,height=size.height*scale; point.x-=(bounds.size.width-width)/2; point.y-=(bounds.size.height-height)/2;
-  Input input; input.kind=kind; input.x=static_cast<std::uint16_t>(std::clamp(point.x/width,0.0,1.0)*65535); input.y=static_cast<std::uint16_t>((1-std::clamp(point.y/height,0.0,1.0))*65535); input.down=down; input.code=static_cast<std::uint16_t>(std::min<NSInteger>(event.buttonNumber,2));
-  input.delta=static_cast<std::int16_t>(std::clamp(event.scrollingDeltaY,-120.0,120.0)); self.peer->input(input);
+  const double y=std::clamp(point.y/height,0.0,1.0);
+  Input input; input.kind=kind; input.x=static_cast<std::uint16_t>(std::clamp(point.x/width,0.0,1.0)*65535); input.y=static_cast<std::uint16_t>((self.isFlipped ? y : 1-y)*65535); input.down=down;
+  // AppKit asserts if a scroll-only property is read on a mouse-move/button
+  // event. View-only must return before inspecting any input-only fields too.
+  if(kind==Input::Scroll) {
+    if(event.type!=NSEventTypeScrollWheel) return;
+    input.delta=static_cast<std::int16_t>(std::clamp(event.scrollingDeltaY,-120.0,120.0));
+  } else if(kind==Input::Button) {
+    switch(event.type) {
+      case NSEventTypeLeftMouseDown: case NSEventTypeLeftMouseUp: input.code=0; break;
+      case NSEventTypeRightMouseDown: case NSEventTypeRightMouseUp: input.code=1; break;
+      case NSEventTypeOtherMouseDown: case NSEventTypeOtherMouseUp:
+        if(event.buttonNumber!=2) return;
+        input.code=2; break;
+      default: return;
+    }
+  }
+  [self sendInput:input];
 }
 - (void)mouseMoved:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
 - (void)mouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
 - (void)rightMouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
-- (void)mouseDown:(NSEvent*)event { if(self.released) { self.released=NO; self.window.title=@"Sanser · Remote desktop · Control+Option+Escape releases input"; } [self.window makeFirstResponder:self]; [self pointer:event kind:Input::Button down:YES]; }
+- (void)otherMouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
+- (void)mouseDown:(NSEvent*)event { if(!self.inputEnabled) return; if(self.released) { self.released=NO; self.window.title=@"Sanser · Remote desktop · Control+Option+Escape releases input"; } [self.window makeFirstResponder:self]; [self pointer:event kind:Input::Button down:YES]; }
 - (void)mouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
 - (void)rightMouseDown:(NSEvent*)event { [self pointer:event kind:Input::Button down:YES]; }
 - (void)rightMouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
@@ -224,16 +244,29 @@ API_AVAILABLE(macos(12.3))
 - (void)otherMouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
 - (void)scrollWheel:(NSEvent*)event { [self pointer:event kind:Input::Scroll down:NO]; }
 - (void)keyDown:(NSEvent*)event {
-  if(event.keyCode==53 && (event.modifierFlags & NSEventModifierFlagControl) && (event.modifierFlags & NSEventModifierFlagOption)) { self.released=YES; if(self.peer) self.peer->input(Input{}); self.window.title=@"Sanser · Input released · Click the stream to resume"; return; }
-  if(self.released || !self.peer) return; const auto hid=hidFromMac(event.keyCode); if(hid) self.peer->input(Input{Input::Key,0,0,hid,0,true});
+  if(!self.inputEnabled) return;
+  if(event.keyCode==53 && (event.modifierFlags & NSEventModifierFlagControl) && (event.modifierFlags & NSEventModifierFlagOption)) { self.released=YES; [self sendInput:Input{}]; self.window.title=@"Sanser · Input released · Click the stream to resume"; return; }
+  if(self.released) return; const auto hid=hidFromMac(event.keyCode); if(hid) [self sendInput:Input{Input::Key,0,0,hid,0,true}];
 }
-- (void)keyUp:(NSEvent*)event { if(!self.released && self.peer) { const auto hid=hidFromMac(event.keyCode); if(hid) self.peer->input(Input{Input::Key,0,0,hid,0,false}); } }
+- (void)keyUp:(NSEvent*)event { if(self.inputEnabled && !self.released) { const auto hid=hidFromMac(event.keyCode); if(hid) [self sendInput:Input{Input::Key,0,0,hid,0,false}]; } }
 - (void)flagsChanged:(NSEvent*)event {
-  if(self.released || !self.peer) return; const auto hid=hidFromMac(event.keyCode); NSEventModifierFlags flag=0;
+  if(!self.inputEnabled || self.released) return; const auto hid=hidFromMac(event.keyCode); NSEventModifierFlags flag=0;
   if(hid==224||hid==228) flag=NSEventModifierFlagControl; if(hid==225||hid==229) flag=NSEventModifierFlagShift; if(hid==226||hid==230) flag=NSEventModifierFlagOption; if(hid==227||hid==231) flag=NSEventModifierFlagCommand;
-  if(flag) self.peer->input(Input{Input::Key,0,0,hid,0,(event.modifierFlags&flag)!=0});
+  if(flag) [self sendInput:Input{Input::Key,0,0,hid,0,(event.modifierFlags&flag)!=0}];
 }
 @end
+
+#ifdef SANSER_CODEC_TEST
+// Exercise the real AppKit callbacks without sending packets or OS input.
+@interface SanserSnv2InputTestView : SanserSnv2RemoteView {
+@public
+  std::vector<Input> events;
+}
+@end
+@implementation SanserSnv2InputTestView
+- (void)sendInput:(Input)input { events.push_back(input); }
+@end
+#endif
 
 namespace sanser::desktop {
 bool macHostAvailable() { if (@available(macOS 12.3, *)) return true; return false; }
@@ -341,13 +374,48 @@ void writeMacInteropFixture(const char* path) {
 void testMacRemoteView() {
   @autoreleasepool {
     [NSApplication sharedApplication];
-    SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:NSMakeRect(0,0,320,200)];
+    SanserSnv2InputTestView* view=[[SanserSnv2InputTestView alloc] initWithFrame:NSMakeRect(0,0,320,200)];
     if(![view respondsToSelector:@selector(presentPixels:)] || ![view respondsToSelector:@selector(imageSize)])
       throw std::runtime_error("SNV2 presenter resolved to a legacy class without presentPixels:/imageSize");
     CVPixelBufferRef pixels=nullptr;
     requireStatus(CVPixelBufferCreate(nullptr,64,32,kCVPixelFormatType_32BGRA,nullptr,&pixels),"Create presenter regression frame");
     [view presentPixels:pixels]; CVPixelBufferRelease(pixels);
     if(view.imageSize.width!=64 || view.imageSize.height!=32) throw std::runtime_error("SNV2 view did not retain the decoded frame");
+    const auto mouse=[](NSEventType type) {
+      return [NSEvent mouseEventWithType:type location:NSMakePoint(160,100) modifierFlags:0 timestamp:0 windowNumber:0 context:nil eventNumber:1 clickCount:1 pressure:1];
+    };
+    auto move=mouse(NSEventTypeMouseMoved),left=mouse(NSEventTypeLeftMouseDown),up=mouse(NSEventTypeLeftMouseUp);
+    auto right=mouse(NSEventTypeRightMouseDown),drag=mouse(NSEventTypeLeftMouseDragged);
+    CGEventRef scrollEvent=CGEventCreateScrollWheelEvent(nullptr,kCGScrollEventUnitLine,1,3);
+    NSEvent* scroll=[NSEvent eventWithCGEvent:scrollEvent]; CFRelease(scrollEvent);
+    auto key=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"a" charactersIgnoringModifiers:@"a" isARepeat:NO keyCode:0];
+    @try {
+      // A group viewer must neither send input nor enter the released/resume
+      // state, even if the cursor is moved/clicked over its video.
+      view.inputEnabled=NO; view.released=NO;
+      [view mouseDown:left]; [view mouseMoved:move]; [view scrollWheel:scroll]; [view keyDown:key];
+      if(!view->events.empty() || view.released || view.acceptsFirstResponder)
+        throw std::runtime_error("View-only captured input or changed control state");
+      view.released=YES; [view mouseDown:left];
+      if(!view->events.empty() || !view.released)
+        throw std::runtime_error("View-only captured input or resumed control");
+      view.inputEnabled=YES; view.released=NO;
+      [view mouseMoved:move]; [view mouseDragged:drag]; [view mouseDown:left]; [view mouseUp:up]; [view rightMouseDown:right]; [view scrollWheel:scroll]; [view keyDown:key]; [view keyUp:key];
+      const auto& events=view->events;
+      if(events.size()!=8 || events[0].kind!=Input::Move || events[0].delta!=0 || events[1].kind!=Input::Move || events[2].kind!=Input::Button || !events[2].down || events[2].code!=0 || events[3].down || events[4].code!=1 || events[5].kind!=Input::Scroll || events[5].delta!=3 || events[6].code!=4 || !events[6].down || events[7].down)
+        throw std::runtime_error("AppKit input type/button/wheel/key mapping is incorrect");
+      [view pointer:move kind:Input::Scroll down:NO];
+      [view pointer:move kind:Input::Button down:NO];
+      if(events.size()!=8) throw std::runtime_error("Mismatched event accessed a type-specific field");
+      view.released=YES; [view mouseMoved:move]; [view keyDown:key];
+      if(events.size()!=8) throw std::runtime_error("Released input was forwarded");
+      [view mouseDown:left]; [view mouseUp:up];
+      if(events.size()!=10 || !events[8].down || events[9].down || view.released)
+        throw std::runtime_error("Resume click lost its down/up pair");
+    } @catch(NSException* exception) {
+      throw std::runtime_error(std::string("AppKit event callback threw: ")+exception.reason.UTF8String);
+    }
+    std::cout<<"Mac remote view: real move/drag/button/wheel/key callbacks and view-only gate verified\n";
   }
 }
 // Exercises the actual VideoToolbox encoder/decoder without capturing a screen
@@ -378,7 +446,7 @@ void testMacVideoCodec() {
     CVPixelBufferLockBaseAddress(source.value,0);
     auto* bytes=static_cast<std::uint8_t*>(CVPixelBufferGetBaseAddress(source.value));
     const auto stride=CVPixelBufferGetBytesPerRow(source.value);
-    for(unsigned y=0;y<360;++y) for(unsigned x=0;x<640;++x) { auto* pixel=bytes+y*stride+x*4; pixel[0]=30; pixel[1]=100; pixel[2]=200; pixel[3]=255; }
+    for(unsigned y=0;y<360;++y) for(unsigned x=0;x<640;++x) { auto* pixel=bytes+y*stride+x*4; pixel[0]=y<180 ? 30 : 200; pixel[1]=100; pixel[2]=y<180 ? 200 : 30; pixel[3]=255; }
     CVPixelBufferUnlockBaseAddress(source.value,0);
     int frame=0;
     while(!decoded.value && Clock::now()<deadline) {
@@ -392,6 +460,7 @@ void testMacVideoCodec() {
     const bool matches=std::abs(static_cast<int>(pixel[0])-30)<25 && std::abs(static_cast<int>(pixel[1])-100)<25 && std::abs(static_cast<int>(pixel[2])-200)<25;
     CVPixelBufferUnlockBaseAddress(decoded.value,kCVPixelBufferLock_ReadOnly);
     if(!matches) throw std::runtime_error("Decoded test frame colors differ");
+    testMacMetalDecodedFrame(decoded.value);
   }
 }
 
@@ -536,11 +605,11 @@ int runMac(bool host,int argc,char** argv) {
     peer.onFrame=[&](Frame frame) { try { decoder.decode(frame); decodeFailures=0; } catch(const std::exception& error) { decodeError=error.what(); ++decodeFailures; peer.requestKeyframe(); } };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Control+Option+Escape releases input" : @"Sanser · View only";
-    SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+    SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.inputEnabled=options.input; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
     if (options.ultraLowLatency) { ((CAMetalLayer*)view.layer).displaySyncEnabled=NO; }
-    window.contentView=view; window.acceptsMouseMovedEvents=YES; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];
+    window.contentView=view; window.acceptsMouseMovedEvents=options.input; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];
     Peer* peerPointer=&peer;
-    id observer=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { peerPointer->input(Input{}); view.released=YES; }];
+    id observer=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { if(view.inputEnabled) { peerPointer->input(Input{}); view.released=YES; } }];
     PeerStop shutdown{peer};
     peer.start();
     while(window.visible && peer.running() && decodeFailures<10) {

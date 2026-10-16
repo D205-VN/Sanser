@@ -9,3 +9,7 @@
 @property(nonatomic,readonly) NSSize imageSize;
 - (void)presentPixels:(CVPixelBufferRef)pixels;
 @end
+
+#ifdef SANSER_CODEC_TEST
+namespace sanser::desktop { void testMacMetalDecodedFrame(CVPixelBufferRef pixels); }
+#endif
