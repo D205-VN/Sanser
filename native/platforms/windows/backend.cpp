@@ -324,7 +324,7 @@ void testWindowsInput() {
   while(PeekMessageW(&message,window,floodMessage,floodMessage,PM_REMOVE)) {}
   std::cout<<"Windows input: resume click, keyboard fallback, keypad, focus reset and view-only enforcement passed\n";
 }
-void testWindowsMacFixture(const char* path) {
+void testWindowsMacFixture(const char* path,bool lowDelay) {
   // A padded/cropped decoder surface must use coded height for the UV plane,
   // not the smaller display height, and must not paint macroblock padding.
   Nv12Image padded{Bytes(8*6*3/2,128),2,2,8,6,2,2};
@@ -361,6 +361,20 @@ void testWindowsMacFixture(const char* path) {
     Frame frame{Bytes(size),width,height,key==1}; file.read(reinterpret_cast<char*>(frame.data.data()),size);
     if(!file) throw std::runtime_error("Truncated Mac access unit");
     worker.submit(std::move(frame));
+    if(lowDelay) {
+      // Submit exactly one access unit, then stop feeding. An idle remote
+      // desktop must not wait for another mouse movement to expose this frame.
+      std::unique_lock lock(mutex);
+      const auto expected=i+1;
+      if(!changed.wait_for(lock,std::chrono::seconds(2),[&] { return converted>=expected || conversionError; }) || conversionError)
+        throw std::runtime_error("Low-delay Windows decoder held frame "+std::to_string(i)+" waiting for future input");
+      if(decoded!=expected || converted!=expected || !latest)
+        throw std::runtime_error("Low-delay stream did not produce one picture for one input");
+      const auto* pixel=latest->pixels.data();
+      const auto channel=i<15 ? 2 : i<30 ? 1 : 0;
+      if(latest->width!=width || latest->height!=height || pixel[channel]<150 || pixel[(channel+1)%3]>80 || pixel[(channel+2)%3]>80)
+        throw std::runtime_error("Paused Mac stream displayed a stale or incorrect picture");
+    }
     // Feed a live stream, not one picture followed by silence: a compliant MF
     // decoder may retain a small startup/reference delay even in low-latency
     // mode. Require continuous output and the final changed picture below.

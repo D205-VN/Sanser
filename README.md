@@ -1,9 +1,9 @@
-# Sanser 2.2.9
+# Sanser 2.2.10
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.9
+Product:  Sanser 2.2.10
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,19 +20,20 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.9 includes one-encoder screen sharing for up to three view-only
-computers in the same account. See [Release notes](docs/releases/v2.2.9.md) and
+Sanser 2.2.10 includes one-encoder screen sharing for up to three view-only
+computers in the same account. See [Release notes](docs/releases/v2.2.10.md) and
 [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.
-This update fixes an AppKit event-type crash when moving or clicking the mouse
-in the Mac SNV2 viewer. Group viewers reject input before event properties are
-read. Sound notices follow the actual connection capability: supported
-Windows-viewer/Mac-host connections no longer claim sound is unavailable.
-Multi-computer sharing still sends video only. The bounded encoder, Windows
-presentation and CNG changes from 2.2.8 remain included. Automated tests exercise
-real AppKit callbacks and asymmetric decoded pictures through Metal. Physical
-retesting remains necessary; the observed 180–200 ms Direct route RTT and the
-reported brief visual inversion are not claimed fixed.
+This update adds actual PCP/NAT-PMP router mapping attempts before UPnP, alongside
+STUN/LAN candidate gathering. Verified paths still compete on measured latency;
+a VPN/overlay is retained when it is the only working path. Diagnostics show the
+OS-selected probe source and distinguish a path already slow at nomination from
+one that slows after media begins. Mac H.264 streams explicitly advertise zero
+frame reordering to Windows decoders when the Baseline SPS has no existing VUI.
+The Windows regression test submits one picture at a time and pauses input to
+check that a future picture is not required for output. Group sharing is still
+video-only and view-only. Physical WAN latency and router compatibility still
+require two-computer validation; 5–15 ms is not guaranteed.
 
 On the host, select **Host → Go online → Start sharing → Invite**. Each invited
 computer selects **Join**. Use **Remove** for one viewer or **Stop sharing** for
@@ -190,7 +191,7 @@ For a local unsigned verification bundle only:
 npm run desktop:bundle:local
 ```
 
-Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.9.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
+Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.10.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
 
 ## Operating-system permissions
 
@@ -198,7 +199,7 @@ Current release scope and remaining platform validation are tracked in [the rele
 - macOS client requests Accessibility/Input Monitoring when remote input capture is enabled and microphone permission only when microphone forwarding is enabled.
 - macOS hosting is implemented with ScreenCaptureKit and VideoToolbox on macOS 12.3 or newer. Screen Recording is requested when hosting starts; Accessibility is needed when remote input is enabled.
 - Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; their audio and HEVC support remain incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
-- Sanser 2.2.9 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
+- Sanser 2.2.10 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
 
 ## Migration
 

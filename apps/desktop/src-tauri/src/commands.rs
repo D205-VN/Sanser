@@ -814,7 +814,11 @@ pub struct DirectSelectionDiagnostics {
     pub local_candidate_type: sanser_p2p::CandidateType,
     pub local_candidate_endpoint: String,
     pub local_candidate_interface: Option<sanser_p2p::NetworkInterface>,
+    pub local_mapping_protocol: sanser_p2p::MappingProtocol,
+    pub probe_source_endpoint: Option<String>,
+    pub probe_source_interface: Option<sanser_p2p::NetworkInterface>,
     pub remote_candidate_type: sanser_p2p::CandidateType,
+    pub remote_mapping_protocol: sanser_p2p::MappingProtocol,
     pub remote_candidate_endpoint: String,
     pub verified_remote_endpoint: String,
     pub probe: Option<sanser_p2p::ProbeStatistics>,
@@ -924,7 +928,11 @@ pub async fn p2p_punch(
                             Some(iface.index) == local.interface_index
                                 && iface.address == local.address
                         }),
+                    local_mapping_protocol: local.mapping_protocol,
+                    probe_source_endpoint: None,
+                    probe_source_interface: None,
                     remote_candidate_type: remote.candidate_type,
+                    remote_mapping_protocol: remote.mapping_protocol,
                     remote_candidate_endpoint: remote.endpoint().to_string(),
                     verified_remote_endpoint: pair.remote.to_string(),
                     probe: selection.probe.clone(),
@@ -936,12 +944,25 @@ pub async fn p2p_punch(
             Err(error) => last_error = Some(error.to_string()),
         }
     }
-    let Some((selected_index, socket, selected, details)) = selected_route else {
+    let Some((selected_index, socket, selected, mut details)) = selected_route else {
         manager.clear_if_current(session_id, attempt_id);
         return Err(last_error.unwrap_or_else(|| {
             "No compatible IPv4 media candidate pair could be constructed".into()
         }));
     };
+    // All nomination traffic has finished. Connecting the reserved UDP socket
+    // asks the kernel for its actual source, instead of claiming that a local
+    // candidate's advertised interface is necessarily the OS route. This socket
+    // is still released before native startup; do not call this a media NIC pin.
+    if socket.connect(selected.remote).await.is_ok()
+        && let Ok(source) = socket.local_addr()
+    {
+        details.probe_source_endpoint = Some(source.to_string());
+        details.probe_source_interface = sanser_p2p::enumerate_interfaces()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|interface| interface.address == source.ip());
+    }
     {
         let mut current = manager.lock_transport()?;
         let Some(transport) = current.get_mut(&session_id).filter(|transport| {

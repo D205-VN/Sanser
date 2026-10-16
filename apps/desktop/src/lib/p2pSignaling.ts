@@ -139,7 +139,7 @@ export async function coordinateP2pConnection(
       details: {
         localPort: gathered.localPort,
         stun: gathered.stunSucceeded,
-        upnp: gathered.portMappingSucceeded,
+        portMapping: gathered.portMappingSucceeded,
         ipv6Available: gathered.ipv6Available,
         durationMs: gathered.durationMs
       }

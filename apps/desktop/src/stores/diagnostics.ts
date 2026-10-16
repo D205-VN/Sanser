@@ -27,7 +27,11 @@ export interface DirectSelectionDiagnostics {
   localCandidateType: string;
   localCandidateEndpoint: string;
   localCandidateInterface?: { name: string; kind: string } | null;
+  localMappingProtocol?: string;
+  probeSourceEndpoint?: string | null;
+  probeSourceInterface?: { name: string; kind: string } | null;
   remoteCandidateType: string;
+  remoteMappingProtocol?: string;
   remoteCandidateEndpoint: string;
   verifiedRemoteEndpoint: string;
   probe: ProbeStatistics | null;
@@ -111,6 +115,11 @@ function createNetworkDiagnosticStore() {
         if (health.status === 'elevated-after-media' && state.routeHealth?.status !== health.status) {
           diagnostics.add({ level: 'warn', category: 'network',
             message: 'Direct RTT rose after media started. Check the media path, OS/network queues and router; no automatic route migration was performed.',
+            details: { probeMedianMs: health.probe.medianMs, liveWireRttMs: health.liveWireRttMs }
+          });
+        } else if (health.status === 'slow-at-nomination' && state.routeHealth?.status !== health.status) {
+          diagnostics.add({ level: 'warn', category: 'network',
+            message: 'Direct path was already slow at nomination; inspect the selected endpoints, mapping and OS-selected source interface.',
             details: { probeMedianMs: health.probe.medianMs, liveWireRttMs: health.liveWireRttMs }
           });
         }

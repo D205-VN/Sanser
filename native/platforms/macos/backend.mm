@@ -10,6 +10,7 @@
 #include "audio_capture.h"
 #include "input_injector.h"
 #include "latest_frame_worker.h"
+#include "h264_low_delay.h"
 #import "metal_presenter.h"
 #include "keyboard.h"
 #include <algorithm>
@@ -45,12 +46,12 @@ public:
       : options_(options),ready_(std::move(ready)),publish_(std::move(publish)) {
     requireStatus(VTCompressionSessionCreate(nullptr,options.width,options.height,kCMVideoCodecType_H264,nullptr,nullptr,nullptr,output,this,&session_),"Create H.264 encoder");
     VTSessionSetProperty(session_,kVTCompressionPropertyKey_RealTime,kCFBooleanTrue);
-    VTSessionSetProperty(session_,kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse);
+    requireStatus(VTSessionSetProperty(session_,kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse),"Disable H.264 frame reordering");
     // RealTime alone is a recommendation. Explicitly disable the compression
     // window as well; the per-picture completion below bounds older encoders
     // that reject this optional property.
     const auto delayStatus=VTSessionSetProperty(session_,kVTCompressionPropertyKey_MaxFrameDelayCount,(__bridge CFNumberRef)@0);
-    VTSessionSetProperty(session_,kVTCompressionPropertyKey_ProfileLevel,kVTProfileLevel_H264_Baseline_AutoLevel);
+    requireStatus(VTSessionSetProperty(session_,kVTCompressionPropertyKey_ProfileLevel,kVTProfileLevel_H264_Baseline_AutoLevel),"Select H.264 Baseline");
     NSDictionary* values=@{(__bridge NSString*)kVTCompressionPropertyKey_AverageBitRate:@(options.bitrate),(__bridge NSString*)kVTCompressionPropertyKey_ExpectedFrameRate:@(options.fps),(__bridge NSString*)kVTCompressionPropertyKey_MaxKeyFrameInterval:@(options.fps)};
     requireStatus(VTSessionSetProperties(session_,(__bridge CFDictionaryRef)values),"Configure H.264 encoder");
     requireStatus(VTCompressionSessionPrepareToEncodeFrames(session_),"Prepare encoder");
@@ -119,7 +120,9 @@ private:
       const auto format=CMSampleBufferGetFormatDescription(sample);
       if(frame.keyframe) {
         for(std::size_t index=0;index<2;++index) { const std::uint8_t* data=nullptr; std::size_t size=0,count=0; int header=0;
-          if(CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format,index,&data,&size,&count,&header)!=noErr) { self.failed_=true; return; } appendNal(frame.data,data,size);
+          if(CMVideoFormatDescriptionGetH264ParameterSetAtIndex(format,index,&data,&size,&count,&header)!=noErr) { self.failed_=true; return; }
+          const auto parameter=sanser::lowDelayBaselineSps(std::span(data,size));
+          appendNal(frame.data,parameter.data(),parameter.size());
         }
       }
       const auto block=CMSampleBufferGetDataBuffer(sample); const auto size=CMBlockBufferGetDataLength(block);

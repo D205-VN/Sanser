@@ -227,7 +227,11 @@ impl RouteHealth {
             };
         } else {
             self.consecutive_elevated = 0;
-            self.status = "no-sustained-rise";
+            self.status = if self.probe.median_ms >= 80.0 && wire_ms >= 80.0 {
+                "slow-at-nomination"
+            } else {
+                "no-sustained-rise"
+            };
         }
     }
 }
@@ -630,6 +634,13 @@ mod tests {
         health.probe.samples = 1;
         health.observe(200.0, 21_000, Some(5_000));
         assert_eq!(health.status, "insufficient-probe-samples");
+        health.probe.samples = 5;
+        health.probe.median_ms = 183.0;
+        health.observe(185.0, 22_000, Some(5_000));
+        assert_eq!(health.status, "slow-at-nomination");
+        assert_eq!(health.consecutive_elevated, 0);
+        health.observe(15.0, 23_000, Some(5_000));
+        assert_eq!(health.status, "no-sustained-rise");
     }
 
     #[test]

@@ -32,74 +32,121 @@ impl PortMapper for NatPmpMapper {
         config: &MappingConfig,
         internal_port: u16,
     ) -> Result<PortMapping, MappingError> {
-        let gateway_ip = match self.gateway {
-            IpAddr::V4(v4) => v4,
-            IpAddr::V6(_) => return Err(MappingError::NotSupported), // NAT-PMP is IPv4 only
-        };
-
-        let socket =
-            UdpSocket::bind("0.0.0.0:0")
-                .await
-                .map_err(|e| MappingError::NetworkError {
-                    reason: e.to_string(),
-                })?;
-
-        let server_addr = SocketAddr::new(IpAddr::V4(gateway_ip), 5351);
-
-        let mut req = [0u8; 12];
-        req[0] = 0; // Version 0
-        req[1] = NATPMP_OPCODE_MAP_UDP; // Opcode 1 (UDP)
-        // 2..4 reserved (0)
-        req[4..6].copy_from_slice(&internal_port.to_be_bytes());
-        req[6..8].copy_from_slice(&config.requested_port.to_be_bytes());
-        req[8..12].copy_from_slice(&config.lifetime_seconds.to_be_bytes());
-
-        socket
-            .send_to(&req, server_addr)
-            .await
-            .map_err(|e| MappingError::NetworkError {
-                reason: e.to_string(),
-            })?;
-
-        let mut buf = [0u8; 16];
-        let sleep_timer = tokio::time::sleep(Duration::from_millis(200));
-        tokio::pin!(sleep_timer);
-
-        tokio::select! {
-            _ = &mut sleep_timer => {
-                Err(MappingError::Timeout)
-            }
-            recv_res = socket.recv_from(&mut buf) => {
-                match recv_res {
-                    Ok((n, _)) => {
-                        if n < 16 {
-                            return Err(MappingError::NetworkError { reason: "response too short".into() });
-                        }
-                        if buf[0] != 0 {
-                            return Err(MappingError::NetworkError { reason: "invalid version".into() });
-                        }
-                        if buf[1] != 128 + NATPMP_OPCODE_MAP_UDP {
-                            return Err(MappingError::NetworkError { reason: "invalid opcode".into() });
-                        }
-                        let result_code = u16::from_be_bytes([buf[2], buf[3]]);
-                        if result_code != 0 {
-                            return Err(MappingError::Refused { reason: format!("error: {result_code}") });
-                        }
-                        let int_port = u16::from_be_bytes([buf[8], buf[9]]);
-                        let ext_port = u16::from_be_bytes([buf[10], buf[11]]);
-                        let lifetime = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
-
-                        Ok(PortMapping {
-                            protocol: MappingProtocolKind::NatPmp,
-                            external: SocketAddr::new(self.gateway, ext_port),
-                            internal: SocketAddr::new(socket.local_addr().unwrap().ip(), int_port),
-                            ttl: Duration::from_secs(u64::from(lifetime)),
-                            needs_renewal: true,
-                        })
-                    }
-                    Err(e) => Err(MappingError::NetworkError { reason: e.to_string() }),
-                }
-            }
+        if !self.gateway.is_ipv4() {
+            return Err(MappingError::NotSupported);
         }
+        map_on_gateway(config, internal_port, SocketAddr::new(self.gateway, 5351)).await
+    }
+}
+
+async fn map_on_gateway(
+    config: &MappingConfig,
+    internal_port: u16,
+    server: SocketAddr,
+) -> Result<PortMapping, MappingError> {
+    if !server.is_ipv4() || internal_port == 0 || config.lifetime_seconds == 0 {
+        return Err(MappingError::NotSupported);
+    }
+    let socket =
+        UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|error| MappingError::NetworkError {
+                reason: error.to_string(),
+            })?;
+    socket
+        .connect(server)
+        .await
+        .map_err(|error| MappingError::NetworkError {
+            reason: error.to_string(),
+        })?;
+    let local = socket
+        .local_addr()
+        .map_err(|error| MappingError::NetworkError {
+            reason: error.to_string(),
+        })?
+        .ip();
+    // The MAP reply contains no public IP. Query external-address opcode 0;
+    // returning the private gateway address creates a fake Direct candidate.
+    let address = super::exchange(&socket, &[0, NATPMP_OPCODE_EXTERNAL_ADDRESS], |r| {
+        r.len() >= 8
+            && r[0] == 0
+            && r[1] == 128 + NATPMP_OPCODE_EXTERNAL_ADDRESS
+            && (r[2..4] != [0, 0] || r.len() == 12)
+    })
+    .await?;
+    check_result(&address)?;
+    let public = std::net::Ipv4Addr::new(address[8], address[9], address[10], address[11]);
+    let mut request = [0u8; 12];
+    request[1] = NATPMP_OPCODE_MAP_UDP;
+    request[4..6].copy_from_slice(&internal_port.to_be_bytes());
+    request[6..8].copy_from_slice(&config.requested_port.to_be_bytes());
+    request[8..12].copy_from_slice(&config.lifetime_seconds.to_be_bytes());
+    let response = super::exchange(&socket, &request, |r| {
+        r.len() >= 8
+            && r[0] == 0
+            && r[1] == 128 + NATPMP_OPCODE_MAP_UDP
+            && (r[2..4] != [0, 0] || (r.len() == 16 && r[8..10] == request[4..6]))
+    })
+    .await?;
+    check_result(&response)?;
+    let port = u16::from_be_bytes(response[10..12].try_into().unwrap());
+    let lifetime = u32::from_be_bytes(response[12..16].try_into().unwrap());
+    if port == 0 || lifetime == 0 {
+        return Err(MappingError::Expired);
+    }
+    Ok(PortMapping {
+        protocol: MappingProtocolKind::NatPmp,
+        external: SocketAddr::new(public.into(), port),
+        internal: SocketAddr::new(local, internal_port),
+        ttl: Duration::from_secs(lifetime.into()),
+        needs_renewal: true,
+    })
+}
+fn check_result(response: &[u8]) -> Result<(), MappingError> {
+    let code = u16::from_be_bytes(response[2..4].try_into().unwrap());
+    if code != 0 {
+        Err(MappingError::Refused {
+            reason: format!("NAT-PMP result {code}"),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn nat_pmp_queries_public_address_instead_of_advertising_private_gateway() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut request = [0; 128];
+            let (size, client) = server.recv_from(&mut request).await.unwrap();
+            assert_eq!(&request[..size], &[0, 0]);
+            let mut response = [0u8; 12];
+            response[1] = 128;
+            response[8..12].copy_from_slice(&[8, 8, 4, 4]);
+            server.send_to(&response, client).await.unwrap();
+            let (size, client) = server.recv_from(&mut request).await.unwrap();
+            assert_eq!(size, 12);
+            assert_eq!(request[1], 1);
+            let mut response = [0u8; 16];
+            response[1] = 129;
+            response[8..10].copy_from_slice(&request[4..6]);
+            response[10..12].copy_from_slice(&55002u16.to_be_bytes());
+            response[12..16].copy_from_slice(&120u32.to_be_bytes());
+            let mut wrong = response;
+            wrong[8] ^= 1;
+            server.send_to(&wrong, client).await.unwrap();
+            server.send_to(&response, client).await.unwrap();
+        });
+        let mapping = map_on_gateway(&MappingConfig::default(), 50000, address)
+            .await
+            .unwrap();
+        responder.await.unwrap();
+        assert_eq!(mapping.external, "8.8.4.4:55002".parse().unwrap());
+        assert_eq!(mapping.internal, "127.0.0.1:50000".parse().unwrap());
+        assert_eq!(mapping.protocol, MappingProtocolKind::NatPmp);
     }
 }

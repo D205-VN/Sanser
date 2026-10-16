@@ -3,9 +3,12 @@
 //! Phase 1 defines the common trait and types. Actual protocol
 //! implementations are added in Phase 5.
 
+mod gateway;
 pub mod nat_pmp;
 pub mod pcp;
 pub mod upnp;
+
+pub(crate) use gateway::default_gateway;
 
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
@@ -91,12 +94,44 @@ impl Default for MappingConfig {
 
 /// Common trait for port mapping protocols.
 #[async_trait::async_trait]
-pub trait PortMapper {
+pub trait PortMapper: Send + Sync {
     async fn try_map_port(
         &self,
         config: &MappingConfig,
         internal_port: u16,
     ) -> Result<PortMapping, MappingError>;
+}
+
+// Connected UDP validates the gateway endpoint in the kernel. Ignore unrelated
+// opcodes/nonces and retain one bounded deadline across malformed replies.
+async fn exchange(
+    socket: &tokio::net::UdpSocket,
+    request: &[u8],
+    matches: impl Fn(&[u8]) -> bool + Send,
+) -> Result<Vec<u8>, MappingError> {
+    for _ in 0..2 {
+        socket
+            .send(request)
+            .await
+            .map_err(|error| MappingError::NetworkError {
+                reason: error.to_string(),
+            })?;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(125);
+        let mut buffer = [0u8; 1024];
+        loop {
+            match tokio::time::timeout_at(deadline, socket.recv(&mut buffer)).await {
+                Ok(Ok(size)) if matches(&buffer[..size]) => return Ok(buffer[..size].to_vec()),
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    return Err(MappingError::NetworkError {
+                        reason: error.to_string(),
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    Err(MappingError::Timeout)
 }
 
 #[cfg(test)]

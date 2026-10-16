@@ -38,99 +38,126 @@ impl PortMapper for PcpMapper {
         config: &MappingConfig,
         internal_port: u16,
     ) -> Result<PortMapping, MappingError> {
-        let socket = UdpSocket::bind(if self.gateway.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        })
+        map_on_gateway(config, internal_port, SocketAddr::new(self.gateway, 5351)).await
+    }
+}
+
+async fn map_on_gateway(
+    config: &MappingConfig,
+    internal_port: u16,
+    server: SocketAddr,
+) -> Result<PortMapping, MappingError> {
+    if internal_port == 0 || config.lifetime_seconds == 0 {
+        return Err(MappingError::NotSupported);
+    }
+    let socket = UdpSocket::bind(if server.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    })
+    .await
+    .map_err(|error| MappingError::NetworkError {
+        reason: error.to_string(),
+    })?;
+    socket
+        .connect(server)
         .await
-        .map_err(|e| MappingError::NetworkError {
-            reason: e.to_string(),
+        .map_err(|error| MappingError::NetworkError {
+            reason: error.to_string(),
         })?;
+    // connect selects the source interface. getsockname before connect would
+    // return 0.0.0.0, which is not a valid PCP client address.
+    let local = socket
+        .local_addr()
+        .map_err(|error| MappingError::NetworkError {
+            reason: error.to_string(),
+        })?
+        .ip();
+    let mut request = [0u8; 60];
+    request[0] = 2;
+    request[1] = PCP_OPCODE_MAP;
+    request[4..8].copy_from_slice(&config.lifetime_seconds.to_be_bytes());
+    let client = match local {
+        IpAddr::V4(ip) => ip.to_ipv6_mapped(),
+        IpAddr::V6(ip) => ip,
+    };
+    request[8..24].copy_from_slice(&client.octets());
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut request[24..36]);
+    request[36] = 17;
+    request[40..42].copy_from_slice(&internal_port.to_be_bytes());
+    request[42..44].copy_from_slice(&config.requested_port.to_be_bytes());
+    let response = super::exchange(&socket, &request, |r| {
+        r.len() >= 24
+            && r[0] == 2
+            && r[1] == 128 + PCP_OPCODE_MAP
+            && (r[3] != 0
+                || (r.len() >= 60
+                    && r[24..36] == request[24..36]
+                    && r[36] == 17
+                    && r[40..42] == request[40..42]))
+    })
+    .await?;
+    if response[3] != 0 {
+        return Err(MappingError::Refused {
+            reason: format!("PCP result {}", response[3]),
+        });
+    }
+    let lifetime = u32::from_be_bytes(response[4..8].try_into().unwrap());
+    let port = u16::from_be_bytes(response[42..44].try_into().unwrap());
+    if lifetime == 0 || port == 0 {
+        return Err(MappingError::Expired);
+    }
+    let ip = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&response[44..60]).unwrap());
+    let external = ip
+        .to_ipv4_mapped()
+        .map(IpAddr::V4)
+        .unwrap_or(IpAddr::V6(ip));
+    Ok(PortMapping {
+        protocol: MappingProtocolKind::Pcp,
+        external: SocketAddr::new(external, port),
+        internal: SocketAddr::new(local, internal_port),
+        ttl: Duration::from_secs(lifetime.into()),
+        needs_renewal: true,
+    })
+}
 
-        let server_addr = SocketAddr::new(self.gateway, 5351);
-
-        let mut req = vec![0u8; 60];
-        req[0] = 2; // Version 2
-        req[1] = PCP_OPCODE_MAP; // Opcode 1 (Map)
-        // 2..4 reserved (0)
-        req[4..8].copy_from_slice(&config.lifetime_seconds.to_be_bytes());
-
-        match socket.local_addr().unwrap().ip() {
-            IpAddr::V4(v4) => {
-                req[8..20].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff]);
-                req[20..24].copy_from_slice(&v4.octets());
-            }
-            IpAddr::V6(v6) => {
-                req[8..24].copy_from_slice(&v6.octets());
-            }
-        }
-
-        let mut nonce = [0u8; 12];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
-        req[24..36].copy_from_slice(&nonce);
-
-        req[36] = 17; // Protocol 17 (UDP)
-        req[40..42].copy_from_slice(&internal_port.to_be_bytes());
-        req[42..44].copy_from_slice(&config.requested_port.to_be_bytes());
-
-        socket
-            .send_to(&req, server_addr)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn pcp_uses_real_source_and_validates_nonce_and_internal_port() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let responder = tokio::spawn(async move {
+            let mut request = [0; 128];
+            let (size, client) = server.recv_from(&mut request).await.unwrap();
+            assert_eq!(size, 60);
+            assert_eq!(
+                &request[8..24],
+                &std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().octets()
+            );
+            let mut reply = request[..60].to_vec();
+            reply[1] |= 128;
+            reply[42..44].copy_from_slice(&55001u16.to_be_bytes());
+            reply[44..60].copy_from_slice(
+                &std::net::Ipv4Addr::new(8, 8, 8, 8)
+                    .to_ipv6_mapped()
+                    .octets(),
+            );
+            let mut wrong = reply.clone();
+            wrong[24] ^= 1;
+            server.send_to(&wrong, client).await.unwrap();
+            wrong = reply.clone();
+            wrong[40] ^= 1;
+            server.send_to(&wrong, client).await.unwrap();
+            server.send_to(&reply, client).await.unwrap();
+        });
+        let mapping = map_on_gateway(&MappingConfig::default(), 50000, address)
             .await
-            .map_err(|e| MappingError::NetworkError {
-                reason: e.to_string(),
-            })?;
-
-        let mut buf = [0u8; 128];
-        let sleep_timer = tokio::time::sleep(Duration::from_millis(200));
-        tokio::pin!(sleep_timer);
-
-        tokio::select! {
-            _ = &mut sleep_timer => {
-                Err(MappingError::Timeout)
-            }
-            recv_res = socket.recv_from(&mut buf) => {
-                match recv_res {
-                    Ok((n, _)) => {
-                        if n < 60 {
-                            return Err(MappingError::NetworkError { reason: "response too short".into() });
-                        }
-                        if buf[0] != 2 {
-                            return Err(MappingError::NetworkError { reason: "invalid version".into() });
-                        }
-                        if buf[1] != 128 + PCP_OPCODE_MAP {
-                            return Err(MappingError::NetworkError { reason: "invalid opcode".into() });
-                        }
-                        let result_code = buf[3];
-                        if result_code != 0 {
-                            return Err(MappingError::Refused { reason: format!("error code: {result_code}") });
-                        }
-                        let lifetime = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
-                        if buf[24..36] != nonce {
-                            return Err(MappingError::NetworkError { reason: "nonce mismatch".into() });
-                        }
-                        let int_port = u16::from_be_bytes([buf[40], buf[41]]);
-                        let ext_port = u16::from_be_bytes([buf[42], buf[43]]);
-
-                        let mut ext_ip_bytes = [0u8; 16];
-                        ext_ip_bytes.copy_from_slice(&buf[44..60]);
-                        let ext_ip = if ext_ip_bytes[..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] {
-                            IpAddr::V4(std::net::Ipv4Addr::new(ext_ip_bytes[12], ext_ip_bytes[13], ext_ip_bytes[14], ext_ip_bytes[15]))
-                        } else {
-                            IpAddr::V6(std::net::Ipv6Addr::from(ext_ip_bytes))
-                        };
-
-                        Ok(PortMapping {
-                            protocol: MappingProtocolKind::Pcp,
-                            external: SocketAddr::new(ext_ip, ext_port),
-                            internal: SocketAddr::new(socket.local_addr().unwrap().ip(), int_port),
-                            ttl: Duration::from_secs(u64::from(lifetime)),
-                            needs_renewal: true,
-                        })
-                    }
-                    Err(e) => Err(MappingError::NetworkError { reason: e.to_string() }),
-                }
-            }
-        }
+            .unwrap();
+        responder.await.unwrap();
+        assert_eq!(mapping.external, "8.8.8.8:55001".parse().unwrap());
+        assert_eq!(mapping.internal, "127.0.0.1:50000".parse().unwrap());
+        assert_eq!(mapping.protocol, MappingProtocolKind::Pcp);
     }
 }

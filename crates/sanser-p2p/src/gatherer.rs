@@ -165,26 +165,27 @@ fn port_mapped_candidate(
     external: SocketAddr,
     interface_index: Option<u32>,
     preference: u16,
+    mapping_protocol: MappingProtocol,
 ) -> Result<Option<P2pCandidate>, P2pError> {
     let clean_ip = external
         .ip()
         .to_string()
         .replace('.', "-")
         .replace(':', "-");
-    let priority = candidate_priority(CandidateType::PortMapped, MappingProtocol::Upnp, preference)
+    let priority = candidate_priority(CandidateType::PortMapped, mapping_protocol, preference)
         .map_err(|error| P2pError::Internal {
-            reason: format!("failed to compute UPnP candidate priority: {error}"),
+            reason: format!("failed to compute mapped candidate priority: {error}"),
         })?;
     let candidate = P2pCandidate {
-        id: format!("upnp-{clean_ip}-{}", external.port()),
+        id: format!("mapped-{mapping_protocol:?}-{clean_ip}-{}", external.port()),
         candidate_type: CandidateType::PortMapped,
         address: external.ip(),
         port: external.port(),
         protocol: TransportProtocol::Udp,
         interface_index,
-        mapping_protocol: MappingProtocol::Upnp,
+        mapping_protocol,
         priority,
-        foundation: format!("upnp-{clean_ip}"),
+        foundation: format!("mapped-{mapping_protocol:?}-{clean_ip}"),
     };
     Ok(candidate.validate().is_ok().then_some(candidate))
 }
@@ -500,9 +501,58 @@ pub async fn gather_candidates_on_socket(
         Some((external, internal_ip))
     };
 
-    let (stun_result, upnp_result) = tokio::join!(
+    let router_mapping = async {
+        use crate::mapping::{
+            MappingConfig, PortMapper, default_gateway, nat_pmp::NatPmpMapper, pcp::PcpMapper,
+        };
+        if config.port_mapping_enabled
+            && socket_is_ipv4
+            && let Some(gateway) = default_gateway().await
+        {
+            let config = MappingConfig {
+                requested_port: local.port(),
+                ..MappingConfig::default()
+            };
+            let pcp = PcpMapper {
+                gateway: gateway.into(),
+            };
+            let pmp = NatPmpMapper {
+                gateway: gateway.into(),
+            };
+            for (mapper, protocol) in [
+                (&pcp as &dyn PortMapper, MappingProtocol::Pcp),
+                (&pmp as &dyn PortMapper, MappingProtocol::NatPmp),
+            ] {
+                if let Ok(mapping) = mapper.try_map_port(&config, local.port()).await
+                    && mapping.external.is_ipv4() == socket_is_ipv4
+                    && let Some(interface) = interfaces
+                        .iter()
+                        .find(|item| item.address == mapping.internal.ip())
+                    && let Ok(Some(candidate)) = port_mapped_candidate(
+                        mapping.external,
+                        Some(interface.index),
+                        interface_preference(interface.cost),
+                        protocol,
+                    )
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+        let (external, internal) = upnp_mapping.await?;
+        let interface = interfaces.iter().find(|item| item.address == internal)?;
+        port_mapped_candidate(
+            external,
+            Some(interface.index),
+            interface_preference(interface.cost),
+            MappingProtocol::Upnp,
+        )
+        .ok()
+        .flatten()
+    };
+    let (stun_result, mapping_result) = tokio::join!(
         tokio::time::timeout(config.total_timeout, stun_servers),
-        tokio::time::timeout(Duration::from_millis(1_500), upnp_mapping)
+        tokio::time::timeout(config.total_timeout, router_mapping)
     );
     if let Ok(Ok(Some(candidate))) = stun_result {
         result.stun_succeeded = true;
@@ -512,19 +562,12 @@ pub async fn gather_candidates_on_socket(
                 reason: format!("failed to collect a STUN candidate: {error}"),
             })?;
     }
-    if let Ok(Some((external, internal_ip))) = upnp_result
-        && let Some(mapped_interface) = interfaces.iter().find(|item| item.address == internal_ip)
-        && let Some(candidate) = port_mapped_candidate(
-            external,
-            Some(mapped_interface.index),
-            interface_preference(mapped_interface.cost),
-        )?
-    {
+    if let Ok(Some(candidate)) = mapping_result {
         result.port_mapping_succeeded = true;
         candidate_set
             .insert(candidate)
             .map_err(|error| P2pError::Internal {
-                reason: format!("failed to collect a UPnP candidate: {error}"),
+                reason: format!("failed to collect a router-mapped candidate: {error}"),
             })?;
     }
     result.candidates = crate::select_signaling_candidates(
@@ -557,6 +600,33 @@ pub async fn gather_candidates_on_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn router_candidates_keep_their_mapping_protocol_and_require_public_endpoints() {
+        for protocol in [
+            MappingProtocol::Pcp,
+            MappingProtocol::NatPmp,
+            MappingProtocol::Upnp,
+        ] {
+            let candidate =
+                port_mapped_candidate("8.8.8.8:55000".parse().unwrap(), Some(3), 65535, protocol)
+                    .unwrap()
+                    .unwrap();
+            candidate.validate().unwrap();
+            assert_eq!(candidate.mapping_protocol, protocol);
+            assert_eq!(candidate.interface_index, Some(3));
+            assert!(
+                port_mapped_candidate(
+                    "192.168.1.1:55000".parse().unwrap(),
+                    Some(3),
+                    65535,
+                    protocol
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_gather_candidates_finds_host_candidates() {
