@@ -10,6 +10,7 @@
 #include "audio_capture.h"
 #include "input_injector.h"
 #include "latest_frame_worker.h"
+#include "decode_worker.h"
 #include "h264_low_delay.h"
 #import "metal_presenter.h"
 #include "keyboard.h"
@@ -167,10 +168,13 @@ public:
     if(sample) CFRelease(sample); CFRelease(block); requireStatus(status,"Decode frame");
   }
   CVPixelBufferRef take() { std::lock_guard lock(mutex_); auto value=latest_; latest_=nullptr; return value; }
+  void reset() { clear(); sps_.clear(); pps_.clear(); }
+  std::uint64_t decoded() const { return decoded_.load(); }
 private:
   void clear() { if(session_) { VTDecompressionSessionWaitForAsynchronousFrames(session_); VTDecompressionSessionInvalidate(session_); CFRelease(session_); session_=nullptr; } if(format_) { CFRelease(format_); format_=nullptr; } }
-  static void output(void* context,void*,OSStatus status,VTDecodeInfoFlags,CVImageBufferRef image,CMTime,CMTime) { if(status!=noErr || !image) return; auto& self=*static_cast<Decoder*>(context); std::lock_guard lock(self.mutex_); if(self.latest_) CVPixelBufferRelease(self.latest_); self.latest_=CVPixelBufferRetain(image); if(!self.reported_) { self.reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; } }
+  static void output(void* context,void*,OSStatus status,VTDecodeInfoFlags,CVImageBufferRef image,CMTime,CMTime) { if(status!=noErr || !image) return; auto& self=*static_cast<Decoder*>(context); ++self.decoded_; std::lock_guard lock(self.mutex_); if(self.latest_) CVPixelBufferRelease(self.latest_); self.latest_=CVPixelBufferRetain(image); if(!self.reported_) { self.reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; } }
   Bytes sps_,pps_; VTDecompressionSessionRef session_=nullptr; CMVideoFormatDescriptionRef format_=nullptr; CVPixelBufferRef latest_=nullptr; std::mutex mutex_; bool reported_=false;
+  std::atomic<std::uint64_t> decoded_{0};
 };
 
 }
@@ -535,6 +539,27 @@ void testMacBroadcastCodec() {
     group.remove("1"); clients[1]->stop();
     encoder.keyframe(); encoder.refresh(); verify(0); verify(2);
     if(encoded!=3) throw std::runtime_error("Removing a viewer restarted or duplicated encoding");
+    // Receiving one IDR is not a streaming test. Change the actual source and
+    // require both surviving viewers to decode each following P-picture.
+    for(unsigned frame=0;frame<24;++frame) {
+      const auto red=frame%2 ? 200 : 30,blue=frame%2 ? 30 : 200;
+      CVPixelBufferLockBaseAddress(source.value,0);
+      for(unsigned y=0;y<360;++y) for(unsigned x=0;x<640;++x) {
+        auto* pixel=bytes+y*stride+x*4; pixel[0]=blue; pixel[2]=red;
+      }
+      CVPixelBufferUnlockBaseAddress(source.value,0);
+      encoder.encode(source.value,CMTimeMake(frame+10,60));
+      for(unsigned viewer : {0U,2U}) {
+        Pixel decoded; const auto until=Clock::now()+std::chrono::seconds(2);
+        while(!decoded.value && Clock::now()<until) { decoded.value=decoders[viewer].take(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
+        if(!decoded.value) throw std::runtime_error("Sharing stopped updating after its initial keyframe");
+        CVPixelBufferLockBaseAddress(decoded.value,kCVPixelBufferLock_ReadOnly);
+        const auto* pixel=static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(decoded.value));
+        const bool changed=std::abs(static_cast<int>(pixel[0])-blue)<25 && std::abs(static_cast<int>(pixel[2])-red)<25;
+        CVPixelBufferUnlockBaseAddress(decoded.value,kCVPixelBufferLock_ReadOnly);
+        if(!changed) throw std::runtime_error("Sharing viewer replayed an old picture instead of the changed desktop");
+      }
+    }
   }
 }
 
@@ -604,8 +629,10 @@ int runMac(bool host,int argc,char** argv) {
       } else throw std::runtime_error("Hosting requires macOS 12.3 or newer");
     }
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    Peer peer(options); Decoder decoder; std::atomic<unsigned> decodeFailures{0}; std::string decodeError;
-    peer.onFrame=[&](Frame frame) { try { decoder.decode(frame); decodeFailures=0; } catch(const std::exception& error) { decodeError=error.what(); ++decodeFailures; peer.requestKeyframe(); } };
+    Peer peer(options); Decoder decoder;
+    DecodeWorker decode([&](Frame frame) { @autoreleasepool { decoder.decode(frame); } },
+      [&] { decoder.reset(); },[&] { peer.requestKeyframe(); },true);
+    peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Control+Option+Escape releases input" : @"Sanser · View only";
     SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.inputEnabled=options.input; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
@@ -615,15 +642,21 @@ int runMac(bool host,int argc,char** argv) {
     id observer=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { if(view.inputEnabled) { peerPointer->input(Input{}); view.released=YES; } }];
     PeerStop shutdown{peer};
     peer.start();
-    while(window.visible && peer.running() && decodeFailures<10) {
+    auto lastHealth=Clock::now(); std::uint64_t presented=0;
+    while(window.visible && peer.running() && decode.failures()<10) {
       @autoreleasepool {
         NSEvent* event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:options.ultraLowLatency ? 0.001 : 0.008] inMode:NSDefaultRunLoopMode dequeue:YES]; if(event) [NSApp sendEvent:event];
-        auto pixels=decoder.take(); if(pixels) { [view presentPixels:pixels]; CVPixelBufferRelease(pixels); }
+        auto pixels=decoder.take(); if(pixels) { [view presentPixels:pixels]; ++presented; CVPixelBufferRelease(pixels); }
         [window displayIfNeeded];
+        if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastHealth>=std::chrono::seconds(1)) {
+          std::cout<<"SNV2_VIDEO_HEALTH decoded="<<decoder.decoded()<<" converted="<<presented
+            <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures()<<std::endl;
+          lastHealth=Clock::now();
+        }
       }
     }
-    [[NSNotificationCenter defaultCenter] removeObserver:observer]; view.peer=nullptr; peer.stop(); [window close];
-    if(decodeFailures>=10) throw std::runtime_error("Unable to decode the remote video: "+decodeError);
+    [[NSNotificationCenter defaultCenter] removeObserver:observer]; view.peer=nullptr; peer.stop(); decode.stop(); [window close];
+    if(decode.failures()>=10) throw std::runtime_error("Unable to decode the remote video: "+decode.error());
     return 0;
   }
 }

@@ -244,7 +244,7 @@ bool HostOutput::ready() const { return broadcast_ ? broadcast_->ready() : singl
 bool HostOutput::running() const { return !nativeStopRequested() && (broadcast_ ? broadcast_->running() : single_->running()); }
 void HostOutput::video(Frame frame) { if(broadcast_) broadcast_->publish(std::move(frame)); else single_->video(frame); }
 void HostOutput::audio(const AudioSamples& samples) { if(single_) single_->audio(samples); }
-std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : options_.bitrate; }
+std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : single_->recommendedBitrate(); }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }
 void HostOutput::pumpControl() {
   if(broadcast_) broadcast_->updateHealth();

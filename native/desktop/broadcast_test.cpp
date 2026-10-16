@@ -67,6 +67,20 @@ int main() {
       require(slow.signals()>slow.requests(),"stats distinguish coalesced signals from encoder requests");
     }
     Options source; source.host=true; source.input=false; source.bitrate=100000000;
+    {
+      auto desktop=source; desktop.bitrate=20000000; desktop.ultraLowLatency=true;
+      Broadcaster group(desktop); Viewer first,second;
+      connect(group,first,desktop,"desktop-first",'v');
+      connect(group,second,desktop,"desktop-second",'w');
+      group.publish(Frame{Bytes(256*1024,0x3c),1920,1080,true});
+      require(waitFor([&] { return count(first)==1 && count(second)==1; }),"large desktop IDR must finish pacing for every sharing viewer");
+      for(unsigned i=0;i<20;++i) {
+        group.updateHealth();
+        group.publish(Frame{Bytes(8000,static_cast<std::uint8_t>(i)),1920,1080,false});
+        require(waitFor([&] { return count(first)==i+2 && count(second)==i+2; }),"sharing froze after its first desktop frame");
+      }
+      for(const auto& peer:group.stats()) require(peer.sendQueueDrops==0 && peer.pauses==0,"pacer's own serialization must not be treated as a slow viewer");
+    }
     Broadcaster host(source); std::array<Viewer,3> viewers;
     for(std::size_t i=0;i<3;++i) connect(host,viewers[i],source,"viewer-"+std::to_string(i),static_cast<char>('a'+i));
     bool rejected=false;

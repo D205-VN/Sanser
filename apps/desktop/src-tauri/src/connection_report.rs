@@ -15,6 +15,8 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "SNV2_TRANSPORT_HEALTH",
+    "SNSHARE_PEER",
     "SNV2_HOST_TIMING",
     "SNV2_VIDEO_HEALTH",
     "SNV2_INPUT_HEALTH",
@@ -35,6 +37,20 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "ready",
+    "running",
+    "stopReason",
+    "repaired",
+    "repairCacheMisses",
+    "dispatched",
+    "replaced",
+    "referenceDrops",
+    "sendQueueDrops",
+    "keyframeSignals",
+    "keyframeRequests",
+    "pauses",
+    "backoffMs",
+    "encoderDropped",
     "captured",
     "submitted",
     "converted",
@@ -543,6 +559,17 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn sharing_and_transport_health_retain_only_numeric_failure_evidence() {
+        let sample=parse_sample(b"SNSHARE_PEER viewer=private-device ready=1 running=1 submitted=80 dispatched=1 replaced=79 referenceDrops=78 pauses=1 backoffMs=2000 token=123").unwrap();
+        assert_eq!(sample.values["replaced"], 79.0);
+        assert!(!sample.values.contains_key("viewer"));
+        assert!(!sample.values.contains_key("token"));
+        let sample=parse_sample(b"SNV2_TRANSPORT_HEALTH rawDatagrams=900 authRejected=0 videoDatagrams=890 completed=0 nackSent=4 stopReason=2 pending=0 endpoint=private-address").unwrap();
+        assert_eq!(sample.values["completed"], 0.0);
+        assert_eq!(sample.values["stopReason"], 2.0);
+        assert!(!sample.values.contains_key("endpoint"));
+    }
     #[test]
     fn snv2_pipeline_timings_are_retained_without_input_or_packet_content() {
         let mut launch = request();

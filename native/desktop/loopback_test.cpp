@@ -16,7 +16,7 @@ int main() {
     std::random_device random;
     for(unsigned attempt=0;attempt<10 && !client;++attempt) {
       const auto port=static_cast<uint16_t>(30000+random()%20000);
-      Options h; h.host=true; h.port=port; h.peer="127.0.0.1:"+std::to_string(port+1); h.token=std::string(48,'x');
+      Options h; h.host=true; h.ultraLowLatency=true; h.port=port; h.peer="127.0.0.1:"+std::to_string(port+1); h.token=std::string(48,'x');
       Options c=h; c.host=false; c.port=port+1; c.peer="127.0.0.1:"+std::to_string(port);
       try { host=std::make_unique<Peer>(h); client=std::make_unique<Peer>(c); } catch(...) { host.reset(); }
     }
@@ -32,6 +32,16 @@ int main() {
     Frame sent{Bytes(2500,0x6a),1280,720,true}; host->video(sent);
     require(waitFor([&] { std::lock_guard lock(mutex); return received.has_value(); }),"fragmented video did not arrive");
     { std::lock_guard lock(mutex); require(received->data==sent.data && received->keyframe && received->width==1280,"video mismatch"); }
+    // A desktop IDR can be much larger than an ordinary P-frame. Its own
+    // configured pacing takes >40 ms even on lossless localhost at 20 Mbps.
+    // It must arrive intact, then the dependent pictures must keep changing.
+    { std::lock_guard lock(mutex); received.reset(); }
+    sent=Frame{Bytes(256*1024,0x39),1920,1080,true}; host->video(sent);
+    require(waitFor([&] { std::lock_guard lock(mutex); return received && received->data==sent.data; }),"large paced keyframe was cut off before completion");
+    for(unsigned i=0;i<12;++i) {
+      sent=Frame{Bytes(8000,static_cast<std::uint8_t>(i)),1920,1080,false}; host->video(sent);
+      require(waitFor([&] { std::lock_guard lock(mutex); return received && received->data==sent.data; }),"video froze after large keyframe");
+    }
     client->input(Input{Input::Key,0,0,5,0,true});
     client->stop();
     require(waitFor([&] { return !host->running(); }),"disconnect did not stop the host"); host->stop();

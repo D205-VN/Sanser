@@ -16,6 +16,8 @@ int main() {
   try {
     TxScheduler scheduler;
     const auto now=Clock::now();
+    require(videoSendBudget(256*1024,20000000,true)>std::chrono::milliseconds(100),"large IDR budget includes its own serialization");
+    require(videoSendBudget(8*1024*1024,1000000,true)==std::chrono::milliseconds(500),"pacing cannot create a multi-second video queue");
     require(scheduler.push(TxScheduler::Video, {Bytes(1024, 1), now, 1}), "queue video");
     require(scheduler.push(TxScheduler::Audio, {{2}, now, 0}), "queue audio separately");
     scheduler.latestInput({{3}, now, 0}); scheduler.latestInput({{4}, now, 0});
@@ -97,6 +99,20 @@ int main() {
     const auto requests=frames.repairs(expired,Clock::now()+std::chrono::milliseconds(4));
     require(!expired && requests.size()==1 && requests.front().frame==2 && requests.front().missing==std::vector<std::uint16_t>{1},"NACK names only the missing fragment");
     require(frames.push(h,fragment(frame,1)).has_value(),"repaired fragment completes the existing assembly");
+    {
+      Bytes large{0,0,7,128,0,0,4,56}; large.resize(256*1024,0x44);
+      Reassembler paced(20000000,true); h.frameId=3;
+      require(!paced.push(h,fragment(large,0)),"large IDR starts incomplete");
+      const auto began=Clock::now();
+      require(paced.repairs(expired,began+std::chrono::milliseconds(35)).empty() && !expired,"do not NACK the tail still being paced by the sender");
+      require(!paced.push(h,fragment(large,2)),"interior gap before later fragment");
+      const auto gap=paced.repairs(expired,began+std::chrono::milliseconds(36));
+      require(gap.size()==1 && gap.front().missing==std::vector<std::uint16_t>{1},"repair only the actual interior loss, not the unsent tail");
+      (void)paced.repairs(expired,began+std::chrono::milliseconds(220));
+      require(!expired,"a normal WAN repair RTT must not expire the entire keyframe");
+      (void)paced.repairs(expired,began+std::chrono::seconds(1));
+      require(expired,"unrepairable pictures retain a bounded deadline");
+    }
     std::cout<<"Transport: encryption, tamper, replay, input and reassembly passed\n";
     return 0;
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

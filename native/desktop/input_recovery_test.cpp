@@ -1,4 +1,5 @@
 #include "transport.h"
+#include "broadcast.h"
 #include <array>
 #include <iostream>
 #include <stdexcept>
@@ -81,9 +82,23 @@ int main() {
     }
     const std::string token(48,'r');
     {
+      Stub remote; Options options; options.host=true; options.ultraLowLatency=true; options.token=token;
+      options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer host(options); PacketCodec codec(token,false); PeerStop stop{host}; host.start();
+      wire::Header h; h.keyId=123; h.sequence=1; h.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,codec.seal(h,{'S','A','K','1'}));
+      const auto ready=Clock::now()+std::chrono::seconds(1);
+      while(!host.ready() && Clock::now()<ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.ready(),"hiccup test handshake");
+      std::this_thread::sleep_for(std::chrono::milliseconds(1250));
+      check(host.running(),"a brief Ultra Wi-Fi gap must not destroy an established session");
+      ++h.sequence; remote.send(options.port,codec.seal(h,{'S','A','K','1'}));
+    }
+    {
       Stub remote; Options options; options.host=true; options.input=false; options.token=token;
       options.bitrate=25000000; options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
-      Peer host(options); PacketCodec codec(token,false); PeerStop stop{host}; host.start();
+      // Exercise the real capture/encoder adapter, not only Peer's estimator.
+      HostOutput host(options); PacketCodec codec(token,false); HostOutputStop stop{host}; host.start();
       wire::Header h; h.keyId=123; h.sequence=1; h.packetType=wire::PacketType::Keepalive;
       remote.send(options.port,codec.seal(h,{'S','A','K','1'}));
       const auto ready=Clock::now()+std::chrono::seconds(1);
@@ -99,14 +114,14 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       };
       for(unsigned i=0;i<3;++i) feedback(0);
-      check(host.recommendedBitrate()==options.bitrate,"idle desktop must not reduce bitrate because throughput is low");
+      check(host.bitrate()==options.bitrate,"idle desktop must not reduce bitrate because throughput is low");
       host.video(Frame{Bytes(50000,1),1280,720,true}); feedback(0);
-      check(host.recommendedBitrate()==options.bitrate,"one transient delivery window must not reduce bitrate");
+      check(host.bitrate()==options.bitrate,"one transient delivery window must not reduce bitrate");
       host.video(Frame{Bytes(50000,1),1280,720,true}); feedback(0);
-      check(host.recommendedBitrate()<options.bitrate && host.recommendedBitrate()>=5000000,"sustained delivery deficit reduces the viewer budget within quality bounds");
-      const auto reduced=host.recommendedBitrate();
+      check(host.bitrate()<options.bitrate && host.bitrate()>=5000000,"sustained delivery deficit reaches the single-host encoder budget within quality bounds");
+      const auto reduced=host.bitrate();
       for(unsigned i=0;i<10;++i) { host.video(Frame{Bytes(50000,1),1280,720,true}); feedback(50008); }
-      check(host.recommendedBitrate()>reduced && host.recommendedBitrate()<=options.bitrate,"healthy delivery recovers the budget gradually");
+      check(host.bitrate()>reduced && host.bitrate()<=options.bitrate,"healthy delivery recovers the budget gradually");
     }
     {
       Stub remote; Options options; options.host=true; options.input=false; options.token=token;
@@ -147,8 +162,15 @@ int main() {
       check(repaired && host.repairedDatagrams()==1,"authenticated NACK recovers missing fragment");
       remote.send(options.port,datagram); std::this_thread::sleep_for(std::chrono::milliseconds(15));
       check(host.repairedDatagrams()==1,"replayed NACK cannot amplify repair traffic");
-      std::this_thread::sleep_for(std::chrono::milliseconds(160));
+      std::this_thread::sleep_for(std::chrono::milliseconds(220));
       request.sequence=3; remote.send(options.port,clientCodec.seal(request,nack));
+      const auto delayed=Clock::now()+std::chrono::milliseconds(250);
+      while(host.repairedDatagrams()<2 && Clock::now()<delayed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.repairedDatagrams()==2 && host.repairCacheMisses()==0,"a WAN-delayed NACK must still find its fragment in cache");
+      // Keep repair available across a slow WAN RTT; cache residency itself
+      // adds no presentation delay. Only requests beyond its TTL must miss.
+      std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+      request.sequence=4; remote.send(options.port,clientCodec.seal(request,nack));
       const auto expired=Clock::now()+std::chrono::seconds(1);
       while(host.repairCacheMisses()==0 && Clock::now()<expired) std::this_thread::sleep_for(std::chrono::milliseconds(1));
       check(host.repairCacheMisses()==1 && keyframes>0,"expired repair cache requests a fresh keyframe");

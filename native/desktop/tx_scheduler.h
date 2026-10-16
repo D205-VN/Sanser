@@ -18,6 +18,7 @@ public:
     std::uint64_t frame = 0;
     bool repair = false;
     bool audio = false;
+    std::chrono::steady_clock::time_point deadline{};
   };
   bool push(Lane lane, Packet packet) {
     packet.repair=lane==Repair;
@@ -48,6 +49,7 @@ public:
   }
   bool hasVideo() const { return !queues_[Video].empty() || !queues_[Repair].empty(); }
   std::size_t nextVideoBytes() const { return !queues_[Video].empty() ? queues_[Video].front().bytes.size() : !queues_[Repair].empty() ? queues_[Repair].front().bytes.size() : 0; }
+  std::size_t queuedVideoBytes() const { return bytes_[Video]; }
   bool hasPriority() const {
     return latestMove_ || !queues_[Control].empty() || !queues_[InputLane].empty() || !queues_[Audio].empty();
   }

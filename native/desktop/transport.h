@@ -48,6 +48,9 @@ struct Frame { Bytes data; std::uint32_t width = 0, height = 0; bool keyframe = 
 // Prefix and encoded payload are prepared once, then authenticated per peer.
 struct PreparedFrame { Bytes payload; bool keyframe = false; };
 PreparedFrame prepareFrame(Frame frame);
+// Serialization is work, not a fixed jitter buffer. Large IDRs need enough
+// time to pass through the configured pacer before they can be declared stale.
+std::chrono::milliseconds videoSendBudget(std::size_t bytes,std::uint32_t bitrate,bool ultra);
 class PacketCodec {
 public:
   PacketCodec(const std::string& token, bool host);
@@ -66,11 +69,18 @@ private:
 };
 class Reassembler {
 public:
+  explicit Reassembler(std::uint32_t bitrate=20000000,bool ultra=false):bitrate_(bitrate),ultra_(ultra) {}
   std::optional<Frame> push(const snv2::Header& header, const Bytes& payload);
   struct Repair { std::uint64_t frame; std::vector<std::uint16_t> missing; };
   std::vector<Repair> repairs(bool& expired,Clock::time_point now=Clock::now());
+  bool assemblingKeyframe() const {
+    for(const auto& [id,partial]:frames_) { (void)id; if(partial.keyframe) return true; }
+    return false;
+  }
 private:
-  struct Partial { Bytes data; std::vector<bool> seen; std::uint16_t received = 0; Clock::time_point started; bool keyframe = false; Clock::time_point lastRepair{}; unsigned repairAttempts=0; };
+  struct Partial { Bytes data; std::vector<bool> seen; std::uint16_t received = 0; Clock::time_point started; bool keyframe = false; Clock::time_point lastRepair{}; unsigned repairAttempts=0; std::size_t highestSeen=0; };
+  std::uint32_t bitrate_;
+  bool ultra_;
   std::map<std::uint64_t, Partial> frames_;
   std::uint64_t lastFrame_ = 0;
 };
@@ -113,13 +123,15 @@ private:
   void loop();
   void sendLoop();
   void acknowledgeInput();
+  void logHealth();
   void transmit(snv2::PacketType type, const Bytes& payload, std::uint32_t stream = 0,
-                std::uint64_t frame = 0, std::uint16_t flags = 0, bool reliable = false);
+                std::uint64_t frame = 0, std::uint16_t flags = 0, bool reliable = false,
+                Clock::time_point deadline = {});
   void datagram(const Bytes& bytes);
   void process(const Bytes& bytes);
   void queueVideoRepair(const Bytes& bytes);
   void serviceVideoRepairs();
-  void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair);
+  void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline = {});
   Options options_;
   PacketCodec codec_;
   std::intptr_t socket_ = -1;
@@ -162,6 +174,8 @@ private:
   std::size_t videoCacheBytes_=0;
   Clock::time_point lastReceived_ = Clock::now(), lastKeyframe_{};
   bool needKeyframe_ = true;
+  std::uint64_t rawDatagrams_=0, authRejected_=0, videoDatagrams_=0, completedFrames_=0, keyframeWaitDropped_=0, nackSent_=0;
+  std::atomic<unsigned> stopReason_{0};
 };
 struct PeerStop { Peer& peer; ~PeerStop() { peer.stop(); } };
 }
