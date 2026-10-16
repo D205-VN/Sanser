@@ -1,7 +1,8 @@
 # Release
 
-The current release is [Sanser 2.2.7](releases/v2.2.7.md), published to the latest
-automatic-update channel with Mac/Windows installers and signed updater bundles.
+The next release definition is [Sanser 2.2.8](releases/v2.2.8.md). Its tagged
+workflow publishes Mac/Windows installers and signed updater bundles to the
+latest automatic-update channel.
 See [sharing implementation and validation progress](multi-viewer-progress.md)
 for the remaining real-device checks.
 

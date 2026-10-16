@@ -94,14 +94,14 @@ private:
   }
   long left_,top_; std::uint32_t width_,height_; std::set<std::uint16_t> keys_,buttons_;
 };
-struct Image { Bytes pixels; std::uint32_t width=0,height=0; };
-struct Nv12Image { Bytes pixels; std::uint32_t width=0,height=0,stride=0,rows=0,left=0,top=0; };
+struct Image { Bytes pixels; std::uint32_t width=0,height=0; Clock::time_point decodedAt=Clock::now(); };
+struct Nv12Image { Bytes pixels; std::uint32_t width=0,height=0,stride=0,rows=0,left=0,top=0; Clock::time_point decodedAt=Clock::now(); };
 Image convertNv12(const Nv12Image& source) {
   const auto width=source.width,height=source.height,stride=source.stride;
   if(!width || !height || source.left+width>stride || source.top+height>source.rows || source.rows%2
       || source.pixels.size()<static_cast<std::size_t>(stride)*source.rows*3/2)
     throw std::runtime_error("Invalid NV12 display aperture");
-  Image image{Bytes(static_cast<std::size_t>(width)*height*4),width,height};
+  Image image{Bytes(static_cast<std::size_t>(width)*height*4),width,height,source.decodedAt};
   const auto* data=source.pixels.data();
   auto clamp=[](int n) { return static_cast<std::uint8_t>(std::clamp(n,0,255)); };
   for(std::uint32_t y=0;y<height;++y) for(std::uint32_t x=0;x<width;++x) {
@@ -194,6 +194,8 @@ struct WindowState {
   std::function<void(Input)> sendInput; std::mutex mutex; std::shared_ptr<const Image> image;
   bool released=false; RECT video{};
   WindowPresenter presenter;
+  std::weak_ptr<const Image> lastPresented;
+  std::uint64_t painted=0,paintUs=0,decodedToPaintUs=0;
   // Auto-reset event coalesces decoded frames instead of queuing a UI message
   // for every frame. Painting retains a snapshot without blocking decoding.
   HANDLE frameReady=CreateEventW(nullptr,FALSE,FALSE,nullptr);
@@ -220,12 +222,21 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
   if(message==WM_ERASEBKGND) return 1;
   if(message==WM_PAINT) {
+    const auto began=Clock::now();
     PAINTSTRUCT paint{}; HDC dc=BeginPaint(window,&paint); RECT area{}; GetClientRect(window,&area);
     std::shared_ptr<const Image> snapshot;
     { std::lock_guard lock(state->mutex); snapshot=state->image; }
     const auto* pixels=snapshot && !snapshot->pixels.empty() ? snapshot->pixels.data() : nullptr;
-    if(!state->presenter.paint(dc,area.right,area.bottom,pixels,snapshot ? snapshot->width : 0,snapshot ? snapshot->height : 0,state->video))
+    const bool presented=state->presenter.paint(dc,area.right,area.bottom,pixels,snapshot ? snapshot->width : 0,snapshot ? snapshot->height : 0,state->video);
+    if(!presented)
       std::cerr<<"Unable to paint the remote desktop frame"<<std::endl;
+    // Do not call repeated paints of an unchanged idle picture frame latency.
+    if(presented && pixels && area.right>0 && area.bottom>0 && state->lastPresented.lock()!=snapshot) {
+      ++state->painted;
+      state->paintUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count());
+      state->decodedToPaintUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-snapshot->decodedAt).count());
+      state->lastPresented=snapshot;
+    }
     EndPaint(window,&paint); return 0;
   }
   // Windows runs its own modal loop while a window is dragged or resized.
@@ -253,6 +264,21 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     state->sendInput(event); return 0;
   }
   return DefWindowProcW(window,message,w,l);
+}
+bool pumpWindowMessages(MSG& message) {
+  // A busy input queue must yield to frameReady. WM_PAINT is normally below
+  // mouse/key messages in priority, so pumping until empty can starve video.
+  const auto deadline=Clock::now()+std::chrono::milliseconds(2);
+  for(unsigned count=0;count<64 && PeekMessageW(&message,nullptr,0,0,PM_REMOVE);++count) {
+    if(message.message==WM_QUIT) return false;
+    TranslateMessage(&message); DispatchMessageW(&message);
+    if(Clock::now()>=deadline) break;
+  }
+  return true;
+}
+void presentReadyFrame(HWND window) {
+  // Send WM_PAINT now, including when mouse traffic keeps the queue nonempty.
+  RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW|RDW_NOERASE);
 }
 }
 #ifdef SANSER_CODEC_TEST
@@ -285,6 +311,17 @@ void testWindowsInput() {
   state.viewOnly=true; const auto before=events.size();
   SendMessageW(window,WM_KEYDOWN,'A',0); SendMessageW(window,WM_LBUTTONDOWN,0,MAKELPARAM(100,50));
   require(events.size()==before,"View-only window forwarded input");
+  ShowWindow(window,SW_SHOWNOACTIVATE);
+  // Posted app messages are not coalesced like physical WM_MOUSEMOVE events.
+  // Keep the queue provably nonempty while testing scheduling fairness.
+  constexpr UINT floodMessage=WM_APP+17;
+  for(unsigned i=0;i<256;++i) require(PostMessageW(window,floodMessage,0,0),"Unable to queue message flood");
+  MSG message{};
+  require(pumpWindowMessages(message),"Input pump unexpectedly quit");
+  require(PeekMessageW(&message,window,floodMessage,floodMessage,PM_NOREMOVE),"Input pump must yield while messages remain queued");
+  state.video={}; presentReadyFrame(window);
+  require(state.video.right>state.video.left,"A ready picture was not painted during queued input");
+  while(PeekMessageW(&message,window,floodMessage,floodMessage,PM_REMOVE)) {}
   std::cout<<"Windows input: resume click, keyboard fallback, keypad, focus reset and view-only enforcement passed\n";
 }
 void testWindowsMacFixture(const char* path) {
@@ -402,9 +439,12 @@ int runWindows(bool host,int argc,char** argv) {
   // Decoder COM objects belong to the decode worker, not the socket/UI threads.
   std::atomic<bool> conversionFailed{false};
   std::atomic<std::uint64_t> decodedFrames{0},convertedFrames{0};
+  std::atomic<std::uint64_t> decodeUs{0},conversionUs{0},decodeCalls{0};
   LatestFrameWorker<Nv12Image> conversion([&](Nv12Image pixels) {
     try {
+      const auto began=Clock::now();
       auto snapshot=std::make_shared<const Image>(convertNv12(pixels));
+      conversionUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count());
       { std::lock_guard lock(state.mutex); state.image=std::move(snapshot); }
       ++convertedFrames;
       SetEvent(state.frameReady);
@@ -412,9 +452,11 @@ int runWindows(bool host,int argc,char** argv) {
   });
   std::unique_ptr<Runtime> runtime; std::unique_ptr<Decoder> decoder;
   DecodeWorker decode([&](Frame frame) {
+    const auto began=Clock::now();
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(frame.width,frame.height,[&](Nv12Image image) { ++decodedFrames; conversion.submit(std::move(image)); });
     decoder->decode(frame);
+    decodeUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count()); ++decodeCalls;
   },[&] { decoder.reset(); runtime.reset(); conversion.clear(); },[&] { peer.requestKeyframe(); },true);
   peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
@@ -426,16 +468,18 @@ int runWindows(bool host,int argc,char** argv) {
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
     if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastProgress>=std::chrono::seconds(1)) {
       std::cout<<"SNV2_VIDEO_HEALTH decoded="<<decodedFrames.load()<<" converted="<<convertedFrames.load()
-        <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures()<<std::endl;
+        <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures()<<" rendered="<<state.painted;
+      const auto calls=decodeCalls.load(),converted=convertedFrames.load();
+      if(calls) std::cout<<" decodeWorkAvgMs="<<decodeUs.load()/1000.0/calls;
+      if(converted) std::cout<<" conversionAvgMs="<<conversionUs.load()/1000.0/converted;
+      if(state.painted) std::cout<<" paintAvgMs="<<state.paintUs/1000.0/state.painted<<" decodedToPaintAvgMs="<<state.decodedToPaintUs/1000.0/state.painted;
+      std::cout<<std::endl;
       lastProgress=Clock::now();
     }
     const auto wake=MsgWaitForMultipleObjectsEx(1,&state.frameReady,100,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
     if(wake==WAIT_FAILED) { peer.stop(); DestroyWindow(window); throw std::runtime_error("Remote window event wait failed"); }
-    if(wake==WAIT_OBJECT_0) InvalidateRect(window,nullptr,FALSE);
-    while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) {
-      if(message.message==WM_QUIT) { open=false; break; }
-      TranslateMessage(&message); DispatchMessageW(&message);
-    }
+    if(wake==WAIT_OBJECT_0) presentReadyFrame(window);
+    open=pumpWindowMessages(message);
   }
   peer.stop(); decode.stop(); conversion.stop(); if(IsWindow(window)) DestroyWindow(window);
   if(decode.failures()>=10) throw std::runtime_error("Unable to decode the remote video: "+decode.error());

@@ -39,7 +39,10 @@ private:
 FullTag hmacSha256(const DirectionKey& key,
                    std::span<const std::uint8_t> first,
                    std::span<const std::uint8_t> second) {
-  AlgorithmHandle algorithm;
+  // Opening a CNG provider is expensive. Share only the immutable algorithm
+  // provider on this thread; every message still gets a fresh keyed hash state.
+  // No packet key, hash state or authentication result is reused.
+  thread_local AlgorithmHandle algorithm;
   BCRYPT_HASH_HANDLE hash = nullptr;
   NTSTATUS status = BCryptCreateHash(
     algorithm.get(),

@@ -36,18 +36,27 @@ std::uint32_t r32(const std::uint8_t* p) { return (static_cast<std::uint32_t>(r1
 snv2::DirectionKey derive(const snv2::DirectionKey& key, std::string_view label) {
   return snv2::deriveKey(key, {reinterpret_cast<const std::uint8_t*>(label.data()), label.size()});
 }
+#ifdef _WIN32
+struct AesAlgorithm {
+  BCRYPT_ALG_HANDLE handle=nullptr;
+  AesAlgorithm() {
+    if(BCryptOpenAlgorithmProvider(&handle,BCRYPT_AES_ALGORITHM,nullptr,0)<0)
+      throw std::runtime_error("AES unavailable");
+    const auto status=BCryptSetProperty(handle,BCRYPT_CHAINING_MODE,reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_CBC)),sizeof(BCRYPT_CHAIN_MODE_CBC),0);
+    if(status<0) { BCryptCloseAlgorithmProvider(handle,0); handle=nullptr; throw std::runtime_error("BCryptSetProperty(CBC) failed"); }
+  }
+  ~AesAlgorithm() { if(handle) BCryptCloseAlgorithmProvider(handle,0); }
+};
+#endif
 Bytes crypt(const snv2::DirectionKey& key, const std::uint8_t* iv, const Bytes& input, bool encrypt) {
   Bytes out(input.size() + 16);
 #ifdef _WIN32
-  BCRYPT_ALG_HANDLE alg = nullptr;
+  // Thousands of media datagrams must not reopen/configure the CNG provider
+  // each time. Key handles and the mutable IV remain private to this call.
+  thread_local AesAlgorithm algorithm;
   BCRYPT_KEY_HANDLE handle = nullptr;
-  if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM, nullptr, 0) < 0) throw std::runtime_error("AES unavailable");
-  const char* stage = "BCryptSetProperty(CBC)";
-  auto status = BCryptSetProperty(alg, BCRYPT_CHAINING_MODE, reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(BCRYPT_CHAIN_MODE_CBC)), sizeof(BCRYPT_CHAIN_MODE_CBC), 0);
-  if (status >= 0) {
-    stage = "BCryptGenerateSymmetricKey";
-    status = BCryptGenerateSymmetricKey(alg, &handle, nullptr, 0, const_cast<PUCHAR>(key.data()), static_cast<ULONG>(key.size()), 0);
-  }
+  const char* stage = "BCryptGenerateSymmetricKey";
+  auto status=BCryptGenerateSymmetricKey(algorithm.handle,&handle,nullptr,0,const_cast<PUCHAR>(key.data()),static_cast<ULONG>(key.size()),0);
   std::array<std::uint8_t, 16> mutableIv{}; std::copy_n(iv, 16, mutableIv.begin());
   ULONG size = 0;
   if (status >= 0) {
@@ -60,7 +69,6 @@ Bytes crypt(const snv2::DirectionKey& key, const std::uint8_t* iv, const Bytes& 
     status = operation(handle, data, static_cast<ULONG>(input.size()), nullptr, mutableIv.data(), 16, out.data(), static_cast<ULONG>(out.size()), &size, BCRYPT_BLOCK_PADDING);
   }
   if (handle) BCryptDestroyKey(handle);
-  BCryptCloseAlgorithmProvider(alg, 0);
   if (status < 0) {
     char error[128];
     std::snprintf(error, sizeof(error), "%s failed (NTSTATUS 0x%08lX)", stage, static_cast<unsigned long>(status));

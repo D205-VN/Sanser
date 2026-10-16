@@ -15,6 +15,9 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "SNV2_HOST_TIMING",
+    "SNV2_VIDEO_HEALTH",
+    "SNV2_INPUT_HEALTH",
     "SNU1_ECHO",
     "SNU1_RX_QUEUE",
     "SNCONTROL_TIMING",
@@ -32,6 +35,20 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "captured",
+    "submitted",
+    "converted",
+    "encodedQueueDrops",
+    "decodeWorkAvgMs",
+    "conversionAvgMs",
+    "paintAvgMs",
+    "decodedToPaintAvgMs",
+    "encodeQueueAvgMs",
+    "encodeAndPublishAvgMs",
+    "queuedKeys",
+    "queuedButtons",
+    "deliveredKeys",
+    "deliveredButtons",
     "hostHoldMs",
     "residualMs",
     "sendCallMs",
@@ -224,6 +241,10 @@ struct Report {
     machine: String,
     platform: &'static str,
     kind: crate::models::EngineKind,
+    wire_protocol: &'static str,
+    requested_width: u16,
+    requested_height: u16,
+    requested_codec: crate::models::VideoCodec,
     route: &'static str,
     relay_transport: Option<&'static str>,
     direct_check: &'static str,
@@ -255,6 +276,14 @@ impl Report {
             machine: crate::device_identity::computer_name(),
             platform: std::env::consts::OS,
             kind: request.kind,
+            wire_protocol: if request.wire_protocol.as_deref() == Some("snv2") {
+                "snv2"
+            } else {
+                "legacy"
+            },
+            requested_width: request.width,
+            requested_height: request.height,
+            requested_codec: request.codec,
             direct_check: match request.direct_check.as_deref() {
                 Some("passed") => "passed",
                 Some("relay-selected") => "relay-selected",
@@ -311,7 +340,7 @@ impl Report {
     fn observe(&mut self, sample: Sample) {
         if matches!(
             sample.source.as_str(),
-            "SNU1_STARTUP" | "SNV1_CLIENT_STATS" | "SNV1_RENDER_STATS"
+            "SNU1_STARTUP" | "SNV1_CLIENT_STATS" | "SNV1_RENDER_STATS" | "SNV2_VIDEO_HEALTH"
         ) && ["decoded", "rendered"]
             .iter()
             .any(|key| sample.values.get(*key).is_some_and(|value| *value > 0.0))
@@ -343,9 +372,17 @@ impl Report {
             "avgRenderAgeMs" | "renderGpuMs" => {
                 *value >= if self.ultra_low_latency { 4.0 } else { 50.0 }
             }
-            "decodeAvgMs" | "encodeAvgMs" | "captureAvgMs" | "sendAvgMs" | "hostAvgWorkMs" => {
-                *value >= 50.0
-            }
+            "decodeAvgMs"
+            | "encodeAvgMs"
+            | "captureAvgMs"
+            | "sendAvgMs"
+            | "hostAvgWorkMs"
+            | "decodeWorkAvgMs"
+            | "conversionAvgMs"
+            | "paintAvgMs"
+            | "decodedToPaintAvgMs"
+            | "encodeQueueAvgMs"
+            | "encodeAndPublishAvgMs" => *value >= 50.0,
             "avgPresentLateMs" | "maxPresentLateMs" | "latencyLateMaxMs" => *value >= 80.0,
             "latencyDropped" | "keyframeWaitDropped" => *value > 0.0,
             _ => false,
@@ -363,6 +400,7 @@ impl Report {
             "SNU1_STARTUP.decoded",
             "SNV1_CLIENT_STATS.decoded",
             "SNV1_RENDER_STATS.rendered",
+            "SNV2_VIDEO_HEALTH.decoded",
         ]
         .iter()
         .any(|key| self.maxima.get(*key).is_some_and(|value| *value > 0.0));
@@ -501,6 +539,25 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn snv2_pipeline_timings_are_retained_without_input_or_packet_content() {
+        let mut launch = request();
+        launch.wire_protocol = Some("snv2".into());
+        let mut report = Report::new(&launch);
+        report.observe(parse_sample(b"SNV2_HOST_TIMING captured=600 submitted=59 completed=58 encodeQueueAvgMs=12 encodeAndPublishAvgMs=8 token=123").unwrap());
+        report.observe(parse_sample(b"SNV2_VIDEO_HEALTH decoded=58 converted=57 rendered=55 decodeWorkAvgMs=2 conversionAvgMs=3 paintAvgMs=1 decodedToPaintAvgMs=60 content=456").unwrap());
+        assert!(report.media_started_at_ms.is_some());
+        assert_eq!(report.status, "delay-observed");
+        assert_eq!(report.maxima["SNV2_VIDEO_HEALTH.decodedToPaintAvgMs"], 60.0);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["wireProtocol"], "snv2");
+        assert_eq!(json["requestedWidth"], 1920);
+        assert_eq!(json["requestedHeight"], 1200);
+        assert_eq!(json["requestedCodec"], "h264");
+        let text = json.to_string();
+        assert!(!text.contains("never-store-this-token"));
+        assert!(!text.contains("token") && !text.contains("content"));
+    }
     fn request() -> LaunchEngineRequest {
         serde_json::from_value(serde_json::json!({
             "kind": "client", "sessionId": uuid::Uuid::new_v4().to_string(),

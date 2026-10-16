@@ -9,6 +9,7 @@
 #include "capture_startup.h"
 #include "audio_capture.h"
 #include "input_injector.h"
+#include "latest_frame_worker.h"
 #import "metal_presenter.h"
 #include "keyboard.h"
 #include <algorithm>
@@ -17,6 +18,7 @@
 #include <set>
 #include <random>
 #include <fstream>
+#include <cstdlib>
 
 using namespace sanser::desktop;
 namespace {
@@ -29,6 +31,12 @@ std::vector<Bytes> nals(const Bytes& bytes) {
   return result;
 }
 void appendNal(Bytes& out,const std::uint8_t* data,std::size_t size) { out.insert(out.end(),{0,0,0,1}); out.insert(out.end(),data,data+size); }
+struct CapturedFrame {
+  std::shared_ptr<__CVBuffer> pixels;
+  CMTime time;
+  Clock::time_point captured;
+  CapturedFrame(CVPixelBufferRef value,CMTime timestamp):pixels(CVPixelBufferRetain(value),[](CVPixelBufferRef p) { CVPixelBufferRelease(p); }),time(timestamp),captured(Clock::now()) {}
+};
 class Encoder {
 public:
   Encoder(const Options& options,Peer& peer) : Encoder(options,[&peer] { return peer.ready(); },[&peer](Frame frame) { peer.video(frame); }) {}
@@ -38,40 +46,71 @@ public:
     requireStatus(VTCompressionSessionCreate(nullptr,options.width,options.height,kCMVideoCodecType_H264,nullptr,nullptr,nullptr,output,this,&session_),"Create H.264 encoder");
     VTSessionSetProperty(session_,kVTCompressionPropertyKey_RealTime,kCFBooleanTrue);
     VTSessionSetProperty(session_,kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse);
+    // RealTime alone is a recommendation. Explicitly disable the compression
+    // window as well; the per-picture completion below bounds older encoders
+    // that reject this optional property.
+    const auto delayStatus=VTSessionSetProperty(session_,kVTCompressionPropertyKey_MaxFrameDelayCount,(__bridge CFNumberRef)@0);
     VTSessionSetProperty(session_,kVTCompressionPropertyKey_ProfileLevel,kVTProfileLevel_H264_Baseline_AutoLevel);
     NSDictionary* values=@{(__bridge NSString*)kVTCompressionPropertyKey_AverageBitRate:@(options.bitrate),(__bridge NSString*)kVTCompressionPropertyKey_ExpectedFrameRate:@(options.fps),(__bridge NSString*)kVTCompressionPropertyKey_MaxKeyFrameInterval:@(options.fps)};
     requireStatus(VTSessionSetProperties(session_,(__bridge CFDictionaryRef)values),"Configure H.264 encoder");
     requireStatus(VTCompressionSessionPrepareToEncodeFrames(session_),"Prepare encoder");
+    std::cout<<"SNV2_ENCODER maxFrameDelay="<<(delayStatus==noErr ? 0 : -1)<<" pendingCaptureLimit=1 completionPerFrame=1"<<std::endl;
+    frames_=std::make_unique<LatestFrameWorker<CapturedFrame>>([this](CapturedFrame frame) {
+      @autoreleasepool {
+        try { submit(frame); } catch(const std::exception& error) { std::cerr<<"SNV2_ENCODE failed: "<<error.what()<<std::endl; failed_=true; }
+      }
+    });
   }
-  ~Encoder() { if(session_) { VTCompressionSessionCompleteFrames(session_,kCMTimeInvalid); VTCompressionSessionInvalidate(session_); CFRelease(session_); } if(lastPixels_) CVPixelBufferRelease(lastPixels_); }
+  ~Encoder() { if(frames_) frames_->stop(); if(session_) { VTCompressionSessionCompleteFrames(session_,kCMTimeInvalid); VTCompressionSessionInvalidate(session_); CFRelease(session_); } if(lastPixels_) CVPixelBufferRelease(lastPixels_); }
   void encode(CVPixelBufferRef pixels,CMTime time) {
     std::lock_guard lock(encodeMutex_);
     if(lastPixels_) CVPixelBufferRelease(lastPixels_);
     lastPixels_=CVPixelBufferRetain(pixels);
     if(CMTimeCompare(time,lastTime_)<=0) time=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
     lastTime_=time;
-    if(ready_()) submit(pixels,time);
+    if(ready_()) { ++captured_; frames_->submit(CapturedFrame(pixels,time)); }
   }
   void refresh() {
     std::lock_guard lock(encodeMutex_);
     if(!lastPixels_ || !ready_()) return;
     lastTime_=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
-    submit(lastPixels_,lastTime_);
+    ++captured_; frames_->submit(CapturedFrame(lastPixels_,lastTime_));
   }
-  void submit(CVPixelBufferRef pixels,CMTime time) {
+  void submit(const CapturedFrame& frame) {
+    const auto began=Clock::now();
+    queueUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(began-frame.captured).count());
+    ++submitted_;
+    std::lock_guard sessionLock(sessionMutex_);
     const bool force=force_.exchange(false);
     const auto properties=force ? (__bridge CFDictionaryRef)@{(__bridge NSString*)kVTEncodeFrameOptionKey_ForceKeyFrame:@YES} : nullptr;
-    if(VTCompressionSessionEncodeFrame(session_,pixels,time,CMTimeMake(1,options_.fps),properties,nullptr,nullptr)!=noErr) failed_=true;
+    requireStatus(VTCompressionSessionEncodeFrame(session_,frame.pixels.get(),frame.time,CMTimeMake(1,options_.fps),properties,nullptr,nullptr),"Encode screen frame");
+    // Only one encoded picture may be in flight. Discard superseded RAW
+    // captures in frames_, never encoded P-frame references. This also delivers
+    // the final idle-desktop picture without waiting for another capture.
+    requireStatus(VTCompressionSessionCompleteFrames(session_,kCMTimeInvalid),"Complete realtime frame");
+    encodeAndPublishUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count());
+    ++completed_;
   }
   void keyframe() { force_=true; }
   bool setBitrate(std::uint32_t bitrate) {
-    std::lock_guard lock(encodeMutex_);
+    std::lock_guard lock(sessionMutex_);
     return VTSessionSetProperty(session_,kVTCompressionPropertyKey_AverageBitRate,(__bridge CFNumberRef)@(bitrate))==noErr;
   }
   bool failed() const { return failed_; }
+  bool takeRetryRequest() { return retry_.exchange(false); }
+  void flush() { frames_->drain(); }
+  void logProgress() {
+    if(!std::getenv("SANSER_TELEMETRY")) return;
+    const auto captured=captured_.load(),submitted=submitted_.load(),completed=completed_.load();
+    std::cout<<"SNV2_HOST_TIMING captured="<<captured<<" submitted="<<submitted<<" completed="<<completed<<" encoderDropped="<<encoderDropped_.load();
+    if(submitted) std::cout<<" encodeQueueAvgMs="<<queueUs_.load()/1000.0/submitted;
+    if(completed) std::cout<<" encodeAndPublishAvgMs="<<encodeAndPublishUs_.load()/1000.0/completed;
+    std::cout<<std::endl;
+  }
 private:
-  static void output(void* context,void*,OSStatus status,VTEncodeInfoFlags,CMSampleBufferRef sample) {
+  static void output(void* context,void*,OSStatus status,VTEncodeInfoFlags flags,CMSampleBufferRef sample) {
     auto& self=*static_cast<Encoder*>(context);
+    if(status==noErr && (flags&kVTEncodeInfo_FrameDropped)) { ++self.encoderDropped_; self.retry_=true; return; }
     if(status!=noErr || !sample || !CMSampleBufferDataIsReady(sample)) { self.failed_=true; return; }
     try {
       Frame frame; frame.width=self.options_.width; frame.height=self.options_.height;
@@ -94,7 +133,10 @@ private:
   Options options_; std::function<bool()> ready_; std::function<void(Frame)> publish_;
   VTCompressionSessionRef session_=nullptr;
   CVPixelBufferRef lastPixels_=nullptr; CMTime lastTime_=kCMTimeZero; std::mutex encodeMutex_;
-  std::atomic<bool> force_{true},failed_{false};
+  std::mutex sessionMutex_;
+  std::unique_ptr<LatestFrameWorker<CapturedFrame>> frames_;
+  std::atomic<std::uint64_t> captured_{0},submitted_{0},completed_{0},encoderDropped_{0},queueUs_{0},encodeAndPublishUs_{0};
+  std::atomic<bool> force_{true},failed_{false},retry_{false};
 };
 class Decoder {
 public:
@@ -226,6 +268,46 @@ struct SharingNotice {
   void pump() { if(!panel) return; NSEvent* event; while((event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:YES])) [NSApp sendEvent:event]; }
 };
 #ifdef SANSER_CODEC_TEST
+void testMacEncoderBackpressure() {
+  @autoreleasepool {
+    Options options; options.width=640; options.height=360;
+    const auto pixels=[](std::uint8_t blue,std::uint8_t red) {
+      CVPixelBufferRef value=nullptr;
+      requireStatus(CVPixelBufferCreate(nullptr,640,360,kCVPixelFormatType_32BGRA,nullptr,&value),"Create encoder-pressure image");
+      std::shared_ptr<__CVBuffer> owner(value,[](CVPixelBufferRef p) { CVPixelBufferRelease(p); });
+      CVPixelBufferLockBaseAddress(value,0);
+      auto* data=static_cast<std::uint8_t*>(CVPixelBufferGetBaseAddress(value)); const auto stride=CVPixelBufferGetBytesPerRow(value);
+      for(unsigned y=0;y<360;++y) for(unsigned x=0;x<640;++x) { auto* p=data+y*stride+x*4; p[0]=blue; p[1]=20; p[2]=red; p[3]=255; }
+      CVPixelBufferUnlockBaseAddress(value,0); return owner;
+    };
+    auto red=pixels(20,210),blue=pixels(210,20);
+    std::mutex mutex; std::condition_variable wake; bool entered=false,release=false;
+    std::vector<Frame> delivered;
+    Encoder encoder(options,[] { return true; },[&](Frame frame) {
+      std::unique_lock lock(mutex); delivered.push_back(std::move(frame));
+      if(!entered) { entered=true; wake.notify_all(); wake.wait_for(lock,std::chrono::seconds(3),[&] { return release; }); }
+    });
+    struct Release { std::mutex& mutex; std::condition_variable& wake; bool& release; ~Release() { { std::lock_guard lock(mutex); release=true; } wake.notify_all(); } } cleanup{mutex,wake,release};
+    encoder.encode(red.get(),CMTimeMake(1,60));
+    { std::unique_lock lock(mutex); if(!wake.wait_for(lock,std::chrono::seconds(2),[&] { return entered; })) throw std::runtime_error("Encoder did not publish its first frame"); }
+    const auto began=Clock::now();
+    for(unsigned i=2;i<102;++i) encoder.encode(red.get(),CMTimeMake(i,60));
+    encoder.encode(blue.get(),CMTimeMake(102,60));
+    if(Clock::now()-began>std::chrono::milliseconds(100)) throw std::runtime_error("Blocked encoded delivery stalled the capture callback");
+    { std::lock_guard lock(mutex); release=true; } wake.notify_all();
+    encoder.flush();
+    if(encoder.failed() || delivered.size()!=2 || !delivered.front().keyframe)
+      throw std::runtime_error("Encoder replayed stale captures or lost its reference keyframe");
+    Decoder decoder; for(const auto& frame:delivered) decoder.decode(frame);
+    auto latest=decoder.take(); if(!latest) throw std::runtime_error("Newest capture did not decode after encoder pressure");
+    CVPixelBufferLockBaseAddress(latest,kCVPixelBufferLock_ReadOnly);
+    const auto* color=static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(latest));
+    const bool matches=color[0]>150 && color[1]<80 && color[2]<80;
+    CVPixelBufferUnlockBaseAddress(latest,kCVPixelBufferLock_ReadOnly); CVPixelBufferRelease(latest);
+    if(!matches) throw std::runtime_error("Final idle-desktop picture remained stale after encoder pressure");
+    std::cout<<"Mac encoder: blocked delivery retained only newest raw capture; reference chain and final idle picture verified\n";
+  }
+}
 void writeMacInteropFixture(const char* path) {
   @autoreleasepool {
     Options options; options.width=1846; options.height=1200; options.bitrate=6000000;
@@ -243,7 +325,7 @@ void writeMacInteropFixture(const char* path) {
           color[1]=index>=15 && index<30 ? 210 : 20; color[2]=index<15 ? 210 : 20; color[3]=255;
         }
         CVPixelBufferUnlockBaseAddress(pixels,0);
-        encoder.encode(pixels,CMTimeMake(index+1,60)); CVPixelBufferRelease(pixels);
+        encoder.encode(pixels,CMTimeMake(index+1,60)); CVPixelBufferRelease(pixels); encoder.flush();
       }
     } // Flush all VideoToolbox callbacks before writing the synthetic fixture.
     if(frames.size()!=45 || !frames.front().keyframe) throw std::runtime_error("Incomplete Mac interop fixture");
@@ -435,12 +517,15 @@ int runMac(bool host,int argc,char** argv) {
         SharingNotice notice(peer,options.sharing);
         HostOutputStop shutdown{peer}; peer.start();
         auto bitrate=options.bitrate;
+        auto lastProgress=Clock::now();
         while(peer.running() && !capture.failed && !encoder.failed()) {
           peer.pumpControl();
           notice.pump(); if(!peer.running()) break;
           const auto target=peer.bitrate();
           if(target!=bitrate && encoder.setBitrate(target)) bitrate=target;
-          if(peer.takeKeyframeRequest()) { encoder.keyframe(); encoder.refresh(); }
+          const bool retry=encoder.takeRetryRequest();
+          if(peer.takeKeyframeRequest() || retry) { encoder.keyframe(); encoder.refresh(); }
+          if(Clock::now()-lastProgress>=std::chrono::seconds(1)) { encoder.logProgress(); lastProgress=Clock::now(); }
           [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
         }
         peer.stop(); return capture.failed || encoder.failed() ? 1 : 0;

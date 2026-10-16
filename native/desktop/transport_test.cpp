@@ -62,6 +62,28 @@ int main() {
     h.keyId++; require(packet!=host.seal(h,secret),"restart changes IV");
     h.sequence++; require(packet!=host.seal(h,secret),"sequence changes IV");
     require(host.open(client.seal(h,{})).has_value(),"reverse direction empty keepalive");
+    // Reusing algorithm providers must never reuse mutable hash/key/IV state.
+    // Exercise simultaneous sessions and key changes on the same worker thread.
+    std::atomic<unsigned> cryptoFailures{0}; std::vector<std::thread> cryptoWorkers;
+    const auto cryptoBegan=Clock::now();
+    for(unsigned worker=0;worker<4;++worker) cryptoWorkers.emplace_back([worker,&cryptoFailures] {
+      try {
+        PacketCodec hosts[]{PacketCodec(std::string(48,static_cast<char>('c'+worker)),true),PacketCodec(std::string(48,static_cast<char>('k'+worker)),true)};
+        PacketCodec clients[]{PacketCodec(std::string(48,static_cast<char>('c'+worker)),false),PacketCodec(std::string(48,static_cast<char>('k'+worker)),false)};
+        for(unsigned i=0;i<2048;++i) {
+          snv2::Header header; header.sequence=i+1; header.keyId=7;
+          const unsigned session=i%2;
+          Bytes plain(i%17==0 ? 0 : 1000,static_cast<std::uint8_t>(i));
+          const auto wire=hosts[session].seal(header,plain);
+          const auto opened=clients[session].open(wire);
+          if(!opened || opened->second!=plain || clients[1-session].open(wire)) ++cryptoFailures;
+        }
+      } catch(...) { ++cryptoFailures; }
+    });
+    for(auto& thread:cryptoWorkers) thread.join();
+    require(cryptoFailures==0,"cached crypto provider mixed concurrent sessions, keys or message state");
+    std::cout<<"Crypto stress: 8192 authenticated media/control round trips across four threads in "
+      <<std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-cryptoBegan).count()<<" ms\n";
     ReplayWindow replay; require(!replay.accept(0),"zero sequence"); require(replay.accept(10),"new sequence"); require(replay.accept(9),"reordering"); require(!replay.accept(9),"duplicate"); require(replay.accept(3000),"window jump"); require(!replay.accept(10),"old sequence"); require(replay.accept(2999),"within new window");
     Input key{Input::Key,0,0,4,0,true}; auto decoded=decodeInput(encodeInput(key)); require(decoded && decoded->code==4 && decoded->down,"key round trip");
     require(!decodeInput(Bytes(9)),"truncated input"); key.code=0; require(!decodeInput(encodeInput(key)),"invalid HID key"); key.kind=Input::Button; key.code=3; require(!decodeInput(encodeInput(key)),"invalid mouse button");
