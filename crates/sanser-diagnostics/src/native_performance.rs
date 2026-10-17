@@ -211,7 +211,7 @@ mod tests {
         );
         p.observe("SNV2_CONTROL_TIMING", &values(&[("appRttMs", 1.0)]), 100);
         assert_eq!(p.metrics["controlAppRtt"].latest_ms, 240.0);
-        assert!(p.findings(6000, 60).is_empty());
+        assert_eq!(p.findings(6000, 60), Vec::<&str>::new());
         let json = serde_json::to_string(&p).unwrap();
         assert!(!json.contains("token") && !json.contains("windows"));
     }
@@ -223,7 +223,7 @@ mod tests {
             &values(&[("captureWaitAvgMs", 100.0), ("captureAvgMs", 0.2)]),
             100,
         );
-        assert!(p.findings(100, 60).is_empty());
+        assert_eq!(p.findings(100, 60), Vec::<&str>::new());
         p.observe(
             "SNV2_HOST_TIMING",
             &values(&[("encodeAndPublishAvgMs", 50.0)]),
