@@ -1,9 +1,9 @@
-# Sanser 2.2.11
+# Sanser 2.2.12
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.11
+Product:  Sanser 2.2.12
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,16 +20,16 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.11 includes one-encoder screen sharing for up to three view-only
-computers in the same account. See [Release notes](docs/releases/v2.2.11.md) and
+Sanser 2.2.12 includes one-encoder screen sharing for up to three view-only
+computers in the same account. See [Release notes](docs/releases/v2.2.12.md) and
 [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.
-This update fixes reproduced SNV2 stalls: large desktop keyframes were cut off
-by the sender's own pacing deadline, and redundant startup keyframe requests
-could suppress subsequent sharing pictures. The Mac SNV2 client now decodes on
-a bounded worker separate from socket reception. Transport/sharing counters and
-explicit stop reasons are retained in local connection reports. Earlier router
-mapping and zero-reorder H.264 fixes remain included. Group sharing is still
+This update fixes reproduced SNV2 failures: denied input could trigger a client
+disconnect, and a later P-picture could erase an incomplete reference picture.
+Repair now preserves ordered dependencies, uses ACK-aware retry spacing and
+can recover the budget when explicit picture progress stalls under congestion.
+Earlier pacing, bounded decode worker, router mapping and zero-reorder H.264
+fixes remain included. Group sharing is still
 video-only and view-only. Real two-computer capture, window stability and WAN
 latency require retesting; 5–15 ms is not guaranteed.
 
@@ -189,7 +189,7 @@ For a local unsigned verification bundle only:
 npm run desktop:bundle:local
 ```
 
-Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.11.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
+Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.12.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
 
 ## Operating-system permissions
 
@@ -197,7 +197,7 @@ Current release scope and remaining platform validation are tracked in [the rele
 - macOS client requests Accessibility/Input Monitoring when remote input capture is enabled and microphone permission only when microphone forwarding is enabled.
 - macOS hosting is implemented with ScreenCaptureKit and VideoToolbox on macOS 12.3 or newer. Screen Recording is requested when hosting starts; Accessibility is needed when remote input is enabled.
 - Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; their audio and HEVC support remain incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
-- Sanser 2.2.11 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
+- Sanser 2.2.12 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
 
 ## Migration
 

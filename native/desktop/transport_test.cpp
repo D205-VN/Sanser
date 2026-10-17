@@ -94,6 +94,76 @@ int main() {
     Bytes frame{0,0,7,128,0,0,4,56}; frame.resize(2508,77); h.frameId=1; h.flags=snv2::kFlagKeyFrame;
     Reassembler frames; require(!frames.push(h,fragment(frame,2)),"partial frame"); require(!frames.push(h,fragment(frame,0)),"out of order partial"); require(!frames.push(h,fragment(frame,0)),"duplicate fragment"); auto ready=frames.push(h,fragment(frame,1)); require(ready && ready->width==1920 && ready->height==1080 && ready->keyframe && ready->data==Bytes(2500,77),"reassembled frame");
     require(!frames.push(h,fragment(frame,0)),"completed frame cannot replay"); h.frameId=2; auto malformed=fragment(frame,0); malformed[2]=255; require(!frames.push(h,malformed),"invalid fragment count");
+    {
+      Reassembler reordered; auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      require(!reordered.push(header,fragment(frame,0)) && !reordered.push(header,fragment(frame,2)),"IDR is missing its middle fragment");
+      auto later=header; later.frameId=2; later.flags=0;
+      Bytes predicted{0,0,7,128,0,0,4,56}; predicted.resize(900,0x55);
+      require(!reordered.push(later,fragment(predicted,0)),"a complete dependent P-picture must not erase the incomplete IDR");
+      require(reordered.assemblingKeyframe(),"the pending reference keyframe survives UDP reordering");
+      const auto repaired=reordered.push(header,fragment(frame,1));
+      require(repaired && repaired->id==1 && repaired->keyframe && repaired->data==Bytes(2500,77),"late repair must complete the original IDR");
+      require(reordered.lostFragments()==0,"late original packets and their provisional NACKs are not proof of packet loss");
+      const auto dependent=reordered.take();
+      require(dependent && dependent->id==2 && !dependent->keyframe && dependent->data==Bytes(892,0x55),"release the already complete P-picture immediately after its repaired reference");
+      require(reordered.receivedBytes()==3408,"goodput counts unique payload bytes, excluding fragment headers");
+      require(!reordered.take(),"a recovered picture must not be delivered twice");
+      header.frameId=3; header.flags=0;
+      require(!reordered.push(header,fragment(frame,0)),"start missing reference P-picture");
+      later.frameId=4;
+      require(!reordered.push(later,fragment(predicted,0)),"later P-picture waits for a known incomplete reference");
+      header.frameId=5; header.flags=snv2::kFlagKeyFrame;
+      const auto fresh=reordered.push(header,fragment(predicted,0));
+      require(fresh && fresh->id==5 && fresh->keyframe,"a fresh complete IDR immediately bypasses the broken reference chain");
+      require(!reordered.take() && !reordered.push(later,fragment(predicted,0)),"old repaired or buffered pictures cannot follow a newer IDR");
+    }
+    {
+      Reassembler stalled; auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      require(!stalled.push(header,fragment(frame,0)),"start an unrepairable startup IDR");
+      Bytes predicted{0,0,7,128,0,0,4,56}; predicted.resize(900,0x33);
+      header.frameId=2; header.flags=0;
+      require(!stalled.push(header,fragment(predicted,0)),"hold the dependent picture during bounded repair");
+      bool timeout=false; (void)stalled.repairs(timeout,Clock::now()+std::chrono::seconds(1));
+      require(timeout,"unrepairable reference eventually expires");
+      require(stalled.lostFragments()==2,"expiry counts each actually missing fragment once");
+      require(!stalled.take() && stalled.awaitingReference(),"expired reference must require a fresh IDR rather than decode an invalid P-picture");
+      header.frameId=3; header.flags=snv2::kFlagKeyFrame;
+      const auto after=stalled.push(header,fragment(predicted,0));
+      require(after && after->id==3 && !stalled.awaitingReference(),"fresh IDR resumes after reference expiry without replaying old P-pictures");
+    }
+    {
+      Reassembler unseen; auto header=h; header.frameId=2; header.flags=0;
+      Bytes predicted{0,0,7,128,0,0,4,56}; predicted.resize(900,0x66);
+      require(!unseen.push(header,fragment(predicted,0)),"P-picture arriving before any IDR fragment cannot advance the replay watermark");
+      header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      require(!unseen.push(header,fragment(frame,0)) && !unseen.push(header,fragment(frame,2)),"late unseen IDR is still accepted after the newer P-picture");
+      const auto idr=unseen.push(header,fragment(frame,1));
+      const auto dependent=unseen.take();
+      require(idr && idr->id==1 && dependent && dependent->id==2,"unseen late IDR restores its already buffered dependent picture");
+    }
+    {
+      Reassembler gap; auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      Bytes predicted{0,0,7,128,0,0,4,56}; predicted.resize(900,0x66);
+      require(gap.push(header,fragment(predicted,0)).has_value(),"establish a live reference chain");
+      header.frameId=3; header.flags=0;
+      require(!gap.push(header,fragment(predicted,0)),"a whole missing P-picture holds its dependent picture");
+      header.frameId=2;
+      const auto recovered=gap.push(header,fragment(predicted,0));
+      const auto dependent=gap.take();
+      require(recovered && recovered->id==2 && dependent && dependent->id==3,"an unseen late P-reference recovers without waiting for another IDR");
+      header.frameId=5;
+      require(!gap.push(header,fragment(predicted,0)),"another missing whole picture remains bounded");
+      bool expired=false; (void)gap.repairs(expired,Clock::now()+std::chrono::seconds(1));
+      require(expired && gap.awaitingReference(),"an unrecovered whole-picture gap eventually requires a fresh IDR");
+    }
+    {
+      Reassembler repaired; auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      require(!repaired.push(header,fragment(frame,0)) && !repaired.push(header,fragment(frame,2)),"start a reference with one genuinely missing fragment");
+      header.flags|=snv2::kFlagRetransmitted;
+      require(repaired.push(header,fragment(frame,1)).has_value() && repaired.lostFragments()==1,"a unique repair counts one observed lost fragment");
+      require(!repaired.push(header,fragment(frame,1)) && repaired.lostFragments()==1,"duplicate repair cannot inflate loss feedback");
+      require(repaired.receivedBytes()==2508,"duplicate repair cannot inflate delivered goodput");
+    }
     require(!frames.push(h,fragment(frame,0)) && !frames.push(h,fragment(frame,2)),"missing fragment remains incomplete");
     bool expired=false;
     const auto requests=frames.repairs(expired,Clock::now()+std::chrono::milliseconds(4));
@@ -108,6 +178,7 @@ int main() {
       require(!paced.push(h,fragment(large,2)),"interior gap before later fragment");
       const auto gap=paced.repairs(expired,began+std::chrono::milliseconds(36));
       require(gap.size()==1 && gap.front().missing==std::vector<std::uint16_t>{1},"repair only the actual interior loss, not the unsent tail");
+      require(paced.repairs(expired,began+std::chrono::milliseconds(70),std::chrono::milliseconds(120)).empty(),"do not spend WAN repair retries before the previous NACK can return");
       (void)paced.repairs(expired,began+std::chrono::milliseconds(220));
       require(!expired,"a normal WAN repair RTT must not expire the entire keyframe");
       (void)paced.repairs(expired,began+std::chrono::seconds(1));

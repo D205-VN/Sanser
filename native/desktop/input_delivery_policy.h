@@ -19,6 +19,11 @@ public:
   std::chrono::milliseconds deadline() const {
     return std::chrono::milliseconds(std::clamp(latencyMs_*8+250,2000U,5000U));
   }
+  std::chrono::milliseconds repairRetry() const {
+    // There may be no keyboard/button ACK before the first video picture.
+    // The first NACK is independent of this retry interval and remains fast.
+    return std::chrono::milliseconds(latencyMs_ ? std::clamp(latencyMs_*3/2+4,20U,200U) : 100U);
+  }
 private:
   std::uint32_t latencyMs_=0;
 };

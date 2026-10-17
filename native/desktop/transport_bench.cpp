@@ -18,10 +18,14 @@ struct Measurements {
   std::vector<std::int64_t> keySent{0},moveSent{0};
   Samples keys,moves,frames;
   unsigned staleMoves=0,lastMove=0,keyOrderErrors=0,lastKey=0;
+  std::int64_t lastVideoAt=0;
+  double maxVideoGapMs=0;
+  double firstVideoMs=0;
 };
 int main(int argc,char** argv) {
   try {
-    if(argc!=6) throw std::runtime_error("Usage: transport-bench HOST_PORT CLIENT_PORT HOST_PROXY CLIENT_PROXY SECONDS");
+    if(argc!=6 && !(argc==7 && std::string(argv[6])=="--adaptive-source")) throw std::runtime_error("Usage: transport-bench HOST_PORT CLIENT_PORT HOST_PROXY CLIENT_PROXY SECONDS [--adaptive-source]");
+    const bool adaptive=argc==7;
     const auto seconds=std::stoi(argv[5]);
     if(seconds<1 || seconds>60) throw std::runtime_error("Duration must be 1..60 seconds");
     Options h; h.host=true; h.port=static_cast<std::uint16_t>(std::stoi(argv[1])); h.peer="127.0.0.1:"+std::string(argv[3]); h.token=std::string(48,'b');
@@ -41,13 +45,19 @@ int main(int argc,char** argv) {
     client.onFrame=[&](Frame frame) {
       if(frame.data.size()<sizeof(std::int64_t)) return;
       std::int64_t sent=0; std::memcpy(&sent,frame.data.data(),sizeof(sent));
-      std::lock_guard lock(m.mutex); m.frames.push_back((micros()-sent)/1000.0);
+      const auto arrived=micros();
+      std::lock_guard lock(m.mutex);
+      if(m.frames.empty() && m.lastVideoAt) m.firstVideoMs=(arrived-m.lastVideoAt)/1000.0;
+      m.frames.push_back((arrived-sent)/1000.0);
+      if(m.lastVideoAt) m.maxVideoGapMs=std::max(m.maxVideoGapMs,(arrived-m.lastVideoAt)/1000.0);
+      m.lastVideoAt=arrived;
     };
     PeerStop stopHost{host},stopClient{client}; host.start(); client.start();
     const auto deadline=Clock::now()+std::chrono::seconds(5);
     while((!host.ready() || !client.ready()) && Clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     if(!host.ready() || !client.ready()) throw std::runtime_error("Synthetic peer handshake failed");
     const auto start=Clock::now(),end=start+std::chrono::seconds(seconds);
+    { std::lock_guard lock(m.mutex); m.lastVideoAt=micros(); }
     auto nextVideo=start,nextMove=start,nextKey=start;
     unsigned sentFrames=0;
     auto sendInput=[&](bool key) {
@@ -60,19 +70,22 @@ int main(int argc,char** argv) {
       if(now>=nextKey) { sendInput(true); nextKey+=std::chrono::milliseconds(50); }
       if(now>=nextMove) { sendInput(false); nextMove+=std::chrono::microseconds(8333); }
       if(now>=nextVideo) {
-        Frame frame{Bytes(41666,0x42),1920,1080,forceKeyframe.exchange(false) || sentFrames%60==0};
+        const auto payload=adaptive ? std::max(1000U,host.recommendedBitrate()/8/60) : 41666U;
+        Frame frame{Bytes(payload,0x42),1920,1080,forceKeyframe.exchange(false) || sentFrames%60==0};
         const auto time=micros(); std::memcpy(frame.data.data(),&time,sizeof(time)); host.video(frame); ++sentFrames;
         nextVideo+=std::chrono::microseconds(16667);
       }
       std::this_thread::sleep_until(std::min({nextVideo,nextKey,nextMove}));
     }
     const bool survived=host.running() && client.running();
+    { std::lock_guard lock(m.mutex); m.maxVideoGapMs=std::max(m.maxVideoGapMs,(micros()-m.lastVideoAt)/1000.0); }
     const double activeSeconds=std::chrono::duration<double>(Clock::now()-start).count();
     std::this_thread::sleep_for(std::chrono::seconds(2)); client.stop(); host.stop();
     std::lock_guard lock(m.mutex);
     auto print=[&](const char* name,const Samples& samples) { std::cout<<'"'<<name<<"\":{\"received\":"<<samples.size()<<",\"p50_ms\":"<<percentile(samples,.5)<<",\"p95_ms\":"<<percentile(samples,.95)<<",\"max_ms\":"<<percentile(samples,1)<<'}'; };
     std::cout<<std::fixed<<std::setprecision(3)<<"{\"survived\":"<<(survived?"true":"false")<<",\"active_seconds\":"<<activeSeconds<<",\"keys_sent\":"<<m.keySent.size()-1<<",\"moves_sent\":"<<m.moveSent.size()-1<<",\"frames_sent\":"<<sentFrames<<",\"delivered_fps\":"<<m.frames.size()/activeSeconds<<",\"stale_moves\":"<<m.staleMoves<<",\"key_order_errors\":"<<m.keyOrderErrors<<',';
-    print("keys",m.keys); std::cout<<','; print("moves",m.moves); std::cout<<','; print("frames",m.frames); std::cout<<"}\n";
-    return survived && m.staleMoves==0 && m.keyOrderErrors==0 && m.keys.size()==m.keySent.size()-1 ? 0 : 2;
+    print("keys",m.keys); std::cout<<','; print("moves",m.moves); std::cout<<','; print("frames",m.frames);
+    std::cout<<",\"adaptive_source\":"<<(adaptive ? "true" : "false")<<",\"final_budget_mbps\":"<<host.recommendedBitrate()/1000000.0<<",\"first_video_ms\":"<<m.firstVideoMs<<",\"max_video_gap_ms\":"<<m.maxVideoGapMs<<"}\n";
+    return survived && !m.frames.empty() && m.maxVideoGapMs<2000 && m.staleMoves==0 && m.keyOrderErrors==0 && m.keys.size()==m.keySent.size()-1 ? 0 : 2;
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

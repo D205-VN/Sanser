@@ -215,31 +215,79 @@ std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b) {
   const auto offset = static_cast<std::size_t>(index)*chunkSize;
   if (b.size()-8 != std::min(chunkSize, size-offset)) return std::nullopt;
   const auto now = Clock::now();
-  for (auto i = frames_.begin(); i != frames_.end();) { if (now-i->second.started > videoSendBudget(i->second.data.size(),bitrate_,ultra_)+std::chrono::milliseconds(350)) i=frames_.erase(i); else ++i; }
-  if (!frames_.contains(h.frameId)) { if (frames_.size() >= 4) frames_.erase(frames_.begin()); frames_.emplace(h.frameId, Partial{Bytes(size), std::vector<bool>(count), 0, now, (h.flags & snv2::kFlagKeyFrame) != 0}); }
+  for (auto i = frames_.begin(); i != frames_.end();) {
+    if (now-i->second.started > videoSendBudget(i->second.data.size(),bitrate_,ultra_)+std::chrono::milliseconds(350)) {
+      lostFragments_+=i->second.seen.size()-i->second.received; haveReference_=false;
+      bufferedBytes_-=i->second.data.size(); i=frames_.erase(i);
+    } else ++i;
+  }
+  if (!frames_.contains(h.frameId)) {
+    // Bound memory and how much reference history a repaired frame can release.
+    // Complete P-pictures do not evict an IDR merely by arriving before its tail.
+    while(frames_.size()>=24 || bufferedBytes_+size>8*1024*1024) discardThrough(frames_.begin()->first,true);
+    frames_.emplace(h.frameId, Partial{Bytes(size), std::vector<bool>(count), 0, now, (h.flags & snv2::kFlagKeyFrame) != 0});
+    bufferedBytes_+=size;
+  }
   auto& p = frames_.at(h.frameId);
-  if (p.data.size() != size || p.seen.size() != count || p.seen[index]) return std::nullopt;
+  if (p.data.size() != size || p.seen.size() != count || p.seen[index] || p.keyframe!=((h.flags&snv2::kFlagKeyFrame)!=0)) return std::nullopt;
+  receivedBytes_+=b.size()-8;
+  // A provisional gap/NACK can be mere reordering. Count a fragment as lost
+  // only when a unique retransmission repairs it, or it expires/is evicted.
+  if(h.flags&snv2::kFlagRetransmitted) ++lostFragments_;
   std::copy(b.begin()+8, b.end(), p.data.begin()+static_cast<std::ptrdiff_t>(offset)); p.seen[index]=true; ++p.received;
   p.highestSeen=std::max(p.highestSeen,static_cast<std::size_t>(index)+1);
   if (p.received != count) return std::nullopt;
-  Frame frame{{p.data.begin()+8, p.data.end()}, r32(p.data.data()), r32(p.data.data()+4), p.keyframe};
-  frames_.erase(frames_.begin(), frames_.upper_bound(h.frameId)); lastFrame_=h.frameId;
-  if (frame.width < 64 || frame.height < 64 || frame.width > 3840 || frame.height > 2160) return std::nullopt;
+  const auto width=r32(p.data.data()),height=r32(p.data.data()+4);
+  if(width<64 || height<64 || width>3840 || height>2160) { bufferedBytes_-=p.data.size(); frames_.erase(h.frameId); return std::nullopt; }
+  return take();
+}
+void Reassembler::discardThrough(std::uint64_t id,bool lost) {
+  while(!frames_.empty() && frames_.begin()->first<=id) {
+    const auto& partial=frames_.begin()->second;
+    if(lost) { lostFragments_+=partial.seen.size()-partial.received; haveReference_=false; }
+    bufferedBytes_-=partial.data.size(); frames_.erase(frames_.begin());
+  }
+}
+std::optional<Frame> Reassembler::take() {
+  // A fresh complete IDR is independent and can bypass an unrepairable chain.
+  for(auto it=frames_.rbegin();it!=frames_.rend();++it) {
+    if(it->second.keyframe && it->second.received==it->second.seen.size()) {
+      const auto id=it->first; discardThrough(id-1); break;
+    }
+  }
+  if(frames_.empty()) return std::nullopt;
+  const auto& [id,p]=*frames_.begin();
+  if(p.received!=p.seen.size()) return std::nullopt;
+  // A whole P-picture may be reordered, not lost. Preserve the last valid
+  // reference while its bounded recovery window is open; a late picture can
+  // still bridge the gap without an IDR. Expiry/eviction invalidates the chain.
+  if(!p.keyframe && (!haveReference_ || id!=lastFrame_+1)) return std::nullopt;
+  Frame frame{{p.data.begin()+8,p.data.end()},r32(p.data.data()),r32(p.data.data()+4),p.keyframe,id};
+  lastFrame_=id; haveReference_=true; discardThrough(id);
   return frame;
 }
-std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_point now) {
+std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_point now,std::chrono::milliseconds retry) {
   std::vector<Repair> result; expired=false;
   for(auto it=frames_.begin();it!=frames_.end();) {
     auto& partial=it->second;
-    if(now-partial.started>videoSendBudget(partial.data.size(),bitrate_,ultra_)+std::chrono::milliseconds(350)) { expired=true; it=frames_.erase(it); continue; }
+    if(now-partial.started>videoSendBudget(partial.data.size(),bitrate_,ultra_)+std::chrono::milliseconds(350)) { expired=true; haveReference_=false; lostFragments_+=partial.seen.size()-partial.received; bufferedBytes_-=partial.data.size(); it=frames_.erase(it); continue; }
+    if(partial.received==partial.seen.size()) { ++it; continue; }
     // A missing tail may still be in the sender's pacer. Do not NACK packets
     // that have not been sent yet; interior holes can be repaired immediately.
     const bool gap=partial.received<partial.highestSeen;
     const auto budget=videoSendBudget(partial.data.size(),bitrate_,ultra_);
-    if(partial.repairAttempts<3 && now-partial.lastRepair>=std::chrono::milliseconds(20) &&
-       now-partial.started>=(gap ? std::chrono::milliseconds(3) : budget) && result.size()<4) {
+    const auto serialization=budget-std::chrono::milliseconds(ultra_ ? 40 : 100);
+    const auto reorder=std::clamp((retry-std::chrono::milliseconds(8))/4,std::chrono::milliseconds(3),std::chrono::milliseconds(20));
+    const auto tailDue=serialization+reorder;
+    // On a slower path, allow the picture's own serialization plus a small
+    // reorder window before declaring holes. Complete frames are never held.
+    // Otherwise harmless packet reordering can fill the repair lane and starve
+    // the few repairs that are genuinely needed. Fast paths keep a 3ms NACK.
+    const auto gapDue=retry>std::chrono::milliseconds(40) ? tailDue : std::chrono::milliseconds(3);
+    if(partial.repairAttempts<3 && now-partial.lastRepair>=retry &&
+       now-partial.started>=(gap ? gapDue : tailDue) && result.size()<4) {
       Repair request{it->first,{}};
-      const auto limit=now-partial.started<budget ? partial.highestSeen : partial.seen.size();
+      const auto limit=now-partial.started<tailDue ? partial.highestSeen : partial.seen.size();
       for(std::size_t i=0;i<limit && request.missing.size()<32;++i) if(!partial.seen[i]) request.missing.push_back(static_cast<std::uint16_t>(i));
       if(!request.missing.empty()) { result.push_back(std::move(request)); partial.lastRepair=now; ++partial.repairAttempts; }
     }
@@ -437,9 +485,13 @@ void Peer::process(const Bytes& bytes) {
     if(previousGenerations_.contains(h.keyId)) return;
     if(previousGenerations_.size()>=16) { running_=false; return; }
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
-    peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; lastAudio_=0; for(auto& window:replay_) window=ReplayWindow{};
-    reassembler_=Reassembler{options_.bitrate,options_.ultraLowLatency}; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
-    if(options_.host) { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
+    peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; lastAudio_=0; for(auto& window:replay_) window=ReplayWindow{};
+    reassembler_=Reassembler{options_.bitrate,options_.ultraLowLatency}; lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
+    if(options_.host) {
+      { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
+      { std::lock_guard lock(feedbackMutex_); feedback_={}; }
+      busyWindows_=congestionWindows_=recoveryWindows_=0;
+    }
     if(options_.host && onInput) onInput(Input{});
   }
   if (h.streamId==2 && h.sequence<=deliveredInput_) { acknowledgeInput(); return; }
@@ -460,6 +512,8 @@ void Peer::process(const Bytes& bytes) {
     std::uint64_t completed=0; for(std::size_t i=4;i<12;++i) completed=(completed<<8)|b[i];
     if(completed<=frame_.load()) {
       std::lock_guard lock(feedbackMutex_);
+      if(!peerVideoProgress_ || completed>feedback_.completedFrame) lastVideoProgress_=Clock::now();
+      peerVideoProgress_=true;
       feedback_.completedFrame=std::max(feedback_.completedFrame,completed);
     }
     return;
@@ -474,18 +528,33 @@ void Peer::process(const Bytes& bytes) {
     // Compare actual offered encoded bytes, never the configured target. An
     // idle/compressible desktop must not be mistaken for insufficient bandwidth.
     const bool busy=offered>=32000;
+    busyWindows_=busy ? std::min(4U,busyWindows_+1) : 0;
     const bool loss=packets>=16 && static_cast<double>(missing)/packets>0.03;
     const bool congested=busy && (static_cast<double>(delivered)<static_cast<double>(offered)*0.85 || loss || drops>lastFeedbackDrops_);
+    bool deliveryStalled=false, liveStalled=false;
     {
       std::lock_guard lock(feedbackMutex_);
       ++feedback_.serial; feedback_.deliveredBytes=delivered;
       feedback_.congested=congested; feedback_.received=Clock::now();
+      liveStalled=peerVideoProgress_ && feedback_.completedFrame>0 && busyWindows_>=2 &&
+        Clock::now()-lastVideoProgress_>=std::chrono::milliseconds(750);
+      deliveryStalled=peerVideoProgress_ && (feedback_.completedFrame==0 || liveStalled);
     }
     lastFeedbackDrops_=drops;
     if(congested) {
       recoveryWindows_=0;
-      if(++congestionWindows_>=2) {
-        videoBudget_=std::max(std::min(options_.bitrate,5000000U),static_cast<std::uint32_t>(videoBudget_.load()*0.85));
+      if(++congestionWindows_>=(liveStalled ? 1U : 2U)) {
+        auto target=static_cast<std::uint32_t>(videoBudget_.load()*0.85);
+        if(deliveryStalled) {
+          // No picture progress despite sustained source activity: recover at
+          // a rate this peer actually receives, with repair headroom.
+          // Only peers explicitly reporting SVP1 progress can enter this path.
+          const auto deliveredBps=std::clamp(static_cast<double>(delivered)*8000.0/elapsed,0.0,static_cast<double>(options_.bitrate));
+          target=std::min(target,static_cast<std::uint32_t>(deliveredBps*0.8));
+        }
+        const auto previous=videoBudget_.load();
+        videoBudget_=std::max(std::min(options_.bitrate,5000000U),target);
+        if(deliveryStalled && videoBudget_<previous && onKeyframe) onKeyframe();
         congestionWindows_=0;
       }
     } else {
@@ -519,40 +588,47 @@ void Peer::process(const Bytes& bytes) {
   if (h.packetType==snv2::PacketType::Nack && options_.host) { queueVideoRepair(b); return; }
   if (h.packetType==snv2::PacketType::KeyframeRequest && options_.host) { if(onKeyframe) onKeyframe(); return; }
   if (h.packetType==snv2::PacketType::Video && !options_.host && h.streamId==1) {
+    lastVideoReceived_=Clock::now();
     ++videoDatagrams_;
-    receivedVideoBytes_+=b.size(); ++receivedVideoDatagrams_;
-    auto frame=reassembler_.push(h,b);
-    if(frame) {
-      ++completedFrames_;
-      if(lastVideo_ && h.frameId!=lastVideo_+1 && !frame->keyframe) needKeyframe_=true;
-      lastVideo_=h.frameId;
-      if(!needKeyframe_ || frame->keyframe) {
-        needKeyframe_=false;
-        if(onFrame) onFrame(std::move(*frame));
-        completedVideoFrame_=h.frameId;
-      } else ++keyframeWaitDropped_;
-    }
-    // The requested IDR is already arriving. Asking again for every fragment
-    // can reach the host after that IDR and put Delivery back into "await IDR",
-    // dropping all subsequent P-pictures despite successful startup.
-    if (needKeyframe_ && !reassembler_.assemblingKeyframe()) requestKeyframe(); return;
+    ++receivedVideoDatagrams_;
+    deliverVideo(reassembler_.push(h,b));
+    if(needKeyframe_ && !reassembler_.assemblingKeyframe()) requestKeyframe();
+    return;
   }
-  if (options_.host && options_.input && (h.packetType==snv2::PacketType::Keyboard || h.packetType==snv2::PacketType::MouseMove)) {
+  if (options_.host && (h.packetType==snv2::PacketType::Keyboard || h.packetType==snv2::PacketType::MouseMove)) {
     auto event=decodeInput(b); if(!event) return;
     if(h.streamId==2) {
       if(h.sequence>deliveredInput_+64) { running_=false; return; }
       receivedInputs_.emplace(h.sequence,*event);
       while(receivedInputs_.contains(deliveredInput_+1)) {
         const auto next=receivedInputs_.at(++deliveredInput_);
-        if(onInput) { onInput(next); if(next.kind==Input::Key) ++deliveredKeys_; if(next.kind==Input::Button) ++deliveredButtons_; }
+        // ACK receipt even if the host denies injection. Otherwise a stale
+        // client input preference kills an otherwise healthy video session.
+        if(options_.input && onInput) { onInput(next); if(next.kind==Input::Key) ++deliveredKeys_; if(next.kind==Input::Button) ++deliveredButtons_; }
         receivedInputs_.erase(deliveredInput_);
       }
       acknowledgeInput();
     } else if(event->kind==Input::Move && h.sequence>lastMouse_) {
       lastMouse_=h.sequence;
-      if(onInput) onInput(*event);
+      if(options_.input && onInput) onInput(*event);
     }
   }
+}
+void Peer::deliverVideo(std::optional<Frame> frame) {
+  if(!frame) frame=reassembler_.take();
+  while(frame) {
+    ++completedFrames_;
+    const auto id=frame->id;
+    if(lastVideo_ && id!=lastVideo_+1 && !frame->keyframe) needKeyframe_=true;
+    lastVideo_=id;
+    if(!needKeyframe_ || frame->keyframe) {
+      needKeyframe_=false;
+      if(onFrame) onFrame(std::move(*frame));
+      completedVideoFrame_=id;
+    } else ++keyframeWaitDropped_;
+    frame=reassembler_.take();
+  }
+  if(reassembler_.awaitingReference()) needKeyframe_=true;
 }
 void Peer::acknowledgeInput() {
   Bytes ack;
@@ -665,29 +741,42 @@ void Peer::loop() {
       if(options_.host) serviceVideoRepairs();
       else {
         bool expired=false;
-        for(const auto& repair:reassembler_.repairs(expired)) {
+        std::chrono::milliseconds repairRetry;
+        {
+          std::lock_guard lock(sendMutex_);
+          // Reuse the observed ACK delivery bound, not a cross-machine clock.
+          // The first NACK remains prompt; avoid spending all three retries
+          // before one WAN repair could possibly make a round trip.
+          repairRetry=inputDelivery_.repairRetry();
+        }
+        for(const auto& repair:reassembler_.repairs(expired,Clock::now(),repairRetry)) {
           Bytes request{'S','V','N','1'};
           for(int i=7;i>=0;--i) request.push_back(static_cast<std::uint8_t>(repair.frame>>(i*8)));
           u16(request,static_cast<std::uint16_t>(repair.missing.size()));
-          requestedVideoFragments_+=repair.missing.size();
           for(auto index:repair.missing) u16(request,index);
           transmit(snv2::PacketType::Nack,request);
           ++nackSent_;
         }
-        if(expired) requestKeyframe();
+        deliverVideo();
+        if(!reassembler_.assemblingKeyframe() && (expired || (ready_ && needKeyframe_ && now-lastVideoReceived_>std::chrono::seconds(1)))) requestKeyframe();
         if(ready_ && now-lastFeedback>=std::chrono::milliseconds(500)) {
           Bytes feedback{'S','V','F','1'};
           u32(feedback,static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now-lastFeedback).count()));
-          for(int i=7;i>=0;--i) feedback.push_back(static_cast<std::uint8_t>(receivedVideoBytes_>>(i*8)));
+          const auto receivedBytes=reassembler_.receivedBytes();
+          const auto delivered=receivedBytes-lastReportedBytes_;
+          for(int i=7;i>=0;--i) feedback.push_back(static_cast<std::uint8_t>(delivered>>(i*8)));
+          lastReportedBytes_=receivedBytes;
           u32(feedback,static_cast<std::uint32_t>(std::min<std::uint64_t>(receivedVideoDatagrams_,UINT32_MAX)));
-          u32(feedback,static_cast<std::uint32_t>(std::min<std::uint64_t>(requestedVideoFragments_,UINT32_MAX)));
+          const auto lost=reassembler_.lostFragments();
+          u32(feedback,static_cast<std::uint32_t>(std::min<std::uint64_t>(lost-lastReportedLoss_,UINT32_MAX)));
+          lastReportedLoss_=lost;
           transmit(snv2::PacketType::NetworkFeedback,feedback);
           // Separate optional control message keeps the existing SVF1 wire
           // format compatible. Completion is not a claim of display scan-out.
           Bytes progress{'S','V','P','1'};
           for(int i=7;i>=0;--i) progress.push_back(static_cast<std::uint8_t>(completedVideoFrame_>>(i*8)));
           transmit(snv2::PacketType::NetworkFeedback,progress);
-          receivedVideoBytes_=receivedVideoDatagrams_=requestedVideoFragments_=0; lastFeedback=now;
+          receivedVideoDatagrams_=0; lastFeedback=now;
         }
       }
     }

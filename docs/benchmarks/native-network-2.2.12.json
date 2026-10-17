@@ -1,0 +1,172 @@
+{
+  "scope": "SIMULATED new SNV2 transport only; not Windows or real LAN/WAN",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "payload_mbps": 20,
+  "adaptive_source": true,
+  "target_fps": 60,
+  "mouse_hz": 120,
+  "keyboard_events_per_second": 20,
+  "runs": [
+    {
+      "scenario": {
+        "name": "lan_emulated",
+        "delay_ms": 1,
+        "jitter_ms": 0.25,
+        "loss": 0,
+        "mbps": 100
+      },
+      "seed": 1000,
+      "seconds": 8,
+      "result": {
+        "survived": true,
+        "active_seconds": 8.002,
+        "keys_sent": 160,
+        "moves_sent": 960,
+        "frames_sent": 480,
+        "delivered_fps": 59.989,
+        "stale_moves": 0,
+        "key_order_errors": 0,
+        "keys": {
+          "received": 160,
+          "p50_ms": 1.195,
+          "p95_ms": 1.48,
+          "max_ms": 1.863
+        },
+        "moves": {
+          "received": 960,
+          "p50_ms": 1.183,
+          "p95_ms": 1.414,
+          "max_ms": 3.092
+        },
+        "frames": {
+          "received": 480,
+          "p50_ms": 13.126,
+          "p95_ms": 13.582,
+          "max_ms": 14.533
+        },
+        "adaptive_source": true,
+        "final_budget_mbps": 20.0,
+        "first_video_ms": 12.661,
+        "max_video_gap_ms": 18.971
+      },
+      "traffic": {
+        "packets": 22159,
+        "bytes": 22971280,
+        "random_drops": 0,
+        "queue_drops": 0,
+        "send_errors": 0,
+        "peak_queued": 16
+      },
+      "exit_code": 0,
+      "stderr_bytes": 0
+    },
+    {
+      "scenario": {
+        "name": "wan_emulated",
+        "delay_ms": 25,
+        "jitter_ms": 8,
+        "loss": 0.005,
+        "mbps": 40
+      },
+      "seed": 1100,
+      "seconds": 8,
+      "result": {
+        "survived": true,
+        "active_seconds": 8.0,
+        "keys_sent": 160,
+        "moves_sent": 960,
+        "frames_sent": 480,
+        "delivered_fps": 58.622,
+        "stale_moves": 0,
+        "key_order_errors": 0,
+        "keys": {
+          "received": 160,
+          "p50_ms": 24.222,
+          "p95_ms": 31.676,
+          "max_ms": 103.415
+        },
+        "moves": {
+          "received": 838,
+          "p50_ms": 24.535,
+          "p95_ms": 32.249,
+          "max_ms": 33.869
+        },
+        "frames": {
+          "received": 469,
+          "p50_ms": 59.977,
+          "p95_ms": 112.065,
+          "max_ms": 202.334
+        },
+        "adaptive_source": true,
+        "final_budget_mbps": 20.0,
+        "first_video_ms": 40.957,
+        "max_video_gap_ms": 177.102
+      },
+      "traffic": {
+        "packets": 21734,
+        "bytes": 22703872,
+        "random_drops": 114,
+        "queue_drops": 0,
+        "send_errors": 0,
+        "peak_queued": 84
+      },
+      "exit_code": 0,
+      "stderr_bytes": 0
+    },
+    {
+      "scenario": {
+        "name": "wan_congested_emulated",
+        "delay_ms": 60,
+        "jitter_ms": 20,
+        "loss": 0.02,
+        "mbps": 15
+      },
+      "seed": 1200,
+      "seconds": 8,
+      "result": {
+        "survived": true,
+        "active_seconds": 8.002,
+        "keys_sent": 160,
+        "moves_sent": 960,
+        "frames_sent": 480,
+        "delivered_fps": 30.619,
+        "stale_moves": 0,
+        "key_order_errors": 0,
+        "keys": {
+          "received": 160,
+          "p50_ms": 61.229,
+          "p95_ms": 84.559,
+          "max_ms": 285.766
+        },
+        "moves": {
+          "received": 546,
+          "p50_ms": 50.95,
+          "p95_ms": 69.275,
+          "max_ms": 78.548
+        },
+        "frames": {
+          "received": 245,
+          "p50_ms": 180.826,
+          "p95_ms": 303.568,
+          "max_ms": 412.348
+        },
+        "adaptive_source": true,
+        "final_budget_mbps": 6.481,
+        "first_video_ms": 325.614,
+        "max_video_gap_ms": 2238.651
+      },
+      "traffic": {
+        "packets": 14875,
+        "bytes": 14381840,
+        "random_drops": 323,
+        "queue_drops": 2093,
+        "send_errors": 0,
+        "peak_queued": 284
+      },
+      "exit_code": 2,
+      "stderr_bytes": 0
+    }
+  ],
+  "version": "2.2.12",
+  "validation": "Synthetic transport only. Congested run fails the two-second video-gap gate; not a real-device latency claim."
+}

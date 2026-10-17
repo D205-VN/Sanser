@@ -82,6 +82,56 @@ int main() {
     }
     const std::string token(48,'r');
     {
+      Stub remote; Options options; options.host=false; options.input=false; options.audio=false; options.token=token;
+      options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer client(options); PacketCodec hostCodec(token,true);
+      std::mutex mutex; std::vector<Frame> pictures;
+      client.onFrame=[&](Frame frame) { std::lock_guard lock(mutex); pictures.push_back(std::move(frame)); };
+      PeerStop stop{client}; client.start();
+      wire::Header header; header.keyId=123; header.sequence=1; header.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,hostCodec.seal(header,{'S','A','K','1'}));
+      Bytes idr{0,0,2,128,0,0,1,104}; idr.resize(2508,0x71);
+      Bytes predicted{0,0,2,128,0,0,1,104}; predicted.resize(900,0x72);
+      std::uint64_t sequence=0;
+      auto sendFragment=[&](const Bytes& frame,unsigned index,std::uint64_t id,bool key,bool repaired=false) {
+        const auto count=(frame.size()+999)/1000;
+        Bytes body{static_cast<std::uint8_t>(index>>8),static_cast<std::uint8_t>(index),static_cast<std::uint8_t>(count>>8),static_cast<std::uint8_t>(count)};
+        for(int i=3;i>=0;--i) body.push_back(static_cast<std::uint8_t>(frame.size()>>(i*8)));
+        body.insert(body.end(),frame.begin()+index*1000,frame.begin()+std::min<std::size_t>(frame.size(),(index+1)*1000));
+        auto h=header; h.packetType=wire::PacketType::Video; h.streamId=1; h.sequence=++sequence; h.frameId=id;
+        h.flags=(key ? wire::kFlagKeyFrame : 0) | (repaired ? wire::kFlagRetransmitted : 0);
+        remote.send(options.port,hostCodec.seal(h,body));
+      };
+      sendFragment(idr,0,1,true); sendFragment(idr,2,1,true);
+      sendFragment(predicted,0,2,false);
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      { std::lock_guard lock(mutex); check(pictures.empty(),"dependent picture must not be decoded before its missing IDR"); }
+      sendFragment(idr,1,1,true,true);
+      const auto repaired=Clock::now()+std::chrono::seconds(1);
+      while(Clock::now()<repaired) {
+        { std::lock_guard lock(mutex); if(pictures.size()==2) break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      { std::lock_guard lock(mutex); check(pictures.size()==2 && pictures[0].id==1 && pictures[0].keyframe && pictures[1].id==2 && !pictures[1].keyframe,"authenticated late repair must deliver IDR then buffered P-frame with their original IDs"); }
+      sendFragment(predicted,0,3,false);
+      const auto next=Clock::now()+std::chrono::seconds(1);
+      while(Clock::now()<next) {
+        { std::lock_guard lock(mutex); if(pictures.size()==3) break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      { std::lock_guard lock(mutex); check(pictures.size()==3 && pictures.back().id==3,"video continues after repair without another keyframe"); }
+      sendFragment(predicted,0,5,false);
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      { std::lock_guard lock(mutex); check(pictures.size()==3,"a gap before an unseen keyframe must not advance delivered video"); }
+      sendFragment(idr,0,4,true); sendFragment(idr,2,4,true); sendFragment(idr,1,4,true);
+      const auto unseen=Clock::now()+std::chrono::seconds(1);
+      while(Clock::now()<unseen) {
+        { std::lock_guard lock(mutex); if(pictures.size()==5) break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+      { std::lock_guard lock(mutex); check(pictures.size()==5 && pictures[3].id==4 && pictures[3].keyframe && pictures[4].id==5,"an initially unseen late IDR resumes the authenticated stream and buffered dependent picture"); }
+    }
+    {
       Stub remote; Options options; options.host=true; options.ultraLowLatency=true; options.token=token;
       options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
       Peer host(options); PacketCodec codec(token,false); PeerStop stop{host}; host.start();
@@ -122,6 +172,44 @@ int main() {
       const auto reduced=host.bitrate();
       for(unsigned i=0;i<10;++i) { host.video(Frame{Bytes(50000,1),1280,720,true}); feedback(50008); }
       check(host.bitrate()>reduced && host.bitrate()<=options.bitrate,"healthy delivery recovers the budget gradually");
+      // Explicit progress=0 distinguishes an actual startup black screen from
+      // an old peer that simply does not implement the optional progress API.
+      (void)host.takeKeyframeRequest();
+      Bytes progress{'S','V','P','1',0,0,0,0,0,0,0,0};
+      ++h.sequence; h.packetType=wire::PacketType::NetworkFeedback;
+      remote.send(options.port,codec.seal(h,progress));
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      host.video(Frame{Bytes(100000,1),1280,720,true}); feedback(60000);
+      host.video(Frame{Bytes(100000,1),1280,720,true}); feedback(60000);
+      check(host.bitrate()==5000000,"sustained congestion before the first complete picture uses delivered rate with a quality floor");
+      check(host.takeKeyframeRequest(),"startup bitrate fallback also requests a fresh keyframe");
+    }
+    {
+      Stub remote; Options options; options.host=true; options.input=false; options.token=token;
+      options.bitrate=12000000; options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      HostOutput host(options); PacketCodec codec(token,false); HostOutputStop stop{host}; host.start();
+      wire::Header h; h.keyId=123; h.sequence=1; h.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,codec.seal(h,{'S','A','K','1'}));
+      const auto ready=Clock::now()+std::chrono::seconds(1);
+      while(!host.ready() && Clock::now()<ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.ready(),"live stall handshake");
+      host.video({Bytes(100000,1),1280,720,true});
+      h.packetType=wire::PacketType::NetworkFeedback; ++h.sequence;
+      remote.send(options.port,codec.seal(h,{'S','V','P','1',0,0,0,0,0,0,0,1}));
+      (void)host.takeKeyframeRequest();
+      // One picture was delivered, then progress stalls while source activity
+      // and congestion persist. This must recover too, not only black startup.
+      for(unsigned window=0;window<3;++window) {
+        host.video({Bytes(100000,1),1280,720,true});
+        std::this_thread::sleep_for(std::chrono::milliseconds(270));
+        Bytes feedback{'S','V','F','1',0,0,1,244};
+        for(int i=7;i>=0;--i) feedback.push_back(static_cast<std::uint8_t>(std::uint64_t{60000}>>(i*8)));
+        feedback.insert(feedback.end(),{0,0,0,100,0,0,0,0}); ++h.sequence;
+        remote.send(options.port,codec.seal(h,feedback));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if(window<2) check(host.bitrate()>5000000,"brief delivery variation must not trigger live-stall emergency recovery");
+      }
+      check(host.bitrate()==5000000 && host.takeKeyframeRequest(),"a frozen live picture with sustained activity recovers budget and requests a fresh IDR");
     }
     {
       Stub remote; Options options; options.host=true; options.input=false; options.token=token;

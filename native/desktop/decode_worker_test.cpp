@@ -7,8 +7,10 @@ void check(bool ok,const char* message) { if(!ok) throw std::runtime_error(messa
 int main() {
   try {
     InputDeliveryPolicy policy;
+    check(policy.repairRetry()==std::chrono::milliseconds(100),"video startup has a conservative retry interval before any input ACK is available");
     check(policy.deadline()>=std::chrono::seconds(2),"first input must allow a WAN ACK rather than expiring after 120 ms");
     policy.acknowledged(std::chrono::milliseconds(350));
+    check(policy.repairRetry()==std::chrono::milliseconds(200),"video repair retries follow slow ACK delivery with a finite bound");
     check(policy.retry(true,1)>=std::chrono::milliseconds(350),"retry pacing adapts to observed ACK latency");
     check(policy.deadline()>std::chrono::milliseconds(350) && policy.deadline()<=std::chrono::seconds(5),"input remains bounded without killing a normal slow path");
     policy.acknowledged(std::chrono::seconds(10));

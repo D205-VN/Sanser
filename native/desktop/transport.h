@@ -44,7 +44,7 @@ struct Input {
 };
 Bytes encodeInput(const Input& input);
 std::optional<Input> decodeInput(const Bytes& bytes);
-struct Frame { Bytes data; std::uint32_t width = 0, height = 0; bool keyframe = false; };
+struct Frame { Bytes data; std::uint32_t width = 0, height = 0; bool keyframe = false; std::uint64_t id = 0; };
 // Prefix and encoded payload are prepared once, then authenticated per peer.
 struct PreparedFrame { Bytes payload; bool keyframe = false; };
 PreparedFrame prepareFrame(Frame frame);
@@ -71,8 +71,13 @@ class Reassembler {
 public:
   explicit Reassembler(std::uint32_t bitrate=20000000,bool ultra=false):bitrate_(bitrate),ultra_(ultra) {}
   std::optional<Frame> push(const snv2::Header& header, const Bytes& payload);
+  // Drain dependent pictures in order after a delayed reference is repaired.
+  std::optional<Frame> take();
+  std::uint64_t lostFragments() const { return lostFragments_; }
+  std::uint64_t receivedBytes() const { return receivedBytes_; }
+  bool awaitingReference() const { return !haveReference_; }
   struct Repair { std::uint64_t frame; std::vector<std::uint16_t> missing; };
-  std::vector<Repair> repairs(bool& expired,Clock::time_point now=Clock::now());
+  std::vector<Repair> repairs(bool& expired,Clock::time_point now=Clock::now(),std::chrono::milliseconds retry=std::chrono::milliseconds(20));
   bool assemblingKeyframe() const {
     for(const auto& [id,partial]:frames_) { (void)id; if(partial.keyframe) return true; }
     return false;
@@ -82,7 +87,12 @@ private:
   std::uint32_t bitrate_;
   bool ultra_;
   std::map<std::uint64_t, Partial> frames_;
+  std::size_t bufferedBytes_=0;
   std::uint64_t lastFrame_ = 0;
+  std::uint64_t lostFragments_=0;
+  std::uint64_t receivedBytes_=0;
+  bool haveReference_=false;
+  void discardThrough(std::uint64_t id,bool lost=false);
 };
 class Peer {
 public:
@@ -129,6 +139,7 @@ private:
                 Clock::time_point deadline = {});
   void datagram(const Bytes& bytes);
   void process(const Bytes& bytes);
+  void deliverVideo(std::optional<Frame> frame = {});
   void queueVideoRepair(const Bytes& bytes);
   void serviceVideoRepairs();
   void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline = {});
@@ -154,9 +165,11 @@ private:
   std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0};
   std::atomic<std::uint64_t> offeredBytes_{0};
   std::atomic<std::uint32_t> videoBudget_{0};
-  std::uint64_t receivedVideoBytes_=0, receivedVideoDatagrams_=0, requestedVideoFragments_=0, lastFeedbackDrops_=0;
-  unsigned congestionWindows_=0, recoveryWindows_=0;
+  std::uint64_t receivedVideoDatagrams_=0, lastReportedBytes_=0, lastReportedLoss_=0, lastFeedbackDrops_=0;
+  unsigned congestionWindows_=0, recoveryWindows_=0, busyWindows_=0;
+  bool peerVideoProgress_=false;
   Clock::time_point lastVideoFeedback_{};
+  Clock::time_point lastVideoProgress_{};
   std::uint32_t generation_ = 0, peerGeneration_ = 0;
   std::set<std::uint32_t> previousGenerations_;
   std::uint64_t lastVideo_ = 0, lastMouse_ = 0;
@@ -173,6 +186,7 @@ private:
   std::map<std::uint64_t,CachedVideo> videoCache_;
   std::size_t videoCacheBytes_=0;
   Clock::time_point lastReceived_ = Clock::now(), lastKeyframe_{};
+  Clock::time_point lastVideoReceived_ = Clock::now();
   bool needKeyframe_ = true;
   std::uint64_t rawDatagrams_=0, authRejected_=0, videoDatagrams_=0, completedFrames_=0, keyframeWaitDropped_=0, nackSent_=0;
   std::atomic<unsigned> stopReason_{0};

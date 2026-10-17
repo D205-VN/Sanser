@@ -21,7 +21,7 @@ SCENARIOS = [
     dict(name="wan_congested_emulated", delay_ms=60, jitter_ms=20, loss=.02, mbps=15),
 ]
 
-def run(binary, scenario, seconds, seed):
+def run(binary, scenario, seconds, seed, adaptive_source=False):
     rng = random.Random(seed)
     sockets = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(4)]
     for sock in sockets:
@@ -39,7 +39,10 @@ def run(binary, scenario, seconds, seed):
     traffic = dict(packets=0, bytes=0, random_drops=0, queue_drops=0, send_errors=0, peak_queued=0)
     began = time.monotonic()
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        process = subprocess.Popen([str(binary), *map(str, ports), str(seconds)], stdout=out, stderr=err)
+        command=[str(binary), *map(str, ports), str(seconds)]
+        if adaptive_source:
+            command.append("--adaptive-source")
+        process = subprocess.Popen(command, stdout=out, stderr=err)
         try:
             while process.poll() is None:
                 now = time.monotonic()
@@ -96,18 +99,21 @@ def main():
     parser.add_argument("--seconds", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--adaptive-source", action="store_true", help="Size synthetic frames from the existing per-peer bitrate recommendation; does not run a codec")
     args = parser.parse_args()
     if not 1 <= args.seconds <= 60 or not 1 <= args.repeats <= 10:
         parser.error("seconds must be 1..60 and repeats must be 1..10")
     report = dict(scope="SIMULATED new SNV2 transport only; not Windows or real LAN/WAN", platform=platform.platform(),
-                  payload_mbps=20, target_fps=60, mouse_hz=120, keyboard_events_per_second=20, runs=[])
+                  payload_mbps=20, adaptive_source=args.adaptive_source, target_fps=60, mouse_hz=120, keyboard_events_per_second=20, runs=[])
     for index, scenario in enumerate(SCENARIOS):
         for repeat in range(args.repeats):
-            result = run(args.binary.resolve(), scenario, args.seconds, 1000+index*100+repeat)
+            result = run(args.binary.resolve(), scenario, args.seconds, 1000+index*100+repeat, args.adaptive_source)
             report["runs"].append(result)
             print(json.dumps(result), flush=True)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(report, indent=2)+"\n")
+    if any(run["exit_code"] != 0 for run in report["runs"]):
+        raise SystemExit(2)
 
 if __name__ == "__main__":
     main()
