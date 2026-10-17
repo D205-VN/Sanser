@@ -20,6 +20,9 @@ const SOURCES: &[&str] = &[
     "SNV2_HOST_TIMING",
     "SNV2_VIDEO_HEALTH",
     "SNV2_INPUT_HEALTH",
+    "SNV2_CONTROL_TIMING",
+    "SNV2_INPUT_TIMING",
+    "SNINPUT_ACK",
     "SNU1_ECHO",
     "SNU1_RX_QUEUE",
     "SNCONTROL_TIMING",
@@ -56,6 +59,7 @@ const FIELDS: &[&str] = &[
     "converted",
     "encodedQueueDrops",
     "decodeWorkAvgMs",
+    "decodeQueueAvgMs",
     "conversionAvgMs",
     "paintAvgMs",
     "decodedToPaintAvgMs",
@@ -256,6 +260,8 @@ impl RouteHealth {
 #[serde(rename_all = "camelCase")]
 struct Report {
     schema_version: u8,
+    #[serde(rename = "reportId")]
+    id: String,
     version: &'static str,
     session_id: Option<String>,
     machine: String,
@@ -281,12 +287,15 @@ struct Report {
     delay_sample_count: u64,
     status: &'static str,
     maxima: BTreeMap<String, f64>,
+    performance: sanser_diagnostics::NativePerformance,
+    performance_findings: Vec<&'static str>,
     samples: VecDeque<Sample>,
 }
 impl Report {
     fn new(request: &LaunchEngineRequest) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
+            id: uuid::Uuid::new_v4().to_string(),
             version: env!("CARGO_PKG_VERSION"),
             session_id: request
                 .session_id
@@ -354,10 +363,15 @@ impl Report {
             delay_sample_count: 0,
             status: "awaiting-measurements",
             maxima: BTreeMap::new(),
+            performance: sanser_diagnostics::NativePerformance::default(),
+            performance_findings: Vec::new(),
             samples: VecDeque::new(),
         }
     }
     fn observe(&mut self, sample: Sample) {
+        self.performance
+            .observe(&sample.source, &sample.values, sample.at_ms);
+        self.performance_findings = self.performance.findings(sample.at_ms, self.requested_fps);
         if matches!(
             sample.source.as_str(),
             "SNU1_STARTUP" | "SNV1_CLIENT_STATS" | "SNV1_RENDER_STATS" | "SNV2_VIDEO_HEALTH"
@@ -398,6 +412,7 @@ impl Report {
             | "sendAvgMs"
             | "hostAvgWorkMs"
             | "decodeWorkAvgMs"
+            | "decodeQueueAvgMs"
             | "conversionAvgMs"
             | "paintAvgMs"
             | "decodedToPaintAvgMs"
@@ -444,10 +459,41 @@ impl Report {
 // Windows unit-test executable does not carry Tauri's Common Controls manifest.
 pub(crate) type RouteHealthObserver = Box<dyn Fn(&RouteHealth) + Send>;
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PerformanceUpdate {
+    report_id: String,
+    kind: crate::models::EngineKind,
+    wire_protocol: &'static str,
+    route: &'static str,
+    relay_transport: Option<&'static str>,
+    started_at_ms: u64,
+    ended: bool,
+    performance: sanser_diagnostics::NativePerformance,
+    findings: Vec<&'static str>,
+}
+impl Report {
+    fn performance_update(&self) -> PerformanceUpdate {
+        PerformanceUpdate {
+            report_id: self.id.clone(),
+            kind: self.kind,
+            wire_protocol: self.wire_protocol,
+            route: self.route,
+            relay_transport: self.relay_transport,
+            started_at_ms: self.started_at_ms,
+            ended: self.ended,
+            performance: self.performance.clone(),
+            findings: self.performance.findings(now_ms(), self.requested_fps),
+        }
+    }
+}
+pub(crate) type PerformanceObserver = Box<dyn Fn(&PerformanceUpdate) + Send>;
+
 pub(crate) fn start(
     directory: &Path,
     request: &LaunchEngineRequest,
     on_route_health: Option<RouteHealthObserver>,
+    on_performance: Option<PerformanceObserver>,
 ) -> std::io::Result<SyncSender<Sample>> {
     fs::create_dir_all(directory)?;
     let mut report = Report::new(request);
@@ -458,11 +504,15 @@ pub(crate) fn start(
     ));
     save(&path, &report)?;
     prune(directory)?;
+    if let Some(observer) = &on_performance {
+        observer(&report.performance_update());
+    }
     let (sender, receiver) = mpsc::sync_channel::<Sample>(128);
     thread::Builder::new()
         .name("sanser-connection-report".into())
         .spawn(move || {
             let mut flushed = Instant::now();
+            let mut notified = Instant::now();
             loop {
                 match receiver.recv_timeout(Duration::from_secs(5)) {
                     Ok(sample) => {
@@ -480,9 +530,18 @@ pub(crate) fn start(
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         report.ended = true;
                         report.updated_at_ms = now_ms();
+                        if let Some(observer) = &on_performance {
+                            observer(&report.performance_update());
+                        }
                         let _ = save(&path, &report);
                         break;
                     }
+                }
+                if notified.elapsed() >= Duration::from_secs(1) {
+                    if let Some(observer) = &on_performance {
+                        observer(&report.performance_update());
+                    }
+                    notified = Instant::now();
                 }
                 if flushed.elapsed() >= Duration::from_secs(5) {
                     let _ = save(&path, &report);
@@ -559,6 +618,87 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn common_performance_contract_keeps_rtt_meanings_and_missing_stages() {
+        let mut launch = request();
+        launch.wire_protocol = Some("snv2".into());
+        let mut report = Report::new(&launch);
+        report.observe(parse_sample(b"SNV2_CONTROL_TIMING appRttMs=12 token=123").unwrap());
+        report.observe(parse_sample(b"SNV2_INPUT_TIMING avgRttMs=190 hostAvgWorkMs=2").unwrap());
+        report.observe(
+            parse_sample(
+                b"SNV2_VIDEO_HEALTH decoded=10 decodeWorkAvgMs=3 decodeQueueAvgMs=20 screen=456",
+            )
+            .unwrap(),
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["schemaVersion"], 2);
+        assert_eq!(
+            json["performance"]["metrics"]["controlAppRtt"]["latestMs"],
+            12.0
+        );
+        assert_eq!(
+            json["performance"]["metrics"]["inputAckRtt"]["latestMs"],
+            190.0
+        );
+        assert!(json["performance"]["metrics"]["wireRttEstimate"].is_null());
+        assert!(
+            report
+                .performance_findings
+                .contains(&"input-delivery-overhead")
+        );
+        assert!(report.performance_findings.contains(&"decode-queue-high"));
+        assert!(!json.to_string().contains("token") && !json.to_string().contains("screen"));
+        let legacy = parse_sample(b"SNINPUT_ACK rttMs=15 hostProcessMs=1 sequence=123").unwrap();
+        report.observe(legacy);
+        assert_eq!(
+            report.performance.metrics["inputAckRtt"].source,
+            "legacy-input"
+        );
+    }
+    #[test]
+    fn common_performance_observer_receives_initial_and_final_snapshots_without_gui()
+    -> std::io::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("sanser-performance-{}", uuid::Uuid::new_v4()));
+        let (notify, updates) = mpsc::channel();
+        let sender = start(
+            &directory,
+            &request(),
+            None,
+            Some(Box::new(move |update| {
+                notify.send(update.clone()).unwrap();
+            })),
+        )?;
+        let initial = updates.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(!initial.ended && initial.performance.metrics.is_empty());
+        sender
+            .send(parse_sample(b"SNV2_CONTROL_TIMING appRttMs=200").unwrap())
+            .unwrap();
+        drop(sender);
+        let final_update = loop {
+            let update = updates.recv_timeout(Duration::from_secs(3)).unwrap();
+            if update.ended {
+                break update;
+            }
+        };
+        assert_eq!(final_update.report_id, initial.report_id);
+        assert_eq!(
+            final_update.performance.metrics["controlAppRtt"].latest_ms,
+            200.0
+        );
+        assert_eq!(final_update.findings, vec!["control-round-trip-high"]);
+        // Notification occurs just before the final atomic file write.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !recent(&directory)
+            .first()
+            .is_some_and(|r| r["ended"] == true)
+        {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        fs::remove_dir_all(directory)
+    }
     #[test]
     fn sharing_and_transport_health_retain_only_numeric_failure_evidence() {
         let sample=parse_sample(b"SNSHARE_PEER viewer=private-device ready=1 running=1 submitted=80 dispatched=1 replaced=79 referenceDrops=78 pauses=1 backoffMs=2000 token=123").unwrap();
@@ -798,6 +938,7 @@ mod tests {
             Some(Box::new(move |health| {
                 notification.send(health.clone()).unwrap();
             })),
+            None,
         )?;
         sender
             .send(parse_sample(b"SNCONTROL_TIMING wireEstimateMs=200").unwrap())
@@ -826,7 +967,7 @@ mod tests {
     fn reports_survive_end_of_session_and_export_without_credentials() -> std::io::Result<()> {
         let directory =
             std::env::temp_dir().join(format!("sanser-reports-{}", uuid::Uuid::new_v4()));
-        let sender = start(&directory, &request(), None)?;
+        let sender = start(&directory, &request(), None, None)?;
         sender
             .send(parse_sample(b"SNV1_STAGE_PROFILE encodeAvgMs=75 token=123").unwrap())
             .unwrap();

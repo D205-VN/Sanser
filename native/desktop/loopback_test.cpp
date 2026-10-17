@@ -26,6 +26,8 @@ int main() {
     client->onFrame=[&](Frame frame) { std::lock_guard lock(mutex); received=std::move(frame); };
     PeerStop stopHost{*host},stopClient{*client}; host->start(); client->start();
     require(waitFor([&] { return host->ready() && client->ready(); }),"authenticated handshake timed out");
+    require(waitFor([&] { return client->controlRoundTripMs().has_value(); }),"authenticated same-transport control probe must receive a matching pong");
+    require(!host->controlRoundTripMs(),"a responder must not invent its own unmeasured RTT");
     client->input(Input{Input::Key,0,0,4,0,true}); client->input(Input{Input::Key,0,0,4,0,false});
     require(waitFor([&] { std::lock_guard lock(mutex); unsigned keys=0; for(auto i:inputs) if(i.kind==Input::Key) ++keys; return keys==2; }),"reliable keyboard did not arrive");
     { std::lock_guard lock(mutex); bool down=false,up=false; for(auto i:inputs) if(i.kind==Input::Key) { if(!down) { require(i.down,"key order"); down=true; } else up=!i.down; } require(down && up,"keyboard order mismatch"); }

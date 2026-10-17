@@ -33,6 +33,10 @@ fixes remain included. Group sharing is still
 video-only and view-only. Real two-computer capture, window stability and WAN
 latency require retesting; 5–15 ms is not guaranteed.
 
+Current development adds a common native performance view and bounded reports
+for Legacy/SNV2; see [measurement semantics and validation](docs/native-performance.md).
+This development work is not part of the published 2.2.12 installers.
+
 On the host, select **Host → Go online → Start sharing → Invite**. Each invited
 computer selects **Join**. Use **Remove** for one viewer or **Stop sharing** for
 the group; a floating native Stop indicator remains visible on the host screen.

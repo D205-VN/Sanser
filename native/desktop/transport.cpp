@@ -1,3 +1,4 @@
+#include "telemetry.h"
 #include "transport.h"
 #include <algorithm>
 #include <array>
@@ -485,8 +486,9 @@ void Peer::process(const Bytes& bytes) {
     if(previousGenerations_.contains(h.keyId)) return;
     if(previousGenerations_.size()>=16) { running_=false; return; }
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
-    peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; lastAudio_=0; for(auto& window:replay_) window=ReplayWindow{};
+    peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; lastAudio_=0; controlProbe_.reset(); for(auto& window:replay_) window=ReplayWindow{};
     reassembler_=Reassembler{options_.bitrate,options_.ultraLowLatency}; lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
+    controlAppRtt_=-1; inputRttUs_=inputRttSamples_=inputWorkUs_=inputWorkSamples_=0;
     if(options_.host) {
       { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
       { std::lock_guard lock(feedbackMutex_); feedback_={}; }
@@ -500,6 +502,21 @@ void Peer::process(const Bytes& bytes) {
   const bool becameReady=!ready_.exchange(true);
   if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
+  // Optional authenticated control RTT on the SAME media transport. Old peers
+  // ignore this keepalive extension; no response means unknown, never zero.
+  if(h.packetType==snv2::PacketType::Keepalive && h.streamId==0 && b.size()==12) {
+    if(options_.host && std::memcmp(b.data(),"SRQ1",4)==0) {
+      auto pong=b; pong[2]='P'; transmit(snv2::PacketType::Keepalive,pong); return;
+    }
+    if(!options_.host && std::memcmp(b.data(),"SRP1",4)==0) {
+      std::uint64_t id=0; for(std::size_t i=4;i<12;++i) id=(id<<8)|b[i];
+      if(const auto rtt=controlProbe_.received(id,Clock::now())) {
+        controlAppRtt_=*rtt;
+        if(std::getenv("SANSER_TELEMETRY")) { std::ostringstream line; line<<"SNV2_CONTROL_TIMING appRttMs="<<*rtt; writeTelemetry(line); }
+      }
+      return;
+    }
+  }
   if (options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','P','1'})) peerAudio_=true;
   if(h.packetType==snv2::PacketType::Audio) {
     if(!options_.host && options_.audio && h.streamId==0 && h.sequence>lastAudio_ && onAudio) {
@@ -573,13 +590,18 @@ void Peer::process(const Bytes& bytes) {
     std::lock_guard lock(sendMutex_);
     if (ack > sequences_[2]) return;
     const auto now=Clock::now();
+    const auto recordRtt=[&](const Pending& p) {
+      if(p.sacked) return;
+      inputRttUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-p.created).count()); ++inputRttSamples_;
+      inputDelivery_.acknowledged(std::chrono::duration_cast<std::chrono::milliseconds>(now-p.created));
+    };
     for(auto it=pending_.begin();it!=pending_.upper_bound(ack);++it)
-      if(!it->second.sacked) inputDelivery_.acknowledged(std::chrono::duration_cast<std::chrono::milliseconds>(now-it->second.created));
+      recordRtt(it->second);
     pending_.erase(pending_.begin(),pending_.upper_bound(ack));
     for (auto& [sequence,p] : pending_) {
       const auto offset=sequence-ack-1;
       if (offset<64 && (mask & (std::uint64_t{1}<<offset)) && !p.sacked) {
-        inputDelivery_.acknowledged(std::chrono::duration_cast<std::chrono::milliseconds>(now-p.created));
+        recordRtt(p);
         p.sacked=true;
       }
     }
@@ -604,7 +626,11 @@ void Peer::process(const Bytes& bytes) {
         const auto next=receivedInputs_.at(++deliveredInput_);
         // ACK receipt even if the host denies injection. Otherwise a stale
         // client input preference kills an otherwise healthy video session.
-        if(options_.input && onInput) { onInput(next); if(next.kind==Input::Key) ++deliveredKeys_; if(next.kind==Input::Button) ++deliveredButtons_; }
+        if(options_.input && onInput) {
+          const auto began=Clock::now(); onInput(next);
+          inputWorkUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count()); ++inputWorkSamples_;
+          if(next.kind==Input::Key) ++deliveredKeys_; if(next.kind==Input::Button) ++deliveredButtons_;
+        }
         receivedInputs_.erase(deliveredInput_);
       }
       acknowledgeInput();
@@ -685,29 +711,45 @@ void Peer::logHealth() {
   if(!std::getenv("SANSER_TELEMETRY")) return;
   std::size_t pending;
   { std::lock_guard lock(sendMutex_); pending=pending_.size(); }
-  std::cout<<"SNV2_TRANSPORT_HEALTH ready="<<ready_.load()<<" running="<<running_.load()
+  std::ostringstream line;
+  line<<"SNV2_TRANSPORT_HEALTH ready="<<ready_.load()<<" running="<<running_.load()
     <<" rawDatagrams="<<rawDatagrams_<<" authRejected="<<authRejected_
     <<" videoDatagrams="<<videoDatagrams_<<" completed="<<completedFrames_
     <<" keyframeWaitDropped="<<keyframeWaitDropped_<<" nackSent="<<nackSent_
     <<" repaired="<<repairedDatagrams_.load()<<" repairCacheMisses="<<repairCacheMisses_.load()
-    <<" sendQueueDrops="<<videoQueueDrops_.load()<<" pending="<<pending<<" stopReason="<<stopReason_.load()<<std::endl;
+    <<" sendQueueDrops="<<videoQueueDrops_.load()<<" pending="<<pending<<" stopReason="<<stopReason_.load(); writeTelemetry(line);
+  if(inputRttSamples_ || inputWorkSamples_) {
+    line.str(""); line.clear();
+    line<<"SNV2_INPUT_TIMING";
+    if(inputRttSamples_) line<<" avgRttMs="<<inputRttUs_/1000.0/inputRttSamples_;
+    if(inputWorkSamples_) line<<" hostAvgWorkMs="<<inputWorkUs_/1000.0/inputWorkSamples_;
+    writeTelemetry(line);
+    inputRttUs_=inputRttSamples_=inputWorkUs_=inputWorkSamples_=0;
+  }
 }
 void Peer::loop() {
   auto lastHello=Clock::time_point{};
+  auto lastControlProbe=Clock::time_point{};
   auto lastInputLog=Clock::now(); std::uint64_t lastInputCount=0;
   auto lastFeedback=Clock::now();
   auto lastHealth=Clock::now();
   try {
     while(running_ && !stopRequested) {
       const auto now=Clock::now();
+      if(!options_.host && ready_ && now-lastControlProbe>=std::chrono::seconds(1)) {
+        const auto id=controlProbe_.sent(now); Bytes probe{'S','R','Q','1'};
+        for(int i=7;i>=0;--i) probe.push_back(static_cast<std::uint8_t>(id>>(i*8)));
+        transmit(snv2::PacketType::Keepalive,probe); lastControlProbe=now;
+      }
       if(now-lastHealth>=std::chrono::seconds(1)) { logHealth(); lastHealth=now; }
       if(std::getenv("SANSER_TELEMETRY") && now-lastInputLog>=std::chrono::seconds(1)) {
         const auto queuedKeys=queuedKeys_.load(),queuedButtons=queuedButtons_.load();
         const auto total=queuedKeys+queuedButtons+deliveredKeys_+deliveredButtons_;
         if(total!=lastInputCount) {
-          std::cout<<"SNV2_INPUT_HEALTH role="<<(options_.host ? "host" : "client")
+          std::ostringstream line;
+          line<<"SNV2_INPUT_HEALTH role="<<(options_.host ? "host" : "client")
             <<" queuedKeys="<<queuedKeys<<" queuedButtons="<<queuedButtons
-            <<" deliveredKeys="<<deliveredKeys_<<" deliveredButtons="<<deliveredButtons_<<std::endl;
+            <<" deliveredKeys="<<deliveredKeys_<<" deliveredButtons="<<deliveredButtons_; writeTelemetry(line);
           lastInputCount=total;
         }
         lastInputLog=now;

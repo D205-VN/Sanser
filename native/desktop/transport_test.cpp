@@ -16,6 +16,19 @@ int main() {
   try {
     TxScheduler scheduler;
     const auto now=Clock::now();
+    {
+      RoundTripProbe probe;
+      const auto first=probe.sent(now),second=probe.sent(now+std::chrono::milliseconds(5));
+      require(!probe.received(999,now),"unsolicited timing responses must not create measurements");
+      const auto rtt=probe.received(second,now+std::chrono::milliseconds(15));
+      require(rtt && *rtt==10.0,"RTT uses a single monotonic clock and matches its own probe");
+      require(!probe.received(second,now+std::chrono::milliseconds(20)),"duplicate timing responses do not bias latency");
+      require(!probe.received(first,now+std::chrono::seconds(4)),"stale responses are unknown rather than current latency");
+      const auto previous=probe.sent(now); probe.reset(); const auto next=probe.sent(now);
+      require(next>previous && !probe.received(previous,now),"generation changes discard pending timings without reusing probe IDs");
+      for(unsigned i=0;i<5;++i) (void)probe.sent(now);
+      require(!probe.received(next,now),"timing probes have bounded outstanding state");
+    }
     require(videoSendBudget(256*1024,20000000,true)>std::chrono::milliseconds(100),"large IDR budget includes its own serialization");
     require(videoSendBudget(8*1024*1024,1000000,true)==std::chrono::milliseconds(500),"pacing cannot create a multi-second video queue");
     require(scheduler.push(TxScheduler::Video, {Bytes(1024, 1), now, 1}), "queue video");

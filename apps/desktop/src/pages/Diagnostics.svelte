@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import CapabilityNotice from '../components/CapabilityNotice.svelte';
   import StatusPill from '../components/StatusPill.svelte';
+  import NativePerformance from '../components/NativePerformance.svelte';
+  import { nativePerformance, metricIsFresh } from '../stores/nativePerformance';
   import { runtimeStatus } from '../lib/platform';
   import type { RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
@@ -14,6 +16,8 @@
   let runtimeBusy = $state(false);
   const displayedRuntime = $derived(liveRuntime ?? runtime);
   let message = $state<string | null>(null);
+  let now = $state(Date.now());
+  const controlRtt = $derived($nativePerformance.client?.performance.metrics.controlAppRtt ?? $nativePerformance.client?.performance.metrics.controlAppRttFallback);
   const events = $derived($diagnostics.filter((event) => filter === 'all' || event.level === filter).slice().reverse());
 
   function isLegacyLocalServer(engine: unknown): boolean {
@@ -27,7 +31,7 @@
     catch (error) { message = error instanceof Error ? error.message : 'Unable to refresh runtime status'; }
     finally { runtimeBusy = false; }
   }
-  onMount(() => { void refreshRuntime(); });
+  onMount(() => { void refreshRuntime(); const timer=window.setInterval(() => { now=Date.now(); },1_000); return () => window.clearInterval(timer); });
 </script>
 
 <section class="stack">
@@ -40,9 +44,11 @@
 
   <div class="diagnostic-summary grid three">
     <article class="card metric-card"><span>Connection</span><strong>{$connection.engineRunning ? 'Window open' : $connection.session?.status ?? 'Idle'}</strong><small>{$connection.session?.transport?.toUpperCase() ?? 'No transport'}</small></article>
-    <article class="card metric-card"><span>RTT</span><strong>{$connection.metrics ? `${$connection.metrics.rttMs} ms` : '—'}</strong><small>Measured only from engine feedback</small></article>
+    <article class="card metric-card"><span>Control RTT</span><strong>{!$nativePerformance.client?.ended && metricIsFresh(controlRtt,now) ? `${controlRtt.latestMs.toFixed(1)} ms` : '—'}</strong><small>Application round trip, including queues</small></article>
     <article class="card metric-card"><span>Frame rate</span><strong>{$connection.metrics ? `${$connection.metrics.fps} FPS` : '—'}</strong><small>{$connection.metrics ? `${$connection.metrics.droppedFrames} dropped` : 'No media metrics'}</small></article>
   </div>
+
+  <NativePerformance />
 
   <article class="card card-body stack">
     <div><h2 class="card-title">Internet direct route</h2><p class="card-subtitle">Updated during the latest P2P attempt. The host uses a stable UDP port for PCP, NAT-PMP, UPnP or manual forwarding.</p></div>

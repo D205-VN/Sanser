@@ -13,6 +13,7 @@
 #include <codecapi.h>
 #include <wrl/client.h>
 #include "transport.h"
+#include "telemetry.h"
 #include "broadcast.h"
 #include "decode_worker.h"
 #include "latest_frame_worker.h"
@@ -453,7 +454,7 @@ int runWindows(bool host,int argc,char** argv) {
   // Decoder COM objects belong to the decode worker, not the socket/UI threads.
   std::atomic<bool> conversionFailed{false};
   std::atomic<std::uint64_t> decodedFrames{0},convertedFrames{0};
-  std::atomic<std::uint64_t> decodeUs{0},conversionUs{0},decodeCalls{0};
+  std::atomic<std::uint64_t> conversionUs{0};
   LatestFrameWorker<Nv12Image> conversion([&](Nv12Image pixels) {
     try {
       const auto began=Clock::now();
@@ -466,11 +467,9 @@ int runWindows(bool host,int argc,char** argv) {
   });
   std::unique_ptr<Runtime> runtime; std::unique_ptr<Decoder> decoder;
   DecodeWorker decode([&](Frame frame) {
-    const auto began=Clock::now();
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(frame.width,frame.height,[&](Nv12Image image) { ++decodedFrames; conversion.submit(std::move(image)); });
     decoder->decode(frame);
-    decodeUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count()); ++decodeCalls;
   },[&] { decoder.reset(); runtime.reset(); conversion.clear(); },[&] { peer.requestKeyframe(); },true);
   peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
@@ -481,13 +480,14 @@ int runWindows(bool host,int argc,char** argv) {
   auto lastProgress=Clock::now();
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
     if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastProgress>=std::chrono::seconds(1)) {
-      std::cout<<"SNV2_VIDEO_HEALTH decoded="<<decodedFrames.load()<<" converted="<<convertedFrames.load()
+      std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decodedFrames.load()<<" converted="<<convertedFrames.load()
         <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures()<<" rendered="<<state.painted;
-      const auto calls=decodeCalls.load(),converted=convertedFrames.load();
-      if(calls) std::cout<<" decodeWorkAvgMs="<<decodeUs.load()/1000.0/calls;
-      if(converted) std::cout<<" conversionAvgMs="<<conversionUs.load()/1000.0/converted;
-      if(state.painted) std::cout<<" paintAvgMs="<<state.paintUs/1000.0/state.painted<<" decodedToPaintAvgMs="<<state.decodedToPaintUs/1000.0/state.painted;
-      std::cout<<std::endl;
+      const auto timing=decode.takeTiming(); const auto converted=convertedFrames.load();
+      if(timing.samples) line<<" decodeWorkAvgMs="<<timing.workUs/1000.0/timing.samples
+        <<" decodeQueueAvgMs="<<timing.queueUs/1000.0/timing.samples;
+      if(converted) line<<" conversionAvgMs="<<conversionUs.load()/1000.0/converted;
+      if(state.painted) line<<" paintAvgMs="<<state.paintUs/1000.0/state.painted<<" decodedToPaintAvgMs="<<state.decodedToPaintUs/1000.0/state.painted;
+      writeTelemetry(line);
       lastProgress=Clock::now();
     }
     const auto wake=MsgWaitForMultipleObjectsEx(1,&state.frameReady,100,QS_ALLINPUT,MWMO_INPUTAVAILABLE);

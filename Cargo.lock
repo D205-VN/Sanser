@@ -3743,6 +3743,7 @@ dependencies = [
  "futures-util",
  "keyring",
  "rand 0.8.6",
+ "sanser-diagnostics",
  "sanser-network",
  "sanser-p2p",
  "serde",

@@ -1,3 +1,4 @@
+#include "telemetry.h"
 #import <Cocoa/Cocoa.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -104,10 +105,10 @@ public:
   void logProgress() {
     if(!std::getenv("SANSER_TELEMETRY")) return;
     const auto captured=captured_.load(),submitted=submitted_.load(),completed=completed_.load();
-    std::cout<<"SNV2_HOST_TIMING captured="<<captured<<" submitted="<<submitted<<" completed="<<completed<<" encoderDropped="<<encoderDropped_.load();
-    if(submitted) std::cout<<" encodeQueueAvgMs="<<queueUs_.load()/1000.0/submitted;
-    if(completed) std::cout<<" encodeAndPublishAvgMs="<<encodeAndPublishUs_.load()/1000.0/completed;
-    std::cout<<std::endl;
+    std::ostringstream line; line<<"SNV2_HOST_TIMING captured="<<captured<<" submitted="<<submitted<<" completed="<<completed<<" encoderDropped="<<encoderDropped_.load();
+    if(submitted) line<<" encodeQueueAvgMs="<<queueUs_.load()/1000.0/submitted;
+    if(completed) line<<" encodeAndPublishAvgMs="<<encodeAndPublishUs_.load()/1000.0/completed;
+    writeTelemetry(line);
   }
 private:
   static void output(void* context,void*,OSStatus status,VTEncodeInfoFlags flags,CMSampleBufferRef sample) {
@@ -649,8 +650,12 @@ int runMac(bool host,int argc,char** argv) {
         auto pixels=decoder.take(); if(pixels) { [view presentPixels:pixels]; ++presented; CVPixelBufferRelease(pixels); }
         [window displayIfNeeded];
         if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastHealth>=std::chrono::seconds(1)) {
-          std::cout<<"SNV2_VIDEO_HEALTH decoded="<<decoder.decoded()<<" converted="<<presented
-            <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures()<<std::endl;
+          std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decoder.decoded()<<" converted="<<presented
+            <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures();
+          const auto timing=decode.takeTiming();
+          if(timing.samples) line<<" decodeWorkAvgMs="<<timing.workUs/1000.0/timing.samples
+            <<" decodeQueueAvgMs="<<timing.queueUs/1000.0/timing.samples;
+          writeTelemetry(line);
           lastHealth=Clock::now();
         }
       }

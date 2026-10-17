@@ -3,6 +3,7 @@
 #include "snv2_auth.h"
 #include "tx_scheduler.h"
 #include "input_delivery_policy.h"
+#include "round_trip_probe.h"
 #include "audio.h"
 #include <condition_variable>
 #include <atomic>
@@ -105,6 +106,8 @@ public:
   void cancel() { running_=false; sendReady_.notify_all(); }
   bool running() const { return running_.load(); }
   bool ready() const { return ready_.load(); }
+  // Last authenticated application RTT; absent until a supporting peer replies.
+  std::optional<double> controlRoundTripMs() const { const auto ms=controlAppRtt_.load(); return ms<0 ? std::nullopt : std::optional<double>{ms}; }
   void video(const Frame& frame);
   void videoPrepared(std::shared_ptr<const PreparedFrame> frame);
   void pauseVideo(bool paused);
@@ -179,6 +182,9 @@ private:
   struct Pending { Bytes bytes; Clock::time_point sent, created; unsigned attempts; bool sacked = false; };
   std::map<std::uint64_t, Pending> pending_;
   InputDeliveryPolicy inputDelivery_;
+  RoundTripProbe controlProbe_;
+  std::atomic<double> controlAppRtt_{-1};
+  std::uint64_t inputRttUs_=0,inputRttSamples_=0,inputWorkUs_=0,inputWorkSamples_=0;
   std::mutex keyframeRequestMutex_;
   std::map<std::uint64_t, Input> receivedInputs_;
   Reassembler reassembler_;

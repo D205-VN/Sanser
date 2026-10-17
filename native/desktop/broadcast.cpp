@@ -1,3 +1,4 @@
+#include "telemetry.h"
 #include "broadcast.h"
 #include "broadcast_recovery.h"
 #include "broadcast_policy.h"
@@ -266,13 +267,15 @@ void HostOutput::pumpControl() {
   if(broadcast_ && Clock::now()-lastStats_>=std::chrono::seconds(1)) {
     lastStats_=Clock::now();
     for(const auto& peer:broadcast_->stats()) {
-      std::cout<<"SNSHARE_PEER viewer="<<peer.id<<" ready="<<peer.ready<<" running="<<peer.running
+      std::ostringstream line;
+      line<<"SNSHARE_PEER viewer="<<peer.id<<" ready="<<peer.ready<<" running="<<peer.running
         <<" submitted="<<peer.submitted<<" dispatched="<<peer.dispatched<<" replaced="<<peer.replaced
         <<" referenceDrops="<<peer.referenceDrops<<" sendQueueDrops="<<peer.sendQueueDrops
         <<" keyframeSignals="<<peer.keyframeSignals<<" keyframeRequests="<<peer.keyframeRequests
         <<" repaired="<<peer.repaired<<" repairCacheMisses="<<peer.repairCacheMisses
         <<" bitrate="<<peer.recommendedBitrate<<" videoState="<<peer.videoState
-        <<" pauses="<<peer.pauses<<" backoffMs="<<peer.backoffMs<<'\n';
+        <<" pauses="<<peer.pauses<<" backoffMs="<<peer.backoffMs;
+      writeTelemetry(line);
     }
     std::cout.flush();
   }

@@ -30,6 +30,9 @@ int main() {
       check(cold.dropped()==0 && requests==0,"cold startup discarded the only IDR/reference chain");
       { std::unique_lock lock(mutex); release=true; wake.notify_all(); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return decoded==21; }),"cold decoder did not catch up its bounded reference chain"); }
       cold.stop();
+      const auto timing=cold.takeTiming();
+      check(timing.samples==21,"queue/decode timing counts completed worker calls, not incoming fragments");
+      check(cold.takeTiming().samples==0,"periodic timing snapshots must not replay old measurements");
     }
 
     std::mutex mutex; std::condition_variable wake;

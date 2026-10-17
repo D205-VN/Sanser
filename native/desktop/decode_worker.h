@@ -27,7 +27,7 @@ public:
       if(waiting_ && !frame.keyframe) request=true;
       else {
         if(frame.keyframe) waiting_=false;
-        bytes_+=frame.data.size(); queue_.push_back(std::move(frame));
+        bytes_+=frame.data.size(); queue_.push_back({std::move(frame),Clock::now()});
       }
     }
     wake_.notify_one();
@@ -40,23 +40,30 @@ public:
   }
   unsigned failures() const { return failures_.load(); }
   std::uint64_t dropped() const { return dropped_.load(); }
+  struct Timing { std::uint64_t samples=0,queueUs=0,workUs=0; };
+  Timing takeTiming() { std::lock_guard lock(mutex_); return std::exchange(timing_,{}); }
   std::string error() const { std::lock_guard lock(mutex_); return error_; }
 private:
   void loop() {
     while(true) {
-      Frame frame; bool reset=false;
+      Frame frame; bool reset=false; Clock::time_point queued;
       {
         std::unique_lock lock(mutex_);
         wake_.wait(lock,[&] { return stopping_ || resetPending_ || !queue_.empty(); });
         if(stopping_) break;
         reset=std::exchange(resetPending_,false);
-        if(!queue_.empty()) { frame=std::move(queue_.front()); queue_.pop_front(); bytes_-=frame.data.size(); }
+        if(!queue_.empty()) { queued=queue_.front().queued; frame=std::move(queue_.front().frame); queue_.pop_front(); bytes_-=frame.data.size(); }
       }
       try {
         if(reset) reset_();
         if(!frame.data.empty()) {
-          decode_(std::move(frame)); failures_=0;
-          std::lock_guard lock(mutex_); if(queue_.empty()) warming_=false;
+          const auto began=Clock::now(); decode_(std::move(frame)); failures_=0;
+          const auto ended=Clock::now();
+          std::lock_guard lock(mutex_);
+          ++timing_.samples;
+          timing_.queueUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(began-queued).count());
+          timing_.workUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ended-began).count());
+          if(queue_.empty()) warming_=false;
         }
       } catch(const std::exception& error) {
         ++failures_;
@@ -74,7 +81,9 @@ private:
   std::function<void()> reset_,keyframe_;
   mutable std::mutex mutex_;
   std::condition_variable wake_;
-  std::deque<Frame> queue_;
+  struct Queued { Frame frame; Clock::time_point queued; };
+  std::deque<Queued> queue_;
+  Timing timing_;
   std::size_t bytes_=0;
   bool coldStart_=false;
   bool stopping_=false, waiting_=true, resetPending_=false, warming_=false;

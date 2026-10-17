@@ -860,6 +860,12 @@ impl EngineManager {
                             let _ = app.emit("direct-route-health", health);
                         }
                     })),
+                    Some(Box::new({
+                        let app = app.clone();
+                        move |performance| {
+                            let _ = app.emit("native-performance", performance);
+                        }
+                    })),
                 ) {
                     Ok(report) => Some(report),
                     Err(error) => {
