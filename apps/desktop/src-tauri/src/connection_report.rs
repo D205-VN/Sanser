@@ -21,6 +21,7 @@ const SOURCES: &[&str] = &[
     "SNV2_VIDEO_HEALTH",
     "SNV2_INPUT_HEALTH",
     "SNV2_CONTROL_TIMING",
+    "SNROUTE_HEALTH",
     "SNV2_INPUT_TIMING",
     "SNINPUT_ACK",
     "SNU1_ECHO",
@@ -82,6 +83,7 @@ const FIELDS: &[&str] = &[
     "hostSendLockMs",
     "hostSendCallMs",
     "appRttMs",
+    "controlSilenceMs",
     "socketRttMs",
     "wireEstimateMs",
     "macSendQueueMs",
@@ -400,6 +402,7 @@ impl Report {
         // RTT and local processing durations use one machine's monotonic clock.
         // Cross-machine wall-clock frame ages are deliberately excluded.
         let delayed = sample.values.iter().any(|(key, value)| match key.as_str() {
+            "controlSilenceMs" => *value >= 15_000.0,
             "rttMs" | "avgRttMs" | "maxRttMs" | "appRttMs" | "socketRttMs" => {
                 *value >= if self.ultra_low_latency { 15.0 } else { 100.0 }
             }
@@ -463,6 +466,8 @@ pub(crate) type RouteHealthObserver = Box<dyn Fn(&RouteHealth) + Send>;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PerformanceUpdate {
     report_id: String,
+    session_id: Option<String>,
+    route_health: Option<RouteHealth>,
     kind: crate::models::EngineKind,
     wire_protocol: &'static str,
     route: &'static str,
@@ -476,6 +481,8 @@ impl Report {
     fn performance_update(&self) -> PerformanceUpdate {
         PerformanceUpdate {
             report_id: self.id.clone(),
+            session_id: self.session_id.clone(),
+            route_health: self.route_health.clone(),
             kind: self.kind,
             wire_protocol: self.wire_protocol,
             route: self.route,
@@ -618,6 +625,23 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_recovery_evidence_is_bound_to_the_report_session_without_raw_content() {
+        let launch = request();
+        let mut report = Report::new(&launch);
+        report.observe(
+            parse_sample(b"SNROUTE_HEALTH controlSilenceMs=16000 endpoint=private token=123")
+                .unwrap(),
+        );
+        let json = serde_json::to_value(report.performance_update()).unwrap();
+        assert_eq!(json["sessionId"], launch.session_id.as_deref().unwrap());
+        assert_eq!(
+            json["performance"]["metrics"]["controlSilence"]["latestMs"],
+            16000.0
+        );
+        assert_eq!(report.status, "delay-observed");
+        assert!(!json.to_string().contains("private") && !json.to_string().contains("token"));
+    }
     #[test]
     fn common_performance_contract_keeps_rtt_meanings_and_missing_stages() {
         let mut launch = request();

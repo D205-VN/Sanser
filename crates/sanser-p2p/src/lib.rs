@@ -28,6 +28,7 @@ mod metrics;
 mod migration;
 mod nomination;
 mod punch;
+mod recovery;
 mod scoring;
 mod security;
 mod selection;
@@ -67,6 +68,9 @@ pub use nomination::{Nomination, NominationPolicy};
 pub use punch::{
     ConnectivitySelection, ProbeStatistics, PunchAttempt, PunchState, check_connectivity,
     check_connectivity_measured,
+};
+pub use recovery::{
+    RecoveryAction, RecoveryCause, RecoveryEvidence, RecoveryPlan, plan_route_recovery,
 };
 pub use scoring::{
     P2pRouteKind, PathEvidence, PathMetrics, RouteScore, ScoringError, VerificationStatus,

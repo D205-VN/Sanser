@@ -151,12 +151,21 @@ pub struct RuntimeCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     pub kind: EngineKind,
+    pub session_id: Option<uuid::Uuid>,
     pub installed: bool,
     pub running: bool,
     pub process_id: Option<u32>,
     pub video_received: bool,
     pub last_error: Option<String>,
     pub startup_failure: Option<NativeStartupFailure>,
+    pub route_failure: Option<NativeRouteFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeRouteFailure {
+    PeerTimeout,
+    RelayLost,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

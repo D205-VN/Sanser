@@ -42,6 +42,7 @@ const INHERITED_ENVIRONMENT: [&str; 7] = [
 ];
 
 struct EngineChild {
+    session_id: Option<Uuid>,
     process: Child,
     output: EngineOutput,
     acknowledgements: std::sync::mpsc::Receiver<crate::engine_output::SharingAck>,
@@ -85,6 +86,7 @@ impl EngineChild {
             metrics,
         ) {
             Ok(output) => Ok(Self {
+                session_id: None,
                 process,
                 output,
                 acknowledgements: ack_receiver,
@@ -885,6 +887,10 @@ impl EngineManager {
                 state.last_errors.insert(request.kind, message.clone());
                 DesktopError::Process(message)
             })?;
+        child.session_id = request
+            .session_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok());
         if let Err(message) = stabilize_child(&mut child) {
             // `try_wait` reaps a child that already exited. If inspecting the
             // child failed instead, make a best-effort cleanup so launch never
@@ -980,10 +986,26 @@ impl EngineManager {
     }
 
     pub fn stop(&self, kind: EngineKind) -> Result<(), DesktopError> {
+        self.stop_matching(kind, None)
+    }
+
+    pub fn stop_for_session(&self, kind: EngineKind, session: Uuid) -> Result<(), DesktopError> {
+        self.stop_matching(kind, Some(session))
+    }
+
+    fn stop_matching(&self, kind: EngineKind, session: Option<Uuid>) -> Result<(), DesktopError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| DesktopError::Process("engine state is unavailable".into()))?;
+        if session.is_some_and(|session| {
+            state
+                .children
+                .get(&kind)
+                .is_none_or(|child| child.session_id != Some(session))
+        }) {
+            return Ok(());
+        }
         let Some(mut child) = state.children.remove(&kind) else {
             return Ok(());
         };
@@ -1001,7 +1023,9 @@ impl EngineManager {
         let mut process_id = None;
         let mut exited = false;
         let mut video_received = false;
+        let mut session_id = None;
         if let Some(child) = state.children.get_mut(&kind) {
+            session_id = child.session_id;
             match child.process.try_wait() {
                 Ok(None) => {
                     running = true;
@@ -1026,6 +1050,7 @@ impl EngineManager {
         }
         Ok(EngineStatus {
             kind,
+            session_id,
             installed,
             running,
             process_id,
@@ -1038,6 +1063,10 @@ impl EngineManager {
                 .last_errors
                 .get(&kind)
                 .and_then(|message| crate::engine_output::startup_failure(message)),
+            route_failure: state
+                .last_errors
+                .get(&kind)
+                .and_then(|message| crate::engine_output::route_failure(message)),
         })
     }
 }
@@ -1047,6 +1076,55 @@ mod tests {
     use std::net::Ipv6Addr;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_an_old_session_does_not_close_a_new_native_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "read ignored"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = EngineChild::spawn(&mut command, None, None)?;
+        let current = Uuid::new_v4();
+        child.session_id = Some(current);
+        let manager = EngineManager::default();
+        manager
+            .state
+            .lock()
+            .map_err(|_| "state lock")?
+            .children
+            .insert(EngineKind::Client, child);
+        manager.stop_for_session(EngineKind::Client, Uuid::new_v4())?;
+        let retained = manager
+            .state
+            .lock()
+            .map_err(|_| "state lock")?
+            .children
+            .get_mut(&EngineKind::Client)
+            .is_some_and(|child| {
+                child
+                    .process
+                    .try_wait()
+                    .is_ok_and(|status| status.is_none())
+            });
+        manager.stop_for_session(EngineKind::Client, current)?;
+        assert!(
+            retained,
+            "late cleanup must leave a differently owned process alive"
+        );
+        assert!(
+            !manager
+                .state
+                .lock()
+                .map_err(|_| "state lock")?
+                .children
+                .contains_key(&EngineKind::Client)
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]

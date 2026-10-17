@@ -35,6 +35,8 @@ latency require retesting; 5–15 ms is not guaranteed.
 
 Current development adds a common native performance view and bounded reports
 for Legacy/SNV2; see [measurement semantics and validation](docs/native-performance.md).
+It also adds [bounded route recovery](docs/route-recovery.md) with fresh
+authorization/candidates and session-scoped cleanup when a native path fails.
 This development work is not part of the published 2.2.12 installers.
 
 On the host, select **Host → Go online → Start sharing → Invite**. Each invited

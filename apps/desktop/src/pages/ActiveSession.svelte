@@ -2,12 +2,13 @@
   import { onMount } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import StatusPill from '../components/StatusPill.svelte';
-  import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay } from '../lib/platform';
+  import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay, routeRecoveryPlan, type RouteRecoveryEvidence } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
-  import { coordinateP2pConnection, directCheckFailure } from '../lib/p2pSignaling';
+  import { coordinateP2pConnection, directCheckFailure, releaseP2pConnection } from '../lib/p2pSignaling';
   import type { ConnectionSession, Page, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
   import { diagnostics } from '../stores/diagnostics';
+  import { nativePerformance } from '../stores/nativePerformance';
   import { preferences } from '../stores/preferences';
   import { presence } from '../stores/presence';
   import { session } from '../stores/session';
@@ -23,9 +24,10 @@
   let nativePreparationInFlight = $state(false);
   let negotiationController: AbortController | null = null;
   let disconnecting = $state(false);
+  let recoveryInFlight = $state(false);
   let phase = $state<'idle' | 'authorizing' | 'direct' | 'relay' | 'launching'>('idle');
   const phaseLabels = { idle: 'Waiting for approval', authorizing: 'Preparing connection', direct: 'Connecting directly', relay: 'Connecting through relay', launching: 'Opening the remote window' };
-  let activeRoute = $state<'direct' | 'relay' | null>(null);
+  const activeRoute = $derived($connection.nativeRoute);
 
   const sessionState = $derived($connection.session);
   const metrics = $derived($connection.metrics);
@@ -64,6 +66,8 @@
     const size = resolveStreamSize(stream.resolution, target.wireProtocol);
     connection.setBusy(true);
     localError = null;
+    let selectedP2p: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
+    let engineLaunched = false;
     try {
       const localDeviceId = $presence.deviceId;
       const peerDeviceId = target.hostDeviceId;
@@ -89,6 +93,7 @@
           signal,
           target.requesterReadyAt
         );
+        selectedP2p = p2pResult;
         diagnostics.add({ level: 'info', category: 'session', message: `P2P Hole Punching success! Local port: ${p2pResult.localPort}` });
       } catch (directError) {
         directCheck = directCheckFailure(directError, target.networkMode === 'relay');
@@ -115,10 +120,12 @@
       }
 
       if (signal.aborted || !componentActive || $connection.session?.id !== target.id || $session.mode !== 'cloud') {
-        if (relayResult) await stopRelay('client').catch(() => undefined);
+        if (selectedP2p) await releaseP2pConnection(selectedP2p).catch(() => undefined);
+        if (relayResult) await stopRelay('client', target.id).catch(() => undefined);
         return false;
       }
       phase = 'launching';
+      connection.markNativeLaunch();
       await launchEngine({
         ultraLowLatency: stream.profile === 'competitive',
         directCheck,
@@ -146,14 +153,16 @@
             : undefined,
         relay: relayResult !== null
       });
+      engineLaunched = true;
       // Async engine startup can outlive sign-out. Recheck the current session.
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (signal.aborted || !componentActive || $connection.session?.id !== target.id) {
-        await stopEngine('client').catch(() => undefined);
+        await stopEngine('client', target.id).catch(() => undefined);
+        await stopRelay('client', target.id).catch(() => undefined);
         return false;
       }
       connection.setEngineRunning(true);
-      activeRoute = relayResult ? 'relay' : 'direct';
+      connection.setNativeRoute(relayResult ? 'relay' : 'direct');
       failedP2pSessionId = null;
       p2pRetryCount = 0;
       p2pRetryAfter = 0;
@@ -161,12 +170,13 @@
       diagnostics.add({ level: 'info', category: 'engine', message: 'Native client started' });
       return true;
     } catch (error) {
-      await stopRelay('client').catch(() => undefined);
+      if (selectedP2p && !engineLaunched) await releaseP2pConnection(selectedP2p).catch(() => undefined);
+      await stopRelay('client', target.id).catch(() => undefined);
       if (signal.aborted || $connection.session?.id !== target.id) return false;
       const message = error instanceof Error ? error.message : 'Unable to start native client';
       p2pRetryCount += 1;
       p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
-      const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0;
+      const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0 || $connection.nativeRecoveryPending;
       failedP2pSessionId = exhausted ? target.id : null;
       if (exhausted) connection.blockNativeRetry();
       localError = message;
@@ -180,7 +190,7 @@
   async function startNativeClient(target = sessionState): Promise<void> {
     const client = session.client();
     const localDeviceId = $presence.deviceId;
-    if (!target || !client || !localDeviceId || nativePreparationInFlight || $connection.engineRunning || $connection.nativeRetryBlocked) return;
+    if (!target || !client || !localDeviceId || nativePreparationInFlight || $connection.busy || $connection.engineRunning || $connection.nativeRetryBlocked || Date.now() < $connection.nativeRecoveryRetryAt) return;
     if (p2pRetrySessionId !== target.id) {
       p2pRetrySessionId = target.id;
       p2pRetryCount = 0;
@@ -218,7 +228,7 @@
       if (isAborted(controller.signal) || $connection.session?.id !== target.id) return;
       p2pRetryCount += 1;
       p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
-      const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0;
+      const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0 || $connection.nativeRecoveryPending;
       failedP2pSessionId = exhausted ? target.id : null;
       if (exhausted) connection.blockNativeRetry();
       const message = error instanceof Error ? error.message : 'Unable to prepare a fresh native session';
@@ -246,6 +256,74 @@
     await startNativeClient();
   }
 
+  function liveRecoveryEvidence(): Omit<RouteRecoveryEvidence, 'automaticAttempts'> | null {
+    const update = $nativePerformance.client;
+    const current = $connection.session;
+    const launched = $connection.nativeLaunchStartedAtMs;
+    if (!current || launched === null || !update || update.ended || update.sessionId !== current.id || update.startedAtMs < launched) return null;
+    const now = Date.now();
+    const stableMs = Math.max(0, now - launched);
+    const silence = update.performance.metrics.controlSilence;
+    if (silence && silence.latestMs >= 15_000 && now >= silence.updatedAtMs) {
+      return { cause: 'control-unresponsive', stableMs, evidenceAgeMs: now - silence.updatedAtMs, controlSilenceMs: silence.latestMs };
+    }
+    const wire = update.performance.metrics.wireRttEstimate;
+    const health = update.routeHealth;
+    if (update.route === 'direct' && health?.status === 'elevated-after-media' && wire && now >= wire.updatedAtMs) {
+      return { cause: 'sustained-wire-delay', stableMs, evidenceAgeMs: now - wire.updatedAtMs,
+        probeSamples: health.probe.samples, probeMedianMs: health.probe.medianMs,
+        wireRttMs: wire.latestMs, elevatedSamples: health.consecutiveElevated };
+    }
+    return null;
+  }
+
+  async function recoverRoute(target: ConnectionSession, evidence: Omit<RouteRecoveryEvidence, 'automaticAttempts'> | null, manual = false): Promise<boolean> {
+    if (recoveryInFlight || nativePreparationInFlight || $connection.busy || disconnecting || (!manual && ($connection.nativeRetryBlocked || $connection.nativeRecoveryPending || $connection.nativeRouteRecoveries >= 2))) return false;
+    const api = session.client();
+    const ownsSession = () => !disconnecting && $session.mode === 'cloud' && $connection.session?.id === target.id;
+    const stillCurrent = () => componentActive && ownsSession();
+    if (!api || !stillCurrent()) return false;
+    recoveryInFlight = true;
+    let cleanupOwned = false;
+    try {
+      // Keep the existing window until the server confirms this session still
+      // has consent. Reconnect never creates or auto-accepts another session.
+      const confirmed = await connection.refresh(api);
+      if (!stillCurrent() || confirmed?.status !== 'accepted') return false;
+      const plan = manual ? { action: 'reconnect' as const, delayMs: 0, reason: 'manual-reconnect' }
+        : evidence ? await routeRecoveryPlan({ ...evidence, automaticAttempts: $connection.nativeRouteRecoveries }) : null;
+      if (!stillCurrent() || (!manual && $connection.nativeRetryBlocked) || plan?.action !== 'reconnect') return false;
+      if (manual) connection.resetNativeRetry();
+      if (!connection.scheduleRouteRecovery(plan.delayMs, plan.reason, !manual)) return false;
+      connection.setBusy(true);
+      cleanupOwned = true;
+      localError = null;
+      await stopEngine('client', target.id);
+      if (!ownsSession()) return false;
+      await stopRelay('client', target.id);
+      if (!ownsSession()) return false;
+      connection.setEngineRunning(false);
+      connection.setNativeRoute(null);
+      p2pRetrySessionId = target.id; p2pRetryCount = 0; failedP2pSessionId = null;
+      p2pRetryAfter = $connection.nativeRecoveryRetryAt;
+      diagnostics.add({ level: 'warn', category: 'network', message: 'Reconnecting the accepted session with fresh credentials and candidates; the remote window will reopen.',
+        details: { reason: plan.reason, automatic: !manual, attempt: $connection.nativeRouteRecoveries } });
+      connection.setBusy(false);
+      if (manual && componentActive) await startNativeClient(confirmed);
+      return true;
+    } catch (error) {
+      if (ownsSession()) {
+        connection.blockNativeRetry();
+        localError = error instanceof Error ? error.message : 'Unable to reconnect; retry manually';
+        connection.setError(localError);
+      }
+      return false;
+    } finally {
+      recoveryInFlight = false;
+      if (cleanupOwned && ownsSession() && !$connection.preparing) connection.setBusy(false);
+    }
+  }
+
   async function disconnect(): Promise<void> {
     if (!sessionState || disconnecting) return;
     const targetId = sessionState.id;
@@ -258,11 +336,11 @@
     localError = null;
     try {
       if (runtime.capabilities.desktopShell.state === 'available') {
-        await stopEngine('client');
-        await stopRelay('client');
+        await stopEngine('client', targetId);
+        await stopRelay('client', targetId);
       }
       connection.setEngineRunning(false);
-      activeRoute = null;
+      connection.setNativeRoute(null);
       const client = session.client();
       if (client) await client.disconnectSession(targetId);
       failedP2pSessionId = null;
@@ -290,6 +368,7 @@
     try {
       if ($connection.engineRunning) {
         const status = await engineStatus('client');
+        if (status.sessionId && status.sessionId !== current.id) return;
         if (status.running && status.videoReceived && current.sharingId && current.requesterReadyAt && localDeviceId) {
           await client.markSharingStarted(current.id, localDeviceId, current.requesterReadyAt);
         }
@@ -298,13 +377,17 @@
         if (!status.running) {
           const message = status.lastError ?? 'The native client stopped unexpectedly';
           const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;
-          await stopEngine('client');
+          if (status.routeFailure && status.startupFailure !== 'auth-rejected' && status.startupFailure !== 'decode-failed' &&
+            await recoverRoute(current, { cause: status.routeFailure, stableMs: 0, evidenceAgeMs: 0 })) return;
+          // Recheck after asynchronous recovery policy/consent validation.
           if (!stillCurrent()) return;
-          await stopRelay('client');
+          await stopEngine('client', current.id);
+          if (!stillCurrent()) return;
+          await stopRelay('client', current.id);
           // Cleanup can outlive Disconnect or navigation to another session.
           if (!stillCurrent()) return;
           connection.setEngineRunning(false);
-          activeRoute = null;
+          connection.setNativeRoute(null);
           p2pRetrySessionId = current.id;
           const retryable = status.startupFailure !== undefined && status.startupFailure !== null &&
             ['no-udp', 'unexpected-peer', 'no-video', 'incomplete-video'].includes(status.startupFailure);
@@ -318,7 +401,8 @@
             failedP2pSessionId = current.id;
             p2pRetryCount = Math.max(p2pRetryCount, 3);
           }
-          localError = retry ? `${message} Retrying once with a fresh connection…` : message;
+          localError = retry ? `${message} Retrying once with a fresh connection…`
+            : status.routeFailure && $connection.nativeRouteRecoveries >= 2 ? `${message} Automatic reconnection stopped after two attempts. Retry manually.` : message;
           connection.setError(localError);
           diagnostics.add({
             level: 'warn',
@@ -338,13 +422,17 @@
         $connection.engineRunning
       ) {
         const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;
-        await stopEngine('client');
+        await stopEngine('client', current.id);
         if (!stillCurrent()) return;
-        await stopRelay('client');
+        await stopRelay('client', current.id);
         if (!stillCurrent()) return;
         connection.setEngineRunning(false);
-        activeRoute = null;
+        connection.setNativeRoute(null);
         return;
+      }
+      if (refreshed?.status === 'accepted' && $connection.engineRunning) {
+        const evidence = liveRecoveryEvidence();
+        if (evidence && await recoverRoute(refreshed, evidence)) return;
       }
       if (
         refreshed?.status === 'accepted' &&
@@ -382,12 +470,12 @@
   <header class="page-header"><div><h1>Active session</h1><p>{sessionState?.accessMode === 'view-only' ? 'Watch the shared screen in its own window.' : 'Your connection and remote desktop, in one place.'}</p></div></header>
   {#if sessionState}<div class="session-toolbar">
     <div class="session-identity">
-      <StatusPill state={$connection.engineRunning ? 'online' : 'warning'} label={$connection.engineRunning ? 'Window open' : sessionState.status} />
+      <StatusPill state={$connection.engineRunning ? 'online' : 'warning'} label={$connection.nativeRecoveryPending ? 'Reconnecting' : $connection.engineRunning ? 'Window open' : sessionState.status} />
       {#if activeRoute}<span class="session-route"><Icon name="link" />{activeRoute === 'direct' ? 'Direct connection' : 'Relay connection'}</span>{/if}
     </div>
     <div class="session-actions">
-
-      <button class="button small danger" disabled={disconnecting} onclick={disconnect}>{disconnecting ? 'Disconnecting…' : nativePreparationInFlight ? 'Cancel connection' : 'Disconnect'}</button>
+      {#if $connection.engineRunning}<button class="button small" title="Close and reopen the remote window" disabled={$connection.busy || nativePreparationInFlight || recoveryInFlight || disconnecting} onclick={() => recoverRoute(sessionState, null, true)}>Reconnect</button>{/if}
+      <button class="button small danger" disabled={disconnecting} onclick={disconnect}>{disconnecting ? 'Disconnecting…' : nativePreparationInFlight ? 'Cancel connection' : $connection.nativeRecoveryPending ? 'Cancel reconnection' : 'Disconnect'}</button>
     </div>
   </div>{/if}
 
@@ -412,8 +500,8 @@
     {:else if sessionState}
       <div class="native-stage-message">
         <span class="capture-dot waiting"></span>
-        <h2>{nativePreparationInFlight ? phaseLabels[phase] : sessionState.status === 'pending' ? 'Waiting for host approval' : sessionState.status === 'accepted' ? 'Host accepted the session' : `Session ${sessionState.status}`}</h2>
-        <p>{nativeReady ? 'Open the remote desktop to begin.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for the other computer.'}</p>
+        <h2>{nativePreparationInFlight ? phaseLabels[phase] : $connection.nativeRecoveryPending ? 'Reconnecting' : sessionState.status === 'pending' ? 'Waiting for host approval' : sessionState.status === 'accepted' ? 'Host accepted the session' : `Session ${sessionState.status}`}</h2>
+        <p>{$connection.nativeRecoveryPending ? 'Checking fresh connection routes. The remote window will reopen; you can cancel below.' : nativeReady ? 'Open the remote desktop to begin.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for the other computer.'}</p>
         <button class="button primary" disabled={!nativeReady || $connection.busy || nativePreparationInFlight} onclick={retryNativeClient}>{nativePreparationInFlight ? 'Connecting…' : failedP2pSessionId === sessionState.id || $connection.nativeRetryBlocked ? 'Retry connection' : 'Open remote desktop'}</button>
         {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">This connection is unavailable. Check Settings → Diagnostics for details.</span>{/if}
       </div>

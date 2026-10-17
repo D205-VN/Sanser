@@ -90,6 +90,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::sharing_engine_remove_peer,
             commands::sharing_engine_peer_status,
             commands::get_engine_status,
+            commands::route_recovery_plan,
             commands::export_diagnostics,
             commands::p2p_stop,
             commands::p2p_gather,

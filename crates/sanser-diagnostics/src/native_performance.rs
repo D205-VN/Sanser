@@ -43,6 +43,7 @@ impl NativePerformance {
                 ("macReceiveQueueMs", "clientReceiveQueue", "legacy-control"),
             ],
             "SNV2_CONTROL_TIMING" => &[("appRttMs", "controlAppRtt", "snv2-control")],
+            "SNROUTE_HEALTH" => &[("controlSilenceMs", "controlSilence", "legacy-control")],
             // SNINPUT_RTT is emitted by legacy control-pong, despite its name.
             "SNINPUT_RTT" => &[("rttMs", "controlAppRttFallback", "legacy-pong")],
             "SNINPUT_ACK" => &[

@@ -145,6 +145,7 @@ export async function coordinateP2pConnection(
       }
     });
   } catch (error) {
+    await invoke('p2p_stop', { attemptId }).catch(() => undefined);
     if (signal?.aborted) throw cancelled();
     const message = error instanceof Error ? error.message : String(error);
     diagnostics.add({ level: 'error', category: 'network', message: `[P2P] Gathering failed: ${message}` });

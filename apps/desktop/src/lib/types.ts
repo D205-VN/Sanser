@@ -49,12 +49,14 @@ export interface RuntimeCapabilities {
 
 export interface EngineStatus {
   kind: EngineKind;
+  sessionId?: string | null;
   installed: boolean;
   running: boolean;
   videoReceived?: boolean;
   processId: number | null;
   lastError: string | null;
   startupFailure?: 'no-udp' | 'unexpected-peer' | 'no-video' | 'auth-rejected' | 'incomplete-video' | 'decode-failed' | null;
+  routeFailure?: 'peer-timeout' | 'relay-lost' | null;
 }
 
 export interface SharingPeerVideoStatus {

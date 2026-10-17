@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import type { DirectRouteHealth } from './diagnostics';
 
 export interface NativeMetric {
   latestMs: number;
@@ -11,6 +12,8 @@ export interface NativeMetric {
 }
 export interface NativePerformanceUpdate {
   reportId: string;
+  sessionId?: string | null;
+  routeHealth?: DirectRouteHealth | null;
   kind: 'client' | 'host' | 'localServer';
   wireProtocol: 'legacy' | 'snv2';
   route: 'direct' | 'relay';

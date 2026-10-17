@@ -116,6 +116,21 @@ pub(crate) fn display_error(message: &str) -> String {
     message.to_owned()
 }
 
+/// Only an explicit terminal native transport timeout can cause reopening.
+/// User close, host Disconnect, auth/decoder errors and input ACK timeouts do not.
+pub(crate) fn route_failure(message: &str) -> Option<crate::models::NativeRouteFailure> {
+    let last = message.lines().last()?.trim_end_matches('\r');
+    (last=="SNV2_STOP reason=2 (2=peer-timeout 3=input-ack-timeout 4=priority-queue-overflow 5=transport-error)")
+        .then_some(crate::models::NativeRouteFailure::PeerTimeout)
+}
+
+pub(crate) fn relay_route_failure(message: &str) -> Option<crate::models::NativeRouteFailure> {
+    (message == "relay peer went offline; retry the accepted session"
+        || message.starts_with("relay connection failed: ")
+        || message.starts_with("local relay UDP bridge stopped receiving packets: "))
+    .then_some(crate::models::NativeRouteFailure::RelayLost)
+}
+
 pub(crate) struct EngineOutput {
     tail: Arc<Mutex<VecDeque<u8>>>,
     completed: mpsc::Receiver<()>,
@@ -269,6 +284,42 @@ fn drain(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn route_recovery_requires_explicit_transport_failure_not_user_close_or_auth_errors() {
+        use crate::models::NativeRouteFailure;
+        let timeout = "SNV2_STOP reason=2 (2=peer-timeout 3=input-ack-timeout 4=priority-queue-overflow 5=transport-error)";
+        assert_eq!(
+            route_failure(timeout),
+            Some(NativeRouteFailure::PeerTimeout)
+        );
+        for message in [
+            "process exited with exit code: 0",
+            "connection timed out",
+            "decoder failed",
+            "SNV2_STOP reason=3 (2=peer-timeout 3=input-ack-timeout 4=priority-queue-overflow 5=transport-error)",
+            "error contains SNV2_STOP reason=2",
+            "SNV2_STOP reason=2\nuser closed the window",
+        ] {
+            assert_eq!(route_failure(message), None);
+        }
+        assert_eq!(route_failure(&format!("{timeout}\ndecode failed")), None);
+        assert_eq!(
+            relay_route_failure("relay peer went offline; retry the accepted session"),
+            Some(NativeRouteFailure::RelayLost)
+        );
+        assert_eq!(
+            relay_route_failure("relay connection failed: connection reset"),
+            Some(NativeRouteFailure::RelayLost)
+        );
+        assert_eq!(
+            relay_route_failure(
+                "relay frame authentication repeatedly failed; refresh the accepted session on both devices"
+            ),
+            None
+        );
+        assert_eq!(relay_route_failure("relay cipher lock failed"), None);
+    }
 
     #[test]
     fn sharing_health_status_is_bounded_and_observed_without_metrics() -> std::io::Result<()> {

@@ -382,3 +382,21 @@ it('records only fixed connection-check categories, without raw credentials', ()
   expect(directCheckFailure(new Error('secret=never-persist'))).toBe('failed');
   expect(directCheckFailure(new Error('anything'), true)).toBe('relay-selected');
 });
+
+it('releases a reserved attempt after gathering no usable candidates before allowing another attempt', async () => {
+  const { client } = createClient();
+  let release: (() => void) | undefined;
+  invokeMock.mockImplementation((command) => {
+    if (command === 'p2p_gather') return Promise.resolve({ ...gatherResult, candidates: [] });
+    if (command === 'p2p_stop') return new Promise<void>((resolve) => { release = resolve; });
+    return Promise.reject(new Error('Unexpected command'));
+  });
+  let finished = false;
+  const pending = coordinateP2pConnection(client, sessionId, localDeviceId, peerDeviceId, false, sessionCredential);
+  const rejected = expect(pending.finally(() => { finished = true; })).rejects.toThrow('No local P2P candidate');
+  await flushSetup();
+  expect(invokeMock).toHaveBeenCalledWith('p2p_stop', { attemptId });
+  expect(finished).toBe(false);
+  release?.(); await rejected;
+  expect(FakeWebSocket.instances).toHaveLength(0);
+});

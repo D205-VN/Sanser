@@ -283,7 +283,15 @@ pub async fn launch_engine(
         );
         None
     } else {
-        relay.stop_for_engine(request.kind);
+        if let Some(id) = request
+            .session_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+        {
+            relay.stop_peer(request.kind, id);
+        } else {
+            relay.stop_for_engine(request.kind);
+        }
         p2p.take_selected_socket(&mut request)?
     };
     tauri::async_runtime::spawn_blocking(move || {
@@ -311,10 +319,19 @@ pub fn stop_engine(
     engines: State<'_, EngineManager>,
     relay: State<'_, crate::relay::RelayManager>,
     kind: EngineKind,
+    session_id: Option<String>,
 ) -> Result<(), DesktopError> {
-    let result = engines.stop(kind);
-    relay.stop_for_engine(kind);
-    result
+    if let Some(session) = session_id {
+        let session = uuid::Uuid::parse_str(&session)
+            .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+        let result = engines.stop_for_session(kind, session);
+        relay.stop_peer(kind, session);
+        result
+    } else {
+        let result = engines.stop(kind);
+        relay.stop_for_engine(kind);
+        result
+    }
 }
 
 #[tauri::command]
@@ -376,6 +393,11 @@ pub fn sharing_engine_peer_status(
 }
 
 #[tauri::command]
+pub fn route_recovery_plan(request: sanser_p2p::RecoveryEvidence) -> sanser_p2p::RecoveryPlan {
+    sanser_p2p::plan_route_recovery(&request)
+}
+
+#[tauri::command]
 pub fn get_engine_status(
     app: AppHandle,
     engines: State<'_, EngineManager>,
@@ -383,13 +405,27 @@ pub fn get_engine_status(
     kind: EngineKind,
 ) -> Result<EngineStatus, DesktopError> {
     let mut status = engines.status(&app, kind)?;
-    if !engines.is_sharing(kind)
-        && let Some(failure) = relay.take_failure(kind)
+    if status.running
+        && !engines.is_sharing(kind)
+        && let Some(id) = status.session_id
+        && let Some(failure) = relay.take_peer_failure(kind, id)
     {
-        let _ = engines.stop(kind);
+        let _ = engines.stop_for_session(kind, id);
         status.running = false;
         status.process_id = None;
         status.last_error = Some(failure);
+        if !matches!(
+            status.startup_failure,
+            Some(
+                crate::models::NativeStartupFailure::AuthRejected
+                    | crate::models::NativeStartupFailure::DecodeFailed
+            )
+        ) {
+            status.route_failure = status
+                .last_error
+                .as_deref()
+                .and_then(crate::engine_output::relay_route_failure);
+        }
     }
     Ok(status)
 }

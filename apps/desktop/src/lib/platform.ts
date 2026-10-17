@@ -107,14 +107,35 @@ export async function sharingPeerStatus(sharingId: string): Promise<SharingPeerV
   return isTauriRuntime() ? invoke<SharingPeerVideoStatus[]>('sharing_engine_peer_status', { sharingId }) : [];
 }
 
-export async function stopEngine(kind: EngineKind): Promise<void> {
+export async function stopEngine(kind: EngineKind, sessionId?: string): Promise<void> {
   if (!isTauriRuntime()) throw new Error('Native engine requires the Sanser desktop app');
-  await invoke('stop_engine', { kind });
+  await invoke('stop_engine', { kind, sessionId });
 }
 
 export async function engineStatus(kind: EngineKind): Promise<EngineStatus> {
   if (isTauriRuntime()) return invoke<EngineStatus>('get_engine_status', { kind });
   return { kind, installed: false, running: false, processId: null, lastError: null };
+}
+
+export interface RouteRecoveryEvidence {
+  cause: 'peer-timeout' | 'relay-lost' | 'control-unresponsive' | 'sustained-wire-delay' | 'application-delay';
+  automaticAttempts: number;
+  stableMs: number;
+  evidenceAgeMs: number;
+  controlSilenceMs?: number;
+  probeSamples?: number;
+  probeMedianMs?: number;
+  wireRttMs?: number;
+  elevatedSamples?: number;
+}
+export interface RouteRecoveryPlan {
+  action: 'observe' | 'reconnect' | 'manual';
+  delayMs: number;
+  reason: string;
+}
+export async function routeRecoveryPlan(request: RouteRecoveryEvidence): Promise<RouteRecoveryPlan> {
+  return isTauriRuntime() ? invoke<RouteRecoveryPlan>('route_recovery_plan', { request })
+    : { action: 'observe', delayMs: 0, reason: 'desktop-required' };
 }
 
 export async function getLocalRouteAddress(serverUrl: string): Promise<string | null> {

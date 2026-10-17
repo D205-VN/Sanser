@@ -12,6 +12,12 @@ export interface ConnectionState {
   error: string | null;
   nativeStartupRetries: number;
   nativeRetryBlocked: boolean;
+  nativeRoute: 'direct' | 'relay' | null;
+  nativeLaunchStartedAtMs: number | null;
+  nativeRouteRecoveries: number;
+  nativeRecoveryPending: boolean;
+  nativeRecoveryRetryAt: number;
+  nativeRecoveryReason: string | null;
 }
 
 const initial: ConnectionState = {
@@ -22,7 +28,13 @@ const initial: ConnectionState = {
   busy: false,
   error: null,
   nativeStartupRetries: 0,
-  nativeRetryBlocked: false
+  nativeRetryBlocked: false,
+  nativeRoute: null,
+  nativeLaunchStartedAtMs: null,
+  nativeRouteRecoveries: 0,
+  nativeRecoveryPending: false,
+  nativeRecoveryRetryAt: 0,
+  nativeRecoveryReason: null
 };
 
 function createConnectionStore() {
@@ -78,7 +90,21 @@ function createConnectionStore() {
       store.update((state) => ({ ...state, preparing }));
     },
     setEngineRunning(running: boolean): void {
-      store.update((state) => ({ ...state, engineRunning: running, error: null }));
+      store.update((state) => ({ ...state, engineRunning: running, error: null,
+        nativeRecoveryPending: running ? false : state.nativeRecoveryPending }));
+    },
+    setNativeRoute(route: 'direct' | 'relay' | null): void {
+      store.update((state) => ({ ...state, nativeRoute: route }));
+    },
+    markNativeLaunch(): void {
+      store.update((state) => ({ ...state, nativeLaunchStartedAtMs: Date.now() }));
+    },
+    scheduleRouteRecovery(delayMs: number, reason: string, automatic = true): boolean {
+      const current = get(store);
+      if (current.session?.status !== 'accepted' || current.nativeRetryBlocked || current.nativeRecoveryPending || (automatic && current.nativeRouteRecoveries >= 2)) return false;
+      store.update((state) => ({ ...state, nativeRouteRecoveries: state.nativeRouteRecoveries + Number(automatic),
+        nativeRecoveryPending: true, nativeRecoveryRetryAt: Date.now() + Math.max(0, Math.min(delayMs, 60_000)), nativeRecoveryReason: reason }));
+      return true;
     },
     authorizeNative(credentials: NativeSessionCredentials, requesterReadyAt?: string): void {
       store.update((state) => {
@@ -110,10 +136,11 @@ function createConnectionStore() {
       return true;
     },
     blockNativeRetry(): void {
-      store.update((state) => ({ ...state, nativeRetryBlocked: true }));
+      store.update((state) => ({ ...state, nativeRetryBlocked: true, nativeRecoveryPending: false }));
     },
     resetNativeRetry(): void {
-      store.update((state) => ({ ...state, nativeStartupRetries: 0, nativeRetryBlocked: false }));
+      store.update((state) => ({ ...state, nativeStartupRetries: 0, nativeRetryBlocked: false,
+        nativeRouteRecoveries: 0, nativeRecoveryPending: false, nativeRecoveryRetryAt: 0, nativeRecoveryReason: null }));
     },
     setBusy(busy: boolean): void {
       store.update((state) => ({ ...state, busy }));

@@ -5827,9 +5827,19 @@ void serviceControlSocket(int fd) {
   auto lastWatchdogLogAt = std::chrono::steady_clock::time_point{};
   bool helloAcked = false;
   bool controlDegraded = false;
+  bool authenticatedRouteSeen = false;
+  auto lastRouteHealthAt = std::chrono::steady_clock::time_point{};
   sendControlHello();
   while (true) {
     const auto now = std::chrono::steady_clock::now();
+    if (authenticatedRouteSeen && now-lastRouteHealthAt >= std::chrono::seconds(2)) {
+      // Silence of authenticated responses, NOT video inactivity or a slow RTT.
+      // The shell may reopen an accepted session only after sustained silence.
+      lastRouteHealthAt=now;
+      std::fprintf(stdout,"SNROUTE_HEALTH controlSilenceMs=%.0f\n",
+        std::chrono::duration<double,std::milli>(now-lastPongAt).count());
+      std::fflush(stdout);
+    }
     if (now - lastPingAt >= pingInterval) {
       lastPingAt = now;
       sendControlPing(++pingSequence);
@@ -5885,6 +5895,7 @@ void serviceControlSocket(int fd) {
     const auto receivedAt = std::chrono::steady_clock::now();
     if (event == HostControlEvent::HelloAck) {
       helloAcked = true;
+      authenticatedRouteSeen = gHostPacketAuthVerified;
       lastPongAt = receivedAt;
       if (controlDegraded) {
         std::cout << "SNCONTROL_WATCHDOG state=recovered action=resume-control\n";

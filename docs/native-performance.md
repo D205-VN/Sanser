@@ -3,6 +3,9 @@
 Development on `Version-2.0.0`, after the 2.2.12 release. No new installer or tag
 is required for this work. The installed 2.2.12 artifacts do not contain it.
 
+[Part 3](route-recovery.md) now consumes session-bound live observations through
+a separate, bounded reconnect policy. The measurement model itself stays passive.
+
 The shared `sanser-diagnostics::NativePerformance` model normalizes allowlisted
 numeric observations from both media implementations. OS capture, codec, render
 and input backends remain native. This does not replace Legacy with SNV2, deploy

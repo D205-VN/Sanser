@@ -142,11 +142,6 @@ impl RelayManager {
     pub fn take_peer_failure(&self, kind: EngineKind, session: uuid::Uuid) -> Option<String> {
         self.failures.lock().ok()?.remove(&(kind, session))
     }
-    pub fn take_failure(&self, kind: EngineKind) -> Option<String> {
-        let mut failures = self.failures.lock().ok()?;
-        let key = failures.keys().find(|key| key.0 == kind).copied()?;
-        failures.remove(&key)
-    }
 
     fn reserve(
         &self,
@@ -820,6 +815,28 @@ fn relay_aad(header: &[u8; RELAY_HEADER_BYTES], session_id: [u8; 16]) -> [u8; 60
 mod tests {
     use super::*;
     use tokio_tungstenite::connect_async;
+
+    #[test]
+    fn relay_failures_and_cleanup_are_scoped_to_the_owning_session() {
+        let manager = RelayManager::default();
+        let old = uuid::Uuid::new_v4();
+        let current = uuid::Uuid::new_v4();
+        {
+            let mut failures = manager.failures.lock().unwrap();
+            failures.insert((EngineKind::Client, old), "old route failed".into());
+            failures.insert((EngineKind::Client, current), "current route failed".into());
+        }
+        assert_eq!(manager.take_peer_failure(EngineKind::Host, current), None);
+        manager.stop_peer(EngineKind::Client, old);
+        assert_eq!(manager.take_peer_failure(EngineKind::Client, old), None);
+        assert_eq!(
+            manager
+                .take_peer_failure(EngineKind::Client, current)
+                .as_deref(),
+            Some("current route failed")
+        );
+        assert_eq!(manager.take_peer_failure(EngineKind::Client, current), None);
+    }
 
     #[tokio::test]
     async fn congested_video_upload_does_not_block_incoming_input_or_stop() {

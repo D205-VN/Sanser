@@ -5,6 +5,7 @@
   onMount(() => { const timer = window.setInterval(() => { now = Date.now(); }, 1_000); return () => window.clearInterval(timer); });
   const labels: Record<string, string> = {
     controlAppRtt: 'Control application RTT', controlAppRttFallback: 'Control-pong RTT',
+    controlSilence: 'Authenticated control silence',
     socketRtt: 'Socket RTT', wireRttEstimate: 'Wire RTT estimate', udpEchoRtt: 'UDP echo RTT',
     echoHostHold: 'Echo host hold', inputAckRtt: 'Input ACK RTT', hostInput: 'Host input work',
     clientSendQueue: 'Client send queue', hostReceiveQueue: 'Host receive queue',
