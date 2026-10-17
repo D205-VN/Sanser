@@ -1,6 +1,7 @@
 #include "engine.h"
 #include "latency_policy.h"
 #include "control_timing.h"
+#include "input_retry.h"
 #include "udp_echo.h"
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
@@ -1381,7 +1382,7 @@ private:
   bool hasRetryWorkLocked(std::chrono::steady_clock::time_point now) const {
     if (!canRetryPendingLocked()) return false;
     for (const auto& entry : pendingBatches_) {
-      if (now - entry.second.lastSentAt >= retryDelay()) return true;
+      if (now - entry.second.lastSentAt >= retryDelay(entry.second.attempts)) return true;
     }
     return false;
   }
@@ -1399,7 +1400,7 @@ private:
     for (const auto& entry : pendingBatches_) {
       const double ageMs = std::chrono::duration<double, std::milli>(now - entry.second.lastSentAt).count();
       oldestMs = std::max(oldestMs, ageMs);
-      if (ageMs >= static_cast<double>(retryDelay().count())) {
+      if (ageMs >= static_cast<double>(retryDelay(entry.second.attempts).count())) {
         retryReady += 1;
       }
       if (entry.second.priority) {
@@ -1454,7 +1455,7 @@ private:
                           bool& priority) {
     if (!canRetryPendingLocked()) return false;
     for (auto it = pendingBatches_.begin(); it != pendingBatches_.end();) {
-      if (now - it->second.lastSentAt < retryDelay()) {
+      if (now - it->second.lastSentAt < retryDelay(it->second.attempts)) {
         ++it;
         continue;
       }
@@ -1631,15 +1632,15 @@ private:
   static constexpr std::uint32_t maxBatchRetryAttempts_ = 4;
   static constexpr auto backpressurePriorityAge_ = std::chrono::milliseconds(160);
   static constexpr auto backpressurePendingAge_ = std::chrono::milliseconds(450);
-  static std::chrono::milliseconds retryDelay() {
+  static std::chrono::milliseconds retryDelay(unsigned attempts=1) {
     // ACK delay follows the path RTT, not the selected video profile. A fixed
     // 12 ms timer retransmits prematurely on WAN; 85 ms wastes a LAN round trip.
     const double rtt = gLiveLatency.rtt.load();
     const auto updated = gLiveLatency.hostUpdated.load();
     const auto now = steadyMicros();
     if (!std::isfinite(rtt) || rtt < 0 || updated == 0 || now < updated || now - updated > 5000000)
-      return std::chrono::milliseconds(40);
-    return std::chrono::milliseconds(static_cast<int>(std::ceil(std::clamp(rtt * 1.5 + 2.0, 8.0, 250.0))));
+      return sanser::inputRetryDelay(-1,0,attempts);
+    return sanser::inputRetryDelay(rtt,0,attempts);
   }
 };
 

@@ -25,3 +25,14 @@ it('marks ended observations stale instead of displaying old latency as live', (
   expect(screen.queryByText(/Encoded frames are waiting/)).not.toBeInTheDocument();
   expect(within(screen.getByRole('row', { name: /Encode queue/ })).getByText('Stale')).toBeInTheDocument();
 });
+it('distinguishes receipt ACK from queued host execution', () => {
+  const metric = (value: number) => ({ latestMs: value, p50Ms: value, p95Ms: value, maxMs: value, samples: 1, updatedAtMs: Date.now(), source: 'snv2-host-input' });
+  nativePerformance.update({ reportId: 'input', kind: 'client', wireProtocol: 'snv2', route: 'direct', relayTransport: null,
+    startedAtMs: 1, ended: false, performance: { metrics: { inputAckRtt: metric(12), hostInputQueue: metric(60), hostInput: metric(8) } },
+    findings: ['host-input-queue-high', 'host-input-work-high'] });
+  render(NativePerformance);
+  expect(screen.getByText(/SNV2 input ACK confirms ordered queue acceptance/)).toBeInTheDocument();
+  expect(screen.getByText('Input is waiting for the host to execute earlier actions.')).toBeInTheDocument();
+  expect(within(screen.getByRole('row', { name: /^Host input queue / })).getAllByText('60.0 ms')).toHaveLength(3);
+  expect(within(screen.getByRole('row', { name: /^Host input work / })).getAllByText('8.0 ms')).toHaveLength(3);
+});

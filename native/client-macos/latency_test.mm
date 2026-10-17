@@ -5,7 +5,7 @@ namespace sanser::desktop { void testMacRemoteView(); }
 
 namespace {
 struct NativeInputPolicyTest {
-  static auto retryDelay() { return NativeInputSender::retryDelay(); }
+  static auto retryDelay(unsigned attempts=1) { return NativeInputSender::retryDelay(attempts); }
   static bool acknowledged(const std::string& event) { return NativeInputSender::isBatchable(event); }
 };
 }
@@ -274,6 +274,7 @@ int main() {
         "Auto must not retransmit obsolete gamepad snapshots");
       gLiveLatency.rtt = 10; gLiveLatency.hostUpdated = steadyMicros();
       requireLatency(NativeInputPolicyTest::retryDelay() == milliseconds(17), "LAN retry follows RTT");
+      requireLatency(NativeInputPolicyTest::retryDelay(2) == milliseconds(34), "Legacy input uses shared reliable retry backoff");
       gLiveLatency.rtt = 100;
       requireLatency(NativeInputPolicyTest::retryDelay() == milliseconds(152), "WAN retry must allow one RTT");
       gLiveLatency.hostUpdated = 0;

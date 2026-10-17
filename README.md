@@ -37,6 +37,8 @@ Current development adds a common native performance view and bounded reports
 for Legacy/SNV2; see [measurement semantics and validation](docs/native-performance.md).
 It also adds [bounded route recovery](docs/route-recovery.md) with fresh
 authorization/candidates and session-scoped cleanup when a native path fails.
+The [input engine improvements](docs/input-engine.md) separate SNV2 OS injection
+from UDP control, bound reliable retries and expose input queue/work timings.
 This development work is not part of the published 2.2.12 installers.
 
 On the host, select **Host → Go online → Start sharing → Invite**. Each invited

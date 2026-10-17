@@ -23,6 +23,7 @@ const SOURCES: &[&str] = &[
     "SNV2_CONTROL_TIMING",
     "SNROUTE_HEALTH",
     "SNV2_INPUT_TIMING",
+    "SNV2_INPUT_HOST_TIMING",
     "SNINPUT_ACK",
     "SNU1_ECHO",
     "SNU1_RX_QUEUE",
@@ -67,6 +68,11 @@ const FIELDS: &[&str] = &[
     "encodeQueueAvgMs",
     "encodeAndPublishAvgMs",
     "queuedKeys",
+    "inputSendQueueAvgMs",
+    "hostQueueAvgMs",
+    "hostQueueMaxMs",
+    "inputRetries",
+    "coalescedMoves",
     "queuedButtons",
     "deliveredKeys",
     "deliveredButtons",
@@ -403,6 +409,7 @@ impl Report {
         // Cross-machine wall-clock frame ages are deliberately excluded.
         let delayed = sample.values.iter().any(|(key, value)| match key.as_str() {
             "controlSilenceMs" => *value >= 15_000.0,
+            "inputSendQueueAvgMs" | "hostQueueAvgMs" | "hostAvgWorkMs" => *value > 5.0,
             "rttMs" | "avgRttMs" | "maxRttMs" | "appRttMs" | "socketRttMs" => {
                 *value >= if self.ultra_low_latency { 15.0 } else { 100.0 }
             }
@@ -413,7 +420,6 @@ impl Report {
             | "encodeAvgMs"
             | "captureAvgMs"
             | "sendAvgMs"
-            | "hostAvgWorkMs"
             | "decodeWorkAvgMs"
             | "decodeQueueAvgMs"
             | "conversionAvgMs"
@@ -641,6 +647,31 @@ mod tests {
         );
         assert_eq!(report.status, "delay-observed");
         assert!(!json.to_string().contains("private") && !json.to_string().contains("token"));
+    }
+    #[test]
+    fn input_stage_reports_keep_queue_work_and_retry_counts_separate_without_content() {
+        let mut report = Report::new(&request());
+        report.observe(parse_sample(b"SNV2_INPUT_TIMING inputSendQueueAvgMs=2 inputRetries=3 coalescedMoves=100 key=4 text=123").unwrap());
+        report.observe(parse_sample(b"SNV2_INPUT_HOST_TIMING hostQueueAvgMs=40 hostAvgWorkMs=6 hostQueueMaxMs=80 token=456").unwrap());
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["performance"]["metrics"]["inputSendQueue"]["latestMs"],
+            2.0
+        );
+        assert_eq!(json["status"], "delay-observed");
+        assert_eq!(
+            json["performance"]["metrics"]["hostInputQueue"]["latestMs"],
+            40.0
+        );
+        assert_eq!(json["performance"]["metrics"]["hostInput"]["latestMs"], 6.0);
+        assert!(json["performance"]["metrics"]["inputAckRtt"].is_null());
+        assert!(json["performance"]["metrics"]["inputRetries"].is_null());
+        let serialized = json.to_string();
+        assert!(
+            !serialized.contains("\"key\"")
+                && !serialized.contains("\"text\"")
+                && !serialized.contains("\"token\"")
+        );
     }
     #[test]
     fn common_performance_contract_keeps_rtt_meanings_and_missing_stages() {

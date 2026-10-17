@@ -19,6 +19,8 @@ public:
     bool repair = false;
     bool audio = false;
     std::chrono::steady_clock::time_point deadline{};
+    std::uint64_t inputSequence = 0;
+    bool input = false;
   };
   bool push(Lane lane, Packet packet) {
     packet.repair=lane==Repair;
@@ -55,6 +57,15 @@ public:
   }
   void clearRealtimeVideo() { queues_[Video].clear(); bytes_[Video]=0; }
   void clearVideo() { clearRealtimeVideo(); queues_[Repair].clear(); bytes_[Repair]=0; }
+  void acknowledgeInput(std::uint64_t contiguous,std::uint64_t mask) {
+    auto& lane=queues_[InputLane];
+    for(auto it=lane.begin();it!=lane.end();) {
+      const auto sequence=it->inputSequence;
+      const bool received=sequence && (sequence<=contiguous ||
+        (sequence>contiguous && sequence-contiguous<=64 && (mask & (std::uint64_t{1}<<(sequence-contiguous-1)))));
+      if(received) { bytes_[InputLane]-=it->bytes.size(); it=lane.erase(it); } else ++it;
+    }
+  }
 private:
   Packet take(std::size_t lane) {
     auto value = std::move(queues_[lane].front()); queues_[lane].pop_front();

@@ -26,68 +26,82 @@ pub struct NativePerformance {
     windows: BTreeMap<&'static str, VecDeque<f64>>,
 }
 
+type MetricField = (&'static str, &'static str, &'static str);
+
+fn metric_fields(source: &str) -> &'static [MetricField] {
+    match source {
+        "SNCONTROL_TIMING" => &[
+            ("appRttMs", "controlAppRtt", "legacy-control"),
+            ("socketRttMs", "socketRtt", "legacy-control"),
+            ("wireEstimateMs", "wireRttEstimate", "legacy-control"),
+            ("macSendQueueMs", "clientSendQueue", "legacy-control"),
+            ("hostReceiveQueueMs", "hostReceiveQueue", "legacy-control"),
+            ("hostControlWorkMs", "hostControlWork", "legacy-control"),
+            ("hostSendLockMs", "hostSendLock", "legacy-control"),
+            ("hostSendCallMs", "hostSendCall", "legacy-control"),
+            ("macReceiveQueueMs", "clientReceiveQueue", "legacy-control"),
+        ],
+        "SNV2_CONTROL_TIMING" => &[("appRttMs", "controlAppRtt", "snv2-control")],
+        "SNROUTE_HEALTH" => &[("controlSilenceMs", "controlSilence", "legacy-control")],
+        // SNINPUT_RTT is emitted by legacy control-pong, despite its name.
+        "SNINPUT_RTT" => &[("rttMs", "controlAppRttFallback", "legacy-pong")],
+        "SNINPUT_ACK" => &[
+            ("rttMs", "inputAckRtt", "legacy-input"),
+            ("hostProcessMs", "hostInput", "legacy-input"),
+        ],
+        "SNV2_INPUT_TIMING" => &[
+            ("avgRttMs", "inputAckRtt", "snv2-input"),
+            ("hostAvgWorkMs", "hostInput", "snv2-input"),
+            ("hostQueueAvgMs", "hostInputQueue", "snv2-input"),
+            ("hostQueueMaxMs", "hostInputQueueMax", "snv2-input"),
+            ("inputSendQueueAvgMs", "inputSendQueue", "snv2-input"),
+        ],
+        "SNV2_INPUT_HOST_TIMING" => &[
+            ("hostAvgWorkMs", "hostInput", "snv2-host-input"),
+            ("hostQueueAvgMs", "hostInputQueue", "snv2-host-input"),
+            ("hostQueueMaxMs", "hostInputQueueMax", "snv2-host-input"),
+        ],
+        "SNU1_ECHO" => &[
+            ("rttMs", "udpEchoRtt", "legacy-echo"),
+            ("hostHoldMs", "echoHostHold", "legacy-echo"),
+        ],
+        "SNU1_RX_QUEUE" => &[("receiveQueueAvgMs", "udpReceiveQueue", "legacy-receive")],
+        "SNV1_HOST_TIMING" | "SNV1_STAGE_PROFILE" => &[
+            ("captureAvgMs", "captureWork", "legacy-host"),
+            ("captureWaitAvgMs", "captureWait", "legacy-host"),
+            ("encodeAvgMs", "encodeWork", "legacy-host"),
+            ("sendAvgMs", "sendTotal", "legacy-host"),
+            ("udpPacedAvgMs", "pacingWait", "legacy-host"),
+            ("udpSocketAvgMs", "socketSend", "legacy-host"),
+        ],
+        "SNV2_HOST_TIMING" => &[
+            ("encodeQueueAvgMs", "encodeQueue", "snv2-host"),
+            ("encodeAndPublishAvgMs", "encodeAndPublish", "snv2-host"),
+        ],
+        "SNV1_CLIENT_STATS" => &[
+            ("decodeAvgMs", "decodeWork", "legacy-video"),
+            ("jitterMs", "arrivalJitter", "legacy-video"),
+        ],
+        "SNV1_RENDER_STATS" => &[
+            ("avgRenderAgeMs", "frameQueue", "legacy-render"),
+            ("renderGpuMs", "renderGpu", "legacy-render"),
+        ],
+        "SNV2_VIDEO_HEALTH" => &[
+            ("decodeWorkAvgMs", "decodeWork", "snv2-video"),
+            ("decodeQueueAvgMs", "decodeQueue", "snv2-video"),
+            ("conversionAvgMs", "colorConversion", "snv2-video"),
+            ("paintAvgMs", "paintWork", "snv2-video"),
+            ("decodedToPaintAvgMs", "decodedToPaint", "snv2-video"),
+        ],
+        _ => &[],
+    }
+}
+
 impl NativePerformance {
     pub fn observe(&mut self, source: &str, values: &BTreeMap<String, f64>, at_ms: u64) {
         // Matching both source and field prevents an input retry RTT from
         // silently becoming a network RTT, and keeps capture wait out of work.
-        let fields: &[(&str, &str, &str)] = match source {
-            "SNCONTROL_TIMING" => &[
-                ("appRttMs", "controlAppRtt", "legacy-control"),
-                ("socketRttMs", "socketRtt", "legacy-control"),
-                ("wireEstimateMs", "wireRttEstimate", "legacy-control"),
-                ("macSendQueueMs", "clientSendQueue", "legacy-control"),
-                ("hostReceiveQueueMs", "hostReceiveQueue", "legacy-control"),
-                ("hostControlWorkMs", "hostControlWork", "legacy-control"),
-                ("hostSendLockMs", "hostSendLock", "legacy-control"),
-                ("hostSendCallMs", "hostSendCall", "legacy-control"),
-                ("macReceiveQueueMs", "clientReceiveQueue", "legacy-control"),
-            ],
-            "SNV2_CONTROL_TIMING" => &[("appRttMs", "controlAppRtt", "snv2-control")],
-            "SNROUTE_HEALTH" => &[("controlSilenceMs", "controlSilence", "legacy-control")],
-            // SNINPUT_RTT is emitted by legacy control-pong, despite its name.
-            "SNINPUT_RTT" => &[("rttMs", "controlAppRttFallback", "legacy-pong")],
-            "SNINPUT_ACK" => &[
-                ("rttMs", "inputAckRtt", "legacy-input"),
-                ("hostProcessMs", "hostInput", "legacy-input"),
-            ],
-            "SNV2_INPUT_TIMING" => &[
-                ("avgRttMs", "inputAckRtt", "snv2-input"),
-                ("hostAvgWorkMs", "hostInput", "snv2-input"),
-            ],
-            "SNU1_ECHO" => &[
-                ("rttMs", "udpEchoRtt", "legacy-echo"),
-                ("hostHoldMs", "echoHostHold", "legacy-echo"),
-            ],
-            "SNU1_RX_QUEUE" => &[("receiveQueueAvgMs", "udpReceiveQueue", "legacy-receive")],
-            "SNV1_HOST_TIMING" | "SNV1_STAGE_PROFILE" => &[
-                ("captureAvgMs", "captureWork", "legacy-host"),
-                ("captureWaitAvgMs", "captureWait", "legacy-host"),
-                ("encodeAvgMs", "encodeWork", "legacy-host"),
-                ("sendAvgMs", "sendTotal", "legacy-host"),
-                ("udpPacedAvgMs", "pacingWait", "legacy-host"),
-                ("udpSocketAvgMs", "socketSend", "legacy-host"),
-            ],
-            "SNV2_HOST_TIMING" => &[
-                ("encodeQueueAvgMs", "encodeQueue", "snv2-host"),
-                ("encodeAndPublishAvgMs", "encodeAndPublish", "snv2-host"),
-            ],
-            "SNV1_CLIENT_STATS" => &[
-                ("decodeAvgMs", "decodeWork", "legacy-video"),
-                ("jitterMs", "arrivalJitter", "legacy-video"),
-            ],
-            "SNV1_RENDER_STATS" => &[
-                ("avgRenderAgeMs", "frameQueue", "legacy-render"),
-                ("renderGpuMs", "renderGpu", "legacy-render"),
-            ],
-            "SNV2_VIDEO_HEALTH" => &[
-                ("decodeWorkAvgMs", "decodeWork", "snv2-video"),
-                ("decodeQueueAvgMs", "decodeQueue", "snv2-video"),
-                ("conversionAvgMs", "colorConversion", "snv2-video"),
-                ("paintAvgMs", "paintWork", "snv2-video"),
-                ("decodedToPaintAvgMs", "decodedToPaint", "snv2-video"),
-            ],
-            _ => &[],
-        };
+        let fields = metric_fields(source);
         for &(field, metric, provenance) in fields {
             let Some(&value) = values.get(field) else {
                 continue;
@@ -159,6 +173,9 @@ impl NativePerformance {
             ("decodeQueue", 5.0, "decode-queue-high"),
             ("frameQueue", 5.0, "frame-queue-high"),
             ("udpReceiveQueue", 5.0, "receive-queue-high"),
+            ("inputSendQueue", 5.0, "input-send-queue-high"),
+            ("hostInputQueue", 5.0, "host-input-queue-high"),
+            ("hostInput", 5.0, "host-input-work-high"),
         ] {
             if fresh(metric).is_some_and(|v| v > threshold) {
                 findings.push(finding);
@@ -177,6 +194,29 @@ mod tests {
             .iter()
             .map(|&(key, value)| (key.into(), value))
             .collect()
+    }
+    #[test]
+    fn host_execution_delay_is_not_reported_as_network_or_input_ack_rtt() {
+        let mut performance = NativePerformance::default();
+        performance.observe(
+            "SNV2_INPUT_HOST_TIMING",
+            &values(&[
+                ("hostQueueAvgMs", 60.0),
+                ("hostAvgWorkMs", 8.0),
+                ("hostQueueMaxMs", 90.0),
+            ]),
+            100,
+        );
+        assert_eq!(performance.metrics["hostInputQueue"].latest_ms, 60.0);
+        assert_eq!(performance.metrics["hostInput"].source, "snv2-host-input");
+        assert!(!performance.metrics.contains_key("inputAckRtt"));
+        assert!(!performance.metrics.contains_key("controlAppRtt"));
+        assert!(!performance.metrics.contains_key("wireRttEstimate"));
+        assert_eq!(
+            performance.findings(100, 60),
+            vec!["host-input-queue-high", "host-input-work-high"]
+        );
+        assert_eq!(performance.findings(5_101, 60), Vec::<&str>::new());
     }
     #[test]
     fn common_names_keep_input_and_control_separate_and_missing_unknown() {

@@ -8,6 +8,7 @@
     controlSilence: 'Authenticated control silence',
     socketRtt: 'Socket RTT', wireRttEstimate: 'Wire RTT estimate', udpEchoRtt: 'UDP echo RTT',
     echoHostHold: 'Echo host hold', inputAckRtt: 'Input ACK RTT', hostInput: 'Host input work',
+    inputSendQueue: 'Input send queue', hostInputQueue: 'Host input queue', hostInputQueueMax: 'Host input queue maximum',
     clientSendQueue: 'Client send queue', hostReceiveQueue: 'Host receive queue',
     hostControlWork: 'Host control work', hostSendLock: 'Host send lock', hostSendCall: 'Host send call',
     clientReceiveQueue: 'Client receive queue', udpReceiveQueue: 'UDP receive queue',
@@ -22,6 +23,9 @@
     'path-or-os-delay': 'The path or OS/socket scheduling has high delay; this does not identify the router or ISP as the cause.',
     'control-round-trip-high': 'Control RTT is high. It includes application queues and peer processing; network delay has not been isolated.',
     'input-delivery-overhead': 'Input ACK is slower than control RTT. Inspect input handling and retries.',
+    'input-send-queue-high': 'Input is waiting in the native sender queue.',
+    'host-input-queue-high': 'Input is waiting for the host to execute earlier actions.',
+    'host-input-work-high': 'The host operating system is taking time to execute input.',
     'capture-over-budget': 'Capture work exceeds the requested frame budget.',
     'encode-over-budget': 'Encoding exceeds the requested frame budget.',
     'encode-publish-over-budget': 'Encode + publish exceeds the frame budget. This combined measurement does not isolate the encoder.',
@@ -61,7 +65,7 @@
       </div>
     {/if}
   {/each}
-  <p class="muted">RTT is round trip, not one-way or screen-to-screen delay. P50/P95 summarize up to 120 periodic observations; some are interval averages, not individual frames. Combined stages can overlap and must not be added together. Missing or stale data does not mean zero latency.</p>
+  <p class="muted">RTT is round trip, not one-way or screen-to-screen delay. SNV2 input ACK confirms ordered queue acceptance; host input queue and work measure execution separately. P50/P95 summarize up to 120 periodic observations; some are interval averages, not individual frames. Combined stages can overlap and must not be added together. Missing or stale data does not mean zero latency.</p>
 </article>
 
 <style>

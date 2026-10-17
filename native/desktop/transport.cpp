@@ -337,29 +337,46 @@ Peer::~Peer() { stop(); if (socket_ != -1) closeSocket(static_cast<Socket>(socke
 void Peer::start() {
   if (running_.exchange(true)) return;
   lastReceived_=Clock::now();
-  try { sender_=std::thread([this] { sendLoop(); }); worker_=std::thread([this] { loop(); }); }
-  catch(...) { running_=false; sendReady_.notify_all(); if(sender_.joinable()) sender_.join(); throw; }
+  try {
+    if(options_.host && options_.input) inputWorker_=std::make_unique<InputWorker>(
+      [this](Input event) {
+        if(onInput) {
+          onInput(event);
+          if(event.kind==Input::Key) ++deliveredKeys_;
+          if(event.kind==Input::Button) ++deliveredButtons_;
+        }
+      },
+      [this] {
+        std::cerr<<"SNV2_INPUT_ERROR reason=os-injection-failed action=stop-and-reset"<<std::endl;
+        stopReason_=5; running_=false; sendReady_.notify_all();
+      });
+    sender_=std::thread([this] { sendLoop(); }); worker_=std::thread([this] { loop(); });
+  }
+  catch(...) { running_=false; sendReady_.notify_all(); if(sender_.joinable()) sender_.join(); if(inputWorker_) inputWorker_->stop(); throw; }
 }
-void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); }
+void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); if(inputWorker_) inputWorker_->stop(); }
 void Peer::datagram(const Bytes& b) { ::send(static_cast<Socket>(socket_), reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()), 0); }
 void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable,Clock::time_point deadline) {
+  const auto queuedAt=Clock::now(); // Include sender mutex/encryption time in application input latency.
   std::lock_guard lock(sendMutex_);
   if(type==snv2::PacketType::Video && !(flags & snv2::kFlagRetransmitted) && videoPaused_) return;
   if (stream > 2 || (reliable && pending_.size() >= 64)) { stopReason_=4; running_=false; return; }
   snv2::Header h; h.packetType=type; h.streamId=stream; h.sequence=++sequences_[stream]; h.frameId=frame; h.flags=flags; h.keyId=generation_;
   auto b=codec_.seal(h,body);
-  const auto now = Clock::now();
   if (type == snv2::PacketType::Disconnect) { datagram(b); return; }
   const auto lane = type == snv2::PacketType::Video ? ((flags & snv2::kFlagRetransmitted) ? TxScheduler::Repair : TxScheduler::Video)
     : reliable ? TxScheduler::InputLane
     : type == snv2::PacketType::Audio ? TxScheduler::Audio : TxScheduler::Control;
-  if (type == snv2::PacketType::MouseMove) tx_.latestInput({b, now, 0});
-  else if (!tx_.push(lane, {b, now, frame, false, false, deadline})) {
+  TxScheduler::Packet queued{b,queuedAt,frame,false,false,deadline};
+  queued.inputSequence=reliable ? h.sequence : 0;
+  queued.input=reliable || type==snv2::PacketType::MouseMove;
+  if (type == snv2::PacketType::MouseMove) tx_.latestInput(std::move(queued));
+  else if (!tx_.push(lane, std::move(queued))) {
     if (lane == TxScheduler::Video) { tx_.clearVideo(); outgoingNeedsKeyframe_ = true; ++videoQueueDrops_; }
     else if(lane!=TxScheduler::Repair) { stopReason_=4; running_ = false; } // Stop/reset rather than silently losing key-up.
     return;
   }
-  if (reliable) pending_.emplace(h.sequence, Pending{std::move(b),now,now,1,false});
+  if (reliable) pending_.emplace(h.sequence, Pending{std::move(b),{},queuedAt,0,false,true});
   sendReady_.notify_one();
 }
 void Peer::video(const Frame& frame) {
@@ -446,7 +463,10 @@ void Peer::queueVideoRepair(const Bytes& bytes) {
   if(missing) { ++repairCacheMisses_; if(onKeyframe) onKeyframe(); }
 }
 void Peer::serviceVideoRepairs() {
-  std::lock_guard lock(videoMutex_);
+  // Publishing a large frame can be sealing fragments under this mutex. UDP
+  // receive/control must not wait for that work; repair resumes next iteration.
+  std::unique_lock lock(videoMutex_,std::try_to_lock);
+  if(!lock.owns_lock()) return;
   unsigned budget=8;
   for(auto it=videoCache_.begin();it!=videoCache_.end();) {
     if(Clock::now()-it->second.sent>std::chrono::seconds(1)) {
@@ -488,13 +508,13 @@ void Peer::process(const Bytes& bytes) {
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
     peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; lastAudio_=0; controlProbe_.reset(); for(auto& window:replay_) window=ReplayWindow{};
     reassembler_=Reassembler{options_.bitrate,options_.ultraLowLatency}; lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
-    controlAppRtt_=-1; inputRttUs_=inputRttSamples_=inputWorkUs_=inputWorkSamples_=0;
+    controlAppRtt_=-1; inputRttUs_=inputRttSamples_=0;
     if(options_.host) {
       { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
       { std::lock_guard lock(feedbackMutex_); feedback_={}; }
       busyWindows_=congestionWindows_=recoveryWindows_=0;
     }
-    if(options_.host && onInput) onInput(Input{});
+    if(inputWorker_) inputWorker_->submit(Input{});
   }
   if (h.streamId==2 && h.sequence<=deliveredInput_) { acknowledgeInput(); return; }
   if (!replay_[h.streamId].accept(h.sequence)) { if (h.streamId==2) acknowledgeInput(); return; }
@@ -583,6 +603,16 @@ void Peer::process(const Bytes& bytes) {
     }
     return;
   }
+  // Optional host input timings. Older clients read its large prefix as an
+  // impossible ACK and ignore it; the existing 8/16-byte ACK wire format stays.
+  if(!options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback && b.size()==16 && std::memcmp(b.data(),"SIT1",4)==0) {
+    if(std::getenv("SANSER_TELEMETRY")) {
+      std::ostringstream line; line<<"SNV2_INPUT_HOST_TIMING hostQueueAvgMs="<<r32(b.data()+4)/1000.0
+        <<" hostAvgWorkMs="<<r32(b.data()+8)/1000.0<<" hostQueueMaxMs="<<r32(b.data()+12)/1000.0;
+      writeTelemetry(line);
+    }
+    return;
+  }
   if (h.packetType==snv2::PacketType::NetworkFeedback && (b.size()==8 || b.size()==16)) {
     std::uint64_t ack=0, mask=0;
     for (std::size_t i=0;i<8;++i) ack=(ack<<8)|b[i];
@@ -593,7 +623,8 @@ void Peer::process(const Bytes& bytes) {
     const auto recordRtt=[&](const Pending& p) {
       if(p.sacked) return;
       inputRttUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-p.created).count()); ++inputRttSamples_;
-      inputDelivery_.acknowledged(std::chrono::duration_cast<std::chrono::milliseconds>(now-p.created));
+      // Karn's rule: a retransmitted ACK cannot identify which send it answers.
+      if(p.attempts==1) inputDelivery_.acknowledged(std::chrono::duration_cast<std::chrono::milliseconds>(now-p.sent));
     };
     for(auto it=pending_.begin();it!=pending_.upper_bound(ack);++it)
       recordRtt(it->second);
@@ -605,6 +636,7 @@ void Peer::process(const Bytes& bytes) {
         p.sacked=true;
       }
     }
+    tx_.acknowledgeInput(ack,mask);
     return;
   }
   if (h.packetType==snv2::PacketType::Nack && options_.host) { queueVideoRepair(b); return; }
@@ -626,17 +658,15 @@ void Peer::process(const Bytes& bytes) {
         const auto next=receivedInputs_.at(++deliveredInput_);
         // ACK receipt even if the host denies injection. Otherwise a stale
         // client input preference kills an otherwise healthy video session.
-        if(options_.input && onInput) {
-          const auto began=Clock::now(); onInput(next);
-          inputWorkUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count()); ++inputWorkSamples_;
-          if(next.kind==Input::Key) ++deliveredKeys_; if(next.kind==Input::Button) ++deliveredButtons_;
+        if(inputWorker_) {
+          if(!inputWorker_->submit(next)) { stopReason_=4; running_=false; return; }
         }
         receivedInputs_.erase(deliveredInput_);
       }
       acknowledgeInput();
     } else if(event->kind==Input::Move && h.sequence>lastMouse_) {
       lastMouse_=h.sequence;
-      if(options_.input && onInput) onInput(*event);
+      if(inputWorker_) inputWorker_->submit(*event);
     }
   }
 }
@@ -694,6 +724,17 @@ void Peer::sendLoop() {
           continue;
         }
         if(packet->audio && now-packet->queued>std::chrono::milliseconds(40)) continue;
+        if(packet->inputSequence) {
+          const auto pending=pending_.find(packet->inputSequence);
+          if(pending==pending_.end() || pending->second.sacked) continue;
+          auto& input=pending->second;
+          input.sent=now; input.queued=false;
+          if(input.attempts++) ++inputRetryCount_;
+        }
+        if(packet->input) {
+          inputSendQueueUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now-packet->queued).count());
+          ++inputSendSamples_;
+        }
         if (packet->frame && ((packet->deadline!=Clock::time_point{} && now>packet->deadline) ||
             (packet->deadline==Clock::time_point{} && now-packet->queued>std::chrono::milliseconds(100)))) {
           if(!packet->repair) { tx_.clearVideo(); outgoingNeedsKeyframe_=true; ++videoQueueDrops_; }
@@ -710,7 +751,16 @@ void Peer::sendLoop() {
 void Peer::logHealth() {
   if(!std::getenv("SANSER_TELEMETRY")) return;
   std::size_t pending;
-  { std::lock_guard lock(sendMutex_); pending=pending_.size(); }
+  std::uint64_t sendQueueUs,sendSamples,retries;
+  { std::lock_guard lock(sendMutex_); pending=pending_.size(); sendQueueUs=inputSendQueueUs_; sendSamples=inputSendSamples_; retries=inputRetryCount_;
+    inputSendQueueUs_=inputSendSamples_=inputRetryCount_=0; }
+  const auto work=inputWorker_ ? inputWorker_->takeStats() : InputWorker::Stats{};
+  if(work.samples && ready_ && running_) {
+    Bytes timing{'S','I','T','1'};
+    for(const auto us : {work.queueUs/work.samples,work.workUs/work.samples,work.queueMaxUs})
+      u32(timing,static_cast<std::uint32_t>(std::min<std::uint64_t>(us,UINT32_MAX)));
+    transmit(snv2::PacketType::NetworkFeedback,timing);
+  }
   std::ostringstream line;
   line<<"SNV2_TRANSPORT_HEALTH ready="<<ready_.load()<<" running="<<running_.load()
     <<" rawDatagrams="<<rawDatagrams_<<" authRejected="<<authRejected_
@@ -718,13 +768,16 @@ void Peer::logHealth() {
     <<" keyframeWaitDropped="<<keyframeWaitDropped_<<" nackSent="<<nackSent_
     <<" repaired="<<repairedDatagrams_.load()<<" repairCacheMisses="<<repairCacheMisses_.load()
     <<" sendQueueDrops="<<videoQueueDrops_.load()<<" pending="<<pending<<" stopReason="<<stopReason_.load(); writeTelemetry(line);
-  if(inputRttSamples_ || inputWorkSamples_) {
+  if(inputRttSamples_ || work.samples || sendSamples) {
     line.str(""); line.clear();
     line<<"SNV2_INPUT_TIMING";
     if(inputRttSamples_) line<<" avgRttMs="<<inputRttUs_/1000.0/inputRttSamples_;
-    if(inputWorkSamples_) line<<" hostAvgWorkMs="<<inputWorkUs_/1000.0/inputWorkSamples_;
+    if(work.samples) line<<" hostAvgWorkMs="<<work.workUs/1000.0/work.samples<<" hostQueueAvgMs="<<work.queueUs/1000.0/work.samples
+      <<" hostQueueMaxMs="<<work.queueMaxUs/1000.0;
+    if(sendSamples) line<<" inputSendQueueAvgMs="<<sendQueueUs/1000.0/sendSamples;
+    line<<" inputRetries="<<retries<<" coalescedMoves="<<work.coalescedMoves;
     writeTelemetry(line);
-    inputRttUs_=inputRttSamples_=inputWorkUs_=inputWorkSamples_=0;
+    inputRttUs_=inputRttSamples_=0;
   }
 }
 void Peer::loop() {
@@ -772,9 +825,10 @@ void Peer::loop() {
             std::fprintf(stderr,"SNV2_INPUT_ACK_TIMEOUT pending=%zu deadlineMs=%lld\n",pending_.size(),static_cast<long long>(deadline.count()));
             stopReason_=3; running_=false; break;
           }
-          if(!p.sacked && now-p.sent>inputDelivery_.retry(options_.ultraLowLatency,p.attempts)) {
-            if (!tx_.push(TxScheduler::InputLane, {p.bytes, now, 0})) { running_=false; break; }
-            ++p.attempts; p.sent=now; sendReady_.notify_one();
+          if(!p.sacked && !p.queued && now-p.sent>inputDelivery_.retry(options_.ultraLowLatency,p.attempts)) {
+            TxScheduler::Packet retry{p.bytes,now,0}; retry.inputSequence=seq; retry.input=true;
+            if (!tx_.push(TxScheduler::InputLane, std::move(retry))) { stopReason_=4; running_=false; break; }
+            p.queued=true; sendReady_.notify_one();
           }
         }
       }
@@ -828,7 +882,7 @@ void Peer::loop() {
   logHealth();
   if(stopReason_>=2) std::cerr<<"SNV2_STOP reason="<<stopReason_.load()
     <<" (2=peer-timeout 3=input-ack-timeout 4=priority-queue-overflow 5=transport-error)"<<std::endl;
-  if(options_.host && onInput) onInput(Input{});
+  if(inputWorker_) inputWorker_->stop();
   if(onStopped) onStopped();
 }
 }

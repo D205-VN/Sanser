@@ -3,6 +3,7 @@
 #include "snv2_auth.h"
 #include "tx_scheduler.h"
 #include "input_delivery_policy.h"
+#include "input_worker.h"
 #include "round_trip_probe.h"
 #include "audio.h"
 #include <condition_variable>
@@ -35,14 +36,6 @@ struct Options {
   std::string token;
 };
 Options parseOptions(bool host, int argc, char** argv);
-struct Input {
-  // Absolute position uses [0,65535]; key codes use USB HID keyboard usages.
-  enum Kind : std::uint8_t { Move, Button, Key, Scroll, Reset };
-  Kind kind = Reset;
-  std::uint16_t x = 0, y = 0, code = 0;
-  std::int16_t delta = 0;
-  bool down = false;
-};
 Bytes encodeInput(const Input& input);
 std::optional<Input> decodeInput(const Bytes& bytes);
 struct Frame { Bytes data; std::uint32_t width = 0, height = 0; bool keyframe = false; std::uint64_t id = 0; };
@@ -152,6 +145,7 @@ private:
   bool timerResolution_=false;
   std::thread worker_;
   std::thread sender_;
+  std::unique_ptr<InputWorker> inputWorker_;
   std::atomic<bool> running_{false}, ready_{false};
   std::mutex sendMutex_, videoMutex_;
   std::condition_variable sendReady_;
@@ -159,7 +153,7 @@ private:
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
   std::atomic<bool> peerAudio_{false};
   std::atomic<std::uint64_t> queuedKeys_{0},queuedButtons_{0};
-  std::uint64_t deliveredKeys_=0,deliveredButtons_=0;
+  std::atomic<std::uint64_t> deliveredKeys_{0},deliveredButtons_{0};
   std::uint64_t lastAudio_=0;
   std::atomic<bool> videoPaused_{false};
   mutable std::mutex feedbackMutex_;
@@ -179,12 +173,13 @@ private:
   std::uint64_t sequences_[3]{}, deliveredInput_ = 0, completedVideoFrame_=0;
   std::atomic<std::uint64_t> frame_{0};
   ReplayWindow replay_[3];
-  struct Pending { Bytes bytes; Clock::time_point sent, created; unsigned attempts; bool sacked = false; };
+  struct Pending { Bytes bytes; Clock::time_point sent, created; unsigned attempts; bool sacked = false, queued = true; };
   std::map<std::uint64_t, Pending> pending_;
   InputDeliveryPolicy inputDelivery_;
   RoundTripProbe controlProbe_;
   std::atomic<double> controlAppRtt_{-1};
-  std::uint64_t inputRttUs_=0,inputRttSamples_=0,inputWorkUs_=0,inputWorkSamples_=0;
+  std::uint64_t inputRttUs_=0,inputRttSamples_=0;
+  std::uint64_t inputSendQueueUs_=0,inputSendSamples_=0,inputRetryCount_=0;
   std::mutex keyframeRequestMutex_;
   std::map<std::uint64_t, Input> receivedInputs_;
   Reassembler reassembler_;
