@@ -195,6 +195,7 @@ int main() {
       check(host.ready(),"live stall handshake");
       host.video({Bytes(100000,1),1280,720,true});
       h.packetType=wire::PacketType::NetworkFeedback; ++h.sequence;
+      const auto progressSent=Clock::now();
       remote.send(options.port,codec.seal(h,{'S','V','P','1',0,0,0,0,0,0,0,1}));
       (void)host.takeKeyframeRequest();
       // One picture was delivered, then progress stalls while source activity
@@ -207,8 +208,14 @@ int main() {
         feedback.insert(feedback.end(),{0,0,0,100,0,0,0,0}); ++h.sequence;
         remote.send(options.port,codec.seal(h,feedback));
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        if(window<2) check(host.bitrate()>5000000,"brief delivery variation must not trigger live-stall emergency recovery");
+        const auto budget=host.bitrate();
+        // Two 270 ms sleeps can exceed the actual 750 ms stall threshold on
+        // a busy runner. Judge a brief gap by elapsed time, not loop count.
+        if(Clock::now()-progressSent<std::chrono::milliseconds(750))
+          check(budget>5000000,"brief delivery variation must not trigger live-stall emergency recovery");
       }
+      const auto applied=Clock::now()+std::chrono::seconds(1);
+      while(host.bitrate()!=5000000 && Clock::now()<applied) std::this_thread::sleep_for(std::chrono::milliseconds(2));
       check(host.bitrate()==5000000 && host.takeKeyframeRequest(),"a frozen live picture with sustained activity recovers budget and requests a fresh IDR");
     }
     {

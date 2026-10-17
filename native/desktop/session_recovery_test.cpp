@@ -30,9 +30,13 @@ int main() {
     client->input({Input::Move,300,400});
     // A stale client preference must not turn the host's input policy into an
     // ACK black hole. No events may be injected; viewing must keep working.
-    const auto until=Clock::now()+std::chrono::milliseconds(2400);
+    const auto started=Clock::now();
+    const auto until=started+std::chrono::seconds(8);
     unsigned frame=0;
-    while(Clock::now()<until && host->running() && client->running()) {
+    // Verify continued delivery beyond the input ACK timeout, not a particular
+    // FPS on a shared CI runner. Keep a finite deadline if delivery is broken.
+    while(Clock::now()<until && host->running() && client->running() &&
+          (Clock::now()-started<std::chrono::milliseconds(2400) || pictures<=20)) {
       host->video({Bytes(1000,static_cast<std::uint8_t>(frame)),640,360,true}); ++frame;
       std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
