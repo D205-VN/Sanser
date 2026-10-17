@@ -23,7 +23,7 @@ int main() {
         std::unique_lock lock(mutex);
         if(!entered) { entered=true; wake.notify_all(); wake.wait_for(lock,std::chrono::seconds(3),[&] { return release; }); }
         ++decoded; wake.notify_all();
-      },[] {},[&] { ++requests; },true);
+      },[] {},[&] { ++requests; },true,false,[] { return Clock::time_point{}; });
       cold.submit({{1},640,360,true});
       { std::unique_lock lock(mutex); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return entered; }),"cold decoder did not enter initialization"); }
       for(unsigned i=0;i<20;++i) cold.submit({{2},640,360,false});
@@ -68,6 +68,62 @@ int main() {
     }
     worker.stop();
     check(resets>=2,"overflow and shutdown clean up the decoder on its owning thread");
+
+    // Below capacity, a fresh IDR must replace an older queued chain too.
+    struct Case { bool expired,cold,ultra; int age; };
+    for(const auto config : {Case{false,false,true,0},Case{true,false,true,51},Case{true,false,false,101},Case{true,true,true,501}}) {
+      const bool expired=config.expired;
+      std::mutex gate; std::condition_variable ready; bool busy=false,allow=false;
+      std::vector<unsigned> frames; std::atomic<unsigned> idrs{0},cleanups{0}; std::atomic<int> timeMs{0};
+      DecodeWorker latest([&](Frame frame) {
+        std::unique_lock lock(gate); frames.push_back(frame.data[0]);
+        if(frame.data[0]==1) { busy=true; ready.notify_all(); ready.wait_for(lock,std::chrono::seconds(3),[&] { return allow; }); }
+        ready.notify_all();
+      },[&] { ++cleanups; },[&] { ++idrs; ready.notify_all(); },config.cold,config.ultra,[&] { return Clock::time_point(std::chrono::milliseconds(timeMs.load())); });
+      struct Release { std::mutex& gate; std::condition_variable& ready; bool& allow;
+        ~Release() { { std::lock_guard lock(gate); allow=true; } ready.notify_all(); }
+      } releaseGate{gate,ready,allow};
+      latest.submit({{1},640,360,true});
+      { std::unique_lock lock(gate); check(ready.wait_for(lock,std::chrono::seconds(2),[&] { return busy; }),"decoder test did not block"); }
+      latest.submit({{2},640,360,false}); latest.submit({{3},640,360,false});
+      if(expired) timeMs=config.age;
+      else latest.submit({{99},640,360,true});
+      { std::lock_guard lock(gate); allow=true; } ready.notify_all();
+      if(expired) {
+        const auto until=Clock::now()+std::chrono::seconds(2);
+        while(idrs==0 && Clock::now()<until) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        check(idrs==1 && latest.expired()==2,"stale dependent pictures must expire even below the queue capacity");
+        latest.submit({{4},640,360,false});
+        check(idrs==1,"waiting frames must not create a keyframe request storm");
+        latest.submit({{99},640,360,true});
+      }
+      { std::unique_lock lock(gate); check(ready.wait_for(lock,std::chrono::seconds(2),[&] { return frames.size()==2; }),"fresh reference failed to resume video"); }
+      check(expired || cleanups==0,"fresh IDR must not recreate a healthy hardware decoder");
+      latest.stop();
+      check(frames==std::vector<unsigned>({1,99}),"stale P-frames must not play before a newer IDR");
+    }
+    {
+      DecodeWorker cleanupFailure([](Frame) {},[] { throw std::runtime_error("synthetic cleanup failure"); },[] {});
+      cleanupFailure.stop();
+      check(cleanupFailure.failures()>=10 && cleanupFailure.error().find("synthetic cleanup failure")!=std::string::npos,
+        "cleanup exception must become a bounded terminal decoder error, not terminate the process");
+      DecodeWorker requestFailure([](Frame) {},[] {},[] { throw std::runtime_error("synthetic request failure"); });
+      requestFailure.submit({{2},640,360,false}); requestFailure.stop();
+      check(requestFailure.failures()>=10,"recovery callback exception must not escape into the UDP reader");
+    }
+    {
+      std::mutex gate; std::condition_variable ready; bool busy=false,allow=false;
+      DecodeWorker concurrentFailure([&](Frame) {
+        std::unique_lock lock(gate); busy=true; ready.notify_all();
+        ready.wait_for(lock,std::chrono::seconds(3),[&] { return allow; });
+      },[] {},[] { throw std::runtime_error("synthetic concurrent recovery failure"); });
+      concurrentFailure.submit({{1},640,360,true});
+      { std::unique_lock lock(gate); check(ready.wait_for(lock,std::chrono::seconds(2),[&] { return busy; }),"concurrent decoder test did not begin"); }
+      for(unsigned i=0;i<4;++i) concurrentFailure.submit({{2},640,360,false});
+      { std::lock_guard lock(gate); allow=true; } ready.notify_all();
+      concurrentFailure.stop();
+      check(concurrentFailure.failures()>=10,"a completed in-flight decode must not clear a concurrent terminal recovery error");
+    }
     std::cout<<"Decode worker: bounded reference-safe queue, non-blocking socket callback and codec thread ownership passed\n";
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

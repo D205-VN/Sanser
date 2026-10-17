@@ -1,6 +1,6 @@
 # Part 3: bounded recovery of an accepted native session
 
-Development on `Version-2.0.0` after 2.2.12; no new release/tag or installer.
+Included in Sanser 2.2.13, developed on `Version-2.0.0` after 2.2.12.
 The client can reopen its remote window with fresh authorization and candidate
 gathering. This is a **controlled reconnect**, with a visible interruption,
 not seamless migration of an existing media socket.

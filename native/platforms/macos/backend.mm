@@ -632,7 +632,7 @@ int runMac(bool host,int argc,char** argv) {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     Peer peer(options); Decoder decoder;
     DecodeWorker decode([&](Frame frame) { @autoreleasepool { decoder.decode(frame); } },
-      [&] { decoder.reset(); },[&] { peer.requestKeyframe(); },true);
+      [&] { decoder.reset(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency);
     peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Control+Option+Escape releases input" : @"Sanser · View only";
@@ -651,10 +651,10 @@ int runMac(bool host,int argc,char** argv) {
         [window displayIfNeeded];
         if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastHealth>=std::chrono::seconds(1)) {
           std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decoder.decoded()<<" converted="<<presented
-            <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures();
+            <<" encodedQueueDrops="<<decode.dropped()<<" decodeQueueExpired="<<decode.expired()<<" decodeErrors="<<decode.failures();
           const auto timing=decode.takeTiming();
           if(timing.samples) line<<" decodeWorkAvgMs="<<timing.workUs/1000.0/timing.samples
-            <<" decodeQueueAvgMs="<<timing.queueUs/1000.0/timing.samples;
+            <<" decodeQueueAvgMs="<<timing.queueUs/1000.0/timing.samples<<" decodeQueueMaxMs="<<timing.queueMaxUs/1000.0;
           writeTelemetry(line);
           lastHealth=Clock::now();
         }

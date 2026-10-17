@@ -60,6 +60,8 @@ const FIELDS: &[&str] = &[
     "submitted",
     "converted",
     "encodedQueueDrops",
+    "decodeQueueExpired",
+    "decodeQueueMaxMs",
     "decodeWorkAvgMs",
     "decodeQueueAvgMs",
     "conversionAvgMs",
@@ -428,7 +430,7 @@ impl Report {
             | "encodeQueueAvgMs"
             | "encodeAndPublishAvgMs" => *value >= 50.0,
             "avgPresentLateMs" | "maxPresentLateMs" | "latencyLateMaxMs" => *value >= 80.0,
-            "latencyDropped" | "keyframeWaitDropped" => *value > 0.0,
+            "latencyDropped" | "keyframeWaitDropped" | "decodeQueueExpired" => *value > 0.0,
             _ => false,
         });
         self.delay_sample_count += u64::from(delayed);

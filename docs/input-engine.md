@@ -1,6 +1,6 @@
 # Part 4: bounded input delivery and independent OS execution
 
-Development on `Version-2.0.0` after 2.2.12. No new release, tag or installer.
+Included in Sanser 2.2.13, developed on `Version-2.0.0` after 2.2.12.
 This follows the shared network foundations, performance diagnostics and bounded
 route reconnect work. It does not replace OS capture/codec/render backends.
 

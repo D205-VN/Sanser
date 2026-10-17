@@ -15,7 +15,7 @@
     captureWork: 'Capture work', captureWait: 'Capture wait', encodeWork: 'Encode work',
     encodeQueue: 'Encode queue', encodeAndPublish: 'Encode + publish', sendTotal: 'Send total',
     pacingWait: 'Pacing wait', socketSend: 'Socket send', arrivalJitter: 'Arrival jitter',
-    decodeQueue: 'Decode queue', decodeWork: 'Decode work', colorConversion: 'Color conversion',
+    decodeQueue: 'Decode queue', decodeQueueMax: 'Decode queue maximum', decodeWork: 'Decode work', colorConversion: 'Color conversion',
     frameQueue: 'Frame queue', renderGpu: 'Render GPU', paintWork: 'Paint work', decodedToPaint: 'Decoded → paint'
   };
   const primary = ['controlAppRtt', 'wireRttEstimate', 'inputAckRtt', 'hostInput', 'decodeQueue', 'decodeWork', 'frameQueue'];

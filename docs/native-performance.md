@@ -1,7 +1,6 @@
 # Part 2: common native performance diagnostics
 
-Development on `Version-2.0.0`, after the 2.2.12 release. No new installer or tag
-is required for this work. The installed 2.2.12 artifacts do not contain it.
+Included in Sanser 2.2.13, developed on `Version-2.0.0` after 2.2.12.
 
 [Part 3](route-recovery.md) now consumes session-bound live observations through
 a separate, bounded reconnect policy. The measurement model itself stays passive.
@@ -49,7 +48,7 @@ a relay, migrate routes, or claim to fix a physical 200 ms path.
 | Control application RTT | Control timing or control-pong fallback | Authenticated probe on the current transport |
 | Wire/socket RTT | Existing detailed control instrumentation | Not measured by this change |
 | Input ACK RTT | Legacy input acknowledgement | Reliable ACK/SACK elapsed time, including retries |
-| Host input work | Host timing carried by legacy ACK | Local host report only |
+| Host input queue/work | Host work carried by legacy ACK; queue unavailable | Local host and optional authenticated numeric feedback to viewer |
 | Capture/encode | Existing host stage messages | Mac host encode queue and encode+publish locally; unsupported stages stay absent |
 | Decode queue/work | Existing decoder work; queue unavailable if not emitted | Shared decode worker on Windows and Mac |
 | Frame queue/GPU render | Existing Metal measurements | Unavailable if the backend does not emit them |
@@ -80,7 +79,8 @@ values. Native checks cover authenticated loopback probes while video/input are
 active and decode worker timing snapshots. These use synthetic data, without
 screen capture or real OS input injection.
 
-Real two-computer tests in all four directions, Windows compilation, NAT/relay
+Real two-computer tests in all four directions, NAT/relay
 behavior and physical screen-to-screen latency still need their respective
-verification. Kernel timestamps, SNV2 wire RTT, remote host-stage propagation,
+verification. Windows/macOS native compilation and synthetic tests are covered by
+CI. Kernel timestamps, SNV2 wire RTT, remaining remote host-stage propagation,
 complete per-frame histograms and unified Legacy/SNV2 transport are later work.

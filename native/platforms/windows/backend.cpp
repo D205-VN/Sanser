@@ -470,7 +470,7 @@ int runWindows(bool host,int argc,char** argv) {
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(frame.width,frame.height,[&](Nv12Image image) { ++decodedFrames; conversion.submit(std::move(image)); });
     decoder->decode(frame);
-  },[&] { decoder.reset(); runtime.reset(); conversion.clear(); },[&] { peer.requestKeyframe(); },true);
+  },[&] { decoder.reset(); runtime.reset(); conversion.clear(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency);
   peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
@@ -481,10 +481,10 @@ int runWindows(bool host,int argc,char** argv) {
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
     if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastProgress>=std::chrono::seconds(1)) {
       std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decodedFrames.load()<<" converted="<<convertedFrames.load()
-        <<" encodedQueueDrops="<<decode.dropped()<<" decodeErrors="<<decode.failures()<<" rendered="<<state.painted;
+        <<" encodedQueueDrops="<<decode.dropped()<<" decodeQueueExpired="<<decode.expired()<<" decodeErrors="<<decode.failures()<<" rendered="<<state.painted;
       const auto timing=decode.takeTiming(); const auto converted=convertedFrames.load();
       if(timing.samples) line<<" decodeWorkAvgMs="<<timing.workUs/1000.0/timing.samples
-        <<" decodeQueueAvgMs="<<timing.queueUs/1000.0/timing.samples;
+        <<" decodeQueueAvgMs="<<timing.queueUs/1000.0/timing.samples<<" decodeQueueMaxMs="<<timing.queueMaxUs/1000.0;
       if(converted) line<<" conversionAvgMs="<<conversionUs.load()/1000.0/converted;
       if(state.painted) line<<" paintAvgMs="<<state.paintUs/1000.0/state.painted<<" decodedToPaintAvgMs="<<state.decodedToPaintUs/1000.0/state.painted;
       writeTelemetry(line);

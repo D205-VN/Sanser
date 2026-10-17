@@ -1,6 +1,6 @@
 # Release
 
-The next release definition is [Sanser 2.2.12](releases/v2.2.12.md). Its tagged
+The current release definition is [Sanser 2.2.13](releases/v2.2.13.md). Its tagged
 workflow publishes Mac/Windows installers and signed updater bundles to the
 latest automatic-update channel.
 See [sharing implementation and validation progress](multi-viewer-progress.md)

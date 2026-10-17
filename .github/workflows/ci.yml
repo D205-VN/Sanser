@@ -74,6 +74,7 @@ jobs:
       - run: npm run desktop:lint
       - run: npm run desktop:test
       - run: node --test scripts/compare-latency-baseline.test.mjs
+      - run: node --test scripts/performance-matrix.test.mjs
       - run: npm run desktop:build
       - run: npm audit --omit=dev --audit-level=moderate
 

@@ -89,6 +89,7 @@ fn metric_fields(source: &str) -> &'static [MetricField] {
         "SNV2_VIDEO_HEALTH" => &[
             ("decodeWorkAvgMs", "decodeWork", "snv2-video"),
             ("decodeQueueAvgMs", "decodeQueue", "snv2-video"),
+            ("decodeQueueMaxMs", "decodeQueueMax", "snv2-video"),
             ("conversionAvgMs", "colorConversion", "snv2-video"),
             ("paintAvgMs", "paintWork", "snv2-video"),
             ("decodedToPaintAvgMs", "decodedToPaint", "snv2-video"),
