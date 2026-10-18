@@ -557,6 +557,18 @@ fn relay_endpoint(
     Ok(url)
 }
 
+fn relay_close_reason(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> String {
+    match frame.map(|frame| u16::from(frame.code)) {
+        Some(1012) => "relay server restarted; retry the accepted session",
+        Some(1013) => "relay server temporarily unavailable; retry the accepted session",
+        Some(1008) => "relay server rejected this connection by policy; retry manually",
+        _ => "relay connection closed; retry the accepted session",
+    }
+    .into()
+}
+
 async fn run_bridge<S>(
     socket: tokio::net::UdpSocket,
     engine_endpoint: SocketAddr,
@@ -656,7 +668,7 @@ where
                 Ok(Message::Text(message)) if message.as_str().contains("relay.peerOffline") => {
                     return Some("relay peer went offline; retry the accepted session".into());
                 }
-                Ok(Message::Close(_)) => break,
+                Ok(Message::Close(frame)) => return Some(relay_close_reason(frame.as_ref())),
                 Err(error) => return Some(format!("relay connection failed: {error}")),
                 _ => {}
             }
@@ -892,6 +904,195 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn abrupt_websocket_reset_is_a_recoverable_route_failure() {
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+        let (local, remote) = tokio::io::duplex(1_024);
+        let websocket = WebSocketStream::from_raw_socket(local, Role::Client, None).await;
+        let proxy = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let engine = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let cipher = RelayCipher::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "synthetic-websocket-reset-credential",
+        )
+        .unwrap();
+        let (_stop, stopped) = oneshot::channel();
+        let bridge = tokio::spawn(run_bridge(
+            proxy,
+            engine.local_addr().unwrap(),
+            websocket,
+            cipher,
+            stopped,
+        ));
+        drop(remote); // Deliberately omit a WebSocket closing handshake.
+        let failure = tokio::time::timeout(Duration::from_secs(2), bridge)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            failure.contains("Connection reset without closing handshake"),
+            "{failure}"
+        );
+        assert_eq!(
+            crate::engine_output::relay_route_failure(&failure),
+            Some(crate::models::NativeRouteFailure::RelayLost)
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_close_codes_distinguish_restart_and_capacity_from_policy_rejection() {
+        use tokio_tungstenite::{
+            WebSocketStream,
+            tungstenite::{protocol::CloseFrame, protocol::Role},
+        };
+        for (code, recoverable) in [(1012, true), (1013, true), (1008, false)] {
+            let (local, remote) = tokio::io::duplex(1_024);
+            let websocket = WebSocketStream::from_raw_socket(local, Role::Client, None).await;
+            let mut peer = WebSocketStream::from_raw_socket(remote, Role::Server, None).await;
+            let proxy = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let engine = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let cipher = RelayCipher::new(
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                "synthetic-relay-close-code-credential",
+            )
+            .unwrap();
+            let (_stop, stopped) = oneshot::channel();
+            let bridge = tokio::spawn(run_bridge(
+                proxy,
+                engine.local_addr().unwrap(),
+                websocket,
+                cipher,
+                stopped,
+            ));
+            peer.send(Message::Close(Some(CloseFrame {
+                code: code.into(),
+                reason: "synthetic-close".into(),
+            })))
+            .await
+            .unwrap();
+            let failure = tokio::time::timeout(Duration::from_secs(2), bridge)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                crate::engine_output::relay_route_failure(&failure).is_some(),
+                recoverable,
+                "{code}: {failure}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_keeps_heartbeats_and_control_alive_during_a_25_second_video_pause() {
+        use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+        let (local, remote) = tokio::io::duplex(65_536);
+        let websocket = WebSocketStream::from_raw_socket(local, Role::Client, None).await;
+        let mut peer = WebSocketStream::from_raw_socket(remote, Role::Server, None).await;
+        let session = uuid::Uuid::new_v4();
+        let left = uuid::Uuid::new_v4();
+        let right = uuid::Uuid::new_v4();
+        let credential = "synthetic-capture-pause-relay-credential";
+        let cipher = RelayCipher::new(session, left, right, credential).unwrap();
+        let mut peer_cipher = RelayCipher::new(session, right, left, credential).unwrap();
+        let proxy = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = proxy.local_addr().unwrap();
+        let engine = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let bridge = tokio::spawn(run_bridge(
+            proxy,
+            engine.local_addr().unwrap(),
+            websocket,
+            cipher,
+            stopped,
+        ));
+        let mut buffer = [0; 64];
+        let mut heartbeat_seen = false;
+        let began = tokio::time::Instant::now();
+        while began.elapsed() < Duration::from_secs(25) {
+            // No capture/video payloads: only authenticated native control.
+            engine
+                .send_to(b"control-pong-capture-paused", address)
+                .await
+                .unwrap();
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), peer.next())
+                    .await
+                    .unwrap()
+                {
+                    Some(Ok(Message::Binary(data))) => {
+                        assert_eq!(
+                            peer_cipher.decrypt(&data).unwrap(),
+                            b"control-pong-capture-paused"
+                        );
+                        break;
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        heartbeat_seen = true;
+                        peer.send(Message::Pong(data)).await.unwrap();
+                    }
+                    other => panic!("relay ended during capture pause: {other:?}"),
+                }
+            }
+            peer.send(Message::Binary(
+                peer_cipher.encrypt(b"control-ping").unwrap().into(),
+            ))
+            .await
+            .unwrap();
+            let (n, _) =
+                tokio::time::timeout(Duration::from_secs(2), engine.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buffer[..n], b"control-ping");
+            assert!(!bridge.is_finished());
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert!(
+            heartbeat_seen,
+            "WebSocket heartbeat was tied to video capture"
+        );
+        engine
+            .send_to(b"fresh-idr-after-capture-resume", address)
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), peer.next())
+                .await
+                .unwrap()
+            {
+                Some(Ok(Message::Binary(data))) => {
+                    assert_eq!(
+                        peer_cipher.decrypt(&data).unwrap(),
+                        b"fresh-idr-after-capture-resume"
+                    );
+                    break;
+                }
+                Some(Ok(Message::Ping(data))) => peer.send(Message::Pong(data)).await.unwrap(),
+                other => panic!("relay did not resume: {other:?}"),
+            }
+        }
+        stop.send(()).unwrap();
+        assert_eq!(bridge.await.unwrap(), None);
     }
 
     #[test]

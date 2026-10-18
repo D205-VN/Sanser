@@ -405,22 +405,28 @@ pub fn get_engine_status(
     kind: EngineKind,
 ) -> Result<EngineStatus, DesktopError> {
     let mut status = engines.status(&app, kind)?;
-    if status.running
+    // A transport reset can make native input time out before this 2s poll.
+    // Do not lose the relay failure just because the sidecar already exited.
+    if !status.user_closed
         && !engines.is_sharing(kind)
         && let Some(id) = status.session_id
         && let Some(failure) = relay.take_peer_failure(kind, id)
     {
-        let _ = engines.stop_for_session(kind, id);
-        status.running = false;
-        status.process_id = None;
-        status.last_error = Some(failure);
-        if !matches!(
+        let recoverable = !matches!(
             status.startup_failure,
             Some(
                 crate::models::NativeStartupFailure::AuthRejected
                     | crate::models::NativeStartupFailure::DecodeFailed
             )
-        ) {
+        );
+        if recoverable {
+            engines.record_relay_failure(kind, id, &failure);
+        }
+        let _ = engines.stop_for_session(kind, id);
+        status.running = false;
+        status.process_id = None;
+        status.last_error = Some(failure);
+        if recoverable {
             status.route_failure = status
                 .last_error
                 .as_deref()

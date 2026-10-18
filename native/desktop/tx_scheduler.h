@@ -57,6 +57,7 @@ public:
   }
   void clearRealtimeVideo() { queues_[Video].clear(); bytes_[Video]=0; }
   void clearVideo() { clearRealtimeVideo(); queues_[Repair].clear(); bytes_[Repair]=0; }
+  void clearInput() { queues_[InputLane].clear(); bytes_[InputLane]=0; latestMove_.reset(); }
   void acknowledgeInput(std::uint64_t contiguous,std::uint64_t mask) {
     auto& lane=queues_[InputLane];
     for(auto it=lane.begin();it!=lane.end();) {

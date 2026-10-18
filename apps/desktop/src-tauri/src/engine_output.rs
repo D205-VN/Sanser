@@ -116,6 +116,15 @@ pub(crate) fn display_error(message: &str) -> String {
     message.to_owned()
 }
 
+pub(crate) fn viewer_closed(message: &str) -> bool {
+    message.lines().any(|line| {
+        matches!(
+            line.trim_end_matches('\r'),
+            "SNV2_VIEWER_CLOSED" | "SNU1_VIEWER_CLOSED"
+        )
+    })
+}
+
 /// Only an explicit terminal native transport timeout can cause reopening.
 /// User close, host Disconnect, auth/decoder errors and input ACK timeouts do not.
 pub(crate) fn route_failure(message: &str) -> Option<crate::models::NativeRouteFailure> {
@@ -127,8 +136,13 @@ pub(crate) fn route_failure(message: &str) -> Option<crate::models::NativeRouteF
 pub(crate) fn relay_route_failure(message: &str) -> Option<crate::models::NativeRouteFailure> {
     (message == "relay peer went offline; retry the accepted session"
         || message.starts_with("relay connection failed: ")
-        || message.starts_with("local relay UDP bridge stopped receiving packets: "))
-    .then_some(crate::models::NativeRouteFailure::RelayLost)
+        || message.starts_with("local relay UDP bridge stopped receiving packets: ")
+        || message == "relay connection closed; retry the accepted session"
+        || message == "UDP relay control closed; retry the accepted session"
+        || message == "UDP relay stopped responding; retry the session"
+        || message == "relay server restarted; retry the accepted session"
+        || message == "relay server temporarily unavailable; retry the accepted session")
+        .then_some(crate::models::NativeRouteFailure::RelayLost)
 }
 
 pub(crate) struct EngineOutput {
@@ -284,6 +298,20 @@ fn drain(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn explicit_viewer_close_is_distinct_from_capture_pause_failure_and_tray_close() {
+        assert!(viewer_closed(
+            "SNV2_VIEWER_CLOSED\r\nSNV2_TRANSPORT_HEALTH running=0"
+        ));
+        assert!(viewer_closed("SNU1_VIEWER_CLOSED\n"));
+        assert!(!viewer_closed("SNV2_STOP reason=3"));
+        assert!(!viewer_closed(
+            "SNV2_CAPTURE_PAUSED reason=desktop-unavailable"
+        ));
+        assert!(!viewer_closed("Sanser lifecycle: hide requested"));
+        assert!(!viewer_closed("prefix SNV2_VIEWER_CLOSED suffix"));
+    }
 
     #[test]
     fn route_recovery_requires_explicit_transport_failure_not_user_close_or_auth_errors() {

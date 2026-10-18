@@ -43,6 +43,22 @@ int main() {
     check(host->running() && client->running(),"denied remote input must not cause an input ACK timeout or close the viewer");
     check(injected==0,"view-only host must never inject denied input");
     check(pictures>20,"viewing must continue while input is denied");
-    std::cout<<"Session recovery: denied input is acknowledged without injection; video and control remain alive\n";
+    host->setCapturePaused(true);
+    const auto paused=Clock::now()+std::chrono::seconds(2);
+    while(!client->capturePaused() && Clock::now()<paused) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    check(client->capturePaused() && !client->inputAvailable(),"authenticated capture pause must disable viewer input");
+    // Simulate a 25-second Secure Desktop/installer pause without touching a
+    // real desktop. No video is published; authenticated control stays alive.
+    const auto pauseUntil=Clock::now()+std::chrono::seconds(25);
+    while(host->running() && client->running() && Clock::now()<pauseUntil)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    check(host->running() && client->running() && client->controlRoundTripMs().has_value(),"capture silence must not become a peer timeout");
+    host->setCapturePaused(false);
+    const auto before=pictures.load();
+    host->video({Bytes(1000,0x7f),640,360,true});
+    const auto resumed=Clock::now()+std::chrono::seconds(2);
+    while((client->capturePaused() || pictures==before) && Clock::now()<resumed) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    check(!client->capturePaused() && pictures>before,"fresh IDR must resume the same session after capture recovery");
+    std::cout<<"Session recovery: denied input ACK, 25-second capture pause/control heartbeat and resumed IDR passed\n";
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

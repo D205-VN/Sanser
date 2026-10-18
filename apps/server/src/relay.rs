@@ -6,7 +6,7 @@ use std::{
 use axum::{
     extract::{
         Query, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
     response::Response,
@@ -205,7 +205,7 @@ pub(crate) async fn authorize_relay(
 }
 
 async fn run_relay_socket(
-    socket: WebSocket,
+    mut socket: WebSocket,
     state: AppState,
     auth: AuthContext,
     session_id: String,
@@ -221,6 +221,14 @@ async fn run_relay_socket(
         .register(key.clone(), device_id.clone(), peer_device_id)
         .await
     else {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            socket.send(Message::Close(Some(CloseFrame {
+                code: 1013,
+                reason: "relay-capacity-unavailable".into(),
+            }))),
+        )
+        .await;
         return;
     };
     let (mut writer, mut reader) = socket.split();
@@ -235,16 +243,16 @@ async fn run_relay_socket(
                     Some(RelayOutbound::Binary(payload)) => Message::Binary(payload.into()),
                     Some(RelayOutbound::PeerReady) => Message::Text("{\"type\":\"relay.peerReady\"}".into()),
                     Some(RelayOutbound::PeerOffline) => Message::Text("{\"type\":\"relay.peerOffline\"}".into()),
-                    None => break,
+                    None => return "relay-outbound-closed",
                 },
                 control = control_rx.recv() => {
-                    let Some(message) = control else { break; };
+                    let Some(message) = control else { return "relay-control-closed"; };
                     message
                 }
                 _ = heartbeat.tick() => Message::Ping(Vec::new().into()),
             };
             if writer.send(message).await.is_err() {
-                break;
+                return "relay-write-error";
             }
         }
     };
@@ -261,7 +269,7 @@ async fn run_relay_socket(
                     }
                     byte_window_total = byte_window_total.saturating_add(payload.len());
                     if byte_window_total > MAX_RELAY_BYTES_PER_SECOND {
-                        break;
+                        return "relay-rate-limit";
                     }
                     match state
                         .relay
@@ -269,24 +277,44 @@ async fn run_relay_socket(
                         .await
                     {
                         Ok(()) => {}
-                        Err("connection_replaced") => break,
+                        Err("connection_replaced") => return "relay-connection-replaced",
                         Err(_) => continue,
                     }
                 }
                 Ok(Message::Ping(payload)) => {
                     if control_tx.try_send(Message::Pong(payload)).is_err() {
-                        break;
+                        return "relay-control-congested";
                     }
                 }
-                Ok(Message::Close(_) | Message::Text(_)) | Err(_) => break,
+                Ok(Message::Close(_)) => return "peer-close",
+                Ok(Message::Text(_)) => return "relay-invalid-message",
+                Err(_) => return "relay-read-error",
                 _ => {}
             }
         }
+        "relay-peer-eof"
     };
-    tokio::select! {
-        () = sending => {},
-        () = receiving => {},
-    }
+    let reason = tokio::select! {
+        reason = sending => reason,
+        reason = receiving => reason,
+        () = state.shutdown.cancelled() => "server-restart",
+    };
+    // Controlled restarts should send a real close frame. Abrupt network/proxy
+    // resets still require client recovery; a close write must never hang exit.
+    let code = match reason {
+        "server-restart" => 1012,
+        "relay-rate-limit" | "relay-invalid-message" => 1008,
+        _ => 1001,
+    };
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        writer.send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        }))),
+    )
+    .await;
+    tracing::info!(reason, "Sanser relay closed");
     state.relay.remove(&key, &device_id, connection_id).await;
 }
 
@@ -300,6 +328,78 @@ pub(crate) fn normalize_uuid(value: &str, name: &str) -> Result<String, AppError
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn controlled_restart_sends_close_1012_and_removes_its_relay_registration() {
+        use axum::{Router, routing::get};
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+        let database = "postgres://sanser:synthetic@127.0.0.1/sanser_test?sslmode=require";
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy(database)
+            .unwrap();
+        let state = AppState::new(crate::config::Config::test(database.into()).unwrap(), pool);
+        let shutdown = state.shutdown.clone();
+        let hub = state.relay.clone();
+        let app = Router::new().route(
+            "/relay-test",
+            get(move |ws: WebSocketUpgrade| {
+                let state = state.clone();
+                async move {
+                    ws.on_upgrade(move |socket| {
+                        run_relay_socket(
+                            socket,
+                            state,
+                            AuthContext {
+                                user_id: "test-user".into(),
+                                auth_session_id: "test-auth".into(),
+                                access_digest: "synthetic".into(),
+                            },
+                            Uuid::new_v4().to_string(),
+                            "test-device".into(),
+                            "test-peer".into(),
+                        )
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let (mut viewer, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/relay-test"))
+                .await
+                .unwrap();
+        shutdown.cancel();
+        let closed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match viewer.next().await {
+                    Some(Ok(ClientMessage::Close(frame))) => break frame.unwrap(),
+                    Some(Ok(ClientMessage::Ping(data))) => {
+                        viewer.send(ClientMessage::Pong(data)).await.unwrap()
+                    }
+                    other => panic!("restart omitted its WebSocket closing handshake: {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            closed.code,
+            tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Restart
+        );
+        assert_eq!(closed.reason.as_str(), "server-restart");
+        let _ = viewer.flush().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !hub.sessions.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        server.abort();
+    }
 
     #[tokio::test]
     async fn relay_hub_forwards_only_between_the_session_peers() {

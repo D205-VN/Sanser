@@ -189,7 +189,7 @@ pub async fn serve(config: Config) -> Result<(), ServerError> {
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(ServerError::Bind)?;
-    let cancellation = CancellationToken::new();
+    let cancellation = state.shutdown.clone();
     let udp_task = if let Some(address) = state.config.udp_relay_bind {
         let socket = tokio::net::UdpSocket::bind(address)
             .await

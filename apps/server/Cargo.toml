@@ -50,6 +50,7 @@ url = "2"
 zeroize = "1"
 
 [dev-dependencies]
+tokio-tungstenite = "0.29"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 

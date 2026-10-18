@@ -89,9 +89,16 @@ public:
   }
 private:
   void reset() {
-    for(auto code:keys_) { const auto scan=windowsKey(code); INPUT input{}; input.type=INPUT_KEYBOARD; input.ki.wScan=scan&255; input.ki.dwFlags=KEYEVENTF_SCANCODE|KEYEVENTF_KEYUP|(scan&256?KEYEVENTF_EXTENDEDKEY:0); SendInput(1,&input,sizeof(input)); } keys_.clear();
+    for(auto it=keys_.begin();it!=keys_.end();) {
+      const auto scan=windowsKey(*it); INPUT input{}; input.type=INPUT_KEYBOARD; input.ki.wScan=scan&255;
+      input.ki.dwFlags=KEYEVENTF_SCANCODE|KEYEVENTF_KEYUP|(scan&256?KEYEVENTF_EXTENDEDKEY:0);
+      if(SendInput(1,&input,sizeof(input))==1) it=keys_.erase(it); else ++it;
+    }
     static constexpr DWORD up[]={MOUSEEVENTF_LEFTUP,MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_MIDDLEUP};
-    for(auto code:buttons_) { INPUT input{}; input.type=INPUT_MOUSE; input.mi.dwFlags=up[code]; SendInput(1,&input,sizeof(input)); } buttons_.clear();
+    for(auto it=buttons_.begin();it!=buttons_.end();) {
+      INPUT input{}; input.type=INPUT_MOUSE; input.mi.dwFlags=up[*it];
+      if(SendInput(1,&input,sizeof(input))==1) it=buttons_.erase(it); else ++it;
+    }
   }
   long left_,top_; std::uint32_t width_,height_; std::set<std::uint16_t> keys_,buttons_;
 };
@@ -192,6 +199,8 @@ private:
 };
 struct WindowState {
   bool viewOnly=false;
+  bool userClosed=false;
+  bool inputPaused=false;
   std::function<void(Input)> sendInput; std::mutex mutex; std::shared_ptr<const Image> image;
   bool released=false; RECT video{};
   WindowPresenter presenter;
@@ -218,8 +227,8 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   auto* state=reinterpret_cast<WindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE) { state=static_cast<WindowState*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state)); }
   if(!state) return DefWindowProcW(window,message,w,l);
-  if(state->viewOnly && ((message>=WM_KEYFIRST && message<=WM_KEYLAST) || (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST))) return DefWindowProcW(window,message,w,l);
-  if(message==WM_CLOSE) { DestroyWindow(window); return 0; }
+  if((state->viewOnly || state->inputPaused) && ((message>=WM_KEYFIRST && message<=WM_KEYLAST) || (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST))) return DefWindowProcW(window,message,w,l);
+  if(message==WM_CLOSE) { state->userClosed=true; DestroyWindow(window); return 0; }
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
   if(message==WM_ERASEBKGND) return 1;
   if(message==WM_PAINT) {
@@ -247,7 +256,7 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_EXITSIZEMOVE) { KillTimer(window,1); InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_TIMER && w==1) { if(WaitForSingleObject(state->frameReady,0)==WAIT_OBJECT_0) InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_SIZE) { InvalidateRect(window,nullptr,FALSE); return 0; }
-  if(message==WM_KILLFOCUS) { state->sendInput(Input{}); state->released=true; if(GetCapture()==window) ReleaseCapture(); return 0; }
+  if(message==WM_KILLFOCUS) { if(!state->viewOnly) state->sendInput(Input{}); state->released=true; if(GetCapture()==window) ReleaseCapture(); return 0; }
   if(message==WM_KEYDOWN || message==WM_SYSKEYDOWN || message==WM_KEYUP || message==WM_SYSKEYUP) {
     const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;
     if(down && w==VK_ESCAPE && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000)) { state->sendInput(Input{}); state->released=true; ReleaseCapture(); SetWindowTextW(window,L"Sanser · Input released · Click to resume"); return 0; }
@@ -311,6 +320,7 @@ void testWindowsInput() {
   require(state.released && events.back().kind==Input::Reset,"Focus loss did not release remote keys/buttons");
   state.viewOnly=true; const auto before=events.size();
   SendMessageW(window,WM_KEYDOWN,'A',0); SendMessageW(window,WM_LBUTTONDOWN,0,MAKELPARAM(100,50));
+  SendMessageW(window,WM_KILLFOCUS,0,0);
   require(events.size()==before,"View-only window forwarded input");
   ShowWindow(window,SW_SHOWNOACTIVATE);
   // Posted app messages are not coalesced like physical WM_MOUSEMOVE events.
@@ -323,6 +333,8 @@ void testWindowsInput() {
   state.video={}; presentReadyFrame(window);
   require(state.video.right>state.video.left,"A ready picture was not painted during queued input");
   while(PeekMessageW(&message,window,floodMessage,floodMessage,PM_REMOVE)) {}
+  SendMessageW(window,WM_CLOSE,0,0);
+  require(state.userClosed && !IsWindow(window),"Viewer X must emit a deliberate close, independently of main-shell tray behavior");
   std::cout<<"Windows input: resume click, keyboard fallback, keypad, focus reset and view-only enforcement passed\n";
 }
 void testWindowsMacFixture(const char* path,bool lowDelay) {
@@ -410,7 +422,7 @@ int runWindows(bool host,int argc,char** argv) {
       throw std::runtime_error("Ultra Low Latency requires GPU capture and hardware encoding on Windows. Choose Balanced if the GPU path is unavailable.");
     SharingNotice notice(peer,options.sharing);
     peer.onInput=[&](Input event) { injector.apply(event); }; HostOutputStop shutdown{peer}; peer.start();
-    FrameBgra cached; bool hasCached=false, force=false;
+    FrameBgra cached; bool hasCached=false, force=false,capturePaused=false;
     auto generation=display.generation();
     const auto mediaStart=Clock::now();
     auto bitrate=options.bitrate;
@@ -424,7 +436,13 @@ int runWindows(bool host,int argc,char** argv) {
       if(peer.ready()) {
         FrameBgra frame;
         const bool captured=display.captureFrame(frame, options.ultraLowLatency ? 2 : 16);
-        if(display.recovering()) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+        if(display.recovering()) {
+          if(!capturePaused) {
+            capturePaused=true; peer.setCapturePaused(true); cached=FrameBgra{}; hasCached=false;
+            std::cerr<<"SNV2_CAPTURE_PAUSED reason=desktop-unavailable possibleSecureDesktop=yes control=alive"<<std::endl;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue;
+        }
         if(generation!=display.generation()) {
           if(encoding.gpuDevice && encoding.gpuDevice!=display.gpuDevice()) {
             encoding.gpuDevice=display.gpuDevice();
@@ -433,6 +451,10 @@ int runWindows(bool host,int argc,char** argv) {
             display.setGpuCapture(encoder->usingGpuInput());
           }
           generation=display.generation(); hasCached=false; cached=FrameBgra{}; force=true;
+        }
+        if(capturePaused) {
+          capturePaused=false; peer.setCapturePaused(false); force=true;
+          std::cerr<<"SNV2_CAPTURE_RESUMED generation="<<generation<<" keyframeRequested=1"<<std::endl;
         }
         if(captured && options.ultraLowLatency && !frame.texture)
           throw std::runtime_error("Ultra Low Latency requires GPU capture. The display is using CPU capture; choose Balanced.");
@@ -479,6 +501,11 @@ int runWindows(bool host,int argc,char** argv) {
   MSG message{}; bool open=true;
   auto lastProgress=Clock::now();
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
+    if(options.input && state.inputPaused==peer.inputAvailable()) {
+      state.inputPaused=!peer.inputAvailable(); state.released=true;
+      if(GetCapture()==window) ReleaseCapture();
+      SetWindowTextW(window,state.inputPaused ? peer.capturePaused() ? L"Sanser · Host capture temporarily unavailable · Check UAC on the host" : L"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists" : L"Sanser · Input restored · Click to resume");
+    }
     if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastProgress>=std::chrono::seconds(1)) {
       std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decodedFrames.load()<<" converted="<<convertedFrames.load()
         <<" encodedQueueDrops="<<decode.dropped()<<" decodeQueueExpired="<<decode.expired()<<" decodeErrors="<<decode.failures()<<" rendered="<<state.painted;
@@ -495,6 +522,7 @@ int runWindows(bool host,int argc,char** argv) {
     if(wake==WAIT_OBJECT_0) presentReadyFrame(window);
     open=pumpWindowMessages(message);
   }
+  if(state.userClosed) std::cerr<<"SNV2_VIEWER_CLOSED"<<std::endl;
   peer.stop(); decode.stop(); conversion.stop(); if(IsWindow(window)) DestroyWindow(window);
   if(decode.failures()>=10) throw std::runtime_error("Unable to decode the remote video: "+decode.error());
   if(conversionFailed) throw std::runtime_error("Unable to convert the remote video frame");

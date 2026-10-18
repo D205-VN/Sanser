@@ -54,6 +54,11 @@ Bytes ack(std::uint64_t contiguous,std::uint64_t mask) {
   for(auto value : {contiguous,mask}) for(int i=7;i>=0;--i) result.push_back(static_cast<std::uint8_t>(value>>(i*8)));
   return result;
 }
+Bytes resetMessage(const char* prefix,std::uint64_t serial,std::uint64_t fence) {
+  Bytes out(prefix,prefix+4);
+  for(auto value : {serial,fence}) for(int i=7;i>=0;--i) out.push_back(static_cast<std::uint8_t>(value>>(i*8)));
+  return out;
+}
 int main() {
 #ifdef _WIN32
   WSADATA winsock{}; if(WSAStartup(MAKEWORD(2,2),&winsock)!=0) return 1;
@@ -349,7 +354,124 @@ int main() {
       }
       check(!client.running(),"reliable input must fail closed at deadline, not queue indefinitely");
     }
-    std::cout<<"Input: selective ACK, lost key-down recovery, duplicate suppression and deadline passed\n";
+    {
+      Stub remote; Options options; options.ultraLowLatency=true; options.token=token;
+      options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer client(options); PacketCodec hostCodec(token,true); PeerStop stop{client}; client.start();
+      wire::Header h; h.keyId=654; h.packetType=wire::PacketType::Keepalive;
+      const auto send=[&](const Bytes& body) { ++h.sequence; remote.send(options.port,hostCodec.seal(h,body)); };
+      send({'S','A','K','1'}); send({'S','I','C','1'});
+      const auto ready=Clock::now()+std::chrono::seconds(2);
+      while(!client.ready() && Clock::now()<ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(client.ready(),"reset recovery handshake");
+      client.input({Input::Key,0,0,0,0,true}); // Invalid usage must not reserve sequence 1.
+      client.input({Input::Key,0,0,4,0,true}); client.input({Input::Key,0,0,4,0,false});
+      Bytes reset; bool validFirst=false;
+      const auto until=Clock::now()+std::chrono::seconds(4);
+      while(Clock::now()<until && reset.empty()) {
+        send({'S','A','K','1'});
+        const auto packet=hostCodec.open(remote.receive()); if(!packet) continue;
+        if(packet->first.streamId==2 && packet->first.sequence==1)
+          validFirst=decodeInput(packet->second)->code==4;
+        if(packet->second.size()==20 && std::equal(packet->second.begin(),packet->second.begin()+4,"SIR1")) reset=packet->second;
+      }
+      check(validFirst && !reset.empty() && read64(reset,12)==2,"missing ACK must suspend input and fence the valid issued sequences");
+      check(client.running() && !client.inputAvailable(),"input timeout must preserve video/control with a supporting peer");
+      // A wrong fence cannot re-enable input, even with an authenticated peer.
+      send(resetMessage("SIA1",read64(reset,4),3));
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      check(!client.inputAvailable(),"mismatched reset ACK resumed input");
+      reset[2]='A'; send(reset);
+      const auto recovered=Clock::now()+std::chrono::seconds(1);
+      while(!client.inputAvailable() && Clock::now()<recovered) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(client.inputAvailable(),"authenticated reset confirmation did not restore input");
+      client.input({Input::Key,0,0,5,0,true});
+      bool continued=false; const auto next=Clock::now()+std::chrono::seconds(1);
+      while(Clock::now()<next && !continued) {
+        const auto packet=hostCodec.open(remote.receive());
+        continued=packet && packet->first.streamId==2 && packet->first.sequence==3;
+      }
+      check(continued,"recovered input must continue after the reset fence, without replaying old actions");
+      Bytes unconfirmed;
+      const auto failedReset=Clock::now()+std::chrono::seconds(4);
+      while(Clock::now()<failedReset && unconfirmed.empty()) {
+        send({'S','A','K','1'});
+        const auto packet=hostCodec.open(remote.receive());
+        if(packet && packet->second.size()==20 && std::equal(packet->second.begin(),packet->second.begin()+4,"SIR1")) unconfirmed=packet->second;
+      }
+      check(!unconfirmed.empty(),"second input loss must start an independent reset transaction");
+      const auto suspended=Clock::now()+std::chrono::milliseconds(5200);
+      while(Clock::now()<suspended) { send({'S','A','K','1'}); (void)remote.receive(); }
+      unconfirmed[2]='A'; send(unconfirmed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      check(client.running() && !client.inputAvailable(),"failed or stale reset confirmation must leave input disabled, preserve viewing and require reconnect");
+    }
+    {
+      Stub remote; Options options; options.host=true; options.token=token;
+      options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer host(options); PacketCodec codec(token,false); PeerStop stop{host};
+      std::atomic<unsigned> keys{0},resets{0};
+      host.onInput=[&](Input input) { if(input.kind==Input::Reset) ++resets; if(input.kind==Input::Key) ++keys; };
+      host.start(); wire::Header h; h.keyId=777; h.packetType=wire::PacketType::Keepalive; h.sequence=1;
+      remote.send(options.port,codec.seal(h,{'S','I','C','1'}));
+      h.packetType=wire::PacketType::Keyboard; h.streamId=2; h.sequence=1;
+      remote.send(options.port,codec.seal(h,encodeInput({Input::Key,0,0,4,0,true})));
+      const auto entered=Clock::now()+std::chrono::seconds(1);
+      while(keys==0 && Clock::now()<entered) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(keys==1,"host reset fixture did not inject first key");
+      const auto before=resets.load();
+      h.streamId=0; h.sequence=2; h.packetType=wire::PacketType::Keepalive;
+      const auto request=resetMessage("SIR1",1,3);
+      remote.send(options.port,codec.seal(h,request));
+      bool confirmed=false; const auto until=Clock::now()+std::chrono::seconds(1);
+      while(Clock::now()<until && !confirmed) {
+        const auto packet=codec.open(remote.receive());
+        confirmed=packet && packet->second==resetMessage("SIA1",1,3);
+      }
+      check(confirmed,"host must acknowledge its authenticated reset fence");
+      h.streamId=2; h.packetType=wire::PacketType::Keyboard; h.sequence=2;
+      remote.send(options.port,codec.seal(h,encodeInput({Input::Key,0,0,5,0,true})));
+      h.sequence=4; remote.send(options.port,codec.seal(h,encodeInput({Input::Key,0,0,6,0,true})));
+      const auto resumed=Clock::now()+std::chrono::seconds(1);
+      while(keys<2 && Clock::now()<resumed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      h.streamId=0; h.packetType=wire::PacketType::Keepalive; h.sequence=3;
+      remote.send(options.port,codec.seal(h,request)); // Lost reset ACK may cause a duplicate.
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      check(keys==2 && resets==before+1,"late actions before the fence must not replay; duplicate reset must not clear newly held input");
+      const auto lease=Clock::now()+std::chrono::seconds(3);
+      while(resets==before+1 && Clock::now()<lease) {
+        ++h.sequence; remote.send(options.port,codec.seal(h,{'S','A','K','1'}));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      check(host.running() && resets==before+2,"missing input lease must release held state while media/control remain alive");
+    }
+    {
+      Stub remote; Options options; options.host=true; options.token=token;
+      options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer host(options); PacketCodec codec(token,false); PeerStop stop{host};
+      std::atomic<unsigned> keys{0},resets{0};
+      host.onInput=[&](Input input) { if(input.kind==Input::Reset) ++resets; if(input.kind==Input::Key) ++keys; };
+      host.start(); wire::Header h; h.keyId=888; h.sequence=1; h.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,codec.seal(h,{'S','I','C','1'}));
+      const auto ready=Clock::now()+std::chrono::seconds(1);
+      while(!host.ready() && Clock::now()<ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.ready(),"capture input pause fixture handshake");
+      host.setCapturePaused(true);
+      h.streamId=2; h.sequence=1; h.packetType=wire::PacketType::Keyboard;
+      remote.send(options.port,codec.seal(h,encodeInput({Input::Key,0,0,4,0,true})));
+      bool acknowledged=false; const auto until=Clock::now()+std::chrono::seconds(1);
+      while(Clock::now()<until && !acknowledged) {
+        const auto packet=codec.open(remote.receive());
+        acknowledged=packet && packet->first.packetType==wire::PacketType::NetworkFeedback && packet->second.size()>=8 && read64(packet->second,0)==1;
+      }
+      check(acknowledged && keys==0,"capture pause must ACK received actions without injecting into the unavailable desktop");
+      const auto before=resets.load(); host.setCapturePaused(false);
+      h.sequence=2; remote.send(options.port,codec.seal(h,encodeInput({Input::Key,0,0,5,0,true})));
+      const auto resumed=Clock::now()+std::chrono::seconds(1);
+      while(keys==0 && Clock::now()<resumed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(keys==1 && resets>before && host.running(),"capture recovery must retry held-state release before accepting fresh input");
+    }
+    std::cout<<"Input: ACK/SACK loss, safe reset fence, lease, capture pause/resume and legacy deadline passed\n";
     return 0;
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
 }

@@ -149,6 +149,7 @@ pub struct RuntimeCapabilities {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)]
 pub struct EngineStatus {
     pub kind: EngineKind,
     pub session_id: Option<uuid::Uuid>,
@@ -156,6 +157,7 @@ pub struct EngineStatus {
     pub running: bool,
     pub process_id: Option<u32>,
     pub video_received: bool,
+    pub user_closed: bool,
     pub last_error: Option<String>,
     pub startup_failure: Option<NativeStartupFailure>,
     pub route_failure: Option<NativeRouteFailure>,

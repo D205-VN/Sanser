@@ -4,6 +4,7 @@
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay, routeRecoveryPlan, type RouteRecoveryEvidence } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
+  import { ApiError } from '../lib/api';
   import { coordinateP2pConnection, directCheckFailure, releaseP2pConnection } from '../lib/p2pSignaling';
   import type { ConnectionSession, Page, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
@@ -24,6 +25,7 @@
   let nativePreparationInFlight = $state(false);
   let negotiationController: AbortController | null = null;
   let disconnecting = $state(false);
+  let closedViewerSessionId: string | null = null;
   let recoveryInFlight = $state(false);
   let phase = $state<'idle' | 'authorizing' | 'direct' | 'relay' | 'launching'>('idle');
   const phaseLabels = { idle: 'Waiting for approval', authorizing: 'Preparing connection', direct: 'Connecting directly', relay: 'Connecting through relay', launching: 'Opening the remote window' };
@@ -207,6 +209,11 @@
       if (controller.signal.aborted) return;
       const credentials = await client.sessionCredentials(target.id, localDeviceId);
       if (isAborted(controller.signal) || !componentActive || $connection.session?.id !== target.id || $session.mode !== 'cloud') return;
+      if ($connection.nativeRecoveryPending && Date.now() > $connection.nativeRecoveryRetryAt + 30_000) {
+        connection.blockNativeRetry();
+        connection.setError('The server did not recover in time. Retry the connection manually.');
+        return;
+      }
       connection.authorizeNative(credentials, ready.requesterReadyAt);
       diagnostics.add({
         level: 'info',
@@ -228,6 +235,13 @@
       if (isAborted(controller.signal) || $connection.session?.id !== target.id) return;
       p2pRetryCount += 1;
       p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
+      if ($connection.nativeRecoveryPending && p2pRetryCount < 3 &&
+          Date.now() <= $connection.nativeRecoveryRetryAt + 30_000 &&
+          error instanceof ApiError && [0, 408, 429, 502, 503, 504].includes(error.status)) {
+        localError = 'Waiting for the server to recover before authorizing a fresh connection…';
+        connection.setError(localError);
+        return;
+      }
       const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0 || $connection.nativeRecoveryPending;
       failedP2pSessionId = exhausted ? target.id : null;
       if (exhausted) connection.blockNativeRetry();
@@ -286,10 +300,12 @@
     recoveryInFlight = true;
     let cleanupOwned = false;
     try {
-      // Keep the existing window until the server confirms this session still
-      // has consent. Reconnect never creates or auto-accepts another session.
+      // Keep a working route until consent is confirmed. A dead route may wait
+      // through a brief server restart; no engine is relaunched before fresh
+      // markNativeReady/credentials calls succeed. Never create/accept a session.
       const confirmed = await connection.refresh(api);
-      if (!stillCurrent() || confirmed?.status !== 'accepted') return false;
+      const lost = evidence?.cause === 'relay-lost' || evidence?.cause === 'peer-timeout';
+      if (!stillCurrent() || (confirmed && confirmed.status !== 'accepted') || (!confirmed && (!lost || manual))) return false;
       const plan = manual ? { action: 'reconnect' as const, delayMs: 0, reason: 'manual-reconnect' }
         : evidence ? await routeRecoveryPlan({ ...evidence, automaticAttempts: $connection.nativeRouteRecoveries }) : null;
       if (!stillCurrent() || (!manual && $connection.nativeRetryBlocked) || plan?.action !== 'reconnect') return false;
@@ -309,7 +325,7 @@
       diagnostics.add({ level: 'warn', category: 'network', message: 'Reconnecting the accepted session with fresh credentials and candidates; the remote window will reopen.',
         details: { reason: plan.reason, automatic: !manual, attempt: $connection.nativeRouteRecoveries } });
       connection.setBusy(false);
-      if (manual && componentActive) await startNativeClient(confirmed);
+      if (manual && componentActive && confirmed) await startNativeClient(confirmed);
       return true;
     } catch (error) {
       if (ownsSession()) {
@@ -336,20 +352,29 @@
     localError = null;
     try {
       if (runtime.capabilities.desktopShell.state === 'available') {
-        await stopEngine('client', targetId);
-        await stopRelay('client', targetId);
+        // A failed local cleanup must not prevent revoking server consent.
+        await Promise.allSettled([stopEngine('client', targetId), stopRelay('client', targetId)]);
+      }
+      if ($connection.session?.id !== targetId) {
+        const client = session.client();
+        if (client) await client.disconnectSession(targetId);
+        return;
       }
       connection.setEngineRunning(false);
       connection.setNativeRoute(null);
       const client = session.client();
       if (client) await client.disconnectSession(targetId);
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      if ($connection.session?.id !== targetId) return;
       failedP2pSessionId = null;
       p2pRetryCount = 0;
       p2pRetryAfter = 0;
       p2pRetrySessionId = null;
       connection.clear();
+      closedViewerSessionId = null;
       diagnostics.add({ level: 'info', category: 'session', message: 'Session disconnected' });
     } catch (error) {
+      if ($connection.session?.id !== targetId) return;
       const message = error instanceof Error ? error.message : 'Unable to disconnect';
       localError = message;
       connection.setError(message);
@@ -366,6 +391,12 @@
     if (!client || !current || $connection.busy) return;
     refreshInFlight = true;
     try {
+      if (closedViewerSessionId === current.id) { await disconnect(); return; }
+      if ($connection.nativeRecoveryPending && Date.now() > $connection.nativeRecoveryRetryAt + 30_000) {
+        connection.blockNativeRetry();
+        connection.setError('The server did not recover in time. Retry the connection manually.');
+        return;
+      }
       if ($connection.engineRunning) {
         const status = await engineStatus('client');
         if (status.sessionId && status.sessionId !== current.id) return;
@@ -375,6 +406,10 @@
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (!componentActive || $connection.session?.id !== current.id) return;
         if (!status.running) {
+          // A deliberate viewer X closes only its server session. This page
+          // remains mounted across navigation; closing the main shell to tray
+          // never emits the native viewer marker.
+          if (status.userClosed && status.sessionId === current.id) { closedViewerSessionId = current.id; await disconnect(); return; }
           const message = status.lastError ?? 'The native client stopped unexpectedly';
           const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;
           if (status.routeFailure && status.startupFailure !== 'auth-rejected' && status.startupFailure !== 'decode-failed' &&

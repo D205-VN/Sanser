@@ -23,7 +23,8 @@ struct Broadcaster::Delivery {
   Peer peer;
   std::mutex mutex;
   std::condition_variable wake;
-  std::shared_ptr<const PreparedFrame> pending;
+  std::deque<std::shared_ptr<const PreparedFrame>> pending;
+  std::size_t pendingBytes=0;
   std::thread worker;
   std::atomic<bool> running{true};
   bool awaitingKeyframe=true;
@@ -51,21 +52,25 @@ struct Broadcaster::Delivery {
     running=false; wake.notify_all();
     if(worker.joinable()) worker.join();
     peer.stop();
-    std::lock_guard lock(mutex); pending.reset();
+    std::lock_guard lock(mutex); pending.clear(); pendingBytes=0;
   }
   void submit(const std::shared_ptr<const PreparedFrame>& frame) {
     if(!running || !peer.running() || !peer.ready()) return;
     std::lock_guard lock(mutex);
     if(!policy.sendsVideo()) return;
     ++submitted;
-    if(pending) {
-      ++replaced;
-      // Replacing a reference with an IDR heals the chain; it must not demand
-      // yet another group-wide IDR. A P-frame replacement still needs recovery.
-      if(!frame->keyframe) { awaitingKeyframe=true; recovery.request(Clock::now()); }
+    // These are ENCODED reference pictures, not disposable raw captures. A
+    // single latest-frame slot destroyed the chain on a brief dispatch delay.
+    // Preserve a short chain; on overload discard it as a unit and await IDR.
+    if(frame->keyframe) {
+      replaced+=pending.size(); pending.clear(); pendingBytes=0;
+      recovery.keyframe();
+    } else if(pending.size()>=8 || pendingBytes+frame->payload.size()>8*1024*1024) {
+      replaced+=pending.size(); pending.clear(); pendingBytes=0;
+      awaitingKeyframe=true; ++referenceDrops; recovery.request(Clock::now());
+      return;
     }
-    if(frame->keyframe) recovery.keyframe();
-    pending=frame;
+    pendingBytes+=frame->payload.size(); pending.push_back(frame);
     wake.notify_one();
   }
   void loop() {
@@ -74,10 +79,10 @@ struct Broadcaster::Delivery {
         std::shared_ptr<const PreparedFrame> frame;
         {
           std::unique_lock lock(mutex);
-          wake.wait_for(lock,std::chrono::milliseconds(20),[&] { return !running || pending; });
+          wake.wait_for(lock,std::chrono::milliseconds(20),[&] { return !running || !pending.empty(); });
           if(!running) break;
-          frame=std::move(pending);
-          if(!frame) continue;
+          if(pending.empty()) continue;
+          frame=std::move(pending.front()); pending.pop_front(); pendingBytes-=frame->payload.size();
           if(awaitingKeyframe && !frame->keyframe) { ++referenceDrops; recovery.request(Clock::now()); continue; }
           if(frame->keyframe) awaitingKeyframe=false;
         }
@@ -103,7 +108,7 @@ struct Broadcaster::Delivery {
     if(previous==policy.state()) return;
     recovery.restart();
     if(policy.state()==SharingDeliveryPolicy::Active) return;
-    pending.reset(); awaitingKeyframe=true;
+    pending.clear(); pendingBytes=0; awaitingKeyframe=true;
     peer.pauseVideo(policy.state()==SharingDeliveryPolicy::Paused);
     if(policy.state()==SharingDeliveryPolicy::Probing) recovery.request(now);
   }
@@ -146,6 +151,7 @@ void Broadcaster::add(ViewerSpec viewer) {
   }
   auto options=source_; options.token=viewer.token; options.peer=viewer.endpoint; options.port=viewer.localPort; options.bitrate=viewer.bitrate;
   auto delivery=std::make_shared<Delivery>(std::move(viewer),options);
+  delivery->peer.setCapturePaused(capturePaused_);
   delivery->start();
   try { peers_.emplace(delivery->spec.id,delivery); }
   catch(...) { delivery->stop(); throw; }
@@ -174,6 +180,11 @@ void Broadcaster::publish(Frame frame) {
 void Broadcaster::updateHealth(Clock::time_point now) {
   std::lock_guard lock(peersMutex_);
   for(const auto& [id,peer]:peers_) { (void)id; peer->updateHealth(now); }
+}
+void Broadcaster::setCapturePaused(bool paused) {
+  std::lock_guard lock(peersMutex_);
+  capturePaused_=paused;
+  for(const auto& [id,delivery]:peers_) { (void)id; delivery->peer.setCapturePaused(paused); }
 }
 bool Broadcaster::ready() const {
   std::lock_guard lock(peersMutex_);
@@ -245,6 +256,7 @@ bool HostOutput::ready() const { return broadcast_ ? broadcast_->ready() : singl
 bool HostOutput::running() const { return !nativeStopRequested() && (broadcast_ ? broadcast_->running() : single_->running()); }
 void HostOutput::video(Frame frame) { if(broadcast_) broadcast_->publish(std::move(frame)); else single_->video(frame); }
 void HostOutput::audio(const AudioSamples& samples) { if(single_) single_->audio(samples); }
+void HostOutput::setCapturePaused(bool paused) { if(broadcast_) broadcast_->setCapturePaused(paused); else single_->setCapturePaused(paused); }
 std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : single_->recommendedBitrate(); }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }
 void HostOutput::pumpControl() {

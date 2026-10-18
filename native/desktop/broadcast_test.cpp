@@ -80,6 +80,11 @@ int main() {
         require(waitFor([&] { return count(first)==i+2 && count(second)==i+2; }),"sharing froze after its first desktop frame");
       }
       for(const auto& peer:group.stats()) require(peer.sendQueueDrops==0 && peer.pauses==0,"pacer's own serialization must not be treated as a slow viewer");
+      const auto firstBefore=count(first),secondBefore=count(second);
+      // A short burst of encoded reference pictures must survive dispatch
+      // scheduling. The former single latest slot could replace its IDR/Ps.
+      for(unsigned i=0;i<5;++i) group.publish(Frame{Bytes(8000,static_cast<std::uint8_t>(0x40+i)),1920,1080,i==0});
+      require(waitFor([&] { return count(first)>=firstBefore+5 && count(second)>=secondBefore+5; }),"a short encoded burst must preserve its full reference chain for both viewers");
     }
     Broadcaster host(source); std::array<Viewer,3> viewers;
     for(std::size_t i=0;i<3;++i) connect(host,viewers[i],source,"viewer-"+std::to_string(i),static_cast<char>('a'+i));

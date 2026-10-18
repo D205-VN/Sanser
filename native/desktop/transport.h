@@ -99,6 +99,9 @@ public:
   void cancel() { running_=false; sendReady_.notify_all(); }
   bool running() const { return running_.load(); }
   bool ready() const { return ready_.load(); }
+  bool inputAvailable() const { return options_.input && !inputSuspended_.load() && !remoteCapturePaused_.load(); }
+  bool capturePaused() const { return remoteCapturePaused_.load(); }
+  void setCapturePaused(bool paused);
   // Last authenticated application RTT; absent until a supporting peer replies.
   std::optional<double> controlRoundTripMs() const { const auto ms=controlAppRtt_.load(); return ms<0 ? std::nullopt : std::optional<double>{ms}; }
   void video(const Frame& frame);
@@ -173,8 +176,16 @@ private:
   std::uint64_t sequences_[3]{}, deliveredInput_ = 0, completedVideoFrame_=0;
   std::atomic<std::uint64_t> frame_{0};
   ReplayWindow replay_[3];
-  struct Pending { Bytes bytes; Clock::time_point sent, created; unsigned attempts; bool sacked = false, queued = true; };
+  struct Pending { Bytes bytes; Clock::time_point sent, created; unsigned attempts; bool sacked = false, queued = true; Input::Kind kind = Input::Reset; };
   std::map<std::uint64_t, Pending> pending_;
+  // Optional authenticated input-only reset. Acknowledging its sequence fence
+  // is required before input resumes; video/control keep their own lifetime.
+  bool peerInputRecovery_=false, inputRecoveryPending_=false, inputLeaseArmed_=false;
+  std::atomic<bool> inputSuspended_{false};
+  std::atomic<bool> localCapturePaused_{false}, remoteCapturePaused_{false};
+  std::uint64_t inputRecoverySerial_=0, inputRecoveryFence_=0, receivedRecoverySerial_=0, receivedRecoveryFence_=0;
+  Clock::time_point inputRecoveryStarted_{}, inputRecoverySent_{}, inputLeaseAt_{};
+  std::uint64_t lastInputAck_=0;
   InputDeliveryPolicy inputDelivery_;
   RoundTripProbe controlProbe_;
   std::atomic<double> controlAppRtt_{-1};

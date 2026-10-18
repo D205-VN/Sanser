@@ -592,7 +592,10 @@ int runMac(bool host,int argc,char** argv) {
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         capture.audio=&audio;
         SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
-        SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3; config.showsCursor=options.sharing ? NO : YES; config.pixelFormat=kCVPixelFormatType_32BGRA;
+        SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3;
+        // Control viewers already draw an immediate local cursor. Only a
+        // view-only capture includes the host pointer in the encoded picture.
+        config.showsCursor=options.sharing || !options.input; config.pixelFormat=kCVPixelFormatType_32BGRA;
         if(@available(macOS 13.0,*)) {
           config.capturesAudio=options.audio && !options.sharing;
           config.sampleRate=audioRate; config.channelCount=audioChannels;
@@ -641,11 +644,17 @@ int runMac(bool host,int argc,char** argv) {
     window.contentView=view; window.acceptsMouseMovedEvents=options.input; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];
     Peer* peerPointer=&peer;
     id observer=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { if(view.inputEnabled) { peerPointer->input(Input{}); view.released=YES; } }];
+    __block bool userClosed=false;
+    id closeObserver=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { userClosed=true; }];
     PeerStop shutdown{peer};
     peer.start();
     auto lastHealth=Clock::now(); std::uint64_t presented=0;
     while(window.visible && peer.running() && decode.failures()<10) {
       @autoreleasepool {
+        if(options.input && view.inputEnabled!=peer.inputAvailable()) {
+          view.inputEnabled=peer.inputAvailable(); view.released=YES;
+          window.title=view.inputEnabled ? @"Sanser · Input restored · Click to resume" : peer.capturePaused() ? @"Sanser · Host capture temporarily unavailable · Check UAC on the host" : @"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists";
+        }
         NSEvent* event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:options.ultraLowLatency ? 0.001 : 0.008] inMode:NSDefaultRunLoopMode dequeue:YES]; if(event) [NSApp sendEvent:event];
         auto pixels=decoder.take(); if(pixels) { [view presentPixels:pixels]; ++presented; CVPixelBufferRelease(pixels); }
         [window displayIfNeeded];
@@ -660,7 +669,10 @@ int runMac(bool host,int argc,char** argv) {
         }
       }
     }
-    [[NSNotificationCenter defaultCenter] removeObserver:observer]; view.peer=nullptr; peer.stop(); decode.stop(); [window close];
+    [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
+    if(userClosed) std::cerr<<"SNV2_VIEWER_CLOSED"<<std::endl;
+    view.peer=nullptr; peer.stop(); decode.stop(); [window close];
     if(decode.failures()>=10) throw std::runtime_error("Unable to decode the remote video: "+decode.error());
     return 0;
   }

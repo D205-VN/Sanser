@@ -8235,6 +8235,7 @@ int runVideoRenderTcp(std::uint16_t port,
                                                                            queue:[NSOperationQueue mainQueue]
                                                                       usingBlock:^(NSNotification* notification) {
                                                                         (void)notification;
+                                                                        std::cerr << "SNU1_VIEWER_CLOSED" << std::endl;
                                                                         sendInputReset("window-close");
                                                                         [view clearActiveMouseButtons];
                                                                         restoreRelativeMouseGrab();

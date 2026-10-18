@@ -11,6 +11,7 @@ use crate::{config::Config, models::EventEnvelope, relay::RelayHub, websocket::S
 
 #[derive(Clone)]
 pub struct AppState {
+    pub shutdown: tokio_util::sync::CancellationToken,
     pub config: Arc<Config>,
     pub pool: PgPool,
     pub events: broadcast::Sender<EventEnvelope>,
@@ -27,6 +28,7 @@ impl AppState {
         let login_limit = config.login_rate_limit_per_ten_minutes;
         let (events, _) = broadcast::channel(256);
         Self {
+            shutdown: tokio_util::sync::CancellationToken::new(),
             config: Arc::new(config),
             pool,
             events,

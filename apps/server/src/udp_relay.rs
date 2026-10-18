@@ -275,6 +275,10 @@ pub async fn relay_socket(
                 let mut last_control_seen = Instant::now();
                 loop {
                     tokio::select! {
+                        () = state.shutdown.cancelled() => {
+                            let _ = send_control(&mut writer, Message::Close(Some(axum::extract::ws::CloseFrame { code: 1012, reason: "server-restart".into() }))).await;
+                            break;
+                        }
                         event = events.recv() => {
                             let Some(event) = event else { break; };
                             if !send_control(&mut writer, Message::Text(serde_json::json!({"type":event}).to_string().into())).await || event == "relay.peerOffline" { break; }

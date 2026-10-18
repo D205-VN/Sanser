@@ -169,6 +169,8 @@ impl EngineChild {
 struct EngineState {
     children: HashMap<EngineKind, EngineChild>,
     last_errors: HashMap<EngineKind, String>,
+    closed_viewers: HashMap<EngineKind, Uuid>,
+    last_sessions: HashMap<EngineKind, Uuid>,
 }
 
 #[derive(Default)]
@@ -909,6 +911,8 @@ impl EngineManager {
             }
         }
         state.last_errors.remove(&request.kind);
+        state.closed_viewers.remove(&request.kind);
+        state.last_sessions.remove(&request.kind);
         state.children.insert(request.kind, child);
         Ok(())
     }
@@ -1013,6 +1017,20 @@ impl EngineManager {
         Ok(())
     }
 
+    pub fn record_relay_failure(&self, kind: EngineKind, session: Uuid, failure: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            let owner = state
+                .children
+                .get(&kind)
+                .and_then(|child| child.session_id)
+                .or_else(|| state.last_sessions.get(&kind).copied());
+            if owner == Some(session) && !state.closed_viewers.contains_key(&kind) {
+                state.last_sessions.insert(kind, session);
+                state.last_errors.insert(kind, failure.to_owned());
+            }
+        }
+    }
+
     pub fn status(&self, app: &AppHandle, kind: EngineKind) -> Result<EngineStatus, DesktopError> {
         let installed = find_sidecar(app, kind).is_some();
         let mut state = self
@@ -1023,7 +1041,7 @@ impl EngineManager {
         let mut process_id = None;
         let mut exited = false;
         let mut video_received = false;
-        let mut session_id = None;
+        let mut session_id = state.last_sessions.get(&kind).copied();
         if let Some(child) = state.children.get_mut(&kind) {
             session_id = child.session_id;
             match child.process.try_wait() {
@@ -1036,7 +1054,14 @@ impl EngineManager {
                     let message = child
                         .output
                         .exit_message(format!("process exited with {status}"));
-                    state.last_errors.insert(kind, message);
+                    if kind == EngineKind::Client && crate::engine_output::viewer_closed(&message) {
+                        if let Some(id) = session_id {
+                            state.closed_viewers.insert(kind, id);
+                        }
+                        state.last_errors.remove(&kind);
+                    } else {
+                        state.last_errors.insert(kind, message);
+                    }
                     exited = true;
                 }
                 Err(error) => {
@@ -1046,6 +1071,9 @@ impl EngineManager {
             }
         }
         if exited {
+            if let Some(id) = session_id {
+                state.last_sessions.insert(kind, id);
+            }
             state.children.remove(&kind);
         }
         Ok(EngineStatus {
@@ -1055,6 +1083,7 @@ impl EngineManager {
             running,
             process_id,
             video_received,
+            user_closed: state.closed_viewers.contains_key(&kind),
             last_error: state
                 .last_errors
                 .get(&kind)
@@ -1063,10 +1092,10 @@ impl EngineManager {
                 .last_errors
                 .get(&kind)
                 .and_then(|message| crate::engine_output::startup_failure(message)),
-            route_failure: state
-                .last_errors
-                .get(&kind)
-                .and_then(|message| crate::engine_output::route_failure(message)),
+            route_failure: state.last_errors.get(&kind).and_then(|message| {
+                crate::engine_output::route_failure(message)
+                    .or_else(|| crate::engine_output::relay_route_failure(message))
+            }),
         })
     }
 }
@@ -1076,6 +1105,56 @@ mod tests {
     use std::net::Ipv6Addr;
 
     use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn relay_reset_after_native_exit_remains_bound_to_the_exited_session() {
+        let manager = EngineManager::default();
+        let old = Uuid::new_v4();
+        let new = Uuid::new_v4();
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .last_sessions
+            .insert(EngineKind::Client, old);
+        let reset = "relay connection failed: WebSocket protocol error: Connection reset without closing handshake";
+        manager.record_relay_failure(EngineKind::Client, old, reset);
+        assert_eq!(
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .last_errors
+                .get(&EngineKind::Client)
+                .map(String::as_str),
+            Some(reset)
+        );
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .last_sessions
+            .insert(EngineKind::Client, new);
+        manager.record_relay_failure(EngineKind::Client, old, "late old failure");
+        manager
+            .state
+            .lock()
+            .unwrap()
+            .closed_viewers
+            .insert(EngineKind::Client, new);
+        manager.record_relay_failure(EngineKind::Client, new, "user close is not route failure");
+        assert_eq!(
+            manager
+                .state
+                .lock()
+                .unwrap()
+                .last_errors
+                .get(&EngineKind::Client)
+                .map(String::as_str),
+            Some(reset)
+        );
+    }
 
     #[cfg(unix)]
     #[test]

@@ -2,15 +2,16 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ConnectionSession, RuntimeStatus } from '../lib/types';
+import { ApiError } from '../lib/api';
 import { connection } from '../stores/connection';
 
 const mocks = vi.hoisted(() => ({
-  ready: vi.fn(), credentials: vi.fn(), disconnect: vi.fn(), getSession: vi.fn(),
+  ready: vi.fn(), credentials: vi.fn(), disconnect: vi.fn(), getSession: vi.fn(), token: vi.fn(),
   punch: vi.fn(), release: vi.fn(), launch: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), status: vi.fn(), recovery: vi.fn()
 }));
 vi.mock('../stores/session', async () => {
   const { writable } = await import('svelte/store');
-  return { session: { ...writable({ mode: 'cloud' }), client: () => ({ markNativeReady: mocks.ready, sessionCredentials: mocks.credentials, disconnectSession: mocks.disconnect, getSession: mocks.getSession }) } };
+  return { session: { ...writable({ mode: 'cloud' }), client: () => ({ markNativeReady: mocks.ready, sessionCredentials: mocks.credentials, disconnectSession: mocks.disconnect, getSession: mocks.getSession, getAccessToken: mocks.token }) } };
 });
 vi.mock('../stores/presence', async () => {
   const { writable } = await import('svelte/store');
@@ -32,6 +33,7 @@ beforeEach(async () => {
   mocks.ready.mockResolvedValue({ requesterReadyAt: '2026-10-04T00:00:00.000Z' });
   mocks.credentials.mockResolvedValue({ sessionId: target.id, peerRouteAddress: '192.0.2.1', basePort: 5000, sessionToken: 'test-only-token', expiresAt: 9999999999, wireProtocol: 'snv2' });
   mocks.disconnect.mockResolvedValue(undefined);
+  mocks.token.mockResolvedValue('test-only-access-token');
   mocks.stop.mockResolvedValue(undefined);
   mocks.stopRelay.mockResolvedValue(undefined);
   mocks.getSession.mockResolvedValue(target);
@@ -134,6 +136,47 @@ it('does not equate an open native process with verified streaming', () => {
   expect(screen.getByText('Window open')).toBeInTheDocument();
   expect(screen.queryByText('Streaming')).not.toBeInTheDocument();
   expect(screen.getByText(/If the screen stays blank, check connection details/)).toBeInTheDocument();
+});
+
+it.each([false, true])('closes the server session when its native viewer is closed, sharing=%s', async (sharing) => {
+  vi.useFakeTimers();
+  const current = sharing ? { ...target, sharingId: 'group', accessMode: 'view-only' as const } : target;
+  connection.begin(current); connection.setEngineRunning(true);
+  mocks.status.mockResolvedValue({ running: false, userClosed: true, sessionId: current.id });
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(mocks.disconnect).toHaveBeenCalledExactlyOnceWith(current.id);
+  expect(mocks.stop).toHaveBeenCalledWith('client', current.id);
+  expect(mocks.stopRelay).toHaveBeenCalledWith('client', current.id);
+  expect(get(connection).session).toBeNull();
+  expect(mocks.launch).not.toHaveBeenCalled();
+  expect(mocks.recovery).not.toHaveBeenCalled();
+});
+
+it('retries server disconnect after a viewer close without reopening its window', async () => {
+  vi.useFakeTimers(); connection.setEngineRunning(true);
+  mocks.status.mockResolvedValue({ running: false, userClosed: true, sessionId: target.id });
+  mocks.disconnect.mockRejectedValueOnce(new Error('Server temporarily unavailable'));
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(get(connection).nativeRetryBlocked).toBe(true);
+  await vi.advanceTimersByTimeAsync(4_000);
+  expect(mocks.disconnect).toHaveBeenCalledTimes(2);
+  expect(get(connection).session).toBeNull();
+  expect(mocks.launch).not.toHaveBeenCalled();
+});
+
+it('does not clear a new session when an old closed viewer finishes server disconnect', async () => {
+  vi.useFakeTimers(); connection.setEngineRunning(true);
+  mocks.status.mockResolvedValue({ running: false, userClosed: true, sessionId: target.id });
+  let finish: (() => void) | undefined;
+  mocks.disconnect.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(2_000);
+  connection.begin({ ...target, id: 'new-session' }); connection.setEngineRunning(true);
+  finish?.(); await vi.advanceTimersByTimeAsync(0);
+  expect(get(connection).session?.id).toBe('new-session');
+  expect(get(connection).engineRunning).toBe(true);
 });
 
 it('retries a blank startup once, retaining Direct mode and the limit across navigation', async () => {
@@ -291,6 +334,72 @@ it('ignores a native status belonging to a different session', async () => {
   expect(mocks.recovery).not.toHaveBeenCalled();
   expect(mocks.stop).not.toHaveBeenCalled();
   expect(mocks.stopRelay).not.toHaveBeenCalled();
+});
+
+it('recovers a WebSocket reset after native has already stopped, with fresh Relay credentials', async () => {
+  vi.useFakeTimers();
+  const relayed = { ...target, networkMode: 'relay' as const };
+  connection.begin(relayed); connection.setEngineRunning(true); connection.setNativeRoute('relay');
+  mocks.getSession.mockResolvedValue(relayed);
+  mocks.status.mockResolvedValueOnce({ running: false, sessionId: target.id, routeFailure: 'relay-lost',
+    lastError: 'relay connection failed: WebSocket protocol error: Connection reset without closing handshake' });
+  mocks.relay.mockResolvedValue({ transport: 'wss', enginePort: 51000, proxyPort: 51001 });
+  // The production API obtains the refreshed token after consent validation.
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(get(connection).nativeRecoveryPending).toBe(true);
+  expect(mocks.recovery).toHaveBeenCalledWith(expect.objectContaining({ cause: 'relay-lost' }));
+  expect(mocks.disconnect).not.toHaveBeenCalled();
+  expect(mocks.stopRelay).toHaveBeenCalledWith('client', target.id);
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(mocks.ready).toHaveBeenCalledTimes(1);
+  expect(mocks.credentials).toHaveBeenCalledTimes(1);
+  expect(mocks.relay).toHaveBeenCalledTimes(1);
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ relay: true, udpConnect: '127.0.0.1:51001' }));
+});
+
+it('waits through a brief server restart without bypassing fresh consent or credentials', async () => {
+  vi.useFakeTimers(); connection.setEngineRunning(true);
+  mocks.status.mockResolvedValueOnce({ running: false, sessionId: target.id, routeFailure: 'relay-lost' });
+  mocks.getSession.mockRejectedValueOnce(new ApiError('Restarting', 503, 'unavailable', null));
+  mocks.ready.mockRejectedValueOnce(new ApiError('Still restarting', 503, 'unavailable', null));
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(get(connection).nativeRecoveryPending).toBe(true);
+  expect(mocks.launch).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(mocks.ready).toHaveBeenCalledTimes(1);
+  expect(mocks.credentials).not.toHaveBeenCalled();
+  expect(get(connection).nativeRetryBlocked).toBe(false);
+  await vi.advanceTimersByTimeAsync(4_000);
+  expect(mocks.ready).toHaveBeenCalledTimes(2);
+  expect(mocks.credentials).toHaveBeenCalledTimes(1);
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+});
+
+it('limits waiting for a restarted server to thirty seconds across navigation', async () => {
+  vi.useFakeTimers(); connection.setEngineRunning(true);
+  mocks.status.mockResolvedValueOnce({ running: false, sessionId: target.id, routeFailure: 'relay-lost' });
+  mocks.getSession.mockRejectedValue(new ApiError('Restarting', 503, 'unavailable', null));
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(10_000);
+  cleanup(); render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(get(connection)).toMatchObject({ nativeRetryBlocked: true, nativeRecoveryPending: false });
+  expect(mocks.ready).not.toHaveBeenCalled();
+  expect(mocks.launch).not.toHaveBeenCalled();
+});
+
+it('never treats revoked consent as a temporary server outage', async () => {
+  vi.useFakeTimers(); connection.setEngineRunning(true);
+  mocks.status.mockResolvedValueOnce({ running: false, routeFailure: 'relay-lost' });
+  mocks.ready.mockRejectedValue(new ApiError('Forbidden', 403, 'forbidden', null));
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(mocks.ready).toHaveBeenCalledTimes(1);
+  expect(mocks.credentials).not.toHaveBeenCalled();
+  expect(mocks.launch).not.toHaveBeenCalled();
+  expect(get(connection).nativeRetryBlocked).toBe(true);
 });
 
 it('preserves the recovery budget and delay across navigation and stops after two automatic reconnects', async () => {

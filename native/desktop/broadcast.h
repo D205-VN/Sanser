@@ -34,6 +34,7 @@ public:
   void remove(const std::string& id);
   void stop();
   void publish(Frame frame);
+  void setCapturePaused(bool paused);
   void updateHealth(Clock::time_point now=Clock::now());
   bool ready() const;
   bool running() const { return running_.load(); }
@@ -48,6 +49,7 @@ private:
   std::mutex lifecycleMutex_, publishMutex_, keyframeMutex_;
   std::map<std::string,std::shared_ptr<Delivery>> peers_;
   std::atomic<bool> running_{true};
+  std::atomic<bool> capturePaused_{false};
   std::atomic<std::uint64_t> published_{0};
   Clock::time_point lastKeyframeRequest_{};
 };
@@ -63,6 +65,7 @@ public:
   bool running() const;
   void video(Frame frame);
   void audio(const AudioSamples& samples);
+  void setCapturePaused(bool paused);
   bool takeKeyframeRequest();
   void pumpControl();
   std::uint32_t bitrate() const;
