@@ -136,6 +136,7 @@ struct Broadcaster::Delivery {
 Broadcaster::Broadcaster(Options source):source_(std::move(source)) {
   if(!source_.host || source_.input || source_.bitrate<1000000 || source_.bitrate>200000000)
     throw std::runtime_error("Sharing host must be view-only with a bounded bitrate");
+  if(source_.audio && source_.audioOpus) audioEncoder_=std::make_unique<sanser::audio::Encoder>();
 }
 Broadcaster::~Broadcaster() { stop(); }
 void Broadcaster::add(ViewerSpec viewer) {
@@ -150,6 +151,7 @@ void Broadcaster::add(ViewerSpec viewer) {
       throw std::runtime_error("Each sharing viewer requires an independent endpoint, port and credential");
   }
   auto options=source_; options.token=viewer.token; options.peer=viewer.endpoint; options.port=viewer.localPort; options.bitrate=viewer.bitrate;
+  options.sharedAudioEncoder=true;
   auto delivery=std::make_shared<Delivery>(std::move(viewer),options);
   delivery->peer.setCapturePaused(capturePaused_);
   delivery->start();
@@ -176,6 +178,24 @@ void Broadcaster::publish(Frame frame) {
   std::lock_guard lock(peersMutex_);
   ++published_;
   for(const auto& [id,peer]:peers_) { (void)id; peer->submit(prepared); }
+}
+void Broadcaster::audio(const AudioSamples& samples) {
+  if(!running_ || !source_.audio) return;
+  std::lock_guard audioLock(audioMutex_);
+  std::vector<std::shared_ptr<Delivery>> peers;
+  { std::lock_guard lock(peersMutex_); for(const auto& [id,peer]:peers_) { (void)id; peers.push_back(peer); } }
+  Bytes opus,pcm;
+  for(const auto& delivery:peers) {
+    if(!delivery->peer.audioReady()) continue;
+    const bool useOpus=delivery->peer.opusAudioReady();
+    if(useOpus && opus.empty()) {
+      const auto sequence=++audioSequence_;
+      opus=sanser::audio::pack({sequence,(sequence-1)*audioFrames,0,audioEncoder_->encode(samples)});
+      ++encodedAudioPackets_;
+    }
+    if(!useOpus && pcm.empty()) pcm=encodeAudio(samples);
+    delivery->peer.audioPrepared(useOpus ? opus : pcm,useOpus);
+  }
 }
 void Broadcaster::updateHealth(Clock::time_point now) {
   std::lock_guard lock(peersMutex_);
@@ -255,7 +275,7 @@ void HostOutput::stop() { if(broadcast_) broadcast_->stop(); else single_->stop(
 bool HostOutput::ready() const { return broadcast_ ? broadcast_->ready() : single_->ready(); }
 bool HostOutput::running() const { return !nativeStopRequested() && (broadcast_ ? broadcast_->running() : single_->running()); }
 void HostOutput::video(Frame frame) { if(broadcast_) broadcast_->publish(std::move(frame)); else single_->video(frame); }
-void HostOutput::audio(const AudioSamples& samples) { if(single_) single_->audio(samples); }
+void HostOutput::audio(const AudioSamples& samples) { if(broadcast_) broadcast_->audio(samples); else single_->audio(samples); }
 void HostOutput::setCapturePaused(bool paused) { if(broadcast_) broadcast_->setCapturePaused(paused); else single_->setCapturePaused(paused); }
 std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : single_->recommendedBitrate(); }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }

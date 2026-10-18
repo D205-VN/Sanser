@@ -21,6 +21,7 @@ struct Encoding {
     width: u16,
     height: u16,
     ultra: bool,
+    audio: bool,
 }
 
 pub(crate) struct SharingPeer {
@@ -45,14 +46,11 @@ impl SharingPeer {
         if request.kind != EngineKind::Host
             || request.wire_protocol.as_deref() != Some("snv2")
             || request.input_enabled
-            || request.audio_enabled
             || request.relative_mouse
             || !matches!(request.codec, VideoCodec::Auto | VideoCodec::H264)
             || !(1_000..=200_000).contains(&request.bitrate_kbps)
         {
-            return Err(invalid(
-                "sharing requires a view-only SNV2/H.264 host without audio",
-            ));
+            return Err(invalid("sharing requires a view-only SNV2/H.264 host"));
         }
         let parse = |value: &str| {
             Uuid::parse_str(value).map_err(|_| invalid("sharing identifiers must be UUIDs"))
@@ -100,6 +98,7 @@ impl SharingPeer {
                 width: request.width,
                 height: request.height,
                 ultra: request.ultra_low_latency,
+                audio: request.audio_enabled,
             },
         }))
     }
@@ -184,7 +183,7 @@ mod tests {
             .ok_or_else(|| invalid("test fixture is missing sharing"))
     }
     #[test]
-    fn sharing_rejects_input_relay_audio_and_invalid_credentials()
+    fn sharing_accepts_audio_but_rejects_input_and_invalid_credentials()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut request = request(Uuid::new_v4())?;
         assert!(SharingPeer::from_request(&request)?.is_some());
@@ -195,7 +194,7 @@ mod tests {
         assert!(SharingPeer::from_request(&request)?.is_some());
         request.relay = false;
         request.audio_enabled = true;
-        assert!(SharingPeer::from_request(&request).is_err());
+        assert!(SharingPeer::from_request(&request)?.is_some());
         request.audio_enabled = false;
         request.session_token = Some("a".repeat(48) + "\tshare-remove");
         assert!(SharingPeer::from_request(&request).is_err());

@@ -1,6 +1,6 @@
 [package]
 name = "sanser-desktop"
-version = "2.2.15"
+version = "2.2.16"
 description = "Sanser low-latency remote desktop shell"
 edition.workspace = true
 license.workspace = true

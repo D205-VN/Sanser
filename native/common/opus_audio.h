@@ -69,6 +69,7 @@ public:
   ~ReceiveWorker();
   bool push(Packet packet,std::uint64_t generation);
   void reset(std::uint64_t generation);
+  void clear();
   Stats stats() const;
 private:
   void run();

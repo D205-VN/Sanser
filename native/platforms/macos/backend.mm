@@ -9,6 +9,7 @@
 #include "engine.h"
 #include "capture_startup.h"
 #include "audio_capture.h"
+#include "audio_player.h"
 #include "input_injector.h"
 #include "latest_frame_worker.h"
 #include "decode_worker.h"
@@ -597,7 +598,7 @@ int runMac(bool host,int argc,char** argv) {
         // view-only capture includes the host pointer in the encoded picture.
         config.showsCursor=options.sharing || !options.input; config.pixelFormat=kCVPixelFormatType_32BGRA;
         if(@available(macOS 13.0,*)) {
-          config.capturesAudio=options.audio && !options.sharing;
+          config.capturesAudio=options.audio;
           config.sampleRate=audioRate; config.channelCount=audioChannels;
           config.excludesCurrentProcessAudio=YES;
         }
@@ -634,6 +635,9 @@ int runMac(bool host,int argc,char** argv) {
     }
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     Peer peer(options); Decoder decoder;
+    AudioPlayer audio(options.audio);
+    if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };
+    if(options.audio) peer.onAudioReset=[&] { audio.reset(); };
     DecodeWorker decode([&](Frame frame) { @autoreleasepool { decoder.decode(frame); } },
       [&] { decoder.reset(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency);
     peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };

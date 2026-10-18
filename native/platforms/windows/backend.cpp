@@ -18,6 +18,7 @@
 #include "decode_worker.h"
 #include "latest_frame_worker.h"
 #include "audio_player.h"
+#include "audio_capture.h"
 #include "engine.h"
 #include "keyboard.h"
 #include "window_presenter.h"
@@ -422,6 +423,7 @@ int runWindows(bool host,int argc,char** argv) {
       throw std::runtime_error("Ultra Low Latency requires GPU capture and hardware encoding on Windows. Choose Balanced if the GPU path is unavailable.");
     SharingNotice notice(peer,options.sharing);
     peer.onInput=[&](Input event) { injector.apply(event); }; HostOutputStop shutdown{peer}; peer.start();
+    AudioCapture audio(options.audio,[&](const AudioSamples& samples) { peer.audio(samples); });
     FrameBgra cached; bool hasCached=false, force=false,capturePaused=false;
     auto generation=display.generation();
     const auto mediaStart=Clock::now();

@@ -8,7 +8,7 @@ import { networkDiagnostics } from '../stores/diagnostics';
 
 const mocks = vi.hoisted(() => ({
   ready: vi.fn(), credentials: vi.fn(), disconnect: vi.fn(), getSession: vi.fn(), token: vi.fn(),
-  punch: vi.fn(), release: vi.fn(), launch: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), status: vi.fn(), recovery: vi.fn()
+  punch: vi.fn(), release: vi.fn(), launch: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), status: vi.fn(), recovery: vi.fn(), sound: vi.fn()
 }));
 vi.mock('../stores/session', async () => {
   const { writable } = await import('svelte/store');
@@ -18,16 +18,18 @@ vi.mock('../stores/presence', async () => {
   const { writable } = await import('svelte/store');
   return { presence: writable({ deviceId: 'local-client', online: true }) };
 });
-vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, engineStatus: mocks.status, routeRecoveryPlan: mocks.recovery, saveNativePreferences: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, engineStatus: mocks.status, routeRecoveryPlan: mocks.recovery, setViewerAudio: mocks.sound, saveNativePreferences: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../lib/p2pSignaling', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/p2pSignaling')>(), coordinateP2pConnection: mocks.punch, releaseP2pConnection: mocks.release }));
 import ActiveSession from './ActiveSession.svelte';
 import { DEFAULT_PREFERENCES, preferences } from '../stores/preferences';
 import { nativePerformance, type NativePerformanceUpdate } from '../stores/nativePerformance';
+import { viewerAudio } from '../stores/viewerAudio';
 const runtime = { platform: 'macOS', capabilities: { clientEngine: { state: 'available' }, nativeDirect: { state: 'available' }, desktopShell: { state: 'available' } } } as RuntimeStatus;
 const target = { id: 'test-session', hostDeviceId: 'remote-host', requesterDeviceId: 'local-client', status: 'accepted', transport: 'native', networkMode: 'auto', qualityProfile: 'balanced', requestedCodec: 'auto' } as ConnectionSession;
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  viewerAudio.set({}); mocks.sound.mockResolvedValue(undefined);
   nativePerformance.clear();
   networkDiagnostics.clear();
   connection.setPreparing(false);
@@ -64,14 +66,19 @@ it.each([
 });
 afterEach(() => { cleanup(); connection.setPreparing(false); connection.clear(); nativePerformance.clear(); vi.useRealTimers(); });
 
-it('explains video-only group sharing and never opts a group viewer into audio', async () => {
+it('enables group sound and mutes only this viewer without restarting video or enabling input', async () => {
   const viewer = { ...target, sharingId: 'group', wireProtocol: 'snv2' as const, accessMode: 'view-only' as const };
   connection.begin(viewer); mocks.getSession.mockResolvedValue(viewer);
   render(ActiveSession, { runtime: { ...runtime, capabilities: { ...runtime.capabilities, clientAudio: true } }, navigate: vi.fn() });
-  expect(screen.getByText('Multi-computer sharing currently sends video only. Sound is not included.')).toBeInTheDocument();
+  expect(screen.getByText(/Muting here affects only this viewer/)).toBeInTheDocument();
   expect(screen.queryByText('Sound is unavailable for this connection.')).not.toBeInTheDocument();
   await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
-  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ audioEnabled: false, inputEnabled: false })));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ audioEnabled: true, audioMuted: false, inputEnabled: false })));
+  await fireEvent.click(screen.getByRole('button', { name: 'Mute sound' }));
+  await waitFor(() => expect(mocks.sound).toHaveBeenCalledWith(viewer.id, true));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Unmute sound' }));
+  await waitFor(() => expect(mocks.sound).toHaveBeenLastCalledWith(viewer.id, false));
+  expect(mocks.launch).toHaveBeenCalledTimes(1); expect(mocks.stop).not.toHaveBeenCalled();
 });
 
 it('does not report unavailable audio for the legacy Mac to Windows connection', async () => {

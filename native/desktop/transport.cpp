@@ -133,6 +133,7 @@ Options parseOptions(bool host, int argc, char** argv) {
     else if (arg == "--share-peer-id") o.viewerId = value();
     else if (arg == "--disable-input") o.input = false;
     else if (arg == "--disable-audio") o.audio = false;
+    else if (arg == "--mute-audio") o.audioMuted = true;
     else if (arg == "--relative-mouse") throw std::runtime_error("SNV2 currently supports absolute mouse mode; select Auto or Absolute");
     else if (arg == "--encode-pipe") { if (value() != "h264") throw std::runtime_error("Cross-platform sessions require H.264"); }
     else if (arg == "--control-port" || arg == "--audio-port") { if (number() != 0) throw std::runtime_error("SNV2 uses one authenticated socket"); }
@@ -147,7 +148,6 @@ Options parseOptions(bool host, int argc, char** argv) {
   if (o.port == 0 || o.peer.empty() || o.fps < 1 || o.fps > 120 || o.width < 64 || o.height < 64 || o.width > 3840 || o.height > 2160 || o.bitrate < 1000000 || o.bitrate > 200000000) throw std::runtime_error("Invalid native session configuration");
   if(o.sharing && (!host || o.input || o.viewerId.empty())) throw std::runtime_error("Sharing requires a host, viewer identifier and disabled input");
   if(!o.sharing && !o.viewerId.empty()) throw std::runtime_error("Viewer identifier requires sharing mode");
-  if(o.sharing) o.audio=false; // Group audio is not negotiated yet.
   o.width &= ~1U; o.height &= ~1U;
   return o;
 }
@@ -336,11 +336,12 @@ Peer::~Peer() { stop(); if (socket_ != -1) closeSocket(static_cast<Socket>(socke
 }
 void Peer::start() {
   if (running_.exchange(true)) return;
+  audioMuted_=options_.audioMuted;
   lastReceived_=Clock::now();
   try {
     if(options_.audio && options_.audioOpus) {
-      if(options_.host) audioEncoder_=std::make_unique<sanser::audio::Encoder>();
-      else if(onAudio) audioReceiver_=std::make_unique<sanser::audio::ReceiveWorker>([this](sanser::audio::Decoded decoded) { onAudio(std::move(decoded.samples)); });
+      if(options_.host && !options_.sharedAudioEncoder) audioEncoder_=std::make_unique<sanser::audio::Encoder>();
+      else if(onAudio) audioReceiver_=std::make_unique<sanser::audio::ReceiveWorker>([this](sanser::audio::Decoded decoded) { if(!audioMuted_) onAudio(std::move(decoded.samples)); });
     }
     if(options_.host && options_.input) inputWorker_=std::make_unique<InputWorker>(
       [this](Input event) {
@@ -511,6 +512,18 @@ void Peer::audio(const AudioSamples& samples) {
     transmit(snv2::PacketType::Audio,packet); ++opusTxPackets_; opusTxBytes_+=packet.size();
   } else transmit(snv2::PacketType::Audio,encodeAudio(samples));
 }
+void Peer::audioPrepared(const Bytes& packet,bool opus) {
+  if(!audioReady() || opus!=opusAudioReady()) return;
+  transmit(snv2::PacketType::Audio,packet);
+  if(opus) { ++opusTxPackets_; opusTxBytes_+=packet.size(); }
+}
+void Peer::setAudioMuted(bool muted) {
+  if(options_.host || !options_.audio) return;
+  audioMuted_=muted;
+  if(audioReceiver_) audioReceiver_->clear();
+  if(onAudioReset) onAudioReset();
+  transmit(snv2::PacketType::Keepalive,Bytes{'S','A','M','1',static_cast<std::uint8_t>(muted)});
+}
 void Peer::requestKeyframe() {
   std::lock_guard lock(keyframeRequestMutex_);
   if(!running_) return;
@@ -528,7 +541,7 @@ void Peer::process(const Bytes& bytes) {
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
     peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false;
     receivedRecoverySerial_=receivedRecoveryFence_=0; inputLeaseArmed_=false;
-    lastAudio_=0; receivingOpus_=false; peerAudioOpus_=false;
+    lastAudio_=0; lastAudioPreference_=0; receivingOpus_=false; peerAudioOpus_=false; peerAudioMuted_=false;
     if(audioReceiver_) audioReceiver_->reset(h.keyId);
     if(onAudioReset) onAudioReset();
     { std::lock_guard lock(audioMutex_); audioSequence_=0; if(audioEncoder_) audioEncoder_->reset(); }
@@ -597,9 +610,10 @@ void Peer::process(const Bytes& bytes) {
     }
   }
   if (options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','P','1'})) peerAudio_=true;
-  if(options_.host && options_.audio && audioEncoder_ && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','O','1'})) { peerAudio_=true; peerAudioOpus_=true; }
+  if(options_.host && options_.audio && options_.audioOpus && (audioEncoder_ || options_.sharedAudioEncoder) && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','O','1'})) { peerAudio_=true; peerAudioOpus_=true; }
+  if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b.size()==5 && std::equal(b.begin(),b.begin()+4,"SAM1") && b[4]<=1 && h.sequence>lastAudioPreference_) { lastAudioPreference_=h.sequence; peerAudioMuted_=b[4]!=0; }
   if(h.packetType==snv2::PacketType::Audio) {
-    if(!options_.host && options_.audio && h.streamId==0 && onAudio) {
+    if(!options_.host && options_.audio && !audioMuted_ && h.streamId==0 && onAudio) {
       if(audioReceiver_ && b.size()>4 && std::equal(b.begin(),b.begin()+4,"SOA1")) {
         if(auto packet=sanser::audio::unpack(b)) {
           if(!receivingOpus_) { receivingOpus_=true; if(onAudioReset) onAudioReset(); }
@@ -864,6 +878,9 @@ void Peer::loop() {
   auto lastHealth=Clock::now();
   try {
     while(running_ && !stopRequested) {
+      if(!options_.host) for(const auto& command:takeNativeCommands()) {
+        if(command=="audio-muted\t1" || command=="audio-muted\t0") setAudioMuted(command.back()=='1');
+      }
       const auto now=Clock::now();
       if(!options_.host && ready_ && now-lastControlProbe>=std::chrono::seconds(1)) {
         const auto id=controlProbe_.sent(now); Bytes probe{'S','R','Q','1'};
@@ -890,8 +907,13 @@ void Peer::loop() {
         if(!options_.host && inputAvailable()) transmit(snv2::PacketType::Keepalive,Bytes{'S','I','E','1'});
         // Optional authenticated capability. Old engines safely ignore it;
         // hosts never send audio until a receiving client explicitly opts in.
-        if(!options_.host && options_.audio && onAudio) transmit(snv2::PacketType::Keepalive,Bytes{'S','A','P','1'});
-        if(audioReceiver_) transmit(snv2::PacketType::Keepalive,Bytes{'S','A','O','1'});
+        if(!options_.host && options_.audio && onAudio) {
+          transmit(snv2::PacketType::Keepalive,Bytes{'S','A','M','1',static_cast<std::uint8_t>(audioMuted_.load())});
+          if(!audioMuted_) {
+            transmit(snv2::PacketType::Keepalive,Bytes{'S','A','P','1'});
+            if(audioReceiver_) transmit(snv2::PacketType::Keepalive,Bytes{'S','A','O','1'});
+          }
+        }
         lastHello=now;
       }
       if(options_.host && peerInputRecovery_ && inputLeaseArmed_ && now-inputLeaseAt_>std::chrono::seconds(2)) {

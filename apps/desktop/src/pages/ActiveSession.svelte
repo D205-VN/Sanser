@@ -13,6 +13,7 @@
   import { preferences } from '../stores/preferences';
   import { presence } from '../stores/presence';
   import { session } from '../stores/session';
+  import { viewerAudio, prepareViewerAudio, muteViewerAudio } from '../stores/viewerAudio';
 
   let { runtime, navigate }: { runtime: RuntimeStatus; navigate: (page: Page) => void } = $props();
   let localError = $state<string | null>(null);
@@ -33,8 +34,16 @@
 
   const sessionState = $derived($connection.session);
   const metrics = $derived($connection.metrics);
-  const sharingWithoutSound = $derived(sessionState?.wireProtocol === 'snv2' && !!sessionState.sharingId);
-  const soundUnavailable = $derived(sessionState?.wireProtocol === 'snv2' && !sharingWithoutSound && runtime.capabilities.clientAudio !== true);
+  let changingSound = $state(false);
+  const groupSound = $derived(sessionState?.wireProtocol === 'snv2' && !!sessionState.sharingId);
+  const soundUnavailable = $derived(sessionState?.wireProtocol === 'snv2' && runtime.capabilities.clientAudio !== true);
+  async function toggleSound(): Promise<void> {
+    if (!sessionState || changingSound) return;
+    changingSound = true;
+    try { await muteViewerAudio(sessionState.id, !($viewerAudio[sessionState.id] ?? !$preferences.host.audioEnabled)); }
+    catch (error) { localError = error instanceof Error ? error.message : 'Unable to change sound'; }
+    finally { changingSound = false; }
+  }
   const nativeReady = $derived(
     sessionState?.status === 'accepted' &&
       runtime.capabilities.clientEngine.state === 'available' &&
@@ -142,9 +151,9 @@
         width: size.width,
         height: size.height,
         networkMode: target.networkMode,
-        audioEnabled: $preferences.host.audioEnabled &&
-          !target.sharingId &&
+        audioEnabled: (!!target.sharingId || $preferences.host.audioEnabled) &&
           (target.wireProtocol !== 'snv2' || runtime.capabilities.clientAudio === true),
+        audioMuted: !!target.sharingId && prepareViewerAudio(target.id, !$preferences.host.audioEnabled),
         inputEnabled: target.accessMode !== 'view-only' && $preferences.host.inputEnabled,
         relativeMouse: target.accessMode !== 'view-only' && target.wireProtocol !== 'snv2' && $preferences.input.mouseMode === 'relative',
         sessionToken: target.sessionToken,
@@ -513,6 +522,9 @@
       {#if activeRoute}<span class="session-route"><Icon name="link" />{activeRoute === 'direct' ? 'Direct connection' : 'Relay connection'}</span>{/if}
     </div>
     <div class="session-actions">
+      {#if groupSound && !soundUnavailable && $connection.engineRunning}
+        <button class="button small" disabled={changingSound || disconnecting || recoveryInFlight} onclick={toggleSound}>{($viewerAudio[sessionState.id] ?? !$preferences.host.audioEnabled) ? 'Unmute sound' : 'Mute sound'}</button>
+      {/if}
       {#if $connection.engineRunning}<button class="button small" title="Close and reopen the remote window" disabled={$connection.busy || nativePreparationInFlight || recoveryInFlight || disconnecting} onclick={() => recoverRoute(sessionState, null, true)}>Reconnect</button>{/if}
       <button class="button small danger" disabled={disconnecting} onclick={disconnect}>{disconnecting ? 'Disconnecting…' : nativePreparationInFlight ? 'Cancel connection' : $connection.nativeRecoveryPending ? 'Cancel reconnection' : 'Disconnect'}</button>
     </div>
@@ -525,10 +537,10 @@
       <li class:complete={metrics !== null}><span>03</span><div><strong>Remote desktop</strong><small>{metrics ? 'Screen data received' : $connection.engineRunning ? 'Check the remote window' : 'Not started'}</small></div></li>
     </ol>
   {/if}
-  {#if sharingWithoutSound}
-    <div class="notice">Multi-computer sharing currently sends video only. Sound is not included.</div>
-  {:else if soundUnavailable}
+  {#if soundUnavailable}
     <div class="notice">This viewer does not support sound for this connection yet.</div>
+  {:else if groupSound}
+    <div class="notice">Sound is available when the host shares system audio. Muting here affects only this viewer.</div>
   {/if}
   {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && $preferences.input.mouseMode === 'relative'}
     <div class="notice">This connection uses absolute mouse control. Relative mouse capture is not supported yet.</div>

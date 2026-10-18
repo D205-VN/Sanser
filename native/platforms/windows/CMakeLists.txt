@@ -1,6 +1,7 @@
 add_library(sanser-native-windows STATIC
   backend.cpp
   audio_player.cpp
+  audio_capture.cpp
   window_presenter.cpp
   ../../host-windows/src/desktop_duplication.cpp
   ../../host-windows/src/mf_video_packet_encoder.cpp

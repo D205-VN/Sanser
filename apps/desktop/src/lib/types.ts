@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.2.15' as const;
+export const SANSER_VERSION = '2.2.16' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
@@ -297,6 +297,7 @@ export interface LaunchEngineRequest {
   height: number;
   networkMode: NetworkMode;
   audioEnabled?: boolean;
+  audioMuted?: boolean;
   inputEnabled?: boolean;
   relativeMouse?: boolean;
   /** Ephemeral server-authorized media credential. Never persist or log this value. */

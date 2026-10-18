@@ -53,6 +53,8 @@ pub struct LaunchEngineRequest {
     #[serde(default)]
     pub audio_enabled: bool,
     #[serde(default)]
+    pub audio_muted: bool,
+    #[serde(default)]
     pub input_enabled: bool,
     #[serde(default)]
     pub relative_mouse: bool,

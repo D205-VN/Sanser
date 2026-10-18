@@ -88,6 +88,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::get_local_route_address,
             commands::launch_engine,
             commands::stop_engine,
+            commands::set_viewer_audio,
             commands::sharing_engine_add_peer,
             commands::sharing_engine_remove_peer,
             commands::sharing_engine_peer_status,

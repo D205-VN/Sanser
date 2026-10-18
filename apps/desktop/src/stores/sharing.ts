@@ -36,6 +36,7 @@ export function createSharingStore() {
   let supportRetryAt = 0;
   let lastHeartbeat = 0;
   let nativeStarted = false;
+  let nativeAudioEnabled = false;
   const hasNative = (): boolean => nativeStarted;
   let ownedGroupId: string | null = null;
   let stoppedGroupId: string | null = null;
@@ -70,6 +71,7 @@ export function createSharingStore() {
     // A queued launch can finish while its cancellation is being awaited.
     if (hasNative()) { await stopEngine('host'); await stopRelay('host'); }
     nativeStarted = false;
+    nativeAudioEnabled = false;
     peers.clear(); retryAfter.clear();
     store.update((state) => ({ ...state, peerVideo: {} }));
     host.setSharingActive(false);
@@ -112,12 +114,15 @@ export function createSharingStore() {
         fps: stream.fps, bitrateKbps: Math.round(stream.bitrateMbps * 1000), width: size.width, height: size.height,
         address: relay ? '127.0.0.1' : direct?.remoteAddress, port: relay?.proxyPort ?? direct?.remotePort,
         udpBindPort: relay?.enginePort ?? direct?.localPort, relay: relay !== null,
-        sessionToken: credentials.sessionToken, audioEnabled: false, inputEnabled: false, relativeMouse: false
+        sessionToken: credentials.sessionToken,
+        audioEnabled: runtime.capabilities.hostAudio === true && get(preferences).host.audioEnabled,
+        inputEnabled: false, relativeMouse: false
       };
       // Negotiations are independent; creation of the one encoder is serialized.
       const operation = nativeQueue.then(async () => {
         if (cancelled()) return false;
-        if (nativeStarted) await addSharingPeer(request); else { await launchEngine(request); nativeStarted = true; }
+        if (nativeStarted) { request.audioEnabled = nativeAudioEnabled; await addSharingPeer(request); }
+        else { await launchEngine(request); nativeAudioEnabled = request.audioEnabled === true; nativeStarted = true; }
         peers.set(member.id, { sessionId, readyAt, relay: relay !== null });
         return true;
       });

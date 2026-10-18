@@ -94,6 +94,7 @@ bool ReceiveWorker::push(Packet packet,std::uint64_t generation) {
   const bool accepted=jitter_.push(std::move(packet)); wake_.notify_one(); return accepted;
 }
 void ReceiveWorker::reset(std::uint64_t generation) { std::lock_guard lock(mutex_); generation_=generation; jitter_.reset(); }
+void ReceiveWorker::clear() { std::lock_guard lock(mutex_); jitter_.reset(); }
 Stats ReceiveWorker::stats() const { std::lock_guard lock(mutex_); return jitter_.stats(); }
 void ReceiveWorker::run() {
   std::unique_lock lock(mutex_);

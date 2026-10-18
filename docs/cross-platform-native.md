@@ -39,9 +39,10 @@ physical device verification remain outstanding in this macOS workspace.
 - Device listings block client-only targets and incompatible codecs before starting
   a session. Registration preserves user-renamed device names.
 - Cross-platform sessions currently use H.264 and absolute keyboard/mouse only.
-  Relative mouse, audio, clipboard and gamepad are not implemented in the new path.
-  Audio settings are disabled because the current single-socket launcher does not
-  connect the legacy engines' separate audio ports either.
+  Relative mouse, clipboard and gamepad are not implemented in the new path.
+  2.2.16 carries system sound using the authenticated audio lane, Opus/PCM
+  capability negotiation and native Windows/macOS capture/playback. Group viewers
+  can mute independently; see [group audio](group-audio.md).
 - Direct route selection uses IPv4 because both media backends currently bind IPv4
   sockets; a successful IPv6 probe no longer causes a later engine launch failure.
 - Custom video settings still come from the host. Preset profiles match on both

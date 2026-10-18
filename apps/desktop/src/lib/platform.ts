@@ -112,6 +112,11 @@ export async function stopEngine(kind: EngineKind, sessionId?: string): Promise<
   await invoke('stop_engine', { kind, sessionId });
 }
 
+export async function setViewerAudio(sessionId: string, muted: boolean): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('Native audio requires the Sanser desktop app');
+  await invoke('set_viewer_audio', { sessionId, muted });
+}
+
 export async function engineStatus(kind: EngineKind): Promise<EngineStatus> {
   if (isTauriRuntime()) return invoke<EngineStatus>('get_engine_status', { kind });
   return { kind, installed: false, running: false, processId: null, lastError: null };

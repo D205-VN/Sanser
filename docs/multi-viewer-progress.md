@@ -1,5 +1,11 @@
 # Multi-viewer sharing: implementation progress
 
+Update for **2.2.16**: group system sound now uses one source capture/Opus
+encode, independent authenticated audio delivery and live viewer-local mute.
+Windows WASAPI capture and Mac SNV2 playback are implemented. See
+[group audio and remaining physical acceptance](group-audio.md). The historical
+Preview checks below do not constitute validation of these newer changes.
+
 All development remains on `Version-2.0.0`. The feature shares a Mac or Windows
 screen with up to three view-only computers in the same account, using the
 existing platform-native SNV2/H.264 capture, encoder and decoder backends.

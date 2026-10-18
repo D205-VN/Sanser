@@ -1,8 +1,7 @@
 # Part 3: bounded adaptive video FEC
 
 Development on `Version-2.0.0` after continuous Direct standby measurement.
-Not included in published 2.2.15 installers. No release/version bump, new server,
-port or external runtime dependency is required by this source change.
+Included in 2.2.16. No new server, port or external runtime dependency is required.
 
 ## Scope and placement
 
@@ -11,7 +10,7 @@ UDP router and UDP Relay bridge. It recognizes original SNV2 Video/stream 1 and
 authenticated encrypted Legacy SNU2 video datagrams. Plain SNU1, manual native
 launches without the Direct router, WSS/TCP and non-video traffic are unchanged.
 Both ordinary control directions and independent group viewers can use it when
-both local bridges support the capability. Group sharing remains video-only.
+both local bridges support the capability. Group audio uses its own unprotected-by-FEC priority lane.
 This is video packet recovery, not Opus in-band FEC or RTP audio Reed–Solomon.
 
 Original native datagrams are sent/forwarded immediately and unchanged. A small

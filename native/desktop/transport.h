@@ -30,6 +30,8 @@ struct Options {
   bool input = true;
   bool audio = true;
   bool audioOpus = true;
+  bool sharedAudioEncoder = false;
+  bool audioMuted = false;
   bool sharing = false;
   std::string viewerId;
   std::string peer;
@@ -118,7 +120,9 @@ public:
   VideoFeedback videoFeedback() const;
   void input(const Input& input);
   void audio(const AudioSamples& samples);
-  bool audioReady() const { return options_.audio && options_.host && peerAudio_ && ready_ && running_; }
+  void audioPrepared(const Bytes& packet, bool opus);
+  void setAudioMuted(bool muted);
+  bool audioReady() const { return options_.audio && options_.host && peerAudio_ && !peerAudioMuted_ && ready_ && running_; }
   bool opusAudioReady() const { return audioReady() && peerAudioOpus_; }
   void requestKeyframe();
   std::function<void(Frame)> onFrame;
@@ -160,6 +164,7 @@ private:
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
   std::atomic<bool> peerAudio_{false};
   std::atomic<bool> peerAudioOpus_{false};
+  std::atomic<bool> peerAudioMuted_{false}, audioMuted_{false};
   std::mutex audioMutex_;
   std::unique_ptr<sanser::audio::Encoder> audioEncoder_;
   std::unique_ptr<sanser::audio::ReceiveWorker> audioReceiver_;
@@ -169,6 +174,7 @@ private:
   std::atomic<std::uint64_t> queuedKeys_{0},queuedButtons_{0};
   std::atomic<std::uint64_t> deliveredKeys_{0},deliveredButtons_{0};
   std::uint64_t lastAudio_=0;
+  std::uint64_t lastAudioPreference_=0;
   std::atomic<bool> videoPaused_{false};
   mutable std::mutex feedbackMutex_;
   VideoFeedback feedback_{};

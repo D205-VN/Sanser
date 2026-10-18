@@ -7387,7 +7387,7 @@ int main(int argc, char** argv) {
                 << ",\"engine\":\"host-windows\","
                    "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,\"multiViewerHost\":true,"
                    "\"h264EncoderImplementation\":true,"
-                   "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,"
+                   "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,\"snv2AudioImplementation\":true,"
                    "\"inputImplementation\":true,\"gamepadImplementation\":true}\n";
       return 0;
     }

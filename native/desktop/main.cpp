@@ -14,9 +14,9 @@ int main(int argc,char** argv) {
   const char* engine=host?"host-windows":"client-windows";
 #endif
   try {
-    bool audio=!host;
+    bool audio=true;
 #ifdef __APPLE__
-    audio=host && sanser::desktop::macSystemAudioAvailable();
+    audio=!host || sanser::desktop::macSystemAudioAvailable();
     if (host && !sanser::desktop::macHostAvailable()) throw std::runtime_error("Hosting requires macOS 12.3 or newer");
 #endif
     if(argc==2 && std::string_view(argv[1])=="--capabilities-json") {

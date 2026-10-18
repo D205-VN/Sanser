@@ -1,9 +1,9 @@
-# Sanser 2.2.15
+# Sanser 2.2.16
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.15
+Product:  Sanser 2.2.16
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,15 +20,17 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.15 includes one-encoder screen sharing for up to three view-only
+Sanser 2.2.16 includes one-encoder screen sharing for up to three view-only
 computers in the same account, common native diagnostics, bounded route reconnect,
 authenticated input-only reset after ACK loss, viewer-close Disconnect and
 reference-safe sharing dispatch. Relay recovery retains the real failure even
 after native exits, and controlled server restarts send WebSocket Close 1012.
-Version 2.2.15 also bounds the Mac hardware audio queue, smooths packet-loss edges
-and uses event-driven Windows playback with a short jitter reserve. Real-device
-listening is still required to validate the reported crackle.
-See [Release notes](docs/releases/v2.2.15.md),
+Version 2.2.16 adds Opus + PLC, continuously measured standby Direct routes,
+bounded adaptive video FEC on Direct/UDP Relay, and group system audio with
+independent viewer mute. Native Windows loopback capture and Mac SNV2 playback
+complete the shared sound path. Real-device network and listening validation
+remains necessary.
+See [Release notes](docs/releases/v2.2.16.md),
 [stability validation and remaining work](docs/session-stability-2.2.14.md)
 and [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.
@@ -48,8 +50,8 @@ waiting chains expire and decoder cleanup exceptions are contained. See
 [video recovery and four-direction validation](docs/media-pipeline-validation.md).
 
 Ordinary Mac controlling Windows retains Legacy; other ordinary desktop pairs
-and group viewers use SNV2. OS backends remain native. Group sharing is still
-video-only and view-only. Physical capture/permissions, real two-computer latency,
+and group viewers use SNV2. OS backends remain native. Group sharing remains
+view-only and now includes system sound with independent viewer mute. Physical capture/permissions, real two-computer latency,
 NAT/VPN paths and group stability require retesting; 5–15 ms is not guaranteed.
 
 On the host, select **Host → Go online → Start sharing → Invite**. Each invited
@@ -208,15 +210,15 @@ For a local unsigned verification bundle only:
 npm run desktop:bundle:local
 ```
 
-Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.15.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
+Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.16.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
 
 ## Operating-system permissions
 
 - Windows host requests capture, audio and firewall access only when hosting; administrator privileges are not required for normal operation.
 - macOS client requests Accessibility/Input Monitoring when remote input capture is enabled and microphone permission only when microphone forwarding is enabled.
 - macOS hosting is implemented with ScreenCaptureKit and VideoToolbox on macOS 12.3 or newer. Screen Recording is requested when hosting starts; Accessibility is needed when remote input is enabled.
-- Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; their audio and HEVC support remain incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
-- Sanser 2.2.15 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared audio is not implemented. Real GPU/capture/network testing remains necessary.
+- Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; system sound uses Opus/PCM, while HEVC support remains incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
+- Sanser 2.2.16 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared Opus audio is encoded once and each viewer can mute independently. Real GPU/capture/network testing remains necessary.
 
 ## Migration
 

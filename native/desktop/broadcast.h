@@ -34,6 +34,8 @@ public:
   void remove(const std::string& id);
   void stop();
   void publish(Frame frame);
+  void audio(const AudioSamples& samples);
+  std::uint64_t encodedAudioPackets() const { return encodedAudioPackets_.load(); }
   void setCapturePaused(bool paused);
   void updateHealth(Clock::time_point now=Clock::now());
   bool ready() const;
@@ -51,6 +53,10 @@ private:
   std::atomic<bool> running_{true};
   std::atomic<bool> capturePaused_{false};
   std::atomic<std::uint64_t> published_{0};
+  std::mutex audioMutex_;
+  std::unique_ptr<sanser::audio::Encoder> audioEncoder_;
+  std::uint64_t audioSequence_=0;
+  std::atomic<std::uint64_t> encodedAudioPackets_{0};
   Clock::time_point lastKeyframeRequest_{};
 };
 

@@ -1,10 +1,9 @@
-# Opus + PLC audio (development after 2.2.15)
+# Opus + PLC audio (2.2.16)
 
 Ordinary **Mac controlling Windows** (Legacy audio) and **Windows controlling
-Mac** (SNV2 audio) now negotiate Opus when both engines support it. This source
-change is not part of the already published 2.2.15 installers. Group sharing is
-still video-only. This does not add mobile audio, microphone forwarding, FEC,
-or an audio receiver to platform pairs that previously lacked one.
+Mac** (SNV2 audio) now negotiate Opus when both engines support it. Version 2.2.16 also adds shared Opus group audio, native Windows loopback capture
+and native Mac SNV2 playback; see [group audio](group-audio.md). This does not add
+mobile audio, microphone forwarding or Opus in-band FEC.
 
 ## Shared codec and receive policy
 

@@ -33,7 +33,7 @@
 
 <article class="card card-body stack sharing-panel">
   <div class="sharing-heading">
-    <div class="panel-heading"><span class="panel-icon"><Icon name="computers" /></span><div><h2 class="card-title">Share with multiple computers <span class="view-only-label">View only</span></h2><p class="card-subtitle">Invite up to 3 computers to watch your screen.</p></div></div>
+    <div class="panel-heading"><span class="panel-icon"><Icon name="computers" /></span><div><h2 class="card-title">Share with multiple computers <span class="view-only-label">View only</span></h2><p class="card-subtitle">Invite up to 3 computers to watch your screen. Sound follows your host audio setting; each viewer can mute independently.</p></div></div>
     {#if group}<button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.stop())}>Stop sharing</button>{/if}
   </div>
   {#if actionError}<div class="notice error" role="alert">{actionError}</div>{/if}

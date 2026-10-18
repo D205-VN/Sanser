@@ -335,6 +335,17 @@ pub fn stop_engine(
 }
 
 #[tauri::command]
+pub fn set_viewer_audio(
+    engines: State<'_, EngineManager>,
+    session_id: String,
+    muted: bool,
+) -> Result<(), DesktopError> {
+    let session = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    engines.set_viewer_audio(session, muted)
+}
+
+#[tauri::command]
 pub async fn sharing_engine_add_peer(
     app: AppHandle,
     p2p: State<'_, P2pSessionManager>,

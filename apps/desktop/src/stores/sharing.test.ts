@@ -26,11 +26,11 @@ vi.mock('./presence', async () => {
 });
 vi.mock('./preferences', async () => {
   const { writable } = await import('svelte/store');
-  return { preferences: writable({ networkMode: 'auto', stream: { profile: 'balanced', codec: 'h264', fps: 60, bitrateMbps: 20, resolution: '1080p' } }) };
+  return { preferences: writable({ networkMode: 'auto', host: { audioEnabled: true }, stream: { profile: 'balanced', codec: 'h264', fps: 60, bitrateMbps: 20, resolution: '1080p' } }) };
 });
 import { createSharingStore } from './sharing';
 
-const runtime = { capabilities: { multiViewerHost: true } } as RuntimeStatus;
+const runtime = { capabilities: { multiViewerHost: true, hostAudio: true } } as RuntimeStatus;
 let group: SharingGroup;
 let stores: ReturnType<typeof createSharingStore>[] = [];
 
@@ -61,7 +61,7 @@ it('starts one encoder for three viewers and does not claim they received a fram
   const store = await startedStore();
   expect(mocks.launch).toHaveBeenCalledTimes(1); expect(mocks.add).toHaveBeenCalledTimes(2);
   for (const [request] of [...mocks.launch.mock.calls, ...mocks.add.mock.calls]) {
-    expect(request).toMatchObject({ inputEnabled: false, audioEnabled: false, wireProtocol: 'snv2', sharingId: 'group', fps: 60 });
+    expect(request).toMatchObject({ inputEnabled: false, audioEnabled: true, wireProtocol: 'snv2', sharingId: 'group', fps: 60 });
   }
   expect(get(store).ownGroup?.members.every((member) => member.startedAt === undefined)).toBe(true);
   mocks.api.removeSharingViewer.mockImplementation(() => {

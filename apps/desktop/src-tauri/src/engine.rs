@@ -536,6 +536,16 @@ fn host_endpoint(request: &LaunchEngineRequest, port: u16) -> Result<String, Des
     Ok(endpoint(address, port))
 }
 
+fn snv2_args(args: &mut Vec<String>, request: &LaunchEngineRequest) {
+    args.push("--snv2".into());
+    if !request.audio_enabled {
+        args.push("--disable-audio".into());
+    }
+    if request.kind == EngineKind::Client && request.audio_muted {
+        args.push("--mute-audio".into());
+    }
+}
+
 fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError> {
     let cross_platform = validate_wire_protocol(request)?;
     validate_common(request)?;
@@ -585,10 +595,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 args.push(bind_port.to_string());
             }
             if cross_platform {
-                args.push("--snv2".into());
-                if !request.audio_enabled {
-                    args.push("--disable-audio".into());
-                }
+                snv2_args(&mut args, request);
             } else {
                 // Legacy Windows capture otherwise defaults to a 250 ms
                 // screenshot interval, overriding the requested stream FPS.
@@ -627,10 +634,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 args.push(conn.clone());
             }
             if cross_platform {
-                args.push("--snv2".into());
-                if !request.audio_enabled {
-                    args.push("--disable-audio".into());
-                }
+                snv2_args(&mut args, request);
             }
             if request.ultra_low_latency {
                 args.push("--ultra-low-latency".into());
@@ -762,6 +766,38 @@ fn stabilize_child(child: &mut EngineChild) -> Result<(), String> {
 }
 
 impl EngineManager {
+    pub fn set_viewer_audio(&self, session: Uuid, muted: bool) -> Result<(), DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or_else(|| DesktopError::Process("viewer is not running".into()))?;
+        if child.session_id != Some(session)
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("unable to inspect viewer".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "viewer session is no longer active".into(),
+            ));
+        }
+        child
+            .process
+            .stdin
+            .as_mut()
+            .ok_or_else(|| DesktopError::Process("viewer control is unavailable".into()))?
+            .write_all(if muted {
+                b"audio-muted\t1\n"
+            } else {
+                b"audio-muted\t0\n"
+            })
+            .map_err(|_| DesktopError::Process("unable to change viewer audio".into()))
+    }
     pub fn sharing_peer_status(
         &self,
         group: Uuid,
@@ -1324,6 +1360,7 @@ mod tests {
             height: 1080,
             network_mode: crate::models::NetworkMode::DirectOnly,
             audio_enabled: true,
+            audio_muted: false,
             input_enabled: true,
             relative_mouse: false,
             session_token: Some("a".repeat(32)),
@@ -1345,7 +1382,7 @@ mod tests {
         value.sharing_viewer_id = Some(viewer.clone());
         value.wire_protocol = Some("snv2".into());
         value.input_enabled = false;
-        value.audio_enabled = false;
+        value.audio_enabled = true;
         value.udp_bind_port = Some(50002);
         let args = build_args(&value)?;
         assert!(args.contains(&"--snv2".into()));
@@ -1466,6 +1503,11 @@ mod tests {
             let mut value = request(kind);
             value.wire_protocol = Some("snv2".into());
             value.audio_enabled = true;
+            value.audio_muted = true;
+            assert_eq!(
+                build_args(&value)?.iter().any(|arg| arg == "--mute-audio"),
+                kind == EngineKind::Client
+            );
             assert!(
                 !build_args(&value)?
                     .iter()
