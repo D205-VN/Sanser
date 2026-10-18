@@ -123,6 +123,8 @@ jobs:
           cache-on-failure: true
       - run: npm ci
       - run: npm run desktop:stage-sidecar
+      - name: Verify live Direct path switching on Windows UDP sockets
+        run: cargo test --locked -p sanser-p2p standby:: -- --nocapture
       - run: cargo test --locked -p sanser-desktop --lib -- --nocapture
       - name: Build Windows desktop lifecycle test executable
         run: cargo build --locked -p sanser-desktop
