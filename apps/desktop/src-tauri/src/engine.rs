@@ -49,6 +49,7 @@ struct EngineChild {
     sharing: Option<crate::sharing_engine::SharingHost>,
     first_frame: Arc<std::sync::atomic::AtomicBool>,
     sharing_statuses: crate::engine_output::SharingStatuses,
+    direct_bridges: HashMap<Uuid, crate::direct::Bridge>,
 }
 
 impl EngineChild {
@@ -93,6 +94,7 @@ impl EngineChild {
                 sharing: None,
                 first_frame,
                 sharing_statuses,
+                direct_bridges: HashMap::new(),
             }),
             Err(error) => {
                 let _ = process.kill();
@@ -700,6 +702,18 @@ fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest
     command
 }
 
+fn prepare_direct(
+    reserved: Option<crate::direct::DirectTransport>,
+    request: &mut LaunchEngineRequest,
+) -> Result<Option<crate::direct::Prepared>, DesktopError> {
+    match reserved {
+        Some(transport) if transport.monitor.is_some() => {
+            crate::direct::Prepared::new(transport, request).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
 fn stop_child(engine: &mut EngineChild) -> std::io::Result<()> {
     let child = &mut engine.process;
     if child.try_wait()?.is_some() {
@@ -789,7 +803,7 @@ impl EngineManager {
         &self,
         app: &AppHandle,
         request: &LaunchEngineRequest,
-        reserved_socket: Option<Arc<tokio::net::UdpSocket>>,
+        reserved_socket: Option<crate::direct::DirectTransport>,
     ) -> Result<(), DesktopError> {
         if request.kind == EngineKind::LocalServer {
             return Err(DesktopError::Unavailable(
@@ -833,7 +847,9 @@ impl EngineManager {
                 "The installed native engine does not support cross-platform sessions".into(),
             ));
         }
-        let args = build_args(request)?;
+        let mut native_request = request.clone();
+        let prepared = prepare_direct(reserved_socket, &mut native_request)?;
+        let args = build_args(&native_request)?;
         let mut state = self
             .state
             .lock()
@@ -878,17 +894,29 @@ impl EngineManager {
                     }
                 },
             );
-        let mut command = sanitized_command(&path, &args, request);
-        // Candidate gathering, STUN and connectivity checks all use this
-        // socket. Release it only after validation/probing and immediately
-        // before the sidecar binds the selected port.
-        drop(reserved_socket);
+        let mut command = sanitized_command(&path, &args, &native_request);
+        let direct_bridge = prepared.map(|prepared| {
+            prepared.start(
+                app.clone(),
+                request.direct_attempt_id.clone().unwrap_or_default(),
+                report.clone(),
+            )
+        });
         let mut child = EngineChild::spawn(&mut command, debug_log_path.as_deref(), report)
             .map_err(|error| {
                 let message = error.to_string();
                 state.last_errors.insert(request.kind, message.clone());
                 DesktopError::Process(message)
             })?;
+        if let Some(bridge) = direct_bridge
+            && let Some(session) = request
+                .sharing_viewer_id
+                .as_deref()
+                .or(request.session_id.as_deref())
+                .and_then(|id| Uuid::parse_str(id).ok())
+        {
+            child.direct_bridges.insert(session, bridge);
+        }
         child.session_id = request
             .session_id
             .as_deref()
@@ -904,7 +932,9 @@ impl EngineManager {
         }
         if let Some(peer) = sharing {
             let viewer = peer.viewer;
-            child.sharing = Some(crate::sharing_engine::SharingHost::new(peer));
+            child.sharing = Some(crate::sharing_engine::SharingHost::new(
+                crate::sharing_engine::SharingPeer::from_request(&native_request)?.unwrap_or(peer),
+            ));
             if let Err(error) = child.wait_sharing_ack(viewer, Duration::from_secs(25)) {
                 let _ = stop_child(&mut child);
                 return Err(error);
@@ -919,9 +949,13 @@ impl EngineManager {
 
     pub fn add_sharing_peer(
         &self,
+        app: &AppHandle,
         request: &LaunchEngineRequest,
-        reserved_socket: Option<Arc<tokio::net::UdpSocket>>,
+        reserved_socket: Option<crate::direct::DirectTransport>,
     ) -> Result<(), DesktopError> {
+        let mut native_request = request.clone();
+        let prepared = prepare_direct(reserved_socket, &mut native_request)?;
+        let request = &native_request;
         let _ = build_args(request)?;
         let peer = crate::sharing_engine::SharingPeer::from_request(request)?.ok_or_else(|| {
             DesktopError::InvalidRequest("sharing configuration is required".into())
@@ -951,10 +985,25 @@ impl EngineManager {
             .validate_add(&peer)?;
         let nonce = Uuid::new_v4();
         let command = peer.add_command(nonce, validated_session_token(request)?);
-        drop(reserved_socket);
+        let direct_bridge = prepared.map(|prepared| {
+            prepared.start(
+                app.clone(),
+                request.direct_attempt_id.clone().unwrap_or_default(),
+                None,
+            )
+        });
         child.sharing_command(nonce, command.as_bytes())?;
         if let Some(sharing) = child.sharing.as_mut() {
             sharing.add(peer);
+        }
+        if let Some(bridge) = direct_bridge
+            && let Some(session) = request
+                .sharing_viewer_id
+                .as_deref()
+                .or(request.session_id.as_deref())
+                .and_then(|id| Uuid::parse_str(id).ok())
+        {
+            child.direct_bridges.insert(session, bridge);
         }
         Ok(())
     }
@@ -982,6 +1031,7 @@ impl EngineManager {
         )?;
         if let Some(sharing) = child.sharing.as_mut() {
             sharing.remove(viewer);
+            child.direct_bridges.remove(&viewer);
         }
         if let Ok(mut statuses) = child.sharing_statuses.lock() {
             statuses.remove(&viewer);

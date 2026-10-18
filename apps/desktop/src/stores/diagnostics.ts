@@ -50,6 +50,19 @@ export interface DirectRouteHealth {
   consecutiveElevated: number;
 }
 
+export interface DirectPathsUpdate {
+  sessionId: string;
+  attemptId: string;
+  snapshot: {
+    activeEndpoint: string;
+    switches: number;
+    rollbacks?: number;
+    pending: boolean;
+    localSendDrops: number;
+    paths: { endpoint: string; samples: number; medianMs: number | null; jitterMs: number | null; lossPercent: number; lastResponseAgeMs: number | null }[];
+  };
+}
+
 export interface NetworkDiagnosticState {
   checkedAt: string | null;
   localPort: number | null;
@@ -62,6 +75,7 @@ export interface NetworkDiagnosticState {
   candidateCount: number;
   selection: (DirectSelectionDiagnostics & { attemptId: string }) | null;
   routeHealth: DirectRouteHealth | null;
+  livePaths: (DirectPathsUpdate & { receivedAtMs: number }) | null;
 }
 
 interface GatherTelemetry {
@@ -85,7 +99,7 @@ const EMPTY_NETWORK_DIAGNOSTICS: NetworkDiagnosticState = {
   gatheringDurationMs: null,
   candidateCount: 0,
   selection: null,
-  routeHealth: null
+  routeHealth: null, livePaths: null
 };
 
 function createNetworkDiagnosticStore() {
@@ -104,18 +118,28 @@ function createNetworkDiagnosticStore() {
         gatheringDurationMs: result.durationMs,
         candidateCount: result.candidates.length,
         selection: null,
-        routeHealth: null
+        routeHealth: null, livePaths: null
       });
     },
     selectRoute(selection: DirectSelectionDiagnostics, attemptId: string): void {
-      store.update((state) => ({ ...state, selection: { ...selection, attemptId }, routeHealth: null }));
+      store.update((state) => ({ ...state, selection: { ...selection, attemptId }, routeHealth: null, livePaths: null }));
+    },
+    updatePaths(update: DirectPathsUpdate): void {
+      store.update((state) => {
+        if (state.selection?.attemptId !== update.attemptId) return state;
+        if (update.snapshot.switches > (state.livePaths?.snapshot.switches ?? 0)) {
+          diagnostics.add({ level: 'info', category: 'network', message: 'Direct path switched after authenticated live path checks.',
+            details: { switches: update.snapshot.switches } });
+        }
+        return { ...state, livePaths: { ...update, receivedAtMs: Date.now() } };
+      });
     },
     updateRouteHealth(health: DirectRouteHealth): void {
       store.update((state) => {
         if (state.selection?.attemptId !== health.attemptId) return state;
         if (health.status === 'elevated-after-media' && state.routeHealth?.status !== health.status) {
           diagnostics.add({ level: 'warn', category: 'network',
-            message: 'Direct RTT rose after media started. Check the media path, OS/network queues and router; no automatic route migration was performed.',
+            message: 'Direct RTT rose after media started. Compare live standby measurements; the router changes paths only after a better route is verified.',
             details: { probeMedianMs: health.probe.medianMs, liveWireRttMs: health.liveWireRttMs }
           });
         } else if (health.status === 'slow-at-nomination' && state.routeHealth?.status !== health.status) {

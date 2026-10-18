@@ -2,8 +2,10 @@
 
 Included in Sanser 2.2.13, developed on `Version-2.0.0` after 2.2.12.
 The client can reopen its remote window with fresh authorization and candidate
-gathering. This is a **controlled reconnect**, with a visible interruption,
-not seamless migration of an existing media socket.
+gathering. This document describes **controlled reconnect**, with a visible interruption.
+The later development [live standby path router](live-standby-paths.md) adds
+in-flight selection between authenticated Direct endpoints without replacing
+the native window. Explicit route failure still uses this reconnect fallback.
 
 ## Evidence required for automatic reconnect
 
@@ -72,7 +74,9 @@ navigation and Disconnect races, fresh credentials/generations, Direct-only
 constraints, group permissions and session-scoped process cleanup. Synthetic
 subprocess and loopback tests do not capture a screen or inject OS input.
 
-No standby native socket is maintained and no better path is guaranteed. A
+For the published 2.2.13–15 behavior, no standby native socket is maintained.
+Later development retains a measured Direct routing socket as described above.
+No better path is guaranteed. A
 new candidate race can select the same route if it remains the best available
 one. There is no automatic in-flight path switch, seamless rollback to the old
 window, complete IPv6 media support, public UDP-relay deployment or assertion

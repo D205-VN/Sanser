@@ -8,7 +8,7 @@
   import { coordinateP2pConnection, directCheckFailure, releaseP2pConnection } from '../lib/p2pSignaling';
   import type { ConnectionSession, Page, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
-  import { diagnostics } from '../stores/diagnostics';
+  import { diagnostics, networkDiagnostics } from '../stores/diagnostics';
   import { nativePerformance } from '../stores/nativePerformance';
   import { preferences } from '../stores/preferences';
   import { presence } from '../stores/presence';
@@ -281,6 +281,10 @@
     if (silence && silence.latestMs >= 15_000 && now >= silence.updatedAtMs) {
       return { cause: 'control-unresponsive', stableMs, evidenceAgeMs: now - silence.updatedAtMs, controlSilenceMs: silence.latestMs };
     }
+    const paths = $networkDiagnostics.livePaths;
+    // A live same-session router owns latency-only path selection. Do not tear
+    // down a healthy window simply to race the same candidates again.
+    if (update.route === 'direct' && paths?.sessionId === current.id && paths.receivedAtMs >= launched && now >= paths.receivedAtMs && now - paths.receivedAtMs < 5_000) return null;
     const wire = update.performance.metrics.wireRttEstimate;
     const health = update.routeHealth;
     if (update.route === 'direct' && health?.status === 'elevated-after-media' && wire && now >= wire.updatedAtMs) {

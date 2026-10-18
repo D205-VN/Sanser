@@ -11,7 +11,7 @@
   import Host from './pages/Host.svelte';
   import Settings from './pages/Settings.svelte';
   import Welcome from './pages/Welcome.svelte';
-  import { diagnostics, networkDiagnostics, type DirectRouteHealth } from './stores/diagnostics';
+  import { diagnostics, networkDiagnostics, type DirectRouteHealth, type DirectPathsUpdate } from './stores/diagnostics';
   import { nativePerformance, type NativePerformanceUpdate } from './stores/nativePerformance';
   import { connection } from './stores/connection';
   import { host } from './stores/host';
@@ -150,6 +150,7 @@
     const routeHealthLifecycle = new AbortController();
     let stopRouteHealth: UnlistenFn | undefined;
     let stopPerformance: UnlistenFn | undefined;
+    let stopPaths: UnlistenFn | undefined;
     const expiryTimer = window.setInterval(checkSessionInactivity, 60_000);
     window.addEventListener('focus', checkSessionInactivity);
     document.addEventListener('visibilitychange', checkSessionInactivity);
@@ -164,6 +165,9 @@
             .catch(() => { diagnostics.add({ level: 'warn', category: 'network', message: 'Live route comparison is unavailable; measurements are still saved in connection reports.' }); return undefined; });
           if (routeHealthLifecycle.signal.aborted) unlisten?.();
           else stopRouteHealth = unlisten;
+          const paths = await listen<DirectPathsUpdate>('direct-paths', (event) => networkDiagnostics.updatePaths(event.payload)).catch(() => undefined);
+          if (routeHealthLifecycle.signal.aborted) paths?.();
+          else stopPaths = paths;
           const stop = await listen<NativePerformanceUpdate>('native-performance', (event) => nativePerformance.update(event.payload))
             .catch(() => undefined);
           if (routeHealthLifecycle.signal.aborted) stop?.();
@@ -178,6 +182,7 @@
       routeHealthLifecycle.abort();
       stopRouteHealth?.();
       stopPerformance?.();
+      stopPaths?.();
       void sharing.shutdown();
       window.clearInterval(expiryTimer);
       window.removeEventListener('focus', checkSessionInactivity);

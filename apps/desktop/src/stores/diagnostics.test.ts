@@ -49,3 +49,23 @@ describe('Direct route diagnostics', () => {
     expect(get(networkDiagnostics).selection).toBeNull();
   });
 });
+
+describe('Live standby path measurements', () => {
+  it('scopes updates to the selected attempt, clears old data and logs each switch once', () => {
+    diagnostics.clear();
+    networkDiagnostics.selectRoute({ pairId: 'path', localCandidateType: 'host', localCandidateEndpoint: '192.0.2.1:50000',
+      remoteCandidateType: 'host', remoteCandidateEndpoint: '192.0.2.2:50000', verifiedRemoteEndpoint: '192.0.2.2:50000', probe: null, reason: 'verified' }, 'current');
+    const update = { sessionId: 'test-session', attemptId: 'old', snapshot: { activeEndpoint: '192.0.2.2:50001', switches: 1, pending: false, localSendDrops: 0,
+      paths: [{ endpoint: '192.0.2.2:50001', samples: 5, medianMs: 12, jitterMs: 1, lossPercent: 0, lastResponseAgeMs: 200 }] } };
+    networkDiagnostics.updatePaths(update);
+    expect(get(networkDiagnostics).livePaths).toBeNull();
+    update.attemptId = 'current';
+    networkDiagnostics.updatePaths(update); networkDiagnostics.updatePaths(update);
+    expect(get(networkDiagnostics).livePaths?.snapshot.activeEndpoint).toBe('192.0.2.2:50001');
+    expect(get(diagnostics).filter((event) => event.message.includes('path switched'))).toHaveLength(1);
+    networkDiagnostics.clear();
+    networkDiagnostics.updatePaths(update);
+    expect(get(networkDiagnostics).livePaths).toBeNull();
+    diagnostics.clear();
+  });
+});

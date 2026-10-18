@@ -356,7 +356,7 @@ pub async fn sharing_engine_add_peer(
     };
     tauri::async_runtime::spawn_blocking(move || {
         app.state::<EngineManager>()
-            .add_sharing_peer(&request, socket)
+            .add_sharing_peer(&app, &request, socket)
     })
     .await
     .map_err(|_| DesktopError::Process("native sharing task failed".into()))?
@@ -474,6 +474,7 @@ struct P2pTransport {
     sockets: Vec<P2pTransportSocket>,
     selected_socket: Option<usize>,
     selected_probe: Option<sanser_p2p::ProbeStatistics>,
+    monitor: Option<sanser_p2p::standby::Config>,
     phase: P2pTransportPhase,
 }
 
@@ -512,7 +513,7 @@ impl P2pSessionManager {
     fn take_selected_socket(
         &self,
         request: &mut LaunchEngineRequest,
-    ) -> Result<Option<Arc<tokio::net::UdpSocket>>, DesktopError> {
+    ) -> Result<Option<crate::direct::DirectTransport>, DesktopError> {
         let Some(session_id) = request.session_id.as_deref() else {
             return Ok(None);
         };
@@ -563,7 +564,10 @@ impl P2pSessionManager {
         request.direct_attempt_id = Some(current.attempt_id.to_string());
         Ok(transport.remove(&session_id).and_then(|mut selected| {
             let index = selected.selected_socket?;
-            (index < selected.sockets.len()).then(|| selected.sockets.swap_remove(index).socket)
+            (index < selected.sockets.len()).then(|| crate::direct::DirectTransport {
+                socket: selected.sockets.swap_remove(index).socket,
+                monitor: selected.monitor.take(),
+            })
         }))
     }
 }
@@ -651,6 +655,7 @@ pub async fn p2p_gather(
                 sockets,
                 selected_socket: None,
                 selected_probe: None,
+                monitor: None,
                 phase: P2pTransportPhase::Gathering,
             },
         );
@@ -992,13 +997,14 @@ pub async fn p2p_punch(
             "No compatible IPv4 media candidate pair could be constructed".into()
         }));
     };
-    // All nomination traffic has finished. Connecting the reserved UDP socket
-    // asks the kernel for its actual source, instead of claiming that a local
-    // candidate's advertised interface is necessarily the OS route. This socket
-    // is still released before native startup; do not call this a media NIC pin.
-    if socket.connect(selected.remote).await.is_ok()
-        && let Ok(source) = socket.local_addr()
+    // Discover the OS route without connecting the reserved media socket:
+    // standby paths must continue receiving on this original NAT binding.
+    if let Ok(discovery) = tokio::net::UdpSocket::bind("0.0.0.0:0").await
+        && discovery.connect(selected.remote).await.is_ok()
+        && let Ok(source) = discovery.local_addr()
     {
+        // This endpoint belongs to the separate route-lookup socket. Do not
+        // fabricate a source IP/port for the unconnected media socket.
         details.probe_source_endpoint = Some(source.to_string());
         details.probe_source_interface = sanser_p2p::enumerate_interfaces()
             .unwrap_or_default()
@@ -1012,6 +1018,20 @@ pub async fn p2p_punch(
         }) else {
             return Err("P2P connectivity check was superseded".into());
         };
+        transport.monitor = Some(sanser_p2p::standby::Config {
+            session: session_id,
+            local_device: device_hash(local_device_id),
+            peer_device: device_hash(peer_device_id),
+            key: probe_key,
+            controlling: request.controlling,
+            active: selected.remote,
+            alternatives: request
+                .remote_candidates
+                .iter()
+                .filter(|candidate| candidate.address.is_ipv4())
+                .map(P2pCandidate::endpoint)
+                .collect(),
+        });
         transport.selected_socket = Some(selected_index);
         transport.selected_probe.clone_from(&details.probe);
         transport.phase = P2pTransportPhase::Selected;
@@ -1218,6 +1238,7 @@ mod tests {
                     }],
                     selected_socket: Some(0),
                     selected_probe: None,
+                    monitor: None,
                     phase: P2pTransportPhase::Selected,
                 },
             );

@@ -72,7 +72,7 @@
       <div class="advanced-metrics">
         <div><span>Local advertised · {selected.localCandidateType}</span><strong>{selected.localCandidateEndpoint}</strong></div>
         <div><span>Advertised local interface · name-based classification</span><strong>{selected.localCandidateInterface ? `${selected.localCandidateInterface.name} · ${selected.localCandidateInterface.kind}` : 'Unknown (not verified from the candidate)'}</strong></div>
-        <div><span>OS-selected probe source</span><strong>{selected.probeSourceEndpoint ?? 'Not measured'}</strong></div>
+        <div><span>OS route lookup · separate socket</span><strong>{selected.probeSourceEndpoint ?? 'Not measured'}</strong></div>
         <div><span>OS-selected source interface · name-based classification</span><strong>{selected.probeSourceInterface ? `${selected.probeSourceInterface.name} · ${selected.probeSourceInterface.kind}` : 'Unknown'}</strong></div>
         <div><span>Router mapping · local / remote</span><strong>{selected.localMappingProtocol ?? 'Unknown'} / {selected.remoteMappingProtocol ?? 'Unknown'}</strong></div>
         <div><span>Remote advertised · {selected.remoteCandidateType}</span><strong>{selected.remoteCandidateEndpoint}</strong></div>
@@ -84,12 +84,29 @@
         <div><span>Echo measured at</span><strong>{$networkDiagnostics.routeHealth?.echoUpdatedAtMs ? new Date($networkDiagnostics.routeHealth.echoUpdatedAtMs).toLocaleTimeString() : 'Awaiting a supporting host'}</strong></div>
         <div><span>Live Wire RTT estimate</span><strong>{$networkDiagnostics.routeHealth?.liveWireRttMs != null ? `${$networkDiagnostics.routeHealth.liveWireRttMs.toFixed(1)} ms` : 'Awaiting media measurements'}</strong></div>
       </div>
-      <p class="muted">Candidate addresses are advertised endpoints, not proof of the physical interface selected by the OS. UDP echo bypasses control/decode queues but still includes OS/socket scheduling and responder work. Probe RTT includes probe handling; live Wire RTT still includes OS queues. Fewer than 3 probe samples means limited confidence. This is the latest nomination, not a guarantee that a session is still active.</p>
+      <p class="muted">Candidate addresses are advertised endpoints. The route lookup uses a separate socket and does not prove which physical interface every media packet uses. UDP echo bypasses control/decode queues but still includes OS/socket scheduling and responder work. Probe RTT includes probe handling; live Wire RTT still includes OS queues. Fewer than 3 probe samples means limited confidence. This is the latest nomination, not a guarantee that a session is still active.</p>
       {#if $networkDiagnostics.routeHealth?.status === 'elevated-after-media'}
-        <div class="notice warning">RTT increased substantially in at least three measurements after media started. The initial probe was faster; investigate the media path and OS/network queues. No route migration has been performed.</div>
-      {:else if $networkDiagnostics.routeHealth?.status === 'slow-at-nomination'}
+        <div class="notice warning">RTT increased substantially in at least three measurements after media started. The initial probe was faster; investigate the media path and OS/network queues. Live standby measurements determine whether a better path is available.</div>
+      {:else if $networkDiagnostics.routeHealth?.status === 'slow-at-nomination' && !$networkDiagnostics.livePaths?.snapshot.switches}
         <div class="notice warning">This Direct path was already slow before video started. Compare the selected endpoints, router mapping and OS-selected source interface. A Direct connection can still use a VPN or overlay. No faster route has been demonstrated.</div>
       {/if}
+    </article>
+  {/if}
+
+  {#if $networkDiagnostics.livePaths}
+    {@const live = $networkDiagnostics.livePaths}
+    {@const fresh = now - live.receivedAtMs < 5_000 && now >= live.receivedAtMs}
+    <article class="card card-body stack">
+      <div><h2 class="card-title">Live Direct paths</h2><p class="card-subtitle">{fresh ? live.snapshot.pending ? 'Confirming a faster path with the peer…' : 'Measuring the active and standby UDP paths' : 'Historical measurements · monitor is no longer reporting'}</p></div>
+      <p>Active: <strong>{live.snapshot.activeEndpoint}</strong> · {live.snapshot.switches} switches</p>
+      <div class="advanced-metrics">
+        {#each live.snapshot.paths as path (path.endpoint)}
+          <div><span>{path.endpoint}{path.endpoint === live.snapshot.activeEndpoint ? ' · active' : ' · standby'}</span>
+            <strong>{fresh && path.samples >= 3 && path.lastResponseAgeMs !== null && path.lastResponseAgeMs <= 8_000 && path.medianMs !== null ? `${path.medianMs.toFixed(1)} ms median · ${path.jitterMs?.toFixed(1) ?? '—'} ms jitter · ${path.lossPercent.toFixed(0)}% probe loss` : 'Insufficient fresh authenticated samples'}</strong>
+          </div>
+        {/each}
+      </div>
+      <p class="muted">Only a sustained improvement confirmed by several fresh probes can replace a responding route. Both peers confirm the new path; a 15-second cooldown prevents repeated switching. Probe RTT includes OS scheduling. No faster path is guaranteed. Unanswered probes may also mean the other app does not support live path checks.</p>
     </article>
   {/if}
 

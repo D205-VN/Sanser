@@ -15,6 +15,7 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "DIRECT_PATH_HEALTH",
     "SNV2_TRANSPORT_HEALTH",
     "SNSHARE_PEER",
     "SNV2_HOST_TIMING",
@@ -50,6 +51,11 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "pathCount",
+    "pathSwitches",
+    "pathSendDrops",
+    "pathRttMs",
+    "pathLossPercent",
     "opusDecoded",
     "opusPlc",
     "opusLate",
@@ -655,6 +661,13 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_path_report_retains_numbers_without_addresses_or_probe_keys() {
+        let sample=parse_sample(b"DIRECT_PATH_HEALTH pathCount=3 pathSwitches=1 pathSendDrops=0 pathRttMs=13 pathLossPercent=0 endpoint=192.0.2.1:50000 key=secret token=secret").unwrap();
+        assert_eq!(sample.values.len(), 5);
+        assert_eq!(sample.values["pathRttMs"], 13.0);
+        assert!(!serde_json::to_string(&sample).unwrap().contains("secret"));
+    }
     #[test]
     fn audio_reports_keep_only_numeric_quality_counters() {
         let sample = parse_sample(b"SNV2_AUDIO_HEALTH opusDecoded=200 opusPlc=3 opusLate=2 opusErrors=0 opusTxBytes=16000 token=123 samples=456").unwrap();

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { ConnectionSession, RuntimeStatus } from '../lib/types';
 import { ApiError } from '../lib/api';
 import { connection } from '../stores/connection';
+import { networkDiagnostics } from '../stores/diagnostics';
 
 const mocks = vi.hoisted(() => ({
   ready: vi.fn(), credentials: vi.fn(), disconnect: vi.fn(), getSession: vi.fn(), token: vi.fn(),
@@ -28,6 +29,7 @@ const target = { id: 'test-session', hostDeviceId: 'remote-host', requesterDevic
 beforeEach(async () => {
   vi.resetAllMocks();
   nativePerformance.clear();
+  networkDiagnostics.clear();
   connection.setPreparing(false);
   connection.begin(target);
   mocks.ready.mockResolvedValue({ requesterReadyAt: '2026-10-04T00:00:00.000Z' });
@@ -436,6 +438,17 @@ it('requests fresh candidates when a current launch has sustained verified wire 
   expect(mocks.recovery).toHaveBeenCalledWith(expect.objectContaining({ cause: 'sustained-wire-delay', wireRttMs: 200, probeMedianMs: 14, elevatedSamples: 5 }));
   await vi.advanceTimersByTimeAsync(2_000);
   expect(mocks.launch).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the native window open while same-session live standby checks own delay recovery', async () => {
+  vi.useFakeTimers(); render(ActiveSession, { runtime, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await vi.advanceTimersByTimeAsync(20_000);
+  networkDiagnostics.selectRoute({ pairId: 'path', localCandidateType: 'host', localCandidateEndpoint: '192.0.2.1:50000', remoteCandidateType: 'host', remoteCandidateEndpoint: '192.0.2.2:50000', verifiedRemoteEndpoint: '192.0.2.2:50000', probe: null, reason: 'verified' }, 'route');
+  networkDiagnostics.updatePaths({ sessionId: target.id, attemptId: 'route', snapshot: { activeEndpoint: '192.0.2.2:50000', switches: 0, pending: true, localSendDrops: 0, paths: [] } });
+  nativePerformance.update(snapshot());
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(mocks.stop).not.toHaveBeenCalled(); expect(mocks.recovery).not.toHaveBeenCalled(); expect(mocks.launch).toHaveBeenCalledTimes(1);
 });
 
 it.each(['application-only', 'slow-at-start', 'stale', 'old-session', 'old-launch', 'ended'] as const)('keeps the existing route for %s measurements', async (scenario) => {

@@ -1,6 +1,7 @@
 mod commands;
 mod connection_report;
 mod device_identity;
+mod direct;
 mod engine;
 mod engine_output;
 mod error;
