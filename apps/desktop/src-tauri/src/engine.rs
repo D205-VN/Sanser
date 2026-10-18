@@ -894,10 +894,23 @@ impl EngineManager {
                     }
                 },
             );
+        if request.relay
+            && let Some(session) = request
+                .session_id
+                .as_deref()
+                .and_then(|id| Uuid::parse_str(id).ok())
+        {
+            app.state::<crate::relay::RelayManager>().attach_report(
+                request.kind,
+                session,
+                report.clone(),
+            );
+        }
         let mut command = sanitized_command(&path, &args, &native_request);
         let direct_bridge = prepared.map(|prepared| {
             prepared.start(
                 app.clone(),
+                request.kind,
                 request.direct_attempt_id.clone().unwrap_or_default(),
                 report.clone(),
             )
@@ -988,6 +1001,7 @@ impl EngineManager {
         let direct_bridge = prepared.map(|prepared| {
             prepared.start(
                 app.clone(),
+                request.kind,
                 request.direct_attempt_id.clone().unwrap_or_default(),
                 None,
             )

@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { nativePerformance } from './nativePerformance';
+import { fecHealth } from './fecHealth';
 
 export type DiagnosticLevel = 'info' | 'warn' | 'error';
 export type DiagnosticValue = string | number | boolean | null;
@@ -198,12 +199,14 @@ function createDiagnosticStore() {
       store.set([]);
       networkDiagnostics.clear();
       nativePerformance.clear();
+      fecHealth.clear();
     },
     exportJson(): string {
       return JSON.stringify({
         schemaVersion: 1,
         exportedAt: new Date().toISOString(),
         network: get(networkDiagnostics),
+        fec: get(fecHealth),
         nativePerformance: get(nativePerformance),
         events: get(store)
       }, null, 2);

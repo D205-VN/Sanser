@@ -5,6 +5,7 @@ mod direct;
 mod engine;
 mod engine_output;
 mod error;
+mod fec_health;
 mod models;
 mod relay;
 mod sharing_engine;

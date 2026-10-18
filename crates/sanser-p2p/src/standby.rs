@@ -55,6 +55,7 @@ pub struct Snapshot {
     pub pending: bool,
     pub paths: Vec<PathSnapshot>,
     pub local_send_drops: u64,
+    pub fec: crate::fec::Stats,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -246,6 +247,7 @@ impl Monitor {
                 .map(|(a, p)| p.snapshot(*a, now))
                 .collect(),
             local_send_drops: self.drops,
+            fec: crate::fec::Stats::default(),
         }
     }
     fn transmit(&mut self, socket: &UdpSocket, address: SocketAddr, message: Message) {
@@ -607,23 +609,56 @@ pub async fn run(
     mut stop: oneshot::Receiver<()>,
     observe: impl Fn(Snapshot) + Send + 'static,
 ) -> std::io::Result<()> {
+    let mut fec = crate::fec::Fec::new(
+        *config.session.as_bytes(),
+        config.local_device,
+        config.peer_device,
+        config.key,
+        OsRng.next_u64(),
+        1400,
+        28,
+        Instant::now(),
+    );
     let mut monitor = Monitor::new(config, Instant::now());
     let mut incoming = vec![0; 65536];
     let mut outgoing = vec![0; 65536];
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut report = Instant::now();
+    let mut fec_route = monitor.config.active;
+    let mut baseline_rtt: Option<f64> = None;
     loop {
         tokio::select! {
             _=&mut stop=>return Ok(()),
-            _=tick.tick()=> { let now=Instant::now(); monitor.tick(&external,now); if now.duration_since(report)>=Duration::from_secs(2) { observe(monitor.snapshot(now)); report=now; } },
+            _=tick.tick()=> {
+                let now=Instant::now();monitor.tick(&external,now);
+                if fec_route!=monitor.config.active {fec.path_changed(now);fec_route=monitor.config.active;baseline_rtt=None;}
+                let mut snapshot=monitor.snapshot(now);
+                if let Some(rtt)=snapshot.paths.iter().find(|p|p.endpoint==snapshot.active_endpoint && p.samples>=3).and_then(|p|p.median_ms) {
+                    let minimum=baseline_rtt.get_or_insert(rtt);*minimum=minimum.min(rtt);
+                    if rtt>*minimum+20.0_f64.max(*minimum*0.5) {fec.congested(now);}
+                }
+                if now.duration_since(report)>=Duration::from_secs(2) {snapshot.fec=fec.stats(now);observe(snapshot);report=now;}
+            },
+            _=tokio::time::sleep(fec.next_tick(Instant::now()))=> {
+                let now=Instant::now();
+                for packet in fec.tick(now) {if external.try_send_to(&packet,monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}}
+            },
             result=external.recv_from(&mut incoming)=> {
                 let (n,source)=match result { Ok(value)=>value,Err(error) if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset)=>continue,Err(error)=>return Err(error) };
-                if monitor.receive(&external,&incoming[..n],source,Instant::now()) && local.try_send_to(&incoming[..n],engine).is_err() { monitor.drops+=1; }
+                let now=Instant::now();
+                if monitor.receive(&external,&incoming[..n],source,now) {
+                    // Originals reach native before optional recovery work.
+                    if !crate::fec::is_packet(&incoming[..n]) && local.try_send_to(&incoming[..n],engine).is_err() {monitor.drops+=1;fec.local_drop(now);}
+                    let (_,recovered)=fec.receive(&incoming[..n],now);
+                    for packet in recovered {if local.try_send_to(&packet,engine).is_err() {monitor.drops+=1;fec.local_drop(now);}}
+                }
             },
             result=local.recv_from(&mut outgoing)=> {
-                let (n,source)=match result { Ok(value)=>value,Err(error) if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset)=>continue,Err(error)=>return Err(error) }; if source!=engine {continue;}
-                if external.try_send_to(&outgoing[..n],monitor.config.active).is_err() {monitor.drops+=1;}
+                let (n,source)=match result { Ok(value)=>value,Err(error) if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset)=>continue,Err(error)=>return Err(error) };if source!=engine {continue;}
+                let now=Instant::now();
+                if external.try_send_to(&outgoing[..n],monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}
+                else if let Some(parity)=fec.outgoing(&outgoing[..n],now) && external.try_send_to(&parity,monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}
             },
         }
     }
@@ -632,6 +667,7 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     fn config(active: SocketAddr, alternative: SocketAddr, controlling: bool) -> Config {
         Config {
             session: uuid::Uuid::from_u128(42),
@@ -1039,6 +1075,135 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn adaptive_fec_recovers_real_udp_losses_while_control_and_audio_remain_unchanged() {
+        let a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let address_a = a.local_addr().unwrap();
+        let address_b = b.local_addr().unwrap();
+        let proxy_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let proxy_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let remote_a = proxy_a.local_addr().unwrap();
+        let remote_b = proxy_b.local_addr().unwrap();
+        let lost = Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+        let mut proxies = Vec::new();
+        for (read, write, target, drop_video) in [
+            (Arc::clone(&proxy_a), Arc::clone(&proxy_b), address_b, true),
+            (Arc::clone(&proxy_b), Arc::clone(&proxy_a), address_a, false),
+        ] {
+            let lost = Arc::clone(&lost);
+            proxies.push(tokio::spawn(async move {
+                let mut buffer = [0; 65536];
+                loop {
+                    let (n, _) = read.recv_from(&mut buffer).await.unwrap();
+                    if drop_video
+                        && let Some(meta) = crate::fec::video(&buffer[..n])
+                        && meta.sequence % 16 == 7
+                    {
+                        lost.lock().unwrap().insert(meta.sequence);
+                        continue;
+                    }
+                    write.send_to(&buffer[..n], target).await.unwrap();
+                }
+            }));
+        }
+        let engine_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let engine_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let local_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let near_a = local_a.local_addr().unwrap();
+        let near_b = local_b.local_addr().unwrap();
+        let (stop_a, stopped_a) = oneshot::channel();
+        let (stop_b, stopped_b) = oneshot::channel();
+        let mut ca = config(remote_a, remote_a, true);
+        ca.alternatives.clear();
+        let mut cb = config(remote_b, remote_b, false);
+        cb.alternatives.clear();
+        let stats = Arc::new(std::sync::Mutex::new(crate::fec::Stats::default()));
+        let observed = Arc::clone(&stats);
+        let bridge_a = tokio::spawn(run(
+            a,
+            local_a,
+            engine_a.local_addr().unwrap(),
+            ca,
+            stopped_a,
+            |_| {},
+        ));
+        let bridge_b = tokio::spawn(run(
+            b,
+            local_b,
+            engine_b.local_addr().unwrap(),
+            cb,
+            stopped_b,
+            move |s| *observed.lock().unwrap() = s.fec,
+        ));
+        let received = Arc::new(std::sync::Mutex::new(BTreeSet::new()));
+        let received_frames = Arc::clone(&received);
+        let viewer = Arc::clone(&engine_b);
+        let viewer_task = tokio::spawn(async move {
+            let mut packet = [0; 2048];
+            loop {
+                let (n, _) = viewer.recv_from(&mut packet).await.unwrap();
+                let meta = crate::fec::video(&packet[..n])
+                    .expect("FEC/probe records must never reach native");
+                assert_eq!(
+                    &packet[..n],
+                    crate::fec::tests::native(meta.sequence, 7, 1120)
+                );
+                received_frames.lock().unwrap().insert(meta.sequence);
+            }
+        });
+        let deadline = Instant::now() + Duration::from_millis(4500);
+        let mut seq = 1;
+        while Instant::now() < deadline {
+            for _ in 0..16 {
+                engine_a
+                    .send_to(&crate::fec::tests::native(seq, 7, 1120), near_a)
+                    .await
+                    .unwrap();
+                seq += 1;
+            }
+            for payload in [b"key-up".as_slice(), b"opus-audio"] {
+                engine_b.send_to(payload, near_b).await.unwrap();
+                let mut buffer = [0; 64];
+                let (n, _) = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    engine_a.recv_from(&mut buffer),
+                )
+                .await
+                .expect("FEC blocked priority input/audio")
+                .unwrap();
+                assert_eq!(&buffer[..n], payload);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let end = Instant::now() + Duration::from_secs(2);
+        while stats.lock().unwrap().recovered == 0 && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let final_stats = *stats.lock().unwrap();
+        assert!(
+            final_stats.recovered > 0,
+            "FEC never recovered a dropped original: {:?}",
+            final_stats
+        );
+        assert!(
+            lost.lock()
+                .unwrap()
+                .iter()
+                .any(|seq| received.lock().unwrap().contains(seq)),
+            "recovery must include a datagram actually discarded by the network fixture"
+        );
+        assert!(!viewer_task.is_finished());
+        viewer_task.abort();
+        stop_a.send(()).unwrap();
+        stop_b.send(()).unwrap();
+        bridge_a.await.unwrap().unwrap();
+        bridge_b.await.unwrap().unwrap();
+        for proxy in proxies {
+            proxy.abort();
+        }
+    }
+    #[tokio::test]
     async fn legacy_peer_without_monitor_support_keeps_original_media_and_cannot_switch() {
         let external = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1083,7 +1248,7 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-            if buffer[..n].starts_with(MAGIC) {
+            if buffer[..n].starts_with(MAGIC) || crate::fec::is_packet(&buffer[..n]) {
                 continue;
             }
             assert_eq!(&buffer[..n], b"native-input");

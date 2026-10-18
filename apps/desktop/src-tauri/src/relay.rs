@@ -48,6 +48,7 @@ struct RelayBridge {
     engine_port: u16,
     proxy_port: u16,
     stop: oneshot::Sender<()>,
+    fec_metrics: crate::fec_health::ReportSink,
 }
 
 #[derive(Default)]
@@ -96,6 +97,19 @@ pub struct RelayManager {
 }
 
 impl RelayManager {
+    pub fn attach_report(
+        &self,
+        kind: EngineKind,
+        session: uuid::Uuid,
+        report: Option<std::sync::mpsc::SyncSender<crate::connection_report::Sample>>,
+    ) {
+        if let Ok(state) = self.state.lock()
+            && let Some(bridge) = state.bridges.get(&(kind, session))
+            && let Ok(mut metrics) = bridge.fec_metrics.lock()
+        {
+            *metrics = report;
+        }
+    }
     pub fn transport(&self, kind: EngineKind, session: &str) -> Option<String> {
         let session = uuid::Uuid::parse_str(session).ok()?;
         self.state
@@ -270,6 +284,7 @@ pub struct RelayStartResult {
 #[tauri::command]
 #[allow(clippy::too_many_lines)]
 pub async fn relay_start(
+    app: tauri::AppHandle,
     manager: State<'_, RelayManager>,
     mut request: RelayStartRequest,
 ) -> Result<RelayStartResult, DesktopError> {
@@ -454,7 +469,9 @@ pub async fn relay_start(
     let engine_endpoint = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), engine_port);
     let (stop_tx, stop_rx) = oneshot::channel();
     let bridge_id = uuid::Uuid::new_v4();
+    let fec_metrics = crate::fec_health::ReportSink::default();
     let bridge = RelayBridge {
+        fec_metrics: Arc::clone(&fec_metrics),
         transport: transport_name,
         id: bridge_id,
         session_id,
@@ -466,9 +483,29 @@ pub async fn relay_start(
     let bridges = Arc::clone(&manager.state);
     let failures = Arc::clone(&manager.failures);
     let kind = request.kind;
+    let fec_started_at_ms = crate::fec_health::now_ms();
     tauri::async_runtime::spawn(async move {
         let failure = if let Some(udp) = udp {
-            udp::run(udp, proxy_socket, engine_endpoint, cipher, stop_rx).await
+            udp::run(
+                udp,
+                proxy_socket,
+                engine_endpoint,
+                cipher,
+                stop_rx,
+                move |stats| {
+                    let report = fec_metrics.lock().ok().and_then(|metrics| metrics.clone());
+                    crate::fec_health::observe(
+                        &app,
+                        kind,
+                        session_id,
+                        "udp-relay",
+                        fec_started_at_ms,
+                        stats,
+                        report.as_ref(),
+                    );
+                },
+            )
+            .await
         } else if let Some(websocket) = websocket {
             run_bridge(proxy_socket, engine_endpoint, websocket, cipher, stop_rx).await
         } else {
@@ -691,6 +728,7 @@ fn udp_port_not_ready(error: &std::io::Error) -> bool {
 
 struct RelayCipher {
     cipher: XChaCha20Poly1305,
+    fec: Option<sanser_p2p::fec::Fec>,
     session_id: [u8; 16],
     local_device_id: [u8; 16],
     peer_device_id: [u8; 16],
@@ -714,11 +752,32 @@ impl RelayCipher {
         let mut key: [u8; 32] = hasher.finalize().into();
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
             .map_err(|_| DesktopError::Process("relay cipher setup failed".into()))?;
+        let mut fec_hasher = Sha256::new();
+        fec_hasher.update(b"sanser-relay-fec-key-v1\0");
+        fec_hasher.update(key);
+        let fec_key: [u8; 32] = fec_hasher.finalize().into();
+        let hash = |id: uuid::Uuid| {
+            let digest = Sha256::digest(id.as_bytes());
+            let mut b = [0; 8];
+            b.copy_from_slice(&digest[..8]);
+            u64::from_be_bytes(b)
+        };
+        let fec = sanser_p2p::fec::Fec::new(
+            *session_id.as_bytes(),
+            hash(local_device_id),
+            hash(peer_device_id),
+            fec_key,
+            OsRng.next_u64(),
+            1348,
+            152,
+            std::time::Instant::now(),
+        );
         key.zeroize();
         let mut send_nonce_prefix = [0_u8; 16];
         OsRng.fill_bytes(&mut send_nonce_prefix);
         Ok(Self {
             cipher,
+            fec: Some(fec),
             session_id: *session_id.as_bytes(),
             local_device_id: *local_device_id.as_bytes(),
             peer_device_id: *peer_device_id.as_bytes(),
@@ -1386,6 +1445,7 @@ mod tests {
             manager.state.lock().unwrap().bridges.insert(
                 (kind, session),
                 RelayBridge {
+                    fec_metrics: Arc::default(),
                     transport: "udp",
                     id: uuid::Uuid::new_v4(),
                     session_id: session,
@@ -1451,6 +1511,7 @@ mod tests {
         manager.stop_peer(EngineKind::Host, session);
         let (stop, _) = oneshot::channel();
         let bridge = RelayBridge {
+            fec_metrics: Arc::default(),
             transport: "udp",
             id: uuid::Uuid::new_v4(),
             session_id: session,

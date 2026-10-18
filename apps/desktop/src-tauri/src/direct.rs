@@ -90,6 +90,7 @@ impl Prepared {
     pub fn start(
         self,
         app: AppHandle,
+        kind: EngineKind,
         attempt: String,
         metrics: Option<std::sync::mpsc::SyncSender<crate::connection_report::Sample>>,
     ) -> Bridge {
@@ -104,8 +105,10 @@ impl Prepared {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         if let Some(config) = transport.monitor.take() {
             let session = config.session;
+            let started_at_ms = crate::fec_health::now_ms();
             tauri::async_runtime::spawn(async move {
                 let result=standby::run(transport.socket,local,engine_address,config,stopped,move |snapshot| {
+                    crate::fec_health::observe(&app,kind,session,"direct",started_at_ms,snapshot.fec,metrics.as_ref());
                     // Addresses stay in explicit connection details. Persist only
                     // bounded numeric path metrics, never probe keys or tokens.
                     if let Some(sender)=&metrics {

@@ -15,6 +15,7 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "FEC_HEALTH",
     "DIRECT_PATH_HEALTH",
     "SNV2_TRANSPORT_HEALTH",
     "SNSHARE_PEER",
@@ -51,6 +52,17 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "fecNegotiated",
+    "fecTargetPercent",
+    "fecVideoBytes",
+    "fecParityBytes",
+    "fecSent",
+    "fecRecovered",
+    "fecExpired",
+    "fecRejected",
+    "fecBudgetSkipped",
+    "fecReceiverLate",
+    "fecCongestionPauses",
     "pathCount",
     "pathSwitches",
     "pathSendDrops",

@@ -14,6 +14,7 @@
   import { diagnostics, networkDiagnostics, type DirectRouteHealth, type DirectPathsUpdate } from './stores/diagnostics';
   import { nativePerformance, type NativePerformanceUpdate } from './stores/nativePerformance';
   import { connection } from './stores/connection';
+  import { fecHealth, type FecHealthUpdate } from './stores/fecHealth';
   import { host } from './stores/host';
   import { preferences } from './stores/preferences';
   import { presence } from './stores/presence';
@@ -151,6 +152,7 @@
     let stopRouteHealth: UnlistenFn | undefined;
     let stopPerformance: UnlistenFn | undefined;
     let stopPaths: UnlistenFn | undefined;
+    let stopFec: UnlistenFn | undefined;
     const expiryTimer = window.setInterval(checkSessionInactivity, 60_000);
     window.addEventListener('focus', checkSessionInactivity);
     document.addEventListener('visibilitychange', checkSessionInactivity);
@@ -168,6 +170,9 @@
           const paths = await listen<DirectPathsUpdate>('direct-paths', (event) => networkDiagnostics.updatePaths(event.payload)).catch(() => undefined);
           if (routeHealthLifecycle.signal.aborted) paths?.();
           else stopPaths = paths;
+          const fec = await listen<FecHealthUpdate>('fec-health', (event) => fecHealth.update(event.payload)).catch(() => undefined);
+          if (routeHealthLifecycle.signal.aborted) fec?.();
+          else stopFec = fec;
           const stop = await listen<NativePerformanceUpdate>('native-performance', (event) => nativePerformance.update(event.payload))
             .catch(() => undefined);
           if (routeHealthLifecycle.signal.aborted) stop?.();
@@ -183,6 +188,7 @@
       stopRouteHealth?.();
       stopPerformance?.();
       stopPaths?.();
+      stopFec?.();
       void sharing.shutdown();
       window.clearInterval(expiryTimer);
       window.removeEventListener('focus', checkSessionInactivity);

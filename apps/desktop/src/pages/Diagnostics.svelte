@@ -7,6 +7,7 @@
   import { runtimeStatus } from '../lib/platform';
   import type { RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
+  import { fecHealth } from '../stores/fecHealth';
   import { diagnostics, networkDiagnostics, type DiagnosticLevel } from '../stores/diagnostics';
   import { preferences } from '../stores/preferences';
 
@@ -107,6 +108,23 @@
         {/each}
       </div>
       <p class="muted">Only a sustained improvement confirmed by several fresh probes can replace a responding route. Both peers confirm the new path; a 15-second cooldown prevents repeated switching. Probe RTT includes OS scheduling. No faster path is guaranteed. Unanswered probes may also mean the other app does not support live path checks.</p>
+    </article>
+  {/if}
+
+  {#if $fecHealth.length}
+    <article class="card card-body stack">
+      <div><h2 class="card-title">Adaptive video FEC</h2><p class="card-subtitle">Optional recovery for short UDP losses. Native retransmission still handles losses beyond one packet per block.</p></div>
+      {#each $fecHealth as health (`${health.kind}:${health.sessionId}`)}
+        {@const fresh = now >= health.receivedAtMs && now - health.receivedAtMs < 5_000}
+        <div class="advanced-metrics">
+          <div><span>{health.kind === 'host' ? 'Sending' : 'Receiving'} · {health.transport === 'direct' ? 'Direct' : 'UDP Relay'}</span><strong>{!fresh ? 'Historical measurements' : !health.stats.negotiated ? 'Awaiting peer capability confirmation' : 'Peer capability confirmed'}</strong></div>
+          <div><span>Local send parity budget</span><strong>{fresh && health.stats.negotiated ? health.stats.videoBytes > 0 ? `${health.stats.overheadPercent}%` : 'Not sending video' : '—'}</strong></div>
+          <div><span>Parity packets / reconstructed packets</span><strong>{health.stats.parityPackets} / {health.stats.recovered}</strong></div>
+          <div><span>Expired recovery blocks / rejected records</span><strong>{health.stats.expired} / {health.stats.invalid}</strong></div>
+          <div><span>Budget skips / congestion pauses</span><strong>{health.stats.budgetSkipped} / {health.stats.congestionPauses}</strong></div>
+        </div>
+      {/each}
+      <p class="muted">The sender budget stays at or below 15% of video wire bytes. FEC adds no waiting time to original video. It cannot repair multiple losses in one block or remove network RTT. Counters describe reconstruction, including useful early recovery during reordering. WSS/TCP does not use FEC.</p>
     </article>
   {/if}
 

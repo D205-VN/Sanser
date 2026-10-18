@@ -20,6 +20,7 @@
 mod candidate;
 mod connectivity;
 mod error;
+pub mod fec;
 mod gatherer;
 mod interface;
 mod keepalive;

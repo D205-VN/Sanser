@@ -133,13 +133,39 @@ async fn connect_inner(request: Request<()>) -> Result<UdpTransport, String> {
     }
 }
 
+fn send_datagram(
+    socket: &UdpSocket,
+    auth: &mut PacketAuth,
+    cipher: &mut RelayCipher,
+    bytes: &[u8],
+) -> Result<bool, String> {
+    let encrypted = cipher
+        .encrypt(bytes)
+        .map_err(|_| "UDP relay encryption failed".to_owned())?;
+    if encrypted.len() > MAX_PACKET_BYTES - OVERHEAD {
+        return Err("native packet exceeds UDP relay limit".into());
+    }
+    let packet = auth
+        .encode(Kind::Data, &encrypted)
+        .map_err(|_| "UDP relay sequence exhausted".to_owned())?;
+    match socket.try_send(&packet) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+        Err(_) => Err("UDP relay send failed".into()),
+    }
+}
+
 pub(super) async fn run(
     mut transport: UdpTransport,
     local: UdpSocket,
     engine: SocketAddr,
     mut cipher: RelayCipher,
     mut stop: oneshot::Receiver<()>,
+    observe: impl Fn(sanser_p2p::fec::Stats) + Send + Sync + 'static,
 ) -> Option<String> {
+    let Some(mut fec) = cipher.fec.take() else {
+        return Some("UDP FEC initialization unavailable".into());
+    };
     let (mut writer, mut reader) = transport.websocket.split();
     let control = async {
         while let Some(message) = reader.next().await {
@@ -170,6 +196,7 @@ pub(super) async fn run(
         let startup_deadline = tokio::time::Instant::now() + RELAY_CONNECT_TIMEOUT;
         let mut engine_ready = false;
         let mut last_received = tokio::time::Instant::now();
+        let mut last_report = std::time::Instant::now();
         loop {
             tokio::select! {
                 received = local.recv_from(&mut outgoing) => {
@@ -180,15 +207,15 @@ pub(super) async fn run(
                     };
                     if source != engine { continue; }
                     engine_ready = true;
-                    let encrypted = match cipher.encrypt(&outgoing[..n]) {
-                        Ok(packet) if packet.len() <= MAX_PACKET_BYTES - OVERHEAD => packet,
-                        _ => return Some("native packet exceeds UDP relay limit".into()),
-                    };
-                    let Ok(packet) = transport.auth.encode(Kind::Data, &encrypted) else { return Some("UDP relay sequence exhausted".into()); };
-                    // Never wait behind a video write. Native ACK/NACK and rate
-                    // feedback recover packet loss, including local congestion.
-                    if let Err(error) = transport.socket.try_send(&packet)
-                        && error.kind() != std::io::ErrorKind::WouldBlock { return Some("UDP relay send failed".into()); }
+                    let now=std::time::Instant::now();
+                    match send_datagram(&transport.socket,&mut transport.auth,&mut cipher,&outgoing[..n]) {
+                        Ok(true)=> {if let Some(parity)=fec.outgoing(&outgoing[..n],now) {
+                            match send_datagram(&transport.socket,&mut transport.auth,&mut cipher,&parity) {
+                                Ok(true)=>{},Ok(false)=>fec.local_drop(now),Err(error)=>return Some(error),
+                            }
+                        }},
+                        Ok(false)=>fec.local_drop(now),Err(error)=>return Some(error),
+                    }
                 }
                 received = transport.socket.recv(&mut incoming) => {
                     let Ok(n) = received else { return Some("UDP relay receive failed".into()); };
@@ -196,12 +223,22 @@ pub(super) async fn run(
                     last_received = tokio::time::Instant::now();
                     if kind != Kind::Forward { continue; }
                     let Ok(plaintext) = cipher.decrypt(payload) else { continue; };
-                    if let Err(error) = local.try_send_to(&plaintext, engine)
-                        && error.kind() != std::io::ErrorKind::WouldBlock && !(tokio::time::Instant::now() < startup_deadline && udp_port_not_ready(&error)) {
-                            return Some("UDP relay could not reach the native engine".into());
+                    let now=std::time::Instant::now();
+                    if !sanser_p2p::fec::is_packet(&plaintext) && let Err(error)=local.try_send_to(&plaintext,engine) {
+                        if error.kind()!=std::io::ErrorKind::WouldBlock && !(tokio::time::Instant::now()<startup_deadline && udp_port_not_ready(&error)) {return Some("UDP relay could not reach the native engine".into());}
+                        fec.local_drop(now);
                     }
+                    let(_,recovered)=fec.receive(&plaintext,now);
+                    for packet in recovered {if local.try_send_to(&packet,engine).is_err(){fec.local_drop(now);}}
+                }
+                ()=tokio::time::sleep(fec.next_tick(std::time::Instant::now()))=> {
+                    let now=std::time::Instant::now();
+                    for packet in fec.tick(now) {match send_datagram(&transport.socket,&mut transport.auth,&mut cipher,&packet) {Ok(true)=>{},Ok(false)=>fec.local_drop(now),Err(error)=>return Some(error)}}
+
                 }
                 _ = heartbeat.tick() => {
+                    let now=std::time::Instant::now();
+                    if now.duration_since(last_report)>=Duration::from_secs(2) {observe(fec.stats(now));last_report=now;}
                     if !engine_ready && tokio::time::Instant::now() >= startup_deadline { return Some("native engine did not start sending UDP".into()); }
                     if last_received.elapsed() > Duration::from_secs(10) { return Some("UDP relay stopped responding; retry the session".into()); }
                     if let Ok(packet) = transport.auth.encode(Kind::Keepalive, &[]) { let _ = transport.socket.try_send(&packet); }
@@ -285,7 +322,9 @@ mod tests {
                             }
                             Kind::Data => {
                                 assert!(confirmed);
-                                assert_eq!(peer_cipher.decrypt(payload).unwrap(), b"native-video");
+                                let native=peer_cipher.decrypt(payload).unwrap();
+                                if sanser_p2p::fec::is_packet(&native) {continue;}
+                                assert_eq!(native,b"native-video");
                                 let lost = peer_cipher.encrypt(b"lost-video").unwrap();
                                 let _ = auth.encode(Kind::Forward, &lost).unwrap();
                                 let delayed = peer_cipher.encrypt(b"delayed-video").unwrap();
@@ -326,6 +365,7 @@ mod tests {
             engine.local_addr().unwrap(),
             RelayCipher::new(session, left, right, credential).unwrap(),
             stopped,
+            |_| {},
         ));
         engine
             .send_to(b"native-video", proxy_address)
@@ -350,6 +390,200 @@ mod tests {
         );
         let _ = stop_server.send(());
         server.await.unwrap();
+    }
+
+    // Synthetic native-shaped ciphertext only: no display, playback or OS input.
+    fn native_video(sequence: u64) -> Vec<u8> {
+        let mut b = vec![0; 1120];
+        for (index, byte) in b.iter_mut().enumerate() {
+            *byte = ((index as u64 * 13 + sequence) % 251) as u8;
+        }
+        b[..4].copy_from_slice(b"SNV2");
+        b[4] = 2;
+        b[5] = 80;
+        b[6] = 3;
+        b[7] = 5;
+        b[8..12].fill(0);
+        b[28..32].copy_from_slice(&1_u32.to_be_bytes());
+        b[32..40].copy_from_slice(&sequence.to_be_bytes());
+        b[56..60].copy_from_slice(&1040_u32.to_be_bytes());
+        b[60..64].copy_from_slice(&7_u32.to_be_bytes());
+        b
+    }
+    #[tokio::test]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
+    async fn encrypted_udp_relay_adapts_fec_and_recovers_dropped_video_without_blocking_input() {
+        use std::{
+            collections::BTreeSet,
+            sync::{Arc, Mutex},
+        };
+        let session = uuid::Uuid::new_v4();
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let credential = "synthetic-fec-relay-test-credential";
+        let relay = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let address = relay.local_addr().unwrap();
+        let left = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let right = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let left_address = left.local_addr().unwrap();
+        let right_address = right.local_addr().unwrap();
+        left.connect(address).await.unwrap();
+        right.connect(address).await.unwrap();
+        let mut websockets = Vec::new();
+        let mut retained_control = Vec::new();
+        for _ in 0..2 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (client, server) = tokio::join!(
+                tokio_tungstenite::connect_async(format!("ws://{address}")),
+                async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    tokio_tungstenite::accept_async(stream).await.unwrap()
+                }
+            );
+            websockets.push(client.unwrap().0);
+            retained_control.push(server);
+        }
+        let auth_a = || PacketAuth::new([1; 16], [2; 32]);
+        let auth_b = || PacketAuth::new([3; 16], [4; 32]);
+        let lost = Arc::new(Mutex::new(BTreeSet::new()));
+        let dropped = Arc::clone(&lost);
+        let service = Arc::clone(&relay);
+        let mut inspect = RelayCipher::new(session, b, a, credential).unwrap();
+        let server = tokio::spawn(async move {
+            let mut left = auth_a();
+            let mut right = auth_b();
+            let mut buffer = vec![0; 65536];
+            loop {
+                let (n, from) = service.recv_from(&mut buffer).await.unwrap();
+                let (source, target, address) = if from == left_address {
+                    (&mut left, &mut right, right_address)
+                } else {
+                    assert_eq!(from, right_address);
+                    (&mut right, &mut left, left_address)
+                };
+                let (kind, payload) = source.decode(&buffer[..n], false).unwrap();
+                let packet = match kind {
+                    Kind::Keepalive => Some((source.encode(Kind::Alive, &[]).unwrap(), from)),
+                    Kind::Data => {
+                        assert!(
+                            payload.starts_with(b"SNR1"),
+                            "FEC/video must remain encrypted outside the clients"
+                        );
+                        if from == left_address {
+                            let plain = inspect.decrypt(payload).unwrap();
+                            if let Some(meta) = sanser_p2p::fec::video(&plain)
+                                && meta.sequence % 16 == 7
+                            {
+                                dropped.lock().unwrap().insert(meta.sequence);
+                                continue;
+                            }
+                        }
+                        Some((target.encode(Kind::Forward, payload).unwrap(), address))
+                    }
+                    _ => panic!("unexpected datagram kind"),
+                };
+                if let Some((packet, address)) = packet {
+                    service.send_to(&packet, address).await.unwrap();
+                }
+            }
+        });
+        let engine_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let engine_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let local_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let proxy_a = local_a.local_addr().unwrap();
+        let proxy_b = local_b.local_addr().unwrap();
+        let (stop_a, stopped_a) = oneshot::channel();
+        let (stop_b, stopped_b) = oneshot::channel();
+        let stats = Arc::new(Mutex::new(sanser_p2p::fec::Stats::default()));
+        let observe = Arc::clone(&stats);
+        let websocket_a = websockets.remove(0);
+        let websocket_b = websockets.remove(0);
+        let bridge_a = tokio::spawn(run(
+            UdpTransport {
+                socket: left,
+                auth: auth_a(),
+                websocket: websocket_a,
+            },
+            local_a,
+            engine_a.local_addr().unwrap(),
+            RelayCipher::new(session, a, b, credential).unwrap(),
+            stopped_a,
+            |_| {},
+        ));
+        let bridge_b = tokio::spawn(run(
+            UdpTransport {
+                socket: right,
+                auth: auth_b(),
+                websocket: websocket_b,
+            },
+            local_b,
+            engine_b.local_addr().unwrap(),
+            RelayCipher::new(session, b, a, credential).unwrap(),
+            stopped_b,
+            move |s| *observe.lock().unwrap() = s,
+        ));
+        let received = Arc::new(Mutex::new(BTreeSet::new()));
+        let delivered = Arc::clone(&received);
+        let viewer = Arc::clone(&engine_b);
+        let viewer_task = tokio::spawn(async move {
+            let mut buffer = [0; 2048];
+            loop {
+                let (n, _) = viewer.recv_from(&mut buffer).await.unwrap();
+                let meta = sanser_p2p::fec::video(&buffer[..n])
+                    .expect("protection control leaked to native");
+                assert_eq!(&buffer[..n], native_video(meta.sequence));
+                delivered.lock().unwrap().insert(meta.sequence);
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_millis(4500);
+        let mut sequence = 1;
+        while std::time::Instant::now() < deadline {
+            for _ in 0..16 {
+                engine_a
+                    .send_to(&native_video(sequence), proxy_a)
+                    .await
+                    .unwrap();
+                sequence += 1;
+            }
+            for payload in [b"key-up".as_slice(), b"opus-audio"] {
+                engine_b.send_to(payload, proxy_b).await.unwrap();
+                let mut buffer = [0; 64];
+                let (n, _) = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    engine_a.recv_from(&mut buffer),
+                )
+                .await
+                .expect("FEC blocked priority datagram")
+                .unwrap();
+                assert_eq!(&buffer[..n], payload);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while stats.lock().unwrap().recovered == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let snapshot = *stats.lock().unwrap();
+        assert!(
+            snapshot.recovered > 0,
+            "UDP relay never restored discarded ciphertext: {snapshot:?}"
+        );
+        assert!(
+            lost.lock()
+                .unwrap()
+                .iter()
+                .any(|seq| received.lock().unwrap().contains(seq))
+        );
+        assert!(!viewer_task.is_finished());
+        viewer_task.abort();
+        stop_a.send(()).unwrap();
+        stop_b.send(()).unwrap();
+        assert!(bridge_a.await.unwrap().is_none());
+        assert!(bridge_b.await.unwrap().is_none());
+        server.abort();
+        drop(retained_control);
     }
 
     #[tokio::test]
