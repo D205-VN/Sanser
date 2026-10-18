@@ -1,5 +1,6 @@
 #include "input_injector.h"
 #include "keyboard.h"
+#include <IOKit/hidsystem/IOLLEvent.h>
 #include <cmath>
 #include <stdexcept>
 namespace sanser::desktop {
@@ -16,6 +17,12 @@ CGEventFlags MacInputInjector::flags() const {
   if(keys_.contains(225)||keys_.contains(229)) flags|=kCGEventFlagMaskShift;
   if(keys_.contains(226)||keys_.contains(230)) flags|=kCGEventFlagMaskAlternate;
   if(keys_.contains(227)||keys_.contains(231)) flags|=kCGEventFlagMaskCommand;
+  // Keep the sided state as well as the aggregate flags. A held right Shift
+  // must survive releasing left Shift, including on mouse/shortcut events.
+  static constexpr CGEventFlags sided[]={NX_DEVICELCTLKEYMASK,NX_DEVICELSHIFTKEYMASK,
+    NX_DEVICELALTKEYMASK,NX_DEVICELCMDKEYMASK,NX_DEVICERCTLKEYMASK,
+    NX_DEVICERSHIFTKEYMASK,NX_DEVICERALTKEYMASK,NX_DEVICERCMDKEYMASK};
+  for(unsigned i=0;i<8;++i) if(keys_.contains(224+i)) flags|=sided[i];
   return flags;
 }
 void MacInputInjector::emit(CGEventRef event) {

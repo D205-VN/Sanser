@@ -316,6 +316,17 @@ void testWindowsInput() {
   events.clear();
   SendMessageW(window,WM_KEYDOWN,'A',0); SendMessageW(window,WM_KEYUP,'A',0);
   require(events.size()==2 && events[0].kind==Input::Key && events[0].code==4 && events[0].down && !events[1].down,"Windows virtual-key fallback did not forward ordinary typing");
+  events.clear();
+  for(const auto scan:{0x2a,0x36}) {
+    SendMessageW(window,WM_KEYDOWN,VK_SHIFT,static_cast<LPARAM>(scan)<<16);
+    SendMessageW(window,WM_KEYDOWN,'A',0x1eLL<<16);
+    SendMessageW(window,WM_KEYUP,'A',(0x1eLL<<16)|(1LL<<30)|(1LL<<31));
+    SendMessageW(window,WM_KEYUP,VK_SHIFT,(static_cast<LPARAM>(scan)<<16)|(1LL<<30)|(1LL<<31));
+  }
+  require(events.size()==8 && events[0].code==225 && events[0].down && events[1].code==4 && events[1].down && !events[2].down && events[3].code==225 && !events[3].down
+    && events[4].code==229 && events[4].down && events[5].code==4 && events[5].down && !events[6].down && events[7].code==229 && !events[7].down,
+    "Windows must forward both Shift+A chords in press/release order");
+  require(windowsHid(VK_LSHIFT,0)==225 && windowsHid(VK_RSHIFT,0)==229,"Scan-less Shift messages lost their side");
   require(windowsHid(VK_RETURN,(0x1cLL<<16)|(1LL<<24))==88,"Keypad Enter lost its extended scan code");
   SendMessageW(window,WM_KILLFOCUS,0,0);
   require(state.released && events.back().kind==Input::Reset,"Focus loss did not release remote keys/buttons");
