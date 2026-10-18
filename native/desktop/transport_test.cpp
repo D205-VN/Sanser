@@ -45,6 +45,29 @@ int main() {
     require(scheduler.pop(true)->frame==1, "video resumes after priority traffic");
     auto repair=scheduler.pop(true);
     require(repair && repair->repair && repair->bytes.front()==8,"repair follows realtime video");
+    {
+      TxScheduler busy;
+      require(busy.push(TxScheduler::Repair,{Bytes(1200,0x11),now,1}),"queue reference repair behind busy video");
+      for(unsigned i=0;i<8;++i) {
+        require(busy.push(TxScheduler::Video,{Bytes(100,0x22),now,2+i}),"continuously replenish fresh video");
+        require(busy.nextVideoBytes()==100,"pacer sizes the selected fresh datagram");
+        auto fresh=busy.pop(true);
+        require(fresh && !fresh->repair,"reserve eight fresh opportunities per pending repair");
+      }
+      require(busy.push(TxScheduler::Video,{Bytes(100,0x22),now,10}),"keep the fresh lane nonempty");
+      require(busy.nextVideoBytes()==1200,"pacer must reserve credit for the selected larger repair");
+      require(!busy.pop(false),"repair fairness cannot bypass the wire pacer");
+      require(busy.push(TxScheduler::Control,{{0x33},now,0}),"control can preempt due repair");
+      require(busy.push(TxScheduler::Audio,{{0x44},now,0}),"audio can preempt due repair");
+      require(busy.pop(false)->bytes.front()==0x33 && busy.pop(false)->audio,"control and audio remain ahead of repair");
+      auto recovered=busy.pop(true);
+      require(recovered && recovered->repair,"a reference repair cannot starve behind continuous fresh video");
+      require(busy.pop(true)->frame==10,"fresh video resumes immediately after one repair slot");
+      require(busy.push(TxScheduler::Repair,{{0x55},now,11}),"queue independent recovery work");
+      require(busy.push(TxScheduler::Video,{{0x66},now,12}),"queue disposable realtime work");
+      busy.clearRealtimeVideo();
+      require(busy.pop(true)->repair,"dropping an expired fresh chain must preserve already requested repairs");
+    }
     require(!scheduler.push(TxScheduler::Video, {Bytes(6*1024*1024),now,2}), "video lane memory bounded");
     require(scheduler.push(TxScheduler::InputLane, {{7},now,0}), "video overflow cannot consume key-up capacity");
     const std::string token(48,'a'); PacketCodec host(token,true),client(token,false),wrong(std::string(48,'b'),false);
@@ -107,6 +130,35 @@ int main() {
     Bytes frame{0,0,7,128,0,0,4,56}; frame.resize(2508,77); h.frameId=1; h.flags=snv2::kFlagKeyFrame;
     Reassembler frames; require(!frames.push(h,fragment(frame,2)),"partial frame"); require(!frames.push(h,fragment(frame,0)),"out of order partial"); require(!frames.push(h,fragment(frame,0)),"duplicate fragment"); auto ready=frames.push(h,fragment(frame,1)); require(ready && ready->width==1920 && ready->height==1080 && ready->keyframe && ready->data==Bytes(2500,77),"reassembled frame");
     require(!frames.push(h,fragment(frame,0)),"completed frame cannot replay"); h.frameId=2; auto malformed=fragment(frame,0); malformed[2]=255; require(!frames.push(h,malformed),"invalid fragment count");
+    {
+      Reassembler receiving; TxScheduler sending;
+      Bytes idr{0,0,7,128,0,0,4,56}; idr.resize(64008,0x3c);
+      auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      for(unsigned index=0;index<(idr.size()+999)/1000;++index)
+        if(index!=7) require(!receiving.push(header,fragment(idr,index)),"IDR remains incomplete after one dropped datagram");
+      Bytes predicted{0,0,7,128,0,0,4,56}; predicted.resize(3508,0x4d);
+      for(unsigned id=2;id<=5;++id) {
+        header.frameId=id; header.flags=0;
+        for(unsigned index=0;index<(predicted.size()+999)/1000;++index)
+          require(!receiving.push(header,fragment(predicted,index)),"dependent P-pictures wait for the damaged reference");
+      }
+      require(sending.push(TxScheduler::Repair,{fragment(idr,7),now,1}),"queue the missing IDR fragment for retransmission");
+      bool recovered=false;
+      for(unsigned i=0;i<32 && !recovered;++i) {
+        require(sending.push(TxScheduler::Video,{Bytes(1000,0x5e),now,6+i}),"new video keeps the realtime lane busy during repair");
+        auto outgoing=sending.pop(true);
+        if(!outgoing->repair) continue;
+        header.frameId=1; header.flags=snv2::kFlagKeyFrame|snv2::kFlagRetransmitted;
+        const auto restored=receiving.push(header,outgoing->bytes);
+        require(restored && restored->id==1 && restored->data==Bytes(64000,0x3c),"bounded repair restores the original IDR while new video is queued");
+        for(unsigned id=2;id<=5;++id) {
+          const auto dependent=receiving.take();
+          require(dependent && dependent->id==id && !dependent->keyframe && dependent->data==Bytes(3500,0x4d),"repair immediately releases the preserved dependent P-chain");
+        }
+        recovered=true;
+      }
+      require(recovered,"continuous fresh traffic must not starve recovery and freeze a complete P-chain");
+    }
     {
       Reassembler reordered; auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
       require(!reordered.push(header,fragment(frame,0)) && !reordered.push(header,fragment(frame,2)),"IDR is missing its middle fragment");

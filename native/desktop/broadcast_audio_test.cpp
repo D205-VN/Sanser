@@ -57,6 +57,35 @@ int main() {
     require(received[1]>healthy+10 && videos[0]>picture,"Mute must preserve other viewers' sound and this viewer's video");
     viewers[0]->setAudioMuted(false); send(40);
     require(waitFor([&] { return received[0]>muted+10; }),"Unmute must clear old playout and resume within the same session");
+    {
+      // The real host pumps viewer health throughout capture. Exercise longer
+      // than its six-second congestion threshold, with a paced desktop-sized
+      // IDR and dependent P-pictures instead of only tiny independent frames.
+      const auto began=Clock::now(); auto nextAudio=began,nextVideo=began;
+      std::array<unsigned,3> progress{}; std::array<Clock::time_point,3> progressed{};
+      progressed.fill(began);
+      for(unsigned i=0;i<3;++i) progress[i]=videos[i].load();
+      unsigned frame=0;
+      while(Clock::now()-began<std::chrono::seconds(9)) {
+        const auto current=Clock::now();
+        group.updateHealth(current);
+        if(current>=nextAudio) { group.audio(signal); nextAudio=current+std::chrono::milliseconds(5); }
+        if(current>=nextVideo) {
+          const bool key=group.takeKeyframeRequest() || frame%60==0;
+          group.publish(Frame{Bytes(key ? 256*1024 : 36000,static_cast<std::uint8_t>(frame)),1920,1080,key});
+          ++frame; nextVideo=current+std::chrono::microseconds(16667);
+        }
+        for(unsigned i=0;i<3;++i) {
+          const auto count=videos[i].load();
+          if(count>progress[i]) { progress[i]=count; progressed[i]=current; }
+          require(current-progressed[i]<std::chrono::seconds(2),"group video must keep changing while Opus/PCM and health feedback are active");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      for(const auto& peer:group.stats())
+        require(peer.videoState=="active" && peer.pauses==0,"healthy paced audiovisual viewers must not enter a false video-only suspension");
+      std::cout<<"Group audiovisual continuity: nine seconds of health updates, desktop-sized IDRs and dependent P-pictures passed\n";
+    }
     viewers[1]->stop(); group.remove("1"); const auto survivor=received[0].load();
     send(30);
     require(waitFor([&] { return received[0]>survivor+10; }),"One viewer closing must not stop group audio");

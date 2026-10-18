@@ -600,6 +600,11 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
                 // Legacy Windows capture otherwise defaults to a 250 ms
                 // screenshot interval, overriding the requested stream FPS.
                 args.extend(["--interval-ms", "0", "--no-stream-cursor"].map(str::to_owned));
+                // In multiplexed UDP mode the legacy host still needs its
+                // explicit audio-capture opt-in, targeting the video socket.
+                if request.audio_enabled {
+                    args.extend(["--audio-udp-connect".into(), host_endpoint(request, port)?]);
+                }
             }
             if let Some(sharing) = sharing {
                 args.extend([
@@ -635,6 +640,10 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             }
             if cross_platform {
                 snv2_args(&mut args, request);
+            } else if !request.audio_enabled {
+                args.push("--disable-audio".into());
+            } else if request.audio_muted {
+                args.push("--audio-muted".into());
             }
             if request.ultra_low_latency {
                 args.push("--ultra-low-latency".into());
@@ -1464,6 +1473,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_audio_launches_capture_and_respects_viewer_mute() -> Result<(), DesktopError> {
+        let mut host = request(EngineKind::Host);
+        host.audio_enabled = true;
+        let args = build_args(&host)?;
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--audio-udp-connect", "192.0.2.10:50000"])
+        );
+        host.audio_enabled = false;
+        assert!(
+            !build_args(&host)?
+                .iter()
+                .any(|arg| arg == "--audio-udp-connect")
+        );
+        let mut client = request(EngineKind::Client);
+        client.audio_enabled = false;
+        assert!(
+            build_args(&client)?
+                .iter()
+                .any(|arg| arg == "--disable-audio")
+        );
+        client.audio_enabled = true;
+        client.audio_muted = true;
+        assert!(
+            build_args(&client)?
+                .iter()
+                .any(|arg| arg == "--audio-muted")
+        );
+        client.audio_muted = false;
+        assert!(
+            !build_args(&client)?
+                .iter()
+                .any(|arg| arg == "--disable-audio" || arg == "--audio-muted")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn host_auto_codec_uses_compatible_h264_and_bounded_ports() -> Result<(), DesktopError> {
         let args = build_args(&request(EngineKind::Host))?;
         assert!(
@@ -1474,11 +1521,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--udp-connect", "192.0.2.10:50000"])
         );
-        assert!(
-            !args
-                .iter()
-                .any(|arg| arg == "--control-connect" || arg == "--audio-udp-connect")
-        );
+        assert!(!args.iter().any(|arg| arg == "--control-connect"));
         Ok(())
     }
 

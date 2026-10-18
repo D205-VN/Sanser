@@ -56,6 +56,20 @@ int main() {
       }
     }
     require(began && gaps==0,"batched 10ms capture with small arrival jitter produced repeated silence");
+    // A 16ms producer wake can deliver three/four decoded5ms blocks together,
+    // while a 10ms WASAPI callback consumes two. That cadence alone must not
+    // be treated as corruption or require increasing the existing15ms reserve.
+    AudioQueue batchedDevice(3); bool deviceStarted=false; unsigned deviceGaps=0,nextDecodedAt=10;
+    for(unsigned ms=0;ms<3000;++ms) {
+      if(ms%16==0) while(nextDecodedAt<=ms) { batchedDevice.push(input,now+std::chrono::milliseconds(ms)); nextDecodedAt+=5; }
+      if(ms%10==0) for(unsigned block=0;block<2;++block) {
+        if(batchedDevice.popBlock(now+std::chrono::milliseconds(ms))) deviceStarted=true;
+        else if(deviceStarted) ++deviceGaps;
+      }
+    }
+    const auto batchedStats=batchedDevice.stats();
+    require(deviceStarted && deviceGaps==0 && batchedStats.underflows==0 && batchedStats.capacityDrops==0 && batchedStats.staleDrops==0,
+            "normal16ms producer batches and10ms device periods caused repeated PCM gaps");
     sanser::AudioDeviceBudget budget;
     for(unsigned i=0;i<8;++i) { require(budget.fits(48000,120),"20ms output rejected early"); budget.submitted(120); }
     require(!budget.fits(48000,120),"hardware queue exceeded 20ms budget");
@@ -89,6 +103,40 @@ int main() {
     require(shortBlock[0]==3300 && shortBlock.back()==6400,"transition jumped at a short packet boundary");
     shortBlock.fill(9600); shortRamp.process(shortBlock.data(),32,2,96000,false);
     require(shortBlock[0]==6500 && shortBlock.back()==9600,"transition failed to finish across packets");
+    // Virtual10ms device callbacks: a stalled device can see a full bounded
+    // queue without ever observing an empty pop. Dropped PCM still needs the
+    // same1ms edge ramp used for underflow. This reproduces a24000-unit
+    // single-sample click with the previous !samples||wasSilent condition.
+    AudioQueue stalledDevice(1); sanser::AudioContinuity deviceContinuity;
+    auto renderBlock=[&](AudioQueue::Clock::time_point at) {
+      auto block=stalledDevice.popBlock(at);
+      require(block.has_value(),"virtual device unexpectedly ran out of PCM");
+      deviceContinuity.process(block->samples.data(),audioFrames,audioChannels,audioRate,block->discontinuity);
+      return *block;
+    };
+    AudioSamples positive,negative; positive.fill(12000); negative.fill(-12000);
+    stalledDevice.push(positive,now);
+    auto deviceBlock=renderBlock(now); require(deviceBlock.samples.back()==12000,"initial PCM ramp did not finish");
+    for(unsigned i=1;i<=9;++i) stalledDevice.push(negative,now+std::chrono::milliseconds(5*i));
+    deviceBlock=renderBlock(now+std::chrono::milliseconds(45));
+    require(deviceBlock.discontinuity && deviceBlock.samples.front()==11500 && deviceBlock.samples[94]==-12000,
+            "capacity eviction caused an abrupt PCM edge after a device stall");
+    deviceBlock=renderBlock(now+std::chrono::milliseconds(50));
+    require(!deviceBlock.discontinuity && deviceBlock.samples.front()==-12000,"continuous PCM was repeatedly ramped");
+    stalledDevice.clear();
+    stalledDevice.push(positive,now+std::chrono::milliseconds(51));
+    deviceBlock=renderBlock(now+std::chrono::milliseconds(51));
+    require(deviceBlock.discontinuity && deviceBlock.samples.front()==-11500,"generation reset lost the PCM discontinuity");
+    stalledDevice.push(positive,now+std::chrono::milliseconds(52));
+    stalledDevice.push(negative,now+std::chrono::milliseconds(100));
+    deviceBlock=renderBlock(now+std::chrono::milliseconds(101));
+    require(deviceBlock.discontinuity && deviceBlock.samples.front()==11500,"freshness eviction caused an abrupt PCM edge");
+    auto queueStats=stalledDevice.stats();
+    require(queueStats.capacityDrops==1 && queueStats.staleDrops==1 && queueStats.resets==1 && queueStats.reprimes==1 && queueStats.underflows==0,
+            "playback queue counters did not distinguish reset/overflow/freshness");
+    require(!stalledDevice.popBlock(now+std::chrono::milliseconds(106)),"empty virtual device did not underflow");
+    require(!stalledDevice.popBlock(now+std::chrono::milliseconds(111)),"idle virtual device unexpectedly produced PCM");
+    require(stalledDevice.stats().underflows==1,"idle silence counted as repeated playback underruns");
     TxScheduler scheduler;
     for(unsigned i=0;i<10;++i) scheduler.push(TxScheduler::Audio,{{static_cast<std::uint8_t>(i)},now,0});
     scheduler.push(TxScheduler::Video,{{99},now,1});

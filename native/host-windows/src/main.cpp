@@ -5340,6 +5340,13 @@ private:
   std::atomic<HANDLE> wakeEvent_{nullptr};
   std::thread worker_;
 };
+
+// Keep the capture opt-in shared by production and its launcher regression.
+// The callback is injectable so tests can use synthetic PCM instead of WASAPI.
+template<class Start>
+void startLegacyAudioSender(const Options& options,Start start) {
+  if(!options.audioUdpConnect.empty()) start(options.audioUdpConnect);
+}
 #endif
 
 void writePipeFrame(const FrameBgra& frame) {
@@ -5606,12 +5613,12 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   }
 
 #ifdef _WIN32
-  if (!options.audioUdpConnect.empty()) {
+  startLegacyAudioSender(options,[&](const std::string& audioEndpoint) {
     if (!winsock) {
       winsock = std::make_unique<WinsockRuntime>();
     }
-    audioSender = std::make_unique<WasapiLoopbackAudioSender>(options.audioUdpConnect, mediaCrypto);
-  }
+    audioSender = std::make_unique<WasapiLoopbackAudioSender>(audioEndpoint, mediaCrypto);
+  });
 #else
   if (!options.audioUdpConnect.empty()) {
     throw std::runtime_error("--audio-udp-connect is currently implemented for Windows host builds.");
@@ -7347,13 +7354,27 @@ int main(int argc, char** argv) {
       if(bind(listener.fd,reinterpret_cast<sockaddr*>(&address),sizeof(address))) throw std::runtime_error("Audio wire test bind");
       int size=sizeof(address); getsockname(listener.fd,reinterpret_cast<sockaddr*>(&address),&size);
       DWORD timeout=1000; setsockopt(listener.fd,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
-      const std::string endpoint="127.0.0.1:"+std::to_string(ntohs(address.sin_port));
+      std::string endpoint="127.0.0.1:"+std::to_string(ntohs(address.sin_port));
       auto crypto=std::make_shared<MediaCryptoState>(std::string(48,'s')); crypto->rotateForNonce("synthetic-audio-nonce-one");
-      UdpAudioClient sender(endpoint,crypto);
+      unsigned starts=0;
+      std::unique_ptr<UdpAudioClient> sender;
+      const auto launch=[&](const std::string& target) {
+        ++starts;
+        sender=std::make_unique<UdpAudioClient>(target,crypto);
+      };
+      // Parse real launcher options and exercise the production capture opt-in
+      // with synthetic PCM. No desktop capture or audio device is opened.
+      char executable[]="sanser-host-windows",flag[]="--audio-udp-connect";
+      char* disabledArgs[]={executable};
+      startLegacyAudioSender(parseOptions(1,disabledArgs),launch);
+      if(starts || sender) throw std::runtime_error("Disabled legacy audio started capture");
+      char* enabledArgs[]={executable,flag,endpoint.data()};
+      startLegacyAudioSender(parseOptions(3,enabledArgs),launch);
+      if(starts!=1 || !sender) throw std::runtime_error("Legacy audio launcher failed to start the configured sender");
       std::array<float,480> samples{}; for(std::size_t i=0;i<samples.size();i+=2) { samples[i]=0.25F; samples[i+1]=-0.25F; }
       for(unsigned epoch=0;epoch<2;++epoch) {
         if(epoch) crypto->rotateForNonce("synthetic-audio-nonce-two");
-        if(sender.sendStereoFloat(48000,samples.data(),240,true,true)!=1) throw std::runtime_error("Fixed Opus block missing");
+        if(sender->sendStereoFloat(48000,samples.data(),240,true,true)!=1) throw std::runtime_error("Fixed Opus block missing");
         std::array<std::uint8_t,1400> packet{}; const int received=recv(listener.fd,reinterpret_cast<char*>(packet.data()),static_cast<int>(packet.size()),0);
         if(received<=static_cast<int>(sizeof(AudioAuthenticatedPacketHeader))) throw std::runtime_error("Opus wire receive timeout");
         AudioAuthenticatedPacketHeader header; std::memcpy(&header,packet.data(),sizeof(header));
@@ -7366,7 +7387,7 @@ int main(int argc, char** argv) {
         sanser::audio::Decoder decoder;
         if(!decoded || decoded->sequence!=1 || !decoder.decode(decoded->payload)) throw std::runtime_error("Opus audio payload cannot decode");
       }
-      if(sender.sendStereoFloat(48000,samples.data(),240,true,false)!=1) throw std::runtime_error("PCM fallback block missing");
+      if(sender->sendStereoFloat(48000,samples.data(),240,true,false)!=1) throw std::runtime_error("PCM fallback block missing");
       std::array<char,1400> pcm{}; if(recv(listener.fd,pcm.data(),static_cast<int>(pcm.size()),0)<=0 || std::memcmp(pcm.data(),"SNA4",4)) throw std::runtime_error("PCM fallback format changed");
       std::cout<<"Legacy Opus: authenticated UDP, epoch reset, 5ms decode and PCM fallback passed\n";
       return 0;

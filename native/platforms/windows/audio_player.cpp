@@ -65,9 +65,9 @@ void AudioPlayer::run() {
         // Windows timer tick. Refill all available blocks up to 20ms, so a
         // normal 10ms device period cannot underrun a one-block 5ms queue.
         while(padding+audioFrames<=targetFrames) {
-          auto samples=queue_.pop(); BYTE* target=nullptr;
-          AudioSamples output=samples.value_or(AudioSamples{});
-          continuity.process(output.data(),audioFrames,audioChannels,audioRate,!samples || wasSilent);
+          auto samples=queue_.popBlock(); BYTE* target=nullptr;
+          AudioSamples output=samples ? std::move(samples->samples) : AudioSamples{};
+          continuity.process(output.data(),audioFrames,audioChannels,audioRate,!samples || wasSilent || samples->discontinuity);
           wasSilent=!samples;
           checkAudio(render->GetBuffer(audioFrames,&target),"Audio output buffer");
           std::memcpy(target,output.data(),output.size()*sizeof(std::int16_t));

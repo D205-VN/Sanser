@@ -378,7 +378,7 @@ void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream
   queued.input=reliable || type==snv2::PacketType::MouseMove;
   if (type == snv2::PacketType::MouseMove) tx_.latestInput(std::move(queued));
   else if (!tx_.push(lane, std::move(queued))) {
-    if (lane == TxScheduler::Video) { tx_.clearVideo(); outgoingNeedsKeyframe_ = true; ++videoQueueDrops_; }
+    if (lane == TxScheduler::Video) { tx_.clearRealtimeVideo(); outgoingNeedsKeyframe_ = true; ++videoQueueDrops_; }
     else if(lane!=TxScheduler::Repair) { stopReason_=4; running_ = false; } // Stop/reset rather than silently losing key-up.
     return;
   }
@@ -820,7 +820,7 @@ void Peer::sendLoop() {
         }
         if (packet->frame && ((packet->deadline!=Clock::time_point{} && now>packet->deadline) ||
             (packet->deadline==Clock::time_point{} && now-packet->queued>std::chrono::milliseconds(100)))) {
-          if(!packet->repair) { tx_.clearVideo(); outgoingNeedsKeyframe_=true; ++videoQueueDrops_; }
+          if(!packet->repair) { tx_.clearRealtimeVideo(); outgoingNeedsKeyframe_=true; ++videoQueueDrops_; }
           continue;
         }
       }

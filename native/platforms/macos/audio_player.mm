@@ -13,9 +13,9 @@ struct AudioPlayer::State {
     auto& self=*static_cast<State*>(context);
     auto* target=static_cast<std::int16_t*>(buffer->mAudioData);
     for(unsigned block=0;block<2;++block) {
-      auto samples=self.queue.pop();
-      auto pcm=samples.value_or(AudioSamples{});
-      self.continuity.process(pcm.data(),audioFrames,audioChannels,audioRate,!samples || self.wasSilent);
+      auto samples=self.queue.popBlock();
+      auto pcm=samples ? std::move(samples->samples) : AudioSamples{};
+      self.continuity.process(pcm.data(),audioFrames,audioChannels,audioRate,!samples || self.wasSilent || samples->discontinuity);
       self.wasSilent=!samples;
       std::memcpy(target+block*pcm.size(),pcm.data(),pcm.size()*sizeof(std::int16_t));
     }
@@ -48,4 +48,5 @@ AudioPlayer::AudioPlayer(bool enabled) {
 AudioPlayer::~AudioPlayer()=default;
 void AudioPlayer::submit(AudioSamples samples) { if(state_) state_->queue.push(std::move(samples)); }
 void AudioPlayer::reset() { if(state_) state_->queue.clear(); }
+AudioQueue::Stats AudioPlayer::stats() const { return state_ ? state_->queue.stats() : AudioQueue::Stats{}; }
 }

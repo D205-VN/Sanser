@@ -53,24 +53,37 @@ private:
 class AudioQueue {
 public:
   using Clock=std::chrono::steady_clock;
+  struct PlayoutBlock { AudioSamples samples; bool discontinuity=false; };
+  struct Stats { std::uint64_t underflows=0,capacityDrops=0,staleDrops=0,reprimes=0,resets=0; };
   explicit AudioQueue(unsigned startupBlocks=1):startupBlocks_(std::clamp(startupBlocks,1U,8U)) {}
   void push(AudioSamples samples,Clock::time_point now=Clock::now()) {
     std::lock_guard lock(mutex_);
-    if(blocks_.size()>=8) blocks_.pop_front();
+    if(blocks_.size()>=8) { blocks_.pop_front(); discontinuity_=true; ++stats_.capacityDrops; }
     blocks_.push_back({std::move(samples),now});
   }
   std::optional<AudioSamples> pop(Clock::time_point now=Clock::now()) {
-    std::lock_guard lock(mutex_);
-    while(!blocks_.empty() && now-blocks_.front().queued>std::chrono::milliseconds(40)) blocks_.pop_front();
-    if(blocks_.empty()) { started_=false; return {}; }
-    if(!started_ && blocks_.size()<startupBlocks_ && now-blocks_.front().queued<std::chrono::milliseconds(5*startupBlocks_)) return {};
-    started_=true;
-    auto samples=std::move(blocks_.front().samples); blocks_.pop_front(); return samples;
+    auto block=popBlock(now);
+    if(!block) return {};
+    return std::move(block->samples);
   }
-  void clear() { std::lock_guard lock(mutex_); blocks_.clear(); started_=false; }
+  // Overflow, stale eviction and a generation/device reset skip PCM without
+  // necessarily returning an empty block. Preserve that edge for the player:
+  // otherwise its existing underflow ramp cannot prevent an audible click.
+  std::optional<PlayoutBlock> popBlock(Clock::time_point now=Clock::now()) {
+    std::lock_guard lock(mutex_);
+    while(!blocks_.empty() && now-blocks_.front().queued>std::chrono::milliseconds(40)) { blocks_.pop_front(); discontinuity_=true; ++stats_.staleDrops; }
+    if(blocks_.empty()) { if(started_) ++stats_.underflows; started_=false; discontinuity_=true; return {}; }
+    if(!started_ && blocks_.size()<startupBlocks_ && now-blocks_.front().queued<std::chrono::milliseconds(5*startupBlocks_)) return {};
+    if(!started_ && everStarted_) ++stats_.reprimes;
+    started_=everStarted_=true;
+    PlayoutBlock block{std::move(blocks_.front().samples),discontinuity_};
+    blocks_.pop_front(); discontinuity_=false; return block;
+  }
+  void clear() { std::lock_guard lock(mutex_); blocks_.clear(); started_=false; discontinuity_=true; ++stats_.resets; }
+  Stats stats() const { std::lock_guard lock(mutex_); return stats_; }
 private:
-  unsigned startupBlocks_; bool started_=false;
+  unsigned startupBlocks_; bool started_=false,everStarted_=false,discontinuity_=true;
   struct Block { AudioSamples samples; Clock::time_point queued; };
-  std::mutex mutex_; std::deque<Block> blocks_;
+  mutable std::mutex mutex_; std::deque<Block> blocks_; Stats stats_;
 };
 }

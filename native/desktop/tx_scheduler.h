@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -45,18 +46,22 @@ public:
         auto packet = std::move(latestMove_); latestMove_.reset(); return packet;
       }
     }
-    if (videoDue && !queues_[Video].empty()) return take(Video);
-    if (videoDue && !queues_[Repair].empty()) return take(Repair);
+    if (videoDue && hasVideo()) {
+      const auto lane=nextVideoLane();
+      if(lane==Repair) freshSinceRepair_=0;
+      else freshSinceRepair_=std::min(8U,freshSinceRepair_+1);
+      return take(lane);
+    }
     return std::nullopt;
   }
   bool hasVideo() const { return !queues_[Video].empty() || !queues_[Repair].empty(); }
-  std::size_t nextVideoBytes() const { return !queues_[Video].empty() ? queues_[Video].front().bytes.size() : !queues_[Repair].empty() ? queues_[Repair].front().bytes.size() : 0; }
+  std::size_t nextVideoBytes() const { return hasVideo() ? queues_[nextVideoLane()].front().bytes.size() : 0; }
   std::size_t queuedVideoBytes() const { return bytes_[Video]; }
   bool hasPriority() const {
     return latestMove_ || !queues_[Control].empty() || !queues_[InputLane].empty() || !queues_[Audio].empty();
   }
   void clearRealtimeVideo() { queues_[Video].clear(); bytes_[Video]=0; }
-  void clearVideo() { clearRealtimeVideo(); queues_[Repair].clear(); bytes_[Repair]=0; }
+  void clearVideo() { clearRealtimeVideo(); queues_[Repair].clear(); bytes_[Repair]=0; freshSinceRepair_=0; }
   void clearInput() { queues_[InputLane].clear(); bytes_[InputLane]=0; latestMove_.reset(); }
   void acknowledgeInput(std::uint64_t contiguous,std::uint64_t mask) {
     auto& lane=queues_[InputLane];
@@ -68,6 +73,13 @@ public:
     }
   }
 private:
+  Lane nextVideoLane() const {
+    // A complete reference picture can be missing one fragment while its
+    // dependent pictures keep the realtime lane continuously busy. Give repair
+    // one paced slot after at most eight fresh datagrams, preserving all higher
+    // priority lanes and the existing shared wire budget.
+    return !queues_[Repair].empty() && (queues_[Video].empty() || freshSinceRepair_>=8) ? Repair : Video;
+  }
   Packet take(std::size_t lane) {
     auto value = std::move(queues_[lane].front()); queues_[lane].pop_front();
     bytes_[lane] -= value.bytes.size(); return value;
@@ -75,5 +87,6 @@ private:
   std::array<std::deque<Packet>, Count> queues_;
   std::array<std::size_t, Count> bytes_{};
   std::optional<Packet> latestMove_;
+  unsigned freshSinceRepair_=0;
 };
 }

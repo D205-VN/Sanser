@@ -184,6 +184,7 @@ void printHelp() {
     << "  --audio-device UID Output audio device UID; default uses the current macOS output\n"
     << "  --audio-volume N Client playback volume 0.0-1.0, default 1.0\n"
     << "  --audio-muted    Start client audio muted\n"
+    << "  --disable-audio  Disable client audio output, including multiplexed UDP\n"
     << "  --list-audio-devices Print macOS output audio device UIDs\n"
     << "  --max-packets N   Stop SNV decode after N packets\n"
     << "  --log-input       Print each native input event for debugging\n"
@@ -4921,7 +4922,16 @@ struct AudioOutputSettings {
   std::string deviceUid;
   double volume = 1.0;
   bool muted = false;
+  bool enabled = true;
 };
+
+// Port zero selects the audio demux queue in single-socket UDP mode. It
+// disables only a dedicated listener, not playback of multiplexed audio.
+template<class Start>
+void startAudioListener(const AudioOutputSettings& settings,bool udpVideo,
+                        std::uint16_t controlPort,std::uint16_t audioPort,Start start) {
+  if(settings.enabled && (audioPort>0 || (udpVideo && controlPort==0))) start();
+}
 
 class AudioQueuePcmPlayer {
 public:
@@ -8331,13 +8341,13 @@ int runVideoRenderTcp(std::uint16_t port,
     gNativeInputSender = inputSender;
     auto avSyncClock = std::make_shared<AvSyncClock>();
 
-    if (audioPort > 0) {
+    startAudioListener(audioSettings,udpVideo,controlPort,audioPort,[&] {
       auto audioPlayer = std::make_shared<AudioQueuePcmPlayer>(audioSettings);
       std::thread audioWorker([audioPort, audioJitterMs, audioPlayer, avSyncClock]() {
         listenUdpAudio(audioPort, audioJitterMs, audioPlayer, avSyncClock);
       });
       audioWorker.detach();
-    }
+    });
 
     void* rendererContext = (__bridge_retained void*)renderer;
     std::string captureUdpConnect = udpConnect;
@@ -8460,6 +8470,7 @@ struct Options {
   double audioJitterMs = 24.0;
   double audioVolume = 1.0;
   bool audioMuted = false;
+  bool audioEnabled = true;
   double seconds = 5;
   std::string snvFile;
   std::string clipboardText;
@@ -8526,6 +8537,8 @@ Options parseOptions(int argc, char** argv) {
     } else if (arg == "--audio-volume") {
       if (i + 1 >= argc) throw std::runtime_error("Missing value for --audio-volume");
       options.audioVolume = std::clamp(std::atof(argv[++i]), 0.0, 1.0);
+    } else if (arg == "--disable-audio") {
+      options.audioEnabled = false;
     } else if (arg == "--audio-muted" || arg == "--audio-mute") {
       options.audioMuted = true;
     } else if (arg == "--list-audio-devices") {
@@ -8639,7 +8652,7 @@ int main(int argc, char** argv) {
                                controlPort,
                                audioPort,
                                options.audioJitterMs,
-                               AudioOutputSettings{options.audioDeviceUid, options.audioVolume, options.audioMuted},
+                               AudioOutputSettings{options.audioDeviceUid, options.audioVolume, options.audioMuted,options.audioEnabled},
                                options.udpVideo,
                                options.maxPackets,
                                options.fullscreen,

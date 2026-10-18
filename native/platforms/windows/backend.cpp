@@ -518,6 +518,7 @@ int runWindows(bool host,int argc,char** argv) {
       if(converted) line<<" conversionAvgMs="<<conversionUs.load()/1000.0/converted;
       if(state.painted) line<<" paintAvgMs="<<state.paintUs/1000.0/state.painted<<" decodedToPaintAvgMs="<<state.decodedToPaintUs/1000.0/state.painted;
       writeTelemetry(line);
+      if(options.audio) writeAudioOutputHealth(audio.stats());
       lastProgress=Clock::now();
     }
     const auto wake=MsgWaitForMultipleObjectsEx(1,&state.frameReady,100,QS_ALLINPUT,MWMO_INPUTAVAILABLE);

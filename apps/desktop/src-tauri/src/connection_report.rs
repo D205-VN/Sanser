@@ -22,6 +22,7 @@ const SOURCES: &[&str] = &[
     "SNV2_HOST_TIMING",
     "SNV2_VIDEO_HEALTH",
     "SNV2_AUDIO_HEALTH",
+    "SNV2_AUDIO_OUTPUT_HEALTH",
     "SNA1_AUDIO_STATS",
     "SNV2_INPUT_HEALTH",
     "SNV2_CONTROL_TIMING",
@@ -76,6 +77,11 @@ const FIELDS: &[&str] = &[
     "opusErrors",
     "opusTxPackets",
     "opusTxBytes",
+    "pcmUnderflows",
+    "pcmCapacityDrops",
+    "pcmStaleDrops",
+    "pcmReprimes",
+    "pcmResets",
     "ready",
     "running",
     "stopReason",
@@ -687,6 +693,12 @@ mod tests {
         assert_eq!(sample.values["opusPlc"], 3.0);
         assert!(!sample.values.contains_key("token"));
         assert!(!sample.values.contains_key("samples"));
+        let output = parse_sample(b"SNV2_AUDIO_OUTPUT_HEALTH pcmUnderflows=4 pcmCapacityDrops=1 pcmStaleDrops=2 pcmReprimes=3 pcmResets=1 samples=456 device=123 token=789").unwrap();
+        assert_eq!(output.values.len(), 5);
+        assert_eq!(output.values["pcmUnderflows"], 4.0);
+        assert!(!output.values.contains_key("samples"));
+        assert!(!output.values.contains_key("device"));
+        assert!(!output.values.contains_key("token"));
     }
     #[test]
     fn live_recovery_evidence_is_bound_to_the_report_session_without_raw_content() {

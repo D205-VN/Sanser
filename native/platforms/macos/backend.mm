@@ -669,6 +669,7 @@ int runMac(bool host,int argc,char** argv) {
           if(timing.samples) line<<" decodeWorkAvgMs="<<timing.workUs/1000.0/timing.samples
             <<" decodeQueueAvgMs="<<timing.queueUs/1000.0/timing.samples<<" decodeQueueMaxMs="<<timing.queueMaxUs/1000.0;
           writeTelemetry(line);
+          if(options.audio) writeAudioOutputHealth(audio.stats());
           lastHealth=Clock::now();
         }
       }

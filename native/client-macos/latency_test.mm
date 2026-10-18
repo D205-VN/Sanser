@@ -25,6 +25,24 @@ int main() {
   @autoreleasepool {
     try {
       sanser::desktop::testMacRemoteView();
+      {
+        // Run the production launcher decision with a fake start callback;
+        // this test must never open an audio device or capture a real screen.
+        unsigned starts=0;
+        AudioOutputSettings enabled,disabled; disabled.enabled=false;
+        startAudioListener(enabled,true,0,0,[&] { ++starts; });
+        requireLatency(starts==1,"multiplexed UDP audio port zero must start the queue receiver");
+        startAudioListener(disabled,true,0,0,[&] { ++starts; });
+        startAudioListener(enabled,false,0,0,[&] { ++starts; });
+        startAudioListener(enabled,true,50001,0,[&] { ++starts; });
+        requireLatency(starts==1,"disabled or nonmultiplexed port zero must not open audio");
+        startAudioListener(enabled,false,50001,50002,[&] { ++starts; });
+        requireLatency(starts==2,"dedicated audio listener remains available");
+        char name[]="sanser-client-macos",disable[]="--disable-audio",mute[]="--audio-muted";
+        char* args[]={name,disable,mute};
+        const auto audioOptions=parseOptions(3,args);
+        requireLatency(!audioOptions.audioEnabled && audioOptions.audioMuted,"legacy viewer must parse disabled audio and muted playback separately");
+      }
       // Exercise the actual asynchronous UDP sender, demux timestamps and reply
       // parser. A timing receipt must not replace the original pong's T5/T6.
       {
