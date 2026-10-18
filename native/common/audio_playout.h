@@ -30,31 +30,45 @@ public:
   template<class Sample>
   void process(Sample* samples,std::size_t frames,unsigned channels,unsigned rate,bool gap) {
     if(!frames || !channels || channels>last_.size()) return;
-    const auto ramp=std::max<std::size_t>(1,rate/1000);
-    for(std::size_t frame=0;frame<frames;++frame) for(unsigned ch=0;ch<channels;++ch) {
-      const auto index=frame*channels+ch;
-      double value=samples[index];
-      if(!std::isfinite(value)) value=0;
-      if(gap && frame<ramp) value=last_[ch]+(value-last_[ch])*static_cast<double>(frame+1)/ramp;
-      samples[index]=static_cast<Sample>(value);
+    begin(rate,gap);
+    for(std::size_t frame=0;frame<frames;++frame) {
+      const auto gain=nextGain();
+      for(unsigned ch=0;ch<channels;++ch) {
+        const auto index=frame*channels+ch;
+        double value=samples[index];
+        if(!std::isfinite(value)) value=0;
+        if(gain<1) value=start_[ch]+(value-start_[ch])*gain;
+        samples[index]=static_cast<Sample>(value);
+      }
     }
     for(unsigned ch=0;ch<channels;++ch) last_[ch]=samples[(frames-1)*channels+ch];
   }
   void floats(std::uint8_t* bytes,std::size_t frames,unsigned channels,unsigned rate,bool gap) {
     if(!frames || !channels || channels>last_.size()) return;
-    const auto ramp=std::max<std::size_t>(1,rate/1000);
-    for(std::size_t frame=0;frame<frames;++frame) for(unsigned ch=0;ch<channels;++ch) {
-      auto* at=bytes+(frame*channels+ch)*sizeof(float);
-      float sample; std::memcpy(&sample,at,sizeof(sample));
-      double value=std::isfinite(sample) ? std::clamp(sample,-1.0F,1.0F) : 0.0;
-      if(gap && frame<ramp) value=last_[ch]+(value-last_[ch])*static_cast<double>(frame+1)/ramp;
-      sample=static_cast<float>(value); std::memcpy(at,&sample,sizeof(sample));
+    begin(rate,gap);
+    for(std::size_t frame=0;frame<frames;++frame) {
+      const auto gain=nextGain();
+      for(unsigned ch=0;ch<channels;++ch) {
+        auto* at=bytes+(frame*channels+ch)*sizeof(float);
+        float sample; std::memcpy(&sample,at,sizeof(sample));
+        double value=std::isfinite(sample) ? std::clamp(sample,-1.0F,1.0F) : 0.0;
+        if(gain<1) value=start_[ch]+(value-start_[ch])*gain;
+        sample=static_cast<float>(value); std::memcpy(at,&sample,sizeof(sample));
+      }
     }
     for(unsigned ch=0;ch<channels;++ch) {
       float sample; std::memcpy(&sample,bytes+((frames-1)*channels+ch)*sizeof(float),sizeof(sample)); last_[ch]=sample;
     }
   }
 private:
-  std::array<double,8> last_{};
+  void begin(unsigned rate,bool gap) {
+    if(gap) { start_=last_; ramp_=std::max<std::size_t>(1,rate/1000); used_=0; }
+  }
+  double nextGain() {
+    if(used_>=ramp_) return 1;
+    return static_cast<double>(++used_)/ramp_;
+  }
+  std::array<double,8> last_{},start_{};
+  std::size_t ramp_=0,used_=0;
 };
 }

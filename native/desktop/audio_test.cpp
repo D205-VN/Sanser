@@ -81,6 +81,14 @@ int main() {
     std::fill(floats.begin(),floats.end(),-0.5F); std::memcpy(floatBytes.data(),floats.data(),floatBytes.size());
     floatContinuity.floats(floatBytes.data(),240,2,48000,true); std::memcpy(floats.data(),floatBytes.data(),floatBytes.size());
     require(floats[0]>0.45F && floats[94]==-0.5F,"lost Legacy packet caused an abrupt PCM edge");
+    sanser::AudioContinuity shortRamp;
+    std::array<std::int16_t,64> shortBlock; shortBlock.fill(9600);
+    shortRamp.process(shortBlock.data(),32,2,96000,true);
+    require(shortBlock[0]==100 && shortBlock.back()==3200,"short packet did not start 1ms transition");
+    shortBlock.fill(9600); shortRamp.process(shortBlock.data(),32,2,96000,false);
+    require(shortBlock[0]==3300 && shortBlock.back()==6400,"transition jumped at a short packet boundary");
+    shortBlock.fill(9600); shortRamp.process(shortBlock.data(),32,2,96000,false);
+    require(shortBlock[0]==6500 && shortBlock.back()==9600,"transition failed to finish across packets");
     TxScheduler scheduler;
     for(unsigned i=0;i<10;++i) scheduler.push(TxScheduler::Audio,{{static_cast<std::uint8_t>(i)},now,0});
     scheduler.push(TxScheduler::Video,{{99},now,1});
