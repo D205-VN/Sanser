@@ -3,6 +3,7 @@
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
 #include "audio_player.h"
+#include "audio_playout.h"
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -18,6 +19,7 @@ struct ComRuntime {
   ~ComRuntime() { CoUninitialize(); }
 };
 struct AudioStop { IAudioClient* client; ~AudioStop() { client->Stop(); } };
+struct AudioEvent { HANDLE value=CreateEventW(nullptr,FALSE,FALSE,nullptr); ~AudioEvent() { if(value) CloseHandle(value); } };
 std::wstring endpointId(IMMDevice* device) {
   LPWSTR value=nullptr; checkAudio(device->GetId(&value),"Audio endpoint ID");
   std::wstring result(value); CoTaskMemFree(value); return result;
@@ -41,24 +43,36 @@ void AudioPlayer::run() {
       WAVEFORMATEX format{}; format.wFormatTag=WAVE_FORMAT_PCM; format.nChannels=audioChannels;
       format.nSamplesPerSec=audioRate; format.wBitsPerSample=16; format.nBlockAlign=audioChannels*2;
       format.nAvgBytesPerSec=audioRate*format.nBlockAlign;
-      checkAudio(client->Initialize(AUDCLNT_SHAREMODE_SHARED,AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM|AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,200000,0,&format,nullptr),"Initialize audio output");
+      checkAudio(client->Initialize(AUDCLNT_SHAREMODE_SHARED,AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM|AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY|AUDCLNT_STREAMFLAGS_EVENTCALLBACK,200000,0,&format,nullptr),"Initialize audio output");
+      AudioEvent event;
+      if(!event.value) throw std::runtime_error("Create audio output event failed");
+      checkAudio(client->SetEventHandle(event.value),"Set audio output event");
       UINT32 capacity=0; checkAudio(client->GetBufferSize(&capacity),"Audio buffer size");
       if(capacity<audioFrames) throw std::runtime_error("Audio endpoint buffer is smaller than one block");
       ComPtr<IAudioRenderClient> render;
       checkAudio(client->GetService(IID_PPV_ARGS(&render)),"Audio renderer");
-      checkAudio(client->Start(),"Start audio output"); AudioStop stop{client.Get()};
       queue_.clear();
+      const auto targetFrames=std::min<UINT32>(capacity,audioFrames*4);
+      BYTE* prime=nullptr; checkAudio(render->GetBuffer(targetFrames,&prime),"Prime audio output");
+      checkAudio(render->ReleaseBuffer(targetFrames,AUDCLNT_BUFFERFLAGS_SILENT),"Submit priming silence");
+      checkAudio(client->Start(),"Start audio output"); AudioStop stop{client.Get()};
+      sanser::AudioContinuity continuity; bool wasSilent=true;
       std::cout<<"SNV2_AUDIO_OUTPUT started=1 rate=48000 channels=2 format=pcm16"<<std::endl;
       auto checkDevice=std::chrono::steady_clock::now();
       while(running_) {
         UINT32 padding=0; checkAudio(client->GetCurrentPadding(&padding),"Audio output padding");
-        // Keep at most 10 ms in the device, even if Windows allocated a larger
-        // buffer. Silence on loss, never wait for a video frame or retransmit.
-        if(padding<=audioFrames && padding+audioFrames<=capacity) {
+        // Device events replace sleep_for(2ms), which can oversleep a whole
+        // Windows timer tick. Refill all available blocks up to 20ms, so a
+        // normal 10ms device period cannot underrun a one-block 5ms queue.
+        while(padding+audioFrames<=targetFrames) {
           auto samples=queue_.pop(); BYTE* target=nullptr;
+          AudioSamples output=samples.value_or(AudioSamples{});
+          continuity.process(output.data(),audioFrames,audioChannels,audioRate,!samples || wasSilent);
+          wasSilent=!samples;
           checkAudio(render->GetBuffer(audioFrames,&target),"Audio output buffer");
-          if(samples) std::memcpy(target,samples->data(),samples->size()*sizeof(std::int16_t));
-          checkAudio(render->ReleaseBuffer(audioFrames,samples ? 0 : AUDCLNT_BUFFERFLAGS_SILENT),"Submit audio output");
+          std::memcpy(target,output.data(),output.size()*sizeof(std::int16_t));
+          checkAudio(render->ReleaseBuffer(audioFrames,0),"Submit audio output");
+          padding+=audioFrames;
         }
         if(std::chrono::steady_clock::now()-checkDevice>std::chrono::seconds(2)) {
           ComPtr<IMMDevice> current;
@@ -66,7 +80,7 @@ void AudioPlayer::run() {
           if(endpointId(current.Get())!=selected) break;
           checkDevice=std::chrono::steady_clock::now();
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if(WaitForSingleObject(event.value,20)==WAIT_FAILED) throw std::runtime_error("Audio output event wait failed");
       }
     } catch(const std::exception& error) {
       std::cerr<<"SNV2_AUDIO_OUTPUT unavailable: "<<error.what()<<"; retrying without stopping video"<<std::endl;

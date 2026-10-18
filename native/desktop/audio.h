@@ -47,11 +47,13 @@ private:
   AudioSamples pending_{}; std::size_t used_=0;
   std::function<void(const AudioSamples&)> output_;
 };
-// Forty milliseconds is a hard freshness/capacity limit, not a mandatory
-// playout delay. Output consumes immediately; gaps produce silence locally.
+// Forty milliseconds is a hard freshness/capacity limit. Playback may request
+// a short priming reserve after an underflow, rather than alternating PCM and
+// silence on every slightly late 5ms packet.
 class AudioQueue {
 public:
   using Clock=std::chrono::steady_clock;
+  explicit AudioQueue(unsigned startupBlocks=1):startupBlocks_(std::clamp(startupBlocks,1U,8U)) {}
   void push(AudioSamples samples,Clock::time_point now=Clock::now()) {
     std::lock_guard lock(mutex_);
     if(blocks_.size()>=8) blocks_.pop_front();
@@ -60,11 +62,14 @@ public:
   std::optional<AudioSamples> pop(Clock::time_point now=Clock::now()) {
     std::lock_guard lock(mutex_);
     while(!blocks_.empty() && now-blocks_.front().queued>std::chrono::milliseconds(40)) blocks_.pop_front();
-    if(blocks_.empty()) return {};
+    if(blocks_.empty()) { started_=false; return {}; }
+    if(!started_ && blocks_.size()<startupBlocks_ && now-blocks_.front().queued<std::chrono::milliseconds(5*startupBlocks_)) return {};
+    started_=true;
     auto samples=std::move(blocks_.front().samples); blocks_.pop_front(); return samples;
   }
-  void clear() { std::lock_guard lock(mutex_); blocks_.clear(); }
+  void clear() { std::lock_guard lock(mutex_); blocks_.clear(); started_=false; }
 private:
+  unsigned startupBlocks_; bool started_=false;
   struct Block { AudioSamples samples; Clock::time_point queued; };
   std::mutex mutex_; std::deque<Block> blocks_;
 };

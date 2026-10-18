@@ -3,6 +3,7 @@
 #include "control_timing.h"
 #include "input_retry.h"
 #include "udp_echo.h"
+#include "audio_playout.h"
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
 #import <CoreAudio/CoreAudio.h>
@@ -4934,6 +4935,7 @@ public:
       freeBuffers_.clear();
     }
     disposeQueue(oldQueue);
+    available_.notify_all();
   }
 
   AudioQueuePcmPlayer(const AudioQueuePcmPlayer&) = delete;
@@ -4956,7 +4958,11 @@ public:
     if (!queue_ || sampleRate_ != sampleRate || channels_ != channels || maxBufferBytes_ < payloadSize) {
       configureLocked(lock, sampleRate, channels, payloadSize);
     }
-    if (!queue_ || freeBuffers_.empty()) {
+    // Keep jitter buffering in software. Do not drain it into 48 variable-size
+    // hardware buffers or drop each next packet merely because output is busy.
+    if (!available_.wait_for(lock, std::chrono::milliseconds(25), [&] {
+          return !queue_ || (!freeBuffers_.empty() && budget_.fits(sampleRate, frameCount));
+        }) || !queue_) {
       queueDrops_ += 1;
       return false;
     }
@@ -4971,6 +4977,7 @@ public:
       queueDrops_ += 1;
       return false;
     }
+    budget_.submitted(frameCount);
     return true;
   }
 
@@ -4979,6 +4986,10 @@ public:
     const std::uint64_t value = queueDrops_;
     queueDrops_ = 0;
     return value;
+  }
+  bool hasQueuedAudio() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !budget_.empty();
   }
 
 private:
@@ -5003,6 +5014,7 @@ private:
     sampleRate_ = 0;
     channels_ = 0;
     maxBufferBytes_ = 0;
+    budget_.clear();
 
     lock.unlock();
     disposeQueue(oldQueue);
@@ -5083,10 +5095,14 @@ private:
   void recycle(AudioQueueBufferRef buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!queue_) return;
+    if (channels_) budget_.completed(buffer->mAudioDataByteSize/(channels_*sizeof(float)));
     freeBuffers_.push_back(buffer);
+    available_.notify_one();
   }
 
   std::mutex mutex_;
+  std::condition_variable available_;
+  sanser::AudioDeviceBudget budget_;
   std::deque<AudioQueueBufferRef> freeBuffers_;
   AudioQueueRef queue_ = nullptr;
   std::uint32_t sampleRate_ = 0;
@@ -5468,10 +5484,13 @@ private:
     pruneLatencyLocked();
     dropStaleEpochPacketsLocked();
     if (buffer_.empty()) {
-      if (started_) {
-        stats_.underflows += 1;
+      // Empty software storage is not a device underrun. Re-priming the full
+      // jitter target while the last hardware blocks play would cause a new
+      // gap every time a capture callback delivers audio in a small burst.
+      if(!player_ || !player_->hasQueuedAudio()) {
+        if(started_) stats_.underflows += 1;
+        started_ = false;
       }
-      started_ = false;
       missingStartedAt_ = {};
       return false;
     }
@@ -5529,6 +5548,11 @@ private:
   }
 
   void pumpLoop() {
+    sanser::AudioContinuity continuity;
+    bool played=false;
+    std::uint64_t playedSequence=0,playedEpoch=0;
+    std::uint32_t playedRate=0;
+    std::uint16_t playedChannels=0;
     while (true) {
       AudioPayloadPacket packet;
       {
@@ -5552,6 +5576,11 @@ private:
       std::vector<std::uint8_t> playbackPayload = std::move(packet.payload);
       std::uint32_t playbackFrameCount = packet.frameCount;
       driftCorrection = correctAudioDrift(packet, playbackPayload, playbackFrameCount);
+      const bool formatChanged=packet.sampleRate!=playedRate || packet.channels!=playedChannels;
+      if(formatChanged) continuity=sanser::AudioContinuity{};
+      auto nextContinuity=continuity;
+      nextContinuity.floats(playbackPayload.data(),playbackFrameCount,packet.channels,packet.sampleRate,
+        !played || formatChanged || packet.mediaEpoch!=playedEpoch || packet.sequence!=playedSequence+1);
       try {
         submitted = player_ && player_->submit(packet.sampleRate,
                                                packet.channels,
@@ -5564,6 +5593,8 @@ private:
 
       std::lock_guard<std::mutex> lock(mutex_);
       if (submitted) {
+        continuity=nextContinuity; played=true; playedSequence=packet.sequence;
+        playedEpoch=packet.mediaEpoch; playedRate=packet.sampleRate; playedChannels=packet.channels;
         stats_.submittedPackets += 1;
         stats_.submittedFrames += playbackFrameCount;
         if (packet.rekeyGrace) {
@@ -5580,6 +5611,7 @@ private:
           }
         }
       } else {
+        played=false;
         stats_.queueDrops += 1;
       }
     }

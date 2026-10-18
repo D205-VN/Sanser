@@ -12,7 +12,7 @@ public:
 private:
   void run();
   std::atomic<bool> running_{true};
-  AudioQueue queue_;
+  AudioQueue queue_{3};
   std::thread worker_;
 };
 }
