@@ -42,6 +42,10 @@ can still send its final packets before the owning router is dropped.
   successive confirmations using **new** samples. For a responding active path,
   require score improvement >=15 ms and >=25%. Re-evaluating one fast sample
   cannot accumulate votes. Do not switch during the first three seconds.
+  Fresh-response eligibility includes a complete bounded probe round (up to
+  2.5 seconds for 20 endpoints); validation does not expire between rounds.
+  Finish confirming a still-qualified alternative instead of oscillating
+  between equally fast alternatives on tiny score differences.
 - Only the controlling peer proposes a better route. A switch must present an
   unexpired random return-path challenge from that exact endpoint. The follower
   also needs its own successful reverse probe; the leader changes its outgoing

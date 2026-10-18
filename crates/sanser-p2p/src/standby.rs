@@ -427,14 +427,15 @@ impl Monitor {
             return;
         }
         let active_score = score(active);
-        let best = snapshots
+        let eligible: Vec<_> = snapshots
             .paths
             .iter()
             .filter(|p| {
                 p.endpoint != self.config.active
                     && p.samples >= 3
                     && p.loss_percent <= 20.0
-                    && p.last_response_age_ms.is_some_and(|age| age < 1500)
+                    && p.last_response_age_ms
+                        .is_some_and(|age| age <= self.response_fresh_ms())
             })
             .filter(|p| {
                 active_lost
@@ -443,10 +444,18 @@ impl Monitor {
                             score(p).is_some_and(|new| old - new >= 15.0_f64.max(old * 0.25))
                         }))
             })
-            .min_by(|a, b| {
-                score(a)
-                    .unwrap_or(f64::MAX)
-                    .total_cmp(&score(b).unwrap_or(f64::MAX))
+            .collect();
+        // Finish validating a still-qualified path instead of resetting votes
+        // whenever two fast alternatives exchange places by a fraction of a ms.
+        let best = self
+            .vote
+            .and_then(|(address, _, _)| eligible.iter().copied().find(|p| p.endpoint == address))
+            .or_else(|| {
+                eligible.into_iter().min_by(|a, b| {
+                    score(a)
+                        .unwrap_or(f64::MAX)
+                        .total_cmp(&score(b).unwrap_or(f64::MAX))
+                })
             });
         let Some(best) = best else {
             self.vote = None;
@@ -491,6 +500,11 @@ impl Monitor {
             });
         }
     }
+    fn response_fresh_ms(&self) -> u64 {
+        // A full round can take 2.5s with twenty paths. Evidence must not
+        // expire halfway through its own bounded probe scheduling cycle.
+        self.paths.len().div_ceil(4) as u64 * 500 + 1500
+    }
     fn rollback_if_lost(&mut self, now: Instant) {
         if self.config.controlling {
             return;
@@ -514,7 +528,9 @@ impl Monitor {
             .and_then(|address| snapshot.paths.iter().find(|p| p.endpoint == address))
             && previous.samples >= 3
             && previous.loss_percent <= 20.0
-            && previous.last_response_age_ms.is_some_and(|age| age < 1500)
+            && previous
+                .last_response_age_ms
+                .is_some_and(|age| age <= self.response_fresh_ms())
         {
             self.activate(previous.endpoint, now);
             self.rollbacks += 1;
@@ -809,6 +825,34 @@ mod tests {
         leader.receive(&local, &reply, other, now);
         assert_eq!(leader.config.active, other);
         assert!(leader.pending.is_none());
+    }
+    #[test]
+    fn many_candidates_do_not_expire_votes_between_bounded_probe_rounds() {
+        let slow = "127.0.0.1:50000".parse().unwrap();
+        let fast = "127.0.0.1:50001".parse().unwrap();
+        let began = Instant::now();
+        let now = began + Duration::from_secs(4);
+        let mut monitor = Monitor::new(config(slow, fast, true), began);
+        for port in 50002..50020 {
+            monitor.path(SocketAddr::from(([127, 0, 0, 1], port)));
+        }
+        assert_eq!(monitor.paths.len(), 20);
+        add_samples(&mut monitor, slow, &[200.0; 3], now);
+        add_samples(&mut monitor, fast, &[12.0; 3], now);
+        monitor.consider(now);
+        for step in 1..=10 {
+            let at = now + Duration::from_millis(step * 500);
+            if step % 5 == 0 {
+                add_samples(&mut monitor, fast, &[12.0], at);
+                add_samples(&mut monitor, slow, &[200.0], at);
+            }
+            monitor.consider(at);
+        }
+        assert_eq!(
+            monitor.pending.as_ref().unwrap().address,
+            fast,
+            "probe cadence must not erase all nomination progress"
+        );
     }
     #[test]
     fn follower_rolls_back_only_to_a_fresh_verified_previous_path() {
