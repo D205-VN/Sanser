@@ -46,6 +46,14 @@ int main() {
     P backoff; P::Sample retries; backoff.observe(now,retries);
     for(unsigned i=0;i<18;++i) { now+=std::chrono::milliseconds(500); retries.backoffMs=2000; backoff.observe(now,retries); }
     check(backoff.state()==P::Paused,"persistent maximum IDR backoff isolates a viewer even without queue replacements");
+    P recovered; P::Sample advancing; recovered.observe(now,advancing);
+    for(unsigned i=0;i<40;++i) {
+      now+=std::chrono::milliseconds(500);
+      advancing.backoffMs=2000; advancing.feedbackFresh=true; ++advancing.feedbackSerial;
+      advancing.sentFrame+=30; advancing.completedFrame=advancing.sentFrame; advancing.deliveredBytes=100000;
+      recovered.observe(now,advancing);
+    }
+    check(recovered.state()==P::Active && recovered.pauses()==0,"old IDR backoff must not pause a viewer with fresh clean completed-frame progress");
     P gap; P::Sample pressure; gap.observe(now,pressure);
     now+=std::chrono::milliseconds(500); pressure.submitted=30; pressure.referenceDrops=30; gap.observe(now,pressure);
     now+=std::chrono::seconds(20); pressure.submitted+=30; pressure.referenceDrops+=30; gap.observe(now,pressure);

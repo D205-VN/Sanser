@@ -20,6 +20,9 @@ struct ViewerStats {
   std::string videoState="active";
   std::uint64_t pauses=0;
   unsigned backoffMs=0;
+  unsigned videoStateCode=0,pauseReason=0;
+  std::uint64_t completedFrame=0,sentFrame=0,feedbackSerial=0;
+  bool feedbackCongested=false;
 };
 
 // One prepared encoded payload, independent crypto/queues/workers per viewer.

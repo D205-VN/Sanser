@@ -148,6 +148,7 @@ class Decoder {
 public:
   ~Decoder() { clear(); std::lock_guard lock(mutex_); if(latest_) CVPixelBufferRelease(latest_); }
   void decode(const Frame& frame) {
+    checkOutput();
     Bytes data; auto parts=nals(frame.data); Bytes sps=sps_,pps=pps_;
     for(auto& nal:parts) { const auto type=nal[0]&31; if(type==7) sps=nal; else if(type==8) pps=nal; else if(type==1 || type==5) { const auto size=static_cast<std::uint32_t>(nal.size()); for(int i=3;i>=0;--i) data.push_back(static_cast<std::uint8_t>(size>>(i*8))); data.insert(data.end(),nal.begin(),nal.end()); } }
     if(sps.empty() || pps.empty() || data.empty()) return;
@@ -168,15 +169,39 @@ public:
     if(status==noErr) status=CMSampleBufferCreateReady(nullptr,block,format_,1,0,nullptr,1,&size,&sample);
     if(status==noErr) status=VTDecompressionSessionDecodeFrame(session_,sample,0,nullptr,nullptr);
     if(sample) CFRelease(sample); CFRelease(block); requireStatus(status,"Decode frame");
+    // With decode flags zero, VideoToolbox finishes the output callback before
+    // returning. A successful submit can still have an unsuccessful output.
+    // Surface that failure to DecodeWorker's reset/IDR recovery path.
+    checkOutput();
   }
   CVPixelBufferRef take() { std::lock_guard lock(mutex_); auto value=latest_; latest_=nullptr; return value; }
-  void reset() { clear(); sps_.clear(); pps_.clear(); }
+  void reset() {
+    clear(); sps_.clear(); pps_.clear(); outputStatus_=noErr;
+    std::lock_guard lock(mutex_); if(latest_) { CVPixelBufferRelease(latest_); latest_=nullptr; }
+  }
   std::uint64_t decoded() const { return decoded_.load(); }
+  std::uint64_t outputErrors() const { return outputErrors_.load(); }
+  std::uint64_t outputDrops() const { return outputDrops_.load(); }
+#ifdef SANSER_CODEC_TEST
+  // Exercise the real output callback without corrupting captured user data.
+  void testOutputFailure(OSStatus status,VTDecodeInfoFlags flags) { output(this,nullptr,status,flags,nullptr,kCMTimeInvalid,kCMTimeInvalid); }
+#endif
 private:
+  void checkOutput() { requireStatus(outputStatus_.exchange(noErr),"Decode output"); }
   void clear() { if(session_) { VTDecompressionSessionWaitForAsynchronousFrames(session_); VTDecompressionSessionInvalidate(session_); CFRelease(session_); session_=nullptr; } if(format_) { CFRelease(format_); format_=nullptr; } }
-  static void output(void* context,void*,OSStatus status,VTDecodeInfoFlags,CVImageBufferRef image,CMTime,CMTime) { if(status!=noErr || !image) return; auto& self=*static_cast<Decoder*>(context); ++self.decoded_; std::lock_guard lock(self.mutex_); if(self.latest_) CVPixelBufferRelease(self.latest_); self.latest_=CVPixelBufferRetain(image); if(!self.reported_) { self.reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; } }
+  static void output(void* context,void*,OSStatus status,VTDecodeInfoFlags flags,CVImageBufferRef image,CMTime,CMTime) {
+    auto& self=*static_cast<Decoder*>(context);
+    if(status!=noErr || !image || (flags&kVTDecodeInfo_FrameDropped)) {
+      if(status!=noErr) ++self.outputErrors_; else ++self.outputDrops_;
+      self.outputStatus_=status!=noErr ? status : kVTVideoDecoderBadDataErr;
+      return;
+    }
+    ++self.decoded_; std::lock_guard lock(self.mutex_); if(self.latest_) CVPixelBufferRelease(self.latest_); self.latest_=CVPixelBufferRetain(image); if(!self.reported_) { self.reported_=true; std::cout<<"SNV2_FIRST_FRAME decoded=1"<<std::endl; }
+  }
   Bytes sps_,pps_; VTDecompressionSessionRef session_=nullptr; CMVideoFormatDescriptionRef format_=nullptr; CVPixelBufferRef latest_=nullptr; std::mutex mutex_; bool reported_=false;
   std::atomic<std::uint64_t> decoded_{0};
+  std::atomic<OSStatus> outputStatus_{noErr};
+  std::atomic<std::uint64_t> outputErrors_{0},outputDrops_{0};
 };
 
 }
@@ -347,6 +372,23 @@ void testMacEncoderBackpressure() {
     const bool matches=color[0]>150 && color[1]<80 && color[2]<80;
     CVPixelBufferUnlockBaseAddress(latest,kCVPixelBufferLock_ReadOnly); CVPixelBufferRelease(latest);
     if(!matches) throw std::runtime_error("Final idle-desktop picture remained stale after encoder pressure");
+    for(const auto failure : {std::pair<OSStatus,VTDecodeInfoFlags>{kVTVideoDecoderBadDataErr,0},
+        {noErr,kVTDecodeInfo_FrameDropped},{noErr,0}}) {
+      Decoder damaged; std::atomic<unsigned> calls{0},requests{0};
+      DecodeWorker recovery([&](Frame frame) {
+        if(++calls==1) damaged.testOutputFailure(failure.first,failure.second);
+        damaged.decode(frame);
+      },[&] { damaged.reset(); },[&] { ++requests; },true);
+      recovery.submit(delivered.front());
+      const auto failedBy=Clock::now()+std::chrono::seconds(2);
+      while(requests==0 && Clock::now()<failedBy) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if(requests!=1) throw std::runtime_error("Decoder callback failure left the viewer frozen without requesting recovery");
+      recovery.submit(delivered.front()); // Fresh, independently decodable IDR.
+      const auto recoveredBy=Clock::now()+std::chrono::seconds(2);
+      while(damaged.decoded()==0 && Clock::now()<recoveredBy) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if(damaged.decoded()!=1 || requests!=1) throw std::runtime_error("Decoder output failure did not recover at the next keyframe");
+      recovery.stop();
+    }
     std::cout<<"Mac encoder: blocked delivery retained only newest raw capture; reference chain and final idle picture verified\n";
   }
 }
@@ -477,20 +519,25 @@ void testMacVideoCodec() {
 // desktop. Each decoder must receive the same freshly encoded keyframe.
 void testMacBroadcastCodec() {
   @autoreleasepool {
-    Options options; options.host=true; options.input=false; options.width=640; options.height=360; options.bitrate=100000000;
+    Options options; options.host=true; options.input=false; options.sharing=true; options.ultraLowLatency=true; options.width=640; options.height=360; options.bitrate=25000000;
     Broadcaster group(options);
     std::array<Decoder,3> decoders;
+    std::array<std::unique_ptr<DecodeWorker>,3> workers;
+    std::array<std::atomic<unsigned>,3> audioBlocks{};
     std::vector<std::unique_ptr<Peer>> clients;
     std::random_device random;
     auto join=[&](unsigned index) {
       for(unsigned attempt=0;attempt<20;++attempt) {
         const auto port=static_cast<std::uint16_t>(30000+random()%20000);
         const auto token=std::string(48,static_cast<char>('a'+index));
-        Options client=options; client.host=false; client.port=port+1; client.peer="127.0.0.1:"+std::to_string(port); client.token=token;
+        Options client=options; client.host=false; client.sharing=false; client.port=port+1; client.peer="127.0.0.1:"+std::to_string(port); client.token=token;
         std::unique_ptr<Peer> receiver;
         try { receiver=std::make_unique<Peer>(client); group.add({std::to_string(index),"127.0.0.1:"+std::to_string(port+1),port,token,options.bitrate}); }
         catch(...) { continue; }
-        receiver->onFrame=[&,index](Frame frame) { decoders[index].decode(frame); };
+        workers[index]=std::make_unique<DecodeWorker>([&,index](Frame frame) { decoders[index].decode(frame); },
+          [&,index] { decoders[index].reset(); },[p=receiver.get()] { p->requestKeyframe(); },true,true);
+        receiver->onFrame=[&,index](Frame frame) { workers[index]->submit(std::move(frame)); };
+        receiver->onAudio=[&,index](AudioSamples) { ++audioBlocks[index]; };
         receiver->start(); clients.push_back(std::move(receiver)); return;
       }
       throw std::runtime_error("Broadcast codec test could not bind sockets");
@@ -498,9 +545,9 @@ void testMacBroadcastCodec() {
     std::atomic<unsigned> encoded{0};
     Encoder encoder(options,[&] { return group.ready(); },[&](Frame frame) { ++encoded; group.publish(std::move(frame)); });
     struct Stop {
-      Broadcaster& group; std::vector<std::unique_ptr<Peer>>& clients;
-      ~Stop() { for(auto& client:clients) client->stop(); group.stop(); }
-    } stop{group,clients};
+      Broadcaster& group; std::vector<std::unique_ptr<Peer>>& clients; std::array<std::unique_ptr<DecodeWorker>,3>& workers;
+      ~Stop() { for(auto& client:clients) client->stop(); for(auto& worker:workers) if(worker) worker->stop(); group.stop(); }
+    } stop{group,clients,workers};
     struct Pixel { CVPixelBufferRef value=nullptr; ~Pixel() { if(value) CVPixelBufferRelease(value); } } source;
     NSDictionary* attributes=@{(__bridge NSString*)kCVPixelBufferIOSurfacePropertiesKey:@{}};
     requireStatus(CVPixelBufferCreate(nullptr,640,360,kCVPixelFormatType_32BGRA,(__bridge CFDictionaryRef)attributes,&source.value),"Create sharing test frame");
@@ -538,7 +585,7 @@ void testMacBroadcastCodec() {
     join(2); waitReady(3);
     encoder.keyframe(); encoder.refresh(); verify(0); verify(1); verify(2);
     if(encoded!=2 || group.publishedFrames()!=2) throw std::runtime_error("Late join encoded separately per viewer");
-    group.remove("1"); clients[1]->stop();
+    group.remove("1"); clients[1]->stop(); workers[1]->stop();
     encoder.keyframe(); encoder.refresh(); verify(0); verify(2);
     if(encoded!=3) throw std::runtime_error("Removing a viewer restarted or duplicated encoding");
     // Receiving one IDR is not a streaming test. Change the actual source and
@@ -562,6 +609,45 @@ void testMacBroadcastCodec() {
         if(!changed) throw std::runtime_error("Sharing viewer replayed an old picture instead of the changed desktop");
       }
     }
+    // Run beyond the old short test and the six/eight-second isolation windows.
+    // Exercise the actual encoder, encrypted group transport and decode workers,
+    // while checking changed pixels rather than only completed UDP packets.
+    const auto began=Clock::now(); auto nextVideo=began,nextAudio=began;
+    std::array<Clock::time_point,3> progress; progress.fill(began);
+    std::array<int,3> colors{-1,-1,-1}; std::array<unsigned,3> changes{};
+    AudioSamples sound; sound.fill(4000); unsigned frame=0;
+    while(Clock::now()-began<std::chrono::seconds(12)) {
+      const auto now=Clock::now(); group.updateHealth(now);
+      if(now>=nextAudio) { group.audio(sound); nextAudio=now+std::chrono::milliseconds(5); }
+      if(now>=nextVideo) {
+        const auto blue=(frame/15)%2 ? 30 : 200,red=(frame/15)%2 ? 200 : 30;
+        CVPixelBufferLockBaseAddress(source.value,0);
+        for(unsigned y=0;y<360;++y) for(unsigned x=0;x<640;++x) { auto* pixel=bytes+y*stride+x*4; pixel[0]=blue; pixel[2]=red; }
+        CVPixelBufferUnlockBaseAddress(source.value,0);
+        if(group.takeKeyframeRequest() || frame%60==0) encoder.keyframe();
+        encoder.encode(source.value,CMTimeMake(frame+100,60));
+        encoder.flush(); // Test owns one mutable source buffer; finish before reuse.
+        ++frame; nextVideo=now+std::chrono::microseconds(16667);
+      }
+      for(unsigned viewer : {0U,2U}) {
+        Pixel image; image.value=decoders[viewer].take();
+        if(image.value) {
+          progress[viewer]=Clock::now(); CVPixelBufferLockBaseAddress(image.value,kCVPixelBufferLock_ReadOnly);
+          const auto* pixel=static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(image.value));
+          const int color=pixel[0]>pixel[2] ? 1 : 0;
+          if(colors[viewer]>=0 && colors[viewer]!=color) ++changes[viewer]; colors[viewer]=color;
+          CVPixelBufferUnlockBaseAddress(image.value,kCVPixelBufferLock_ReadOnly);
+        }
+        if(Clock::now()-progress[viewer]>std::chrono::seconds(2) || workers[viewer]->failures()>=10)
+          throw std::runtime_error("Group viewer stopped presenting decoded pictures while source and audio continued");
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    for(unsigned viewer : {0U,2U}) if(changes[viewer]<4 || audioBlocks[viewer]<100)
+      throw std::runtime_error("Group continuity must verify changing decoded pixels and live sound together");
+    for(const auto& peer:group.stats()) if(peer.videoState!="active" || peer.pauses)
+      throw std::runtime_error("Healthy codec viewers entered an unintended video pause");
+    std::cout<<"Group codec: twelve seconds of changing pixels, Opus audio, decode workers and health updates passed\n";
   }
 }
 
@@ -664,6 +750,7 @@ int runMac(bool host,int argc,char** argv) {
         [window displayIfNeeded];
         if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastHealth>=std::chrono::seconds(1)) {
           std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decoder.decoded()<<" converted="<<presented
+            <<" decoderOutputErrors="<<decoder.outputErrors()<<" decoderOutputDrops="<<decoder.outputDrops()
             <<" encodedQueueDrops="<<decode.dropped()<<" decodeQueueExpired="<<decode.expired()<<" decodeErrors="<<decode.failures();
           const auto timing=decode.takeTiming();
           if(timing.samples) line<<" decodeWorkAvgMs="<<timing.workUs/1000.0/timing.samples

@@ -35,35 +35,43 @@ public:
     const auto dropped=delta(sample.replaced,previous_.replaced)+delta(sample.referenceDrops,previous_.referenceDrops);
     const bool localBad=submitted>=10 && (dropped*100>=submitted*35 || sample.queueDrops>previous_.queueDrops);
     const bool newFeedback=sample.feedbackFresh && sample.feedbackSerial>previous_.feedbackSerial;
+    const bool recovered=newFeedback && !sample.feedbackCongested && sample.deliveredBytes>0 && sample.completedFrame>previous_.completedFrame;
     const bool pressure=localBad || (sample.feedbackFresh && sample.feedbackCongested);
     previous_=sample; sampledAt_=now;
     if(state_==Probing) {
-      if(pressure) { ++failedProbes_; pause(now); return; }
+      if(pressure) { ++failedProbes_; pause(now,1); return; }
       if(newFeedback) { ++cleanFeedback_; delivered_=delivered_ || sample.deliveredBytes>0; }
       if(delivered_ && sample.completedFrame>probeAfterFrame_ && cleanFeedback_>=3 && now-probeAt_>=std::chrono::milliseconds(1500)) {
-        state_=Active; failedProbes_=0; bad_=false; backoff_=false; return;
+        state_=Active; failedProbes_=0; bad_=false; backoff_=false; pauseReason_=0; return;
       }
-      if(now-probeAt_>=std::chrono::seconds(3)) { ++failedProbes_; pause(now); }
+      if(now-probeAt_>=std::chrono::seconds(3)) { ++failedProbes_; pause(now,3); }
       return;
     }
     if(pressure) { if(!bad_) badAt_=now; bad_=true; } else bad_=false;
-    if(sample.backoffMs>=2000) { if(!backoff_) backoffAt_=now; backoff_=true; } else backoff_=false;
-    if((bad_ && now-badAt_>=std::chrono::seconds(6)) ||
-       (backoff_ && now-backoffAt_>=std::chrono::seconds(8))) pause(now);
+    // Publishing an IDR alone is not recovery proof, but fresh clean feedback
+    // and a completed new picture are. Old retry history must not freeze a
+    // viewer which has already recovered. Sustained congestion still isolates it.
+    if(sample.backoffMs>=2000 && !recovered) { if(!backoff_) backoffAt_=now; backoff_=true; } else backoff_=false;
+    if(bad_ && now-badAt_>=std::chrono::seconds(6)) pause(now,1);
+    else if(backoff_ && now-backoffAt_>=std::chrono::seconds(8)) pause(now,2);
   }
   State state() const { return state_; }
   bool sendsVideo() const { return state_!=Paused; }
   bool affectsBitrate() const { return state_==Active; }
   const char* label() const { return state_==Active ? "active" : state_==Paused ? "paused" : "probing"; }
   std::uint64_t pauses() const { return pauses_; }
+  // 0=none, 1=sustained pressure, 2=IDR backoff without progress, 3=failed probe.
+  unsigned pauseReason() const { return pauseReason_; }
 private:
-  void pause(Clock::time_point now) {
+  void pause(Clock::time_point now,unsigned reason) {
+    pauseReason_=reason;
     state_=Paused; ++pauses_; bad_=false; backoff_=false;
     retryAt_=now+std::chrono::seconds(std::min(30U,5U*(1U<<std::min(3U,failedProbes_))));
   }
   State state_=Active;
   bool initialized_=false, bad_=false, backoff_=false, delivered_=false;
   unsigned failedProbes_=0, cleanFeedback_=0;
+  unsigned pauseReason_=0;
   std::uint64_t pauses_=0;
   std::uint64_t probeAfterFrame_=0;
   Sample previous_{};

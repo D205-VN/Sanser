@@ -94,6 +94,14 @@ const FIELDS: &[&str] = &[
     "keyframeSignals",
     "keyframeRequests",
     "pauses",
+    "videoStateCode",
+    "pauseReason",
+    "completedFrame",
+    "sentFrame",
+    "feedbackSerial",
+    "feedbackCongested",
+    "decoderOutputErrors",
+    "decoderOutputDrops",
     "backoffMs",
     "encoderDropped",
     "captured",
@@ -825,14 +833,23 @@ mod tests {
     }
     #[test]
     fn sharing_and_transport_health_retain_only_numeric_failure_evidence() {
-        let sample=parse_sample(b"SNSHARE_PEER viewer=private-device ready=1 running=1 submitted=80 dispatched=1 replaced=79 referenceDrops=78 pauses=1 backoffMs=2000 token=123").unwrap();
+        let sample=parse_sample(b"SNSHARE_PEER viewer=private-device ready=1 running=1 submitted=80 dispatched=1 replaced=79 referenceDrops=78 pauses=1 backoffMs=2000 videoState=paused videoStateCode=1 pauseReason=2 completedFrame=4 sentFrame=80 feedbackSerial=10 feedbackCongested=0 token=123").unwrap();
         assert_eq!(sample.values["replaced"], 79.0);
+        assert_eq!(sample.values["videoStateCode"], 1.0);
+        assert_eq!(sample.values["pauseReason"], 2.0);
+        assert_eq!(sample.values["completedFrame"], 4.0);
+        assert_eq!(sample.values["sentFrame"], 80.0);
+        assert!(!sample.values.contains_key("videoState"));
         assert!(!sample.values.contains_key("viewer"));
         assert!(!sample.values.contains_key("token"));
         let sample=parse_sample(b"SNV2_TRANSPORT_HEALTH rawDatagrams=900 authRejected=0 videoDatagrams=890 completed=0 nackSent=4 stopReason=2 pending=0 endpoint=private-address").unwrap();
         assert_eq!(sample.values["completed"], 0.0);
         assert_eq!(sample.values["stopReason"], 2.0);
         assert!(!sample.values.contains_key("endpoint"));
+        let sample=parse_sample(b"SNV2_VIDEO_HEALTH decoded=40 decoderOutputErrors=1 decoderOutputDrops=2 frameContent=123").unwrap();
+        assert_eq!(sample.values["decoderOutputErrors"], 1.0);
+        assert_eq!(sample.values["decoderOutputDrops"], 2.0);
+        assert!(!sample.values.contains_key("frameContent"));
     }
     #[test]
     fn snv2_pipeline_timings_are_retained_without_input_or_packet_content() {

@@ -126,10 +126,12 @@ struct Broadcaster::Delivery {
   }
   ViewerStats stats() {
     std::lock_guard lock(mutex);
+    const auto feedback=peer.videoFeedback();
     return {spec.id,peer.ready(),peer.running() && running,
       submitted.load(),dispatched.load(),replaced.load(),referenceDrops.load(),
       peer.videoQueueDrops(),peer.repairedDatagrams(),peer.repairCacheMisses(),
-      recovery.signals(),recovery.requests(),peer.recommendedBitrate(),policy.label(),policy.pauses(),recovery.backoffMs(Clock::now())};
+      recovery.signals(),recovery.requests(),peer.recommendedBitrate(),policy.label(),policy.pauses(),recovery.backoffMs(Clock::now()),
+      static_cast<unsigned>(policy.state()),policy.pauseReason(),feedback.completedFrame,feedback.sentFrame,feedback.serial,feedback.congested};
   }
 };
 
@@ -306,7 +308,10 @@ void HostOutput::pumpControl() {
         <<" keyframeSignals="<<peer.keyframeSignals<<" keyframeRequests="<<peer.keyframeRequests
         <<" repaired="<<peer.repaired<<" repairCacheMisses="<<peer.repairCacheMisses
         <<" bitrate="<<peer.recommendedBitrate<<" videoState="<<peer.videoState
-        <<" pauses="<<peer.pauses<<" backoffMs="<<peer.backoffMs;
+        <<" pauses="<<peer.pauses<<" backoffMs="<<peer.backoffMs
+        <<" videoStateCode="<<peer.videoStateCode<<" pauseReason="<<peer.pauseReason
+        <<" completedFrame="<<peer.completedFrame<<" sentFrame="<<peer.sentFrame
+        <<" feedbackSerial="<<peer.feedbackSerial<<" feedbackCongested="<<peer.feedbackCongested;
       writeTelemetry(line);
     }
     std::cout.flush();
