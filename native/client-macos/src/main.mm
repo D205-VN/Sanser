@@ -4,6 +4,7 @@
 #include "input_retry.h"
 #include "udp_echo.h"
 #include "audio_playout.h"
+#include "opus_audio.h"
 #import <Cocoa/Cocoa.h>
 #import <CoreHaptics/CoreHaptics.h>
 #import <CoreAudio/CoreAudio.h>
@@ -2746,6 +2747,7 @@ void sendControlHello() {
       << ",\"inputAck\":true"
       << ",\"audioUdp\":true"
       << ",\"audioPcm16\":true"
+      << ",\"audioOpus\":true"
       << ",\"videoUdp\":true"
       << ",\"keyframeRequest\":true"
       << ",\"videoNack\":true"
@@ -2824,6 +2826,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
     const bool inputBatch = jsonBoolValue(payload, "inputBatch");
     const bool inputAck = jsonBoolValue(payload, "inputAck");
     const bool audioPcm16 = jsonBoolValue(payload, "audioPcm16");
+    const bool audioOpus = jsonBoolValue(payload,"audioOpus");
     const bool keyframeRequest = jsonBoolValue(payload, "keyframeRequest");
     const bool videoNack = jsonBoolValue(payload, "videoNack");
     const bool udpRepairStats = jsonBoolValue(payload, "udpRepairStats");
@@ -2871,6 +2874,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
               << " inputBatch=" << boolText(inputBatch)
               << " inputAck=" << boolText(inputAck)
               << " audioPcm16=" << boolText(audioPcm16)
+              << " audioOpus=" << boolText(audioOpus)
               << " keyframeRequest=" << boolText(keyframeRequest)
               << " videoNack=" << boolText(videoNack)
               << " udpRepairStats=" << boolText(udpRepairStats)
@@ -5167,6 +5171,13 @@ public:
     return true;
   }
 
+  void discardAudio() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    buffer_.clear(); resetSequenceTrackingLocked();
+    activeMediaEpoch_=0; hasActiveMediaEpoch_=false;
+    sequencingMediaEpoch_=0; hasSequencingMediaEpoch_=false;
+  }
+
   void push(AudioPayloadPacket packet) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (stopped_) return;
@@ -7022,6 +7033,18 @@ void listenUdpAudio(std::uint16_t audioPort,
       }
 
       AudioJitterBuffer jitter(player, avSyncClock, audioJitterMs);
+      // Opus already has a 10ms sequence/reorder playout reserve. Retain A/V
+      // synchronization and bounded device submission without a second reserve.
+      AudioJitterBuffer opusJitter(player,avSyncClock,0);
+      sanser::audio::ReceiveWorker opusReceiver([&](sanser::audio::Decoded decoded) {
+        AudioPayloadPacket packet; packet.sequence=decoded.sequence; packet.mediaEpoch=decoded.generation;
+        packet.hostUnixMicros=decoded.unixMicros; packet.sampleRate=48000; packet.channels=2; packet.frameCount=240;
+        packet.payload.resize(decoded.samples.size()*sizeof(float));
+        for(std::size_t i=0;i<decoded.samples.size();++i) { const float value=decoded.samples[i]/32768.0F; std::memcpy(packet.payload.data()+i*sizeof(float),&value,sizeof(value)); }
+        packet.receivedAt=std::chrono::steady_clock::now(); opusJitter.push(std::move(packet));
+      });
+      bool receivingOpus=false;
+      std::uint64_t opusMediaGeneration=0,opusEpoch=UINT64_MAX,opusGeneration=0;
       std::cout << "SNA1_JITTER_CONFIG targetMs=" << std::fixed << std::setprecision(1)
                 << jitter.targetJitterMs()
                 << "\n";
@@ -7076,8 +7099,9 @@ void listenUdpAudio(std::uint16_t audioPort,
         }
         const bool pcm16Audio = std::memcmp(data, "SNA3", 4) == 0 ||
           std::memcmp(data, "SNA4", 4) == 0;
+        const bool opusAudio=std::memcmp(data,"SNA5",4)==0 || std::memcmp(data,"SNA6",4)==0;
         const bool authenticatedAudio = std::memcmp(data, "SNA2", 4) == 0 ||
-          std::memcmp(data, "SNA4", 4) == 0;
+          std::memcmp(data, "SNA4", 4) == 0 || std::memcmp(data,"SNA6",4)==0;
         ResolvedMediaCrypto audioCrypto;
         std::uint64_t audioAuthSeq = 0;
         std::uint64_t audioAuthEpoch = 0;
@@ -7107,7 +7131,7 @@ void listenUdpAudio(std::uint16_t audioPort,
           packetMediaEpoch = audioAuthEpoch;
           packetRekeyGrace = audioCrypto.rekeyGrace;
         } else if (std::memcmp(data, "SNA1", 4) == 0 ||
-                   std::memcmp(data, "SNA3", 4) == 0) {
+                   std::memcmp(data, "SNA3", 4) == 0 || std::memcmp(data,"SNA5",4)==0) {
           if (!gExpectedSessionToken.empty()) {
             stats.authRejected += 1;
             continue;
@@ -7127,7 +7151,7 @@ void listenUdpAudio(std::uint16_t audioPort,
         const std::size_t sampleCount = static_cast<std::size_t>(frameCount)
           * static_cast<std::size_t>(channels);
         const std::size_t wireBytesPerSample = pcm16Audio ? sizeof(std::int16_t) : sizeof(float);
-        const std::size_t expectedWirePayloadBytes = sampleCount * wireBytesPerSample;
+        const std::size_t expectedWirePayloadBytes = opusAudio ? payloadSize : sampleCount * wireBytesPerSample;
         const std::uint32_t maxFramesPerPacket = std::max<std::uint32_t>(1, sampleRate / 10);
 
         if (headerSize < (authenticatedAudio ? sizeof(AudioAuthenticatedPacketHeader) : sizeof(AudioPacketHeader)) ||
@@ -7140,6 +7164,7 @@ void listenUdpAudio(std::uint16_t audioPort,
             sampleRate > 384000 ||
             frameCount == 0 ||
             frameCount > maxFramesPerPacket ||
+            (opusAudio && (sampleRate!=48000 || channels!=2 || frameCount!=240 || payloadSize<=20 || payloadSize>1020)) ||
             expectedWirePayloadBytes == 0 ||
             static_cast<std::size_t>(payloadSize) != expectedWirePayloadBytes) {
           stats.malformed += 1;
@@ -7172,6 +7197,21 @@ void listenUdpAudio(std::uint16_t audioPort,
         }
 
         const auto* payload = data + headerSize;
+        if(opusMediaGeneration!=mediaGeneration) {
+          opusMediaGeneration=mediaGeneration; opusEpoch=UINT64_MAX; receivingOpus=false;
+          opusReceiver.reset(++opusGeneration); opusJitter.discardAudio();
+        }
+        if(opusAudio) {
+          if(packetRekeyGrace) continue; // Never roll the decoder back to a retired epoch.
+          auto packet=sanser::audio::unpack({payload,payloadSize});
+          if(!packet || packet->sequence!=sequence) { ++stats.malformed; continue; }
+          if(opusEpoch!=packetMediaEpoch) {
+            opusEpoch=packetMediaEpoch; opusReceiver.reset(++opusGeneration); opusJitter.discardAudio();
+          }
+          if(!receivingOpus) { jitter.discardAudio(); receivingOpus=true; std::cout<<"SNA1_AUDIO_CODEC codec=opus rate=48000 channels=2 frameMs=5 bitrate=96000"<<std::endl; }
+          packet->unixMicros=hostUnixMicros;
+          opusReceiver.push(std::move(*packet),opusGeneration);
+        } else if(!receivingOpus) {
         AudioPayloadPacket packet;
         packet.sequence = sequence;
         packet.mediaEpoch = packetMediaEpoch;
@@ -7198,11 +7238,13 @@ void listenUdpAudio(std::uint16_t audioPort,
         }
         packet.receivedAt = std::chrono::steady_clock::now();
         jitter.push(std::move(packet));
+        }
 
         const auto statsNow = std::chrono::steady_clock::now();
         const double statsSeconds = std::chrono::duration<double>(statsNow - statsStartedAt).count();
         if (statsSeconds >= 1.0) {
-          const AudioJitterStats jitterStats = jitter.takeStats();
+          const AudioJitterStats jitterStats = receivingOpus ? opusJitter.takeStats() : jitter.takeStats();
+          const auto opusStats=opusReceiver.stats();
           const double avgAgeMs = jitterStats.ageSamples > 0
             ? jitterStats.ageSumMs / static_cast<double>(jitterStats.ageSamples)
             : -1.0;
@@ -7215,6 +7257,8 @@ void listenUdpAudio(std::uint16_t audioPort,
           std::ostringstream line;
           line << std::fixed << std::setprecision(1)
                << "SNA1_AUDIO_STATS datagrams=" << stats.datagrams
+               << " opusDecoded=" << opusStats.decoded << " opusPlc=" << opusStats.concealed
+               << " opusLate=" << opusStats.late << " opusReordered=" << opusStats.reordered << " opusDropped=" << opusStats.dropped << " opusErrors=" << opusStats.errors
                << " played=" << jitterStats.submittedPackets
                << " frames=" << jitterStats.submittedFrames
                << " lost=" << jitterStats.lostPackets

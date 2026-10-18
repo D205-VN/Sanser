@@ -31,6 +31,9 @@ target_compile_definitions(sanser-host-windows PRIVATE
 target_include_directories(sanser-host-windows PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
 if(BUILD_TESTING)
+  target_compile_definitions(sanser-host-windows PRIVATE SANSER_AUDIO_TEST=1)
+  add_test(NAME sanser-windows-opus-wire-test COMMAND sanser-host-windows --test-audio-wire)
+  set_tests_properties(sanser-windows-opus-wire-test PROPERTIES TIMEOUT 10)
   add_executable(sanser-control-timing-test ../common/control_timing_test.cpp)
   add_test(NAME sanser-control-timing-test COMMAND sanser-control-timing-test)
   add_executable(sanser-stream-adaptation-test ../common/stream_adaptation_policy_test.cpp)

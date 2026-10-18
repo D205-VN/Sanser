@@ -473,6 +473,7 @@ int runWindows(bool host,int argc,char** argv) {
   Peer peer(options); WindowState state; state.sendInput=[&](Input input) { peer.input(input); }; state.viewOnly=!options.input;
   AudioPlayer audio(options.audio);
   if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };
+  if(options.audio) peer.onAudioReset=[&] { audio.reset(); };
   // Decoder COM objects belong to the decode worker, not the socket/UI threads.
   std::atomic<bool> conversionFailed{false};
   std::atomic<std::uint64_t> decodedFrames{0},convertedFrames{0};

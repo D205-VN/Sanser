@@ -9,6 +9,7 @@ public:
   explicit AudioPlayer(bool enabled);
   ~AudioPlayer();
   void submit(AudioSamples samples) { queue_.push(std::move(samples)); }
+  void reset() { queue_.clear(); }
 private:
   void run();
   std::atomic<bool> running_{true};

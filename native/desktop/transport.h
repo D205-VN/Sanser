@@ -6,6 +6,7 @@
 #include "input_worker.h"
 #include "round_trip_probe.h"
 #include "audio.h"
+#include "opus_audio.h"
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
@@ -28,6 +29,7 @@ struct Options {
   bool ultraLowLatency = false;
   bool input = true;
   bool audio = true;
+  bool audioOpus = true;
   bool sharing = false;
   std::string viewerId;
   std::string peer;
@@ -117,10 +119,12 @@ public:
   void input(const Input& input);
   void audio(const AudioSamples& samples);
   bool audioReady() const { return options_.audio && options_.host && peerAudio_ && ready_ && running_; }
+  bool opusAudioReady() const { return audioReady() && peerAudioOpus_; }
   void requestKeyframe();
   std::function<void(Frame)> onFrame;
   std::function<void(Input)> onInput;
   std::function<void(AudioSamples)> onAudio;
+  std::function<void()> onAudioReset;
   std::function<void()> onKeyframe;
   std::function<void()> onStopped;
   std::function<void()> onReady;
@@ -155,6 +159,13 @@ private:
   TxScheduler tx_;
   std::atomic<bool> peerSack_{false}, outgoingNeedsKeyframe_{false};
   std::atomic<bool> peerAudio_{false};
+  std::atomic<bool> peerAudioOpus_{false};
+  std::mutex audioMutex_;
+  std::unique_ptr<sanser::audio::Encoder> audioEncoder_;
+  std::unique_ptr<sanser::audio::ReceiveWorker> audioReceiver_;
+  std::uint64_t audioSequence_=0;
+  std::atomic<std::uint64_t> opusTxPackets_{0},opusTxBytes_{0};
+  bool receivingOpus_=false;
   std::atomic<std::uint64_t> queuedKeys_{0},queuedButtons_{0};
   std::atomic<std::uint64_t> deliveredKeys_{0},deliveredButtons_{0};
   std::uint64_t lastAudio_=0;

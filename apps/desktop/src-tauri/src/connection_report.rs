@@ -19,6 +19,8 @@ const SOURCES: &[&str] = &[
     "SNSHARE_PEER",
     "SNV2_HOST_TIMING",
     "SNV2_VIDEO_HEALTH",
+    "SNV2_AUDIO_HEALTH",
+    "SNA1_AUDIO_STATS",
     "SNV2_INPUT_HEALTH",
     "SNV2_CONTROL_TIMING",
     "SNROUTE_HEALTH",
@@ -48,6 +50,14 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "opusDecoded",
+    "opusPlc",
+    "opusLate",
+    "opusReordered",
+    "opusDropped",
+    "opusErrors",
+    "opusTxPackets",
+    "opusTxBytes",
     "ready",
     "running",
     "stopReason",
@@ -645,6 +655,14 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    #[test]
+    fn audio_reports_keep_only_numeric_quality_counters() {
+        let sample = parse_sample(b"SNV2_AUDIO_HEALTH opusDecoded=200 opusPlc=3 opusLate=2 opusErrors=0 opusTxBytes=16000 token=123 samples=456").unwrap();
+        assert_eq!(sample.values.len(), 5);
+        assert_eq!(sample.values["opusPlc"], 3.0);
+        assert!(!sample.values.contains_key("token"));
+        assert!(!sample.values.contains_key("samples"));
+    }
     #[test]
     fn live_recovery_evidence_is_bound_to_the_report_session_without_raw_content() {
         let launch = request();

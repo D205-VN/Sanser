@@ -9,6 +9,7 @@
 #include "latency_policy.h"
 #include "control_timing.h"
 #include "stream_adaptation_policy.h"
+#include "opus_audio.h"
 
 #include <algorithm>
 #include <atomic>
@@ -377,6 +378,7 @@ std::uint64_t gNextVideoNackSequence = 0;
 constexpr std::size_t kMaxQueuedVideoNacks = 64;
 constexpr std::size_t kMaxCoalescedVideoNackPackets = 256;
 std::atomic<bool> gClientAudioPcm16{false};
+std::atomic<bool> gClientAudioOpus{false};
 static SOCKET gUdpMainSocket = INVALID_SOCKET;
 static std::mutex gUdpMainSocketMutex;
 static bool gSingleSocketMode = false;
@@ -3860,6 +3862,8 @@ private:
           const bool clientMediaCrypto = jsonBoolValue(payload, "mediaCrypto");
           const bool clientAudioPcm16 = jsonBoolValue(payload, "audioPcm16");
           gClientAudioPcm16.store(clientAudioPcm16, std::memory_order_release);
+          const bool clientAudioOpus=jsonBoolValue(payload,"audioOpus");
+          gClientAudioOpus.store(clientAudioOpus,std::memory_order_release);
           clientGamepadRumble_ = jsonBoolValue(payload, "gamepadRumble");
           const std::string sessionNonce = jsonStringValue(payload, "sessionNonce");
           const bool canPacketAuth = !sessionToken_.empty() && clientPacketAuth && !sessionNonce.empty();
@@ -3876,6 +3880,7 @@ private:
                 << ",\"videoUdpPacing\":true"
                 << ",\"audioUdp\":true"
                 << ",\"audioPcm16\":" << (clientAudioPcm16 ? "true" : "false")
+                << ",\"audioOpus\":" << (clientAudioOpus ? "true" : "false")
                 << ",\"keyframeRequest\":true"
                 << ",\"videoNack\":true"
                 << ",\"udpRepairStats\":true"
@@ -4706,8 +4711,19 @@ public:
   std::uint32_t sendStereoFloat(std::uint32_t sampleRate,
                                 const float* samples,
                                 std::uint32_t frameCount,
-                                bool usePcm16) {
+                                bool usePcm16,bool useOpus=false) {
     if (socket_ == INVALID_SOCKET || !samples || frameCount == 0) return 0;
+    if(useOpus) {
+      if(!opusEncoder_) {
+        opusEncoder_=std::make_unique<sanser::audio::Encoder>();
+        opusPacketizer_=std::make_unique<sanser::audio::Packetizer>([this](const sanser::audio::Samples& block) { sendOpus(block); });
+        std::cerr<<"SNA1_AUDIO_WIRE_FORMAT format=opus authMagic=SNA6 rate=48000 channels=2 frameMs=5 bitrate=96000\n";
+      }
+      syncMediaAuthEpoch(mediaCrypto_ ? mediaCrypto_->snapshot() : MediaCryptoSnapshot{},"audio");
+      const auto before=opusPacketsSent_;
+      if(!opusPacketizer_->push({samples,static_cast<std::size_t>(frameCount)*2},sampleRate)) return 0;
+      return static_cast<std::uint32_t>(opusPacketsSent_-before);
+    }
 
     constexpr std::uint16_t channels = 2;
     constexpr std::size_t maxPayloadBytes = 1152;
@@ -4798,12 +4814,46 @@ public:
         throw std::runtime_error("SNA1 audio UDP send failed, WSA error " + std::to_string(WSAGetLastError()));
       }
       sentPackets += 1;
+      audioDatagramBytes_+=static_cast<std::uint64_t>(datagramSize);
       offsetFrames += chunkFrames;
     }
     return sentPackets;
   }
+  std::uint64_t audioDatagramBytes() const { return audioDatagramBytes_; }
 
 private:
+  void sendOpus(const sanser::audio::Samples& samples) {
+    const auto crypto=mediaCrypto_ ? mediaCrypto_->snapshot() : MediaCryptoSnapshot{};
+    syncMediaAuthEpoch(crypto,"audio");
+    const auto sequence=nextSequence_++;
+    const auto encoded=sanser::audio::pack({sequence,(sequence-1)*sanser::audio::frames,0,opusEncoder_->encode(samples)});
+    const auto now=unixMicros();
+    if(!opusNextUnix_ || now>opusNextUnix_+100000) opusNextUnix_=now>5000 ? now-5000 : now;
+    std::array<std::uint8_t,sizeof(AudioAuthenticatedPacketHeader)+1020> datagram{};
+    std::size_t size=0;
+    if(crypto.enabled) {
+      AudioAuthenticatedPacketHeader header{}; std::memcpy(header.magic,"SNA6",4);
+      header.sampleRate=48000; header.frameCount=240; header.sequence=sequence; header.hostUnixMicros=opusNextUnix_;
+      header.payloadSize=static_cast<std::uint32_t>(encoded.size()); header.authSeq=++mediaAuthSequence_; header.authEpoch=crypto.epoch;
+      std::memcpy(datagram.data(),&header,sizeof(header)); std::memcpy(datagram.data()+sizeof(header),encoded.data(),encoded.size()); size=sizeof(header)+encoded.size();
+      chacha20Xor(datagram.data()+sizeof(header),encoded.size(),crypto.audioCryptoKey,"audio",header.authSeq);
+      writeUdpAuthTag(crypto.audioAuthKey,"audio",datagram,size,offsetof(AudioAuthenticatedPacketHeader,authTag));
+    } else {
+      AudioPacketHeader header{}; std::memcpy(header.magic,"SNA5",4);
+      header.sampleRate=48000; header.frameCount=240; header.sequence=sequence; header.hostUnixMicros=opusNextUnix_;
+      header.payloadSize=static_cast<std::uint32_t>(encoded.size());
+      std::memcpy(datagram.data(),&header,sizeof(header)); std::memcpy(datagram.data()+sizeof(header),encoded.data(),encoded.size()); size=sizeof(header)+encoded.size();
+    }
+    opusNextUnix_+=5000;
+    int sent;
+    if(gSingleSocketMode && gUdpMainSocket!=INVALID_SOCKET) {
+      std::vector<std::uint8_t> multiplexed{0x01}; multiplexed.insert(multiplexed.end(),datagram.begin(),datagram.begin()+static_cast<std::ptrdiff_t>(size));
+      std::lock_guard lock(gUdpMainSocketMutex); sent=send(gUdpMainSocket,reinterpret_cast<const char*>(multiplexed.data()),static_cast<int>(multiplexed.size()),0); if(sent>0) --sent;
+    } else sent=send(socket_,reinterpret_cast<const char*>(datagram.data()),static_cast<int>(size),0);
+    if(sent!=static_cast<int>(size)) throw std::runtime_error("Opus audio UDP send failed");
+    ++opusPacketsSent_;
+    audioDatagramBytes_+=size;
+  }
   static std::int16_t floatToPcm16(float value) {
     const float clamped = std::clamp(value, -1.0f, 1.0f);
     const float scale = clamped < 0.0f ? 32768.0f : 32767.0f;
@@ -4837,6 +4887,9 @@ private:
     mediaAuthEpoch_ = crypto.epoch;
     mediaAuthSequence_ = 0;
     nextSequence_ = 1;
+    opusNextUnix_=0;
+    if(opusEncoder_) opusEncoder_->reset();
+    if(opusPacketizer_) opusPacketizer_->reset();
     hasMediaAuthEpoch_ = true;
     std::cerr << "SNMEDIA_AUTHSEQ_RESET media=" << media
               << " epoch=" << mediaAuthEpoch_
@@ -4856,6 +4909,10 @@ private:
   std::uint64_t mediaAuthEpoch_ = 0;
   bool hasMediaAuthEpoch_ = false;
   bool hasWireFormat_ = false;
+  std::unique_ptr<sanser::audio::Encoder> opusEncoder_;
+  std::unique_ptr<sanser::audio::Packetizer> opusPacketizer_;
+  std::uint64_t opusPacketsSent_=0,opusNextUnix_=0;
+  std::uint64_t audioDatagramBytes_=0;
   bool pcm16WireFormat_ = false;
 };
 
@@ -5146,6 +5203,7 @@ private:
       std::uint64_t statsBytes = 0;
       std::uint64_t statsPcm16Frames = 0;
       std::uint64_t statsFloat32Frames = 0;
+      std::uint64_t statsOpusFrames = 0;
       std::uint64_t statsSilentFrames = 0;
       std::uint64_t statsDiscontinuityFrames = 0;
       std::uint64_t statsDiscontinuityPackets = 0;
@@ -5173,14 +5231,16 @@ private:
           convertToStereoFloat(data, frameCount, format, silent, stereoSamples);
           requireHr(captureClient->ReleaseBuffer(frameCount), "IAudioCaptureClient::ReleaseBuffer");
           const bool usePcm16 = gClientAudioPcm16.load(std::memory_order_acquire);
+          const bool useOpus = gClientAudioOpus.load(std::memory_order_acquire);
+          const auto audioBytesBefore=audioClient.audioDatagramBytes();
           statsPackets += audioClient.sendStereoFloat(format.sampleRate,
                                                       stereoSamples.data(),
                                                       frameCount,
-                                                      usePcm16);
+                                                      usePcm16,useOpus);
           statsFrames += frameCount;
-          statsBytes += static_cast<std::uint64_t>(frameCount) * 2 *
-            (usePcm16 ? sizeof(std::int16_t) : sizeof(float));
-          if (usePcm16) {
+          statsBytes += audioClient.audioDatagramBytes()-audioBytesBefore;
+          if(useOpus) statsOpusFrames+=frameCount;
+          else if (usePcm16) {
             statsPcm16Frames += frameCount;
           } else {
             statsFloat32Frames += frameCount;
@@ -5201,6 +5261,7 @@ private:
                     << " frames=" << statsFrames
                     << " kbps=" << std::fixed << std::setprecision(1) << kbps
                     << " pcm16Frames=" << statsPcm16Frames
+                    << " opusFrames=" << statsOpusFrames
                     << " float32Frames=" << statsFloat32Frames
                     << " silentFrames=" << statsSilentFrames
                     << " discontinuityPackets=" << statsDiscontinuityPackets
@@ -5213,6 +5274,7 @@ private:
           statsBytes = 0;
           statsPcm16Frames = 0;
           statsFloat32Frames = 0;
+          statsOpusFrames = 0;
           statsSilentFrames = 0;
           statsDiscontinuityFrames = 0;
           statsDiscontinuityPackets = 0;
@@ -7276,6 +7338,40 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
 int main(int argc, char** argv) {
   try {
+#ifdef SANSER_AUDIO_TEST
+    if(argc==2 && std::string_view(argv[1])=="--test-audio-wire") {
+      WinsockRuntime runtime;
+      struct SocketStop { SOCKET fd=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP); ~SocketStop() { if(fd!=INVALID_SOCKET) closesocket(fd); } } listener;
+      if(listener.fd==INVALID_SOCKET) throw std::runtime_error("Audio wire test socket");
+      sockaddr_in address{}; address.sin_family=AF_INET; address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+      if(bind(listener.fd,reinterpret_cast<sockaddr*>(&address),sizeof(address))) throw std::runtime_error("Audio wire test bind");
+      int size=sizeof(address); getsockname(listener.fd,reinterpret_cast<sockaddr*>(&address),&size);
+      DWORD timeout=1000; setsockopt(listener.fd,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+      const std::string endpoint="127.0.0.1:"+std::to_string(ntohs(address.sin_port));
+      auto crypto=std::make_shared<MediaCryptoState>(std::string(48,'s')); crypto->rotateForNonce("synthetic-audio-nonce-one");
+      UdpAudioClient sender(endpoint,crypto);
+      std::array<float,480> samples{}; for(std::size_t i=0;i<samples.size();i+=2) { samples[i]=0.25F; samples[i+1]=-0.25F; }
+      for(unsigned epoch=0;epoch<2;++epoch) {
+        if(epoch) crypto->rotateForNonce("synthetic-audio-nonce-two");
+        if(sender.sendStereoFloat(48000,samples.data(),240,true,true)!=1) throw std::runtime_error("Fixed Opus block missing");
+        std::array<std::uint8_t,1400> packet{}; const int received=recv(listener.fd,reinterpret_cast<char*>(packet.data()),static_cast<int>(packet.size()),0);
+        if(received<=static_cast<int>(sizeof(AudioAuthenticatedPacketHeader))) throw std::runtime_error("Opus wire receive timeout");
+        AudioAuthenticatedPacketHeader header; std::memcpy(&header,packet.data(),sizeof(header));
+        const auto state=crypto->snapshot();
+        if(std::memcmp(header.magic,"SNA6",4) || header.sequence!=1 || header.authEpoch!=state.epoch || header.payloadSize+sizeof(header)!=static_cast<std::size_t>(received)) throw std::runtime_error("Opus epoch/size/header mismatch");
+        std::memset(packet.data()+offsetof(AudioAuthenticatedPacketHeader,authTag),0,kUdpAuthTagHexSize);
+        if(std::string(header.authTag,kUdpAuthTagHexSize)!=udpDatagramMacHex(state.audioAuthKey,"audio",packet.data(),received)) throw std::runtime_error("Opus audio authentication mismatch");
+        chacha20Xor(packet.data()+sizeof(header),header.payloadSize,state.audioCryptoKey,"audio",header.authSeq);
+        const auto decoded=sanser::audio::unpack({packet.data()+sizeof(header),header.payloadSize});
+        sanser::audio::Decoder decoder;
+        if(!decoded || decoded->sequence!=1 || !decoder.decode(decoded->payload)) throw std::runtime_error("Opus audio payload cannot decode");
+      }
+      if(sender.sendStereoFloat(48000,samples.data(),240,true,false)!=1) throw std::runtime_error("PCM fallback block missing");
+      std::array<char,1400> pcm{}; if(recv(listener.fd,pcm.data(),static_cast<int>(pcm.size()),0)<=0 || std::memcmp(pcm.data(),"SNA4",4)) throw std::runtime_error("PCM fallback format changed");
+      std::cout<<"Legacy Opus: authenticated UDP, epoch reset, 5ms decode and PCM fallback passed\n";
+      return 0;
+    }
+#endif
     for (int i = 1; i < argc; ++i) {
       if (std::string_view(argv[i]) == "--snv2") return sanser::desktop::runWindows(true, argc, argv);
     }

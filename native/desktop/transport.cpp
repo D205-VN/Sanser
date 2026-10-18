@@ -338,6 +338,10 @@ void Peer::start() {
   if (running_.exchange(true)) return;
   lastReceived_=Clock::now();
   try {
+    if(options_.audio && options_.audioOpus) {
+      if(options_.host) audioEncoder_=std::make_unique<sanser::audio::Encoder>();
+      else if(onAudio) audioReceiver_=std::make_unique<sanser::audio::ReceiveWorker>([this](sanser::audio::Decoded decoded) { onAudio(std::move(decoded.samples)); });
+    }
     if(options_.host && options_.input) inputWorker_=std::make_unique<InputWorker>(
       [this](Input event) {
         if(onInput) {
@@ -354,7 +358,7 @@ void Peer::start() {
   }
   catch(...) { running_=false; sendReady_.notify_all(); if(sender_.joinable()) sender_.join(); if(inputWorker_) inputWorker_->stop(); throw; }
 }
-void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); if(inputWorker_) inputWorker_->stop(); }
+void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); audioReceiver_.reset(); if(inputWorker_) inputWorker_->stop(); }
 void Peer::datagram(const Bytes& b) { ::send(static_cast<Socket>(socket_), reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()), 0); }
 void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable,Clock::time_point deadline) {
   const auto queuedAt=Clock::now(); // Include sender mutex/encryption time in application input latency.
@@ -499,7 +503,13 @@ void Peer::setCapturePaused(bool paused) {
   if(inputWorker_ && !inputWorker_->submit(Input{})) { stopReason_=4; cancel(); }
 }
 void Peer::audio(const AudioSamples& samples) {
-  if(audioReady()) transmit(snv2::PacketType::Audio,encodeAudio(samples));
+  if(!audioReady()) return;
+  std::lock_guard lock(audioMutex_);
+  if(peerAudioOpus_ && audioEncoder_) {
+    const auto sequence=++audioSequence_;
+    const auto packet=sanser::audio::pack({sequence,(sequence-1)*audioFrames,0,audioEncoder_->encode(samples)});
+    transmit(snv2::PacketType::Audio,packet); ++opusTxPackets_; opusTxBytes_+=packet.size();
+  } else transmit(snv2::PacketType::Audio,encodeAudio(samples));
 }
 void Peer::requestKeyframe() {
   std::lock_guard lock(keyframeRequestMutex_);
@@ -518,7 +528,11 @@ void Peer::process(const Bytes& bytes) {
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
     peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false;
     receivedRecoverySerial_=receivedRecoveryFence_=0; inputLeaseArmed_=false;
-    lastAudio_=0; controlProbe_.reset(); for(auto& window:replay_) window=ReplayWindow{};
+    lastAudio_=0; receivingOpus_=false; peerAudioOpus_=false;
+    if(audioReceiver_) audioReceiver_->reset(h.keyId);
+    if(onAudioReset) onAudioReset();
+    { std::lock_guard lock(audioMutex_); audioSequence_=0; if(audioEncoder_) audioEncoder_->reset(); }
+    controlProbe_.reset(); for(auto& window:replay_) window=ReplayWindow{};
     reassembler_=Reassembler{options_.bitrate,options_.ultraLowLatency}; lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
     controlAppRtt_=-1; inputRttUs_=inputRttSamples_=0;
     if(options_.host) {
@@ -583,9 +597,17 @@ void Peer::process(const Bytes& bytes) {
     }
   }
   if (options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','P','1'})) peerAudio_=true;
+  if(options_.host && options_.audio && audioEncoder_ && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','O','1'})) { peerAudio_=true; peerAudioOpus_=true; }
   if(h.packetType==snv2::PacketType::Audio) {
-    if(!options_.host && options_.audio && h.streamId==0 && h.sequence>lastAudio_ && onAudio) {
-      if(auto samples=decodeAudio(b)) { lastAudio_=h.sequence; onAudio(std::move(*samples)); }
+    if(!options_.host && options_.audio && h.streamId==0 && onAudio) {
+      if(audioReceiver_ && b.size()>4 && std::equal(b.begin(),b.begin()+4,"SOA1")) {
+        if(auto packet=sanser::audio::unpack(b)) {
+          if(!receivingOpus_) { receivingOpus_=true; if(onAudioReset) onAudioReset(); }
+          audioReceiver_->push(std::move(*packet),h.keyId);
+        }
+      } else if(!receivingOpus_ && h.sequence>lastAudio_) {
+        if(auto samples=decodeAudio(b)) { lastAudio_=h.sequence; onAudio(std::move(*samples)); }
+      }
     }
     return;
   }
@@ -797,6 +819,13 @@ void Peer::sendLoop() {
 }
 void Peer::logHealth() {
   if(!std::getenv("SANSER_TELEMETRY")) return;
+  if(audioReceiver_ || opusTxPackets_) {
+    const auto stats=audioReceiver_ ? audioReceiver_->stats() : sanser::audio::Stats{};
+    std::ostringstream audio;
+    audio<<"SNV2_AUDIO_HEALTH opusDecoded="<<stats.decoded<<" opusPlc="<<stats.concealed
+      <<" opusLate="<<stats.late<<" opusReordered="<<stats.reordered<<" opusDropped="<<stats.dropped<<" opusErrors="<<stats.errors
+      <<" opusTxPackets="<<opusTxPackets_.load()<<" opusTxBytes="<<opusTxBytes_.load(); writeTelemetry(audio);
+  }
   std::size_t pending;
   std::uint64_t sendQueueUs,sendSamples,retries;
   { std::lock_guard lock(sendMutex_); pending=pending_.size(); sendQueueUs=inputSendQueueUs_; sendSamples=inputSendSamples_; retries=inputRetryCount_;
@@ -862,6 +891,7 @@ void Peer::loop() {
         // Optional authenticated capability. Old engines safely ignore it;
         // hosts never send audio until a receiving client explicitly opts in.
         if(!options_.host && options_.audio && onAudio) transmit(snv2::PacketType::Keepalive,Bytes{'S','A','P','1'});
+        if(audioReceiver_) transmit(snv2::PacketType::Keepalive,Bytes{'S','A','O','1'});
         lastHello=now;
       }
       if(options_.host && peerInputRecovery_ && inputLeaseArmed_ && now-inputLeaseAt_>std::chrono::seconds(2)) {
