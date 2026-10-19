@@ -52,6 +52,7 @@ struct VoiceRuntime::Impl {
             // The consent gates change before closing a device or clearing
             // buffered PCM; callbacks cannot enqueue newly muted speech.
             ++captureToken;
+            state(); // Revoke transport permission before potentially waiting for a device to close.
             mic.reset(); capturing=false;
             { std::lock_guard lock(mutex); captured.clear(); pendingStatus.clear(); if(!joined || deafened) incoming.clear(); }
             if(encoder) encoder->reset();
@@ -61,7 +62,6 @@ struct VoiceRuntime::Impl {
               if(!player) player=std::make_unique<AudioPlayer>(true);
             }
             code=joined ? deafened ? "deafened" : microphone ? "starting" : "listening" : "idle";
-            state();
             if(joined && microphone && !deafened) {
               if(!encoder) encoder=std::make_unique<voice::Encoder>();
               const auto token=captureToken.load();

@@ -2,6 +2,7 @@ import { get, writable } from 'svelte/store';
 import { groupVoiceStatus, setGroupVoice, type GroupVoiceScope, type GroupVoiceStatus } from '../lib/platform';
 
 export interface GroupVoiceState extends GroupVoiceStatus { busy: boolean; available: boolean; error: string | null }
+const statusReadError = 'Unable to verify voice status. The microphone may still be active; use Mute mic or Leave voice to stop it.';
 const initial = (): GroupVoiceState => ({ joined: false, microphone: false, deafened: false, capture: false, code: 'idle', busy: false, available: false, error: null });
 // In-memory consent belongs to this native group/session only. Never restore a microphone preference.
 export function createGroupVoice() {
@@ -43,11 +44,13 @@ export function createGroupVoice() {
       if (epoch === generation) {
         // Native state is authoritative about permission and device errors.
         const failed = ['permission-denied', 'no-device', 'unavailable', 'stopped', 'unsupported'].includes(observed.code);
-        state.update((value) => ({ ...value, ...observed, microphone: observed.microphone && !failed, capture: observed.capture && !failed, available: observed.code !== 'unsupported' }));
+        state.update((value) => ({ ...value, ...observed, microphone: observed.microphone && !failed, capture: observed.capture && !failed, available: observed.code !== 'unsupported', error: value.error === statusReadError ? null : value.error }));
         if (failed) intent.microphone = false;
       }
     } catch {
-      if (epoch === generation) state.update((value) => ({ ...initial(), busy: value.busy }));
+      // Losing the status pipe does not stop capture. Keep the last confirmed
+      // consent/capture state so Mute and Leave remain available.
+      if (epoch === generation) state.update((value) => ({ ...value, available: false, error: value.joined ? statusReadError : null }));
     } finally { polling = false; }
   }
   function attach(next: GroupVoiceScope): void {

@@ -118,6 +118,7 @@ int main() {
     for(auto& viewer:viewers) viewer.peer->setVoiceState({true,true,false});
     group.setVoiceState({true,true,false});
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    group.setCapturePaused(true); // Voice must continue even when screen capture pauses.
     for(unsigned turn=0;turn<12;++turn) {
       for(unsigned i=0;i<3;++i) viewers[i].peer->voicePacket(packet(speakers[i],Clock::now()));
       group.voicePacket(packet(speakers[3],Clock::now()));
@@ -126,6 +127,7 @@ int main() {
     require(waitFor([&] { return host.total()>=30; }),"host hears three viewer microphones");
     for(unsigned i=0;i<3;++i) {
       const auto own=viewers[i].peer->voiceSpeaker();
+      require(host.count(own)>=10 && host.count(0)==0,"viewer packets use only their authenticated assigned speaker ID");
       require(waitFor([&] { return viewers[i].total()>=30; }),"every viewer hears host and other viewers");
       require(viewers[i].count(own)==0 && viewers[i].count(0)>0,"SFU never echoes a viewer's microphone to itself");
     }

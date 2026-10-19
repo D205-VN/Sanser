@@ -77,3 +77,26 @@ it('preserves prior explicit microphone consent while the default device reconne
   await voice.toggleMicrophone();
   expect(setVoice).toHaveBeenLastCalledWith(scope, { joined: true, microphone: false, deafened: false });
 });
+it('preserves a known active microphone when status IPC fails and still allows mute and leave', async () => {
+  const voice = createGroupVoice(); voice.attach(scope); await voice.join(); await voice.toggleMicrophone();
+  expect(get(voice)).toMatchObject({ joined: true, microphone: true, capture: true });
+  const sent = setVoice.mock.calls.length;
+  status.mockRejectedValueOnce(new Error('temporary IPC failure'));
+  await voice.refresh();
+  expect(get(voice)).toMatchObject({ joined: true, microphone: true, capture: true, deafened: false, available: false, code: 'running' });
+  expect(get(voice).error).toMatch(/Unable to verify voice status/);
+  expect(setVoice).toHaveBeenCalledTimes(sent);
+  await voice.toggleMicrophone();
+  expect(setVoice).toHaveBeenLastCalledWith(scope, { joined: true, microphone: false, deafened: false });
+  expect(get(voice)).toMatchObject({ joined: true, microphone: false, capture: false, available: true, error: null });
+  await voice.leave();
+  expect(setVoice).toHaveBeenLastCalledWith(scope, { joined: false, microphone: false, deafened: false });
+});
+it('does not silently undeafen an existing listener after a failed status read', async () => {
+  const voice = createGroupVoice(); voice.attach(scope); await voice.join(); await voice.toggleDeafen();
+  status.mockRejectedValueOnce(new Error('temporary IPC failure'));
+  await voice.refresh();
+  expect(get(voice)).toMatchObject({ joined: true, microphone: false, capture: false, deafened: true, available: false });
+  await voice.refresh();
+  expect(get(voice)).toMatchObject({ deafened: true, available: true, error: null });
+});
