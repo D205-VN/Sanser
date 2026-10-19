@@ -1,6 +1,7 @@
 // LocalSystem capture/input broker. No sockets, shell commands, session tokens,
 // encoder or account credentials are accepted by this service.
 #include "protocol.h"
+#include "input_state.h"
 #include "win_util.h"
 #include "desktop_duplication.h"
 #include "sanser_version.h"
@@ -49,24 +50,43 @@ bool unlockedConsole(DWORD session) {
 class Desktop {
 public:
   ~Desktop() { if(current_) { SetThreadDesktop(original_); CloseDesktop(current_); } }
-  bool bind() {
+  bool bind(bool input=false) {
     HDESK next=OpenInputDesktop(0,FALSE,DESKTOP_READOBJECTS|DESKTOP_WRITEOBJECTS|DESKTOP_SWITCHDESKTOP);
     if(!next) return false;
     wchar_t name[256]{}; DWORD needed=0;
     if(!GetUserObjectInformationW(next,UOI_NAME,name,sizeof(name),&needed)
-        || _wcsicmp(name,L"Winlogon")) { CloseDesktop(next); return false; }
-    if(current_) { CloseDesktop(next); return true; }
+        || (_wcsicmp(name,L"Winlogon") && (!input || _wcsicmp(name,L"Default")))) { CloseDesktop(next); return false; }
+    if(current_ && name_==name) { CloseDesktop(next); return true; }
     if(!SetThreadDesktop(next)) { CloseDesktop(next); return false; }
-    current_=next; return true;
+    if(current_) CloseDesktop(current_);
+    current_=next; name_=name; return true;
   }
 private:
   HDESK original_=GetThreadDesktop(GetCurrentThreadId()),current_=nullptr;
+  std::wstring name_;
+};
+INPUT winInput(const Request& request) {
+  INPUT in{}; in.type=request.type;
+  if(in.type==INPUT_KEYBOARD) {
+    in.ki.dwFlags=request.flags;
+    if(request.flags&KEYEVENTF_SCANCODE) in.ki.wScan=static_cast<WORD>(request.data); else in.ki.wVk=static_cast<WORD>(request.data);
+  } else { in.mi.dwFlags=request.flags; in.mi.dx=request.x; in.mi.dy=request.y; in.mi.mouseData=request.data; }
+  return in;
+}
+struct AppliedInput {
+  DWORD session; Desktop& desktop;
+  InputState state;
+  ~AppliedInput() {
+    if(!unlockedConsole(session) || !desktop.bind(true)) return;
+    state.release([](const Request& event) { INPUT input=winInput(event); SendInput(1,&input,sizeof(input)); });
+  }
 };
 int worker(const wchar_t* channelName) {
   HANDLE raw=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw)!=FALSE,"Worker identity");
   Handle token(raw); require(localSystem(raw),"Worker requires LocalSystem");
   DWORD session=0; require(ProcessIdToSessionId(GetCurrentProcessId(),&session)!=FALSE,"Worker session");
   Desktop desktop; std::unique_ptr<DesktopDuplicator> capture; unsigned adapter=0,output=0;
+  AppliedInput applied{session,desktop,{}};
   Handle channel(CreateFileW(channelName,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr));
   require(static_cast<bool>(channel),"Private worker channel");
   const HANDLE input=channel.value,out=channel.value;
@@ -76,7 +96,7 @@ int worker(const wchar_t* channelName) {
     // Lock/logoff/user switch revokes access. We only support UAC in an
     // already unlocked interactive console, not Windows sign-in credentials.
     if(!valid(request)) return 2;
-    if(unlockedConsole(session) && desktop.bind()) {
+    if(unlockedConsole(session) && desktop.bind(request.operation==Operation::Input)) {
       try {
         if(request.operation==Operation::Capture) {
           if(!capture || adapter!=request.adapter || output!=request.output) {
@@ -90,12 +110,8 @@ int worker(const wchar_t* channelName) {
             if(!validFrame(response)) return 2;
           } else if(!capture->recovering()) response.status=Status::Idle;
         } else {
-          INPUT in{}; in.type=request.type;
-          if(in.type==INPUT_KEYBOARD) {
-            in.ki.dwFlags=request.flags;
-            if(request.flags&KEYEVENTF_SCANCODE) in.ki.wScan=static_cast<WORD>(request.data); else in.ki.wVk=static_cast<WORD>(request.data);
-          } else { in.mi.dwFlags=request.flags; in.mi.dx=request.x; in.mi.dy=request.y; in.mi.mouseData=request.data; }
-          if(SendInput(1,&in,sizeof(in))==1) response.status=Status::Applied;
+          INPUT in=winInput(request);
+          if(SendInput(1,&in,sizeof(in))==1) { applied.state.applied(request); response.status=Status::Applied; }
         }
       } catch(...) { capture.reset(); response=Response{}; }
     } else capture.reset();
@@ -127,6 +143,12 @@ bool authorized(HANDLE pipe,DWORD& session,Handle& owner) {
 }
 struct Worker {
   Handle job,process,channel;
+  ~Worker() {
+    // Give the worker a bounded chance to release held input before the job
+    // kills it. Closing the pipe unblocks its synchronous request read.
+    channel=Handle();
+    if(process) WaitForSingleObject(process.value,250);
+  }
   explicit Worker(DWORD session) {
     // Windows forbids handle inheritance across sessions. Connect the Session 0
     // broker to its interactive worker over a random, SYSTEM-only named pipe.

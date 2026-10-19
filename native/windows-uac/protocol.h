@@ -33,6 +33,8 @@ inline bool valid(const Request& r) {
     return !r.x && !r.y && r.data>0 && r.data<=255 && !(r.flags&~0x0bU);
   }
   if(r.type!=0 || !r.flags || (r.flags&~0xe9ffU)) return false;
+  if(r.flags&0x180U) { if((r.data!=1 && r.data!=2) || (r.flags&0x800U)) return false; }
+  else if(!(r.flags&0x800U) && r.data) return false;
   if(r.flags&0x8000U) return r.x>=0 && r.x<=65535 && r.y>=0 && r.y<=65535;
   return r.x>=-65535 && r.x<=65535 && r.y>=-65535 && r.y<=65535;
 }

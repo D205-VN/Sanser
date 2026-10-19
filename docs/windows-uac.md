@@ -38,7 +38,12 @@ Sanser alone does not silently install or enable this service.
    generation, requests an IDR through the existing host loop and resumes the
    normal pipeline. The network session is not restarted.
 
-Input uses the helper only while it is actively serving UAC capture. A confirmed
+Input uses the helper while it is actively serving UAC capture, or when normal
+`SendInput` is blocked by an elevated installer on the unlocked Default desktop.
+Both cases use the same authenticated, protected host and user/session checks.
+Applied keys/buttons are tracked by the worker and released on graceful pipe
+disconnect so a viewer cannot leave modifiers held inside the secure desktop.
+A confirmed
 `Unavailable` response can return an input event to the normal desktop after UAC
 closes. An input transaction whose outcome is unknown is not blindly replayed.
 

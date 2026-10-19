@@ -68,10 +68,12 @@ bool CaptureClient::capture(FrameBgra& frame,unsigned adapter,unsigned output,bo
 bool active() { return GetTickCount64()<servedUntil.load(); }
 void resumed() { servedUntil=0; }
 UINT sendInput(UINT count,INPUT* inputs,int size) {
-  if(!active()) return ::SendInput(count,inputs,size);
   if(size!=sizeof(INPUT) || count>16) return 0;
   thread_local Connection connection;
-  UINT sent=0;
+  // Ordinary input remains in-process. The helper is also needed for a high-
+  // integrity installer window after its UAC prompt returns to Default.
+  UINT sent=active() ? 0 : ::SendInput(count,inputs,size);
+  if(sent==count) return sent;
   for(;sent<count;++sent) {
     const auto& in=inputs[sent]; Request request; request.operation=Operation::Input; request.type=in.type;
     if(in.type==INPUT_KEYBOARD) { request.flags=in.ki.dwFlags; request.data=(in.ki.dwFlags&KEYEVENTF_SCANCODE)?in.ki.wScan:in.ki.wVk; }
