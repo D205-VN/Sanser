@@ -323,6 +323,9 @@ int elevate(bool enable) {
 }
 int wmain(int argc,wchar_t** argv) {
   SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32|LOAD_LIBRARY_SEARCH_APPLICATION_DIR);
+  // Match the native host before DXGI reads output geometry. Otherwise GetDesc
+  // virtualizes high-DPI dimensions and the capture loop rejects every frame.
+  SetProcessDPIAware();
   try {
     if(argc==3 && std::wstring(argv[1])==L"--worker") return worker(argv[2]);
     if(argc!=2) return 2;
@@ -330,7 +333,7 @@ int wmain(int argc,wchar_t** argv) {
     if(mode==L"--install" || mode==L"--uninstall") { install(mode==L"--install"); return 0; }
     if(mode==L"--enable" || mode==L"--disable") return elevate(mode==L"--enable");
     if(mode==L"--status") {
-      std::cout<<"{\"enabled\":"<<(running()?"true":"false")<<",\"version\":\""<<sanser::kVersion<<"\"}\n"; return 0;
+      std::cout<<"{\"enabled\":"<<(running()?"true":"false")<<",\"dpiAware\":"<<(IsProcessDPIAware()?"true":"false")<<",\"version\":\""<<sanser::kVersion<<"\"}\n"; return 0;
     }
     if(mode==L"--host-path") {
       const auto path=(installDirectory()/L"sanser-host-windows.exe").wstring();

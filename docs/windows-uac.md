@@ -81,6 +81,9 @@ group sessions, launch a benign installer, verify that its real UAC prompt is
 visible and mouse/keyboard work, cancel/accept it, and confirm moving desktop
 content resumes without reconnecting. Also test disabling the service, viewer
 disconnect while UAC is open, repeated UAC transitions, and lock/logoff rejection.
+Include Windows scaling at 125%/150%: the worker sets the same DPI awareness as
+the normal host before DXGI queries, so logical dimensions do not conflict with
+physical duplication surfaces.
 Do not enter or record administrator passwords in test artifacts.
 
 ## References
@@ -89,3 +92,4 @@ Do not enter or record administrator passwords in test artifacts.
 - [Microsoft: desktop duplication](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api): recreate duplication after access loss.
 - [Microsoft: CreateProcessAsUser](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw): session/desktop selection and cross-session handle restrictions.
 - [Microsoft: interactive services](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services): services use a separate worker in the interactive session rather than an interactive Session 0 service.
+- [Microsoft: GetDesc](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgioutput-getdesc): output dimensions are virtualized unless the process is DPI aware.
