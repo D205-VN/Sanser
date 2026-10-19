@@ -107,6 +107,9 @@ jobs:
       - run: cmake -S native/host-windows -B build/host-windows -A x64 -DBUILD_TESTING=ON
       - run: cmake --build build/host-windows --config Release --parallel
       - run: ctest --test-dir build/host-windows -C Release --output-on-failure
+      - name: Verify opt-in UAC service installation and deny unauthorized callers
+        shell: pwsh
+        run: ./scripts/test-windows-uac-service.ps1
       - run: ./build/host-windows/cross-platform/Release/sanser-client-windows.exe --capabilities-json
 
   windows-relay:

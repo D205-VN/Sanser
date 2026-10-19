@@ -56,6 +56,7 @@ private:
   long left_ = 0;
   long top_ = 0;
   bool gpuCapture_ = false;
+  bool brokerCapture_ = false;
   std::uint64_t lastAcquireWaitMicros_ = 0;
   std::uint64_t gpuPoolBusyDrops_ = 0;
   std::uint64_t generation_ = 0;

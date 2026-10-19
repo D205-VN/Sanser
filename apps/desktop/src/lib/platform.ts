@@ -6,6 +6,15 @@ export function isTauriRuntime(): boolean {
   return '__TAURI_INTERNALS__' in window;
 }
 
+export interface WindowsUacStatus { available: boolean; enabled: boolean; ready: boolean }
+export async function windowsUacStatus(): Promise<WindowsUacStatus> {
+  return isTauriRuntime() ? invoke<WindowsUacStatus>('windows_uac_status') : { available: false, enabled: false, ready: false };
+}
+export async function configureWindowsUac(enabled: boolean): Promise<WindowsUacStatus> {
+  if (!isTauriRuntime()) throw new Error('UAC support requires the packaged Windows app');
+  return invoke<WindowsUacStatus>('configure_windows_uac', { enabled });
+}
+
 export interface LoginDevice {
   installationId: string;
   deviceName: string;

@@ -11,6 +11,7 @@ mod relay;
 mod sharing_engine;
 mod storage;
 mod tray;
+mod windows_uac;
 
 use engine::EngineManager;
 use tauri::Manager;
@@ -77,6 +78,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            windows_uac::windows_uac_status,
+            windows_uac::configure_windows_uac,
             commands::get_runtime_status,
             device_identity::get_device_identity,
             device_identity::get_login_device,

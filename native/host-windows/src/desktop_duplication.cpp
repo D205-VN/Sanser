@@ -1,4 +1,7 @@
 #include "desktop_duplication.h"
+#ifndef SANSER_UAC_WORKER
+#include "../../windows-uac/client.h"
+#endif
 
 #include <d3d11.h>
 #include <d3d10.h>
@@ -40,6 +43,9 @@ struct DesktopDuplicator::Impl {
   bool recoveryPending = false;
   std::chrono::steady_clock::time_point nextRecoveryAttempt{};
   std::uint32_t recoveryFailures = 0;
+#ifndef SANSER_UAC_WORKER
+  sanser::uac::CaptureClient broker;
+#endif
 };
 
 DesktopDuplicator::DesktopDuplicator() : impl_(std::make_unique<Impl>()) {}
@@ -47,7 +53,7 @@ DesktopDuplicator::DesktopDuplicator() : impl_(std::make_unique<Impl>()) {}
 DesktopDuplicator::~DesktopDuplicator() = default;
 
 ID3D11Device* DesktopDuplicator::gpuDevice() const { return impl_->device.Get(); }
-bool DesktopDuplicator::recovering() const { return impl_->recoveryPending; }
+bool DesktopDuplicator::recovering() const { return impl_->recoveryPending && !brokerCapture_; }
 
 void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t outputIndex) {
   auto next = std::make_unique<Impl>();
@@ -135,6 +141,10 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
   surfaceWidth_ = nextSurfaceWidth;
   surfaceHeight_ = nextSurfaceHeight;
   rotation_ = static_cast<unsigned int>(outputDesc.Rotation);
+#ifndef SANSER_UAC_WORKER
+  if(brokerCapture_) { sanser::uac::resumed(); std::fprintf(stderr,"SNUAC_CAPTURE active=0 source=desktop\n"); }
+#endif
+  brokerCapture_ = false;
   ++generation_;
 }
 
@@ -142,20 +152,44 @@ bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) 
   lastAcquireWaitMicros_ = 0;
   if (impl_->recoveryPending) {
     const auto now = std::chrono::steady_clock::now();
-    if (now < impl_->nextRecoveryAttempt) return false;
     // Release the invalid duplication before creating its replacement.
-    impl_->duplication.Reset();
-    try {
-      initialize(adapterIndex_, outputIndex_);
-    } catch (const std::exception& error) {
-      impl_->nextRecoveryAttempt = now + std::chrono::milliseconds(250);
-      impl_->recoveryFailures += 1;
-      if (impl_->recoveryFailures == 1 || impl_->recoveryFailures % 20 == 0) {
-        std::fprintf(stderr,
-                     "Desktop duplication recovery pending (attempt %u): %s\n",
-                     impl_->recoveryFailures,
-                     error.what());
+    if(now >= impl_->nextRecoveryAttempt) {
+      impl_->duplication.Reset();
+      try {
+        initialize(adapterIndex_, outputIndex_);
+      } catch (const std::exception& error) {
+        impl_->nextRecoveryAttempt = now + std::chrono::milliseconds(250);
+        impl_->recoveryFailures += 1;
+        if (impl_->recoveryFailures == 1 || impl_->recoveryFailures % 20 == 0) {
+          std::fprintf(stderr,
+                       "Desktop duplication recovery pending (attempt %u): %s\n",
+                       impl_->recoveryFailures,
+                       error.what());
+        }
       }
+    }
+    if(impl_->recoveryPending) {
+#ifndef SANSER_UAC_WORKER
+      bool changed=false;
+      if(impl_->broker.capture(frame,adapterIndex_,outputIndex_,changed)) {
+        if(!brokerCapture_) { brokerCapture_=true; ++generation_; std::fprintf(stderr,"SNUAC_CAPTURE active=1 source=system-helper\n"); }
+        if(changed && gpuCapture_ && impl_->device) {
+          // Only the short UAC interval crosses the process boundary as BGRA.
+          // Upload to the existing device so GPU encoders keep their context.
+          D3D11_TEXTURE2D_DESC description{};
+          description.Width=frame.width; description.Height=frame.height; description.MipLevels=1;
+          description.ArraySize=1; description.Format=DXGI_FORMAT_B8G8R8A8_UNORM; description.SampleDesc.Count=1;
+          description.Usage=D3D11_USAGE_DEFAULT; description.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+          D3D11_SUBRESOURCE_DATA data{}; data.pSysMem=frame.pixels.data(); data.SysMemPitch=frame.stride;
+          ComPtr<ID3D11Texture2D> texture;
+          if(SUCCEEDED(impl_->device->CreateTexture2D(&description,&data,&texture)))
+            frame.texture=std::shared_ptr<ID3D11Texture2D>(texture.Detach(),[](ID3D11Texture2D* value) { value->Release(); });
+          else { brokerCapture_=false; return false; }
+        }
+        return changed;
+      }
+#endif
+      brokerCapture_=false;
       return false;
     }
   }

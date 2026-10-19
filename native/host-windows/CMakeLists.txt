@@ -10,6 +10,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+add_subdirectory(../windows-uac ${CMAKE_BINARY_DIR}/windows-uac)
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../protocol ${CMAKE_BINARY_DIR}/snv2-protocol)
 
 add_executable(sanser-host-windows
@@ -48,12 +50,13 @@ if(BUILD_TESTING)
     src/mf_encoder_test.cpp src/mf_video_packet_encoder.cpp src/gpu_video_processor.cpp
     src/mf_video_encoder.cpp src/desktop_duplication.cpp)
   target_compile_definitions(sanser-mf-encoder-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-  target_link_libraries(sanser-mf-encoder-test PRIVATE mfplat mfreadwrite mfuuid ole32 strmiids wmcodecdspuuid d3d11 d3dcompiler dxgi user32)
+  target_link_libraries(sanser-mf-encoder-test PRIVATE sanser-uac-client mfplat mfreadwrite mfuuid ole32 strmiids wmcodecdspuuid d3d11 d3dcompiler dxgi user32)
   add_test(NAME sanser-mf-encoder-test COMMAND sanser-mf-encoder-test)
   set_tests_properties(sanser-mf-encoder-test PROPERTIES TIMEOUT 30)
 endif()
 
 target_link_libraries(sanser-host-windows PRIVATE
+  sanser-uac-client
   avrt
   bcrypt
   d3d11

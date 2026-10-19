@@ -298,7 +298,7 @@ fn parse_sidecar_capabilities(
     Ok(capabilities)
 }
 
-fn native_command(path: &Path) -> Command {
+pub(crate) fn native_command(path: &Path) -> Command {
     #[allow(unused_mut)]
     let mut command = Command::new(path);
     #[cfg(windows)]
@@ -310,7 +310,7 @@ fn native_command(path: &Path) -> Command {
     command
 }
 
-fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
+pub(crate) fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
     let mut command = native_command(path);
     command
         .arg("--capabilities-json")
@@ -407,7 +407,11 @@ fn staged_sidecar_filename(base: &str) -> Option<String> {
 }
 
 fn candidate_paths(app: &AppHandle, kind: EngineKind) -> Vec<PathBuf> {
-    let filename = executable_filename(sidecar_name(kind));
+    named_candidate_paths(app, sidecar_name(kind))
+}
+
+pub(crate) fn named_candidate_paths(app: &AppHandle, name: &str) -> Vec<PathBuf> {
+    let filename = executable_filename(name);
     let mut candidates = Vec::with_capacity(5);
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join(&filename));
@@ -420,7 +424,7 @@ fn candidate_paths(app: &AppHandle, kind: EngineKind) -> Vec<PathBuf> {
         candidates.push(directory.join("binaries").join(&filename));
     }
     #[cfg(debug_assertions)]
-    if let Some(staged) = staged_sidecar_filename(sidecar_name(kind)) {
+    if let Some(staged) = staged_sidecar_filename(name) {
         // Tauri strips the target triple when bundling. During `tauri dev`,
         // however, the CLI leaves the staged binary beside this manifest.
         candidates.push(
@@ -435,6 +439,13 @@ fn candidate_paths(app: &AppHandle, kind: EngineKind) -> Vec<PathBuf> {
 pub fn find_sidecar(app: &AppHandle, kind: EngineKind) -> Option<PathBuf> {
     if !supported_on_platform(kind) {
         return None;
+    }
+    #[cfg(windows)]
+    if kind == EngineKind::Host
+        && let Some(path) = crate::windows_uac::protected_host(app)
+        && probe_path(&path, kind).compatible
+    {
+        return Some(path);
     }
     candidate_paths(app, kind)
         .into_iter()

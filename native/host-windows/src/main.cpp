@@ -2,6 +2,7 @@
 #include "engine.h"
 #include "bmp_writer.h"
 #include "desktop_duplication.h"
+#include "../../windows-uac/client.h"
 #include "mf_video_encoder.h"
 #include "mf_video_packet_encoder.h"
 #include "sanser_version.h"
@@ -1517,8 +1518,8 @@ void recordInputHealth(InputHealthKind kind, bool ok) {
 bool movePointerNormalized(double normalizedX, double normalizedY) {
   const POINT target = normalizedToScreenPoint(normalizedX, normalizedY);
 
-  ClipCursor(nullptr);
-  if (SetCursorPos(target.x, target.y) != 0 && cursorNearTarget(target)) return true;
+  if (!sanser::uac::active()) ClipCursor(nullptr);
+  if (!sanser::uac::active() && SetCursorPos(target.x, target.y) != 0 && cursorNearTarget(target)) return true;
 
   const int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
   const int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -1532,7 +1533,8 @@ bool movePointerNormalized(double normalizedX, double normalizedY) {
   input.mi.dx = absoluteX;
   input.mi.dy = absoluteY;
   input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-  if (SendInput(1, &input, sizeof(input)) == 1 && cursorNearTarget(target)) return true;
+  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1
+      && (sanser::uac::active() || cursorNearTarget(target))) return true;
 
   mouse_event(input.mi.dwFlags,
               static_cast<DWORD>(absoluteX),
@@ -1593,7 +1595,7 @@ RelativePointerApplyResult movePointerRelative(double deltaX, double deltaY) {
 #ifdef MOUSEEVENTF_MOVE_NOCOALESCE
   input.mi.dwFlags |= MOUSEEVENTF_MOVE_NOCOALESCE;
 #endif
-  if (SendInput(1, &input, sizeof(input)) == 1) {
+  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) {
     result.moved = true;
     return result;
   }
@@ -1629,7 +1631,7 @@ bool sendMouseButtonRaw(int button, bool down) {
   INPUT input{};
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = normalizeMacMouseButton(button, down);
-  if (SendInput(1, &input, sizeof(input)) == 1) return true;
+  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
   mouse_event(input.mi.dwFlags, 0, 0, 0, 0);
   return GetLastError() == ERROR_SUCCESS;
 }
@@ -1653,7 +1655,7 @@ bool sendWheel(double deltaY, bool precise) {
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = MOUSEEVENTF_WHEEL;
   input.mi.mouseData = static_cast<DWORD>(static_cast<LONG>(std::lround(clamped)));
-  if (SendInput(1, &input, sizeof(input)) == 1) return true;
+  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
   mouse_event(MOUSEEVENTF_WHEEL, 0, 0, static_cast<DWORD>(static_cast<LONG>(std::lround(clamped))), 0);
   return GetLastError() == ERROR_SUCCESS;
 }
@@ -1864,7 +1866,7 @@ bool sendVirtualKeyRaw(WORD virtualKey, bool down) {
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = virtualKey;
   input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
-  if (SendInput(1, &input, sizeof(input)) == 1) return true;
+  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
   keybd_event(static_cast<BYTE>(virtualKey), 0, down ? 0 : KEYEVENTF_KEYUP, 0);
   return GetLastError() == ERROR_SUCCESS;
 }
@@ -1876,7 +1878,7 @@ bool sendKeyInjectionRaw(const KeyInjection& key, bool down) {
     input.ki.wScan = static_cast<WORD>(key.scanCode);
     input.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
     if (key.extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-    if (SendInput(1, &input, sizeof(input)) == 1) return true;
+    if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
 
     if (key.virtualKey != 0) {
       keybd_event(static_cast<BYTE>(key.virtualKey),

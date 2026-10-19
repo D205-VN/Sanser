@@ -103,6 +103,9 @@ function stageWindows() {
   const clientSource = resolve(build, 'cross-platform/Release/sanser-client-windows.exe');
   if (!existsSync(clientSource)) throw new Error('Windows client was not produced');
   copyFileSync(clientSource, resolve(binaries, `sanser-client-windows-${target}.exe`));
+  const uacSource = resolve(build, 'windows-uac/Release/sanser-uac-service.exe');
+  if (!existsSync(uacSource)) throw new Error('Windows UAC helper was not produced');
+  copyFileSync(uacSource, resolve(binaries, `sanser-uac-service-${target}.exe`));
 }
 
 if (platform === 'darwin') stageMacOS();

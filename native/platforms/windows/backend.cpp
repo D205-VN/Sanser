@@ -23,6 +23,7 @@
 #include "keyboard.h"
 #include "window_presenter.h"
 #include "desktop_duplication.h"
+#include "../../windows-uac/client.h"
 #include "mf_video_packet_encoder.h"
 #include <algorithm>
 #include <memory>
@@ -86,19 +87,19 @@ public:
       }
       if(event.kind==Input::Scroll) { input.mi.dwFlags=MOUSEEVENTF_WHEEL; input.mi.mouseData=static_cast<DWORD>(static_cast<int>(event.delta)*WHEEL_DELTA); }
     }
-    SendInput(1,&input,sizeof(input));
+    sanser::uac::sendInput(1,&input,sizeof(input));
   }
 private:
   void reset() {
     for(auto it=keys_.begin();it!=keys_.end();) {
       const auto scan=windowsKey(*it); INPUT input{}; input.type=INPUT_KEYBOARD; input.ki.wScan=scan&255;
       input.ki.dwFlags=KEYEVENTF_SCANCODE|KEYEVENTF_KEYUP|(scan&256?KEYEVENTF_EXTENDEDKEY:0);
-      if(SendInput(1,&input,sizeof(input))==1) it=keys_.erase(it); else ++it;
+      if(sanser::uac::sendInput(1,&input,sizeof(input))==1) it=keys_.erase(it); else ++it;
     }
     static constexpr DWORD up[]={MOUSEEVENTF_LEFTUP,MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_MIDDLEUP};
     for(auto it=buttons_.begin();it!=buttons_.end();) {
       INPUT input{}; input.type=INPUT_MOUSE; input.mi.dwFlags=up[*it];
-      if(SendInput(1,&input,sizeof(input))==1) it=buttons_.erase(it); else ++it;
+      if(sanser::uac::sendInput(1,&input,sizeof(input))==1) it=buttons_.erase(it); else ++it;
     }
   }
   long left_,top_; std::uint32_t width_,height_; std::set<std::uint16_t> keys_,buttons_;

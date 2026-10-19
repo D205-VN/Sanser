@@ -5,7 +5,8 @@
     ],
     "externalBin": [
       "binaries/sanser-host-windows",
-      "binaries/sanser-client-windows"
+      "binaries/sanser-client-windows",
+      "binaries/sanser-uac-service"
     ],
     "windows": {
       "nsis": {
