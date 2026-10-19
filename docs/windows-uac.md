@@ -9,7 +9,10 @@ LocalSystem service for that interval, shared by the legacy and SNV2 hosts.
 
 In a build containing the helper, open **Host → Windows administrator prompts →
 Enable UAC support** on Windows. Stop any current host/group session first.
-Approve Windows' administrator prompt locally. The first setup prompt cannot be
+Use your Windows administrator account and approve its prompt locally. The helper
+is bound to the account that approved setup, not to every local user. Using a
+different administrator's credentials from a standard user's session does not
+enable privileged capture for that standard user. The first setup prompt cannot be
 controlled remotely before the helper is installed.
 
 Setup copies the service and host into the protected `Program Files/SanserUac`
@@ -57,7 +60,8 @@ UAC prompts or change Windows UAC policy.
 
 ## Lifetime and validation
 
-The public pipe rejects remote clients, has an explicit local ACL and authenticates
+The public pipe rejects remote clients, has an explicit ACL for SYSTEM and the
+setup account SID (stored in a protected file), and authenticates
 the client's PID, executable path and user SID. The host checks the server image
 and running SCM service PID without requiring permission to read a SYSTEM token.
 The worker executable and host are installed with protected administrator/SYSTEM

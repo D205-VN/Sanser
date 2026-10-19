@@ -29,6 +29,31 @@ struct ServiceHandle {
   explicit ServiceHandle(SC_HANDLE h):value(h) {}
   ~ServiceHandle() { if(value) CloseServiceHandle(value); }
 };
+std::wstring tokenSid(HANDLE token) {
+  DWORD size=0; GetTokenInformation(token,TokenUser,nullptr,0,&size);
+  std::vector<unsigned char> bytes(size);
+  require(size && GetTokenInformation(token,TokenUser,bytes.data(),size,&size),"Read setup account");
+  LPWSTR value=nullptr;
+  require(ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(bytes.data())->User.Sid,&value)!=FALSE,"Setup account SID");
+  const std::wstring result=value; LocalFree(value); return result;
+}
+std::wstring currentSid() {
+  HANDLE raw=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw)!=FALSE,"Current account");
+  Handle token(raw); return tokenSid(raw);
+}
+std::wstring allowedSid() {
+  const auto path=installDirectory()/L"allowed-user.sid";
+  Handle file(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr));
+  if(!file) return {};
+  BY_HANDLE_FILE_INFORMATION info{};
+  if(!GetFileInformationByHandle(file.value,&info) || (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT)
+      || info.nFileSizeHigh || !info.nFileSizeLow || info.nFileSizeLow>256) return {};
+  std::string text(info.nFileSizeLow,'\0');
+  if(!transfer(file.value,text.data(),info.nFileSizeLow,false)) return {};
+  std::wstring sid(text.begin(),text.end()); PSID parsed=nullptr;
+  if(!ConvertStringSidToSidW(sid.c_str(),&parsed)) return {};
+  LocalFree(parsed); return sid;
+}
 void privilege(const wchar_t* name) {
   HANDLE raw=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_ADJUST_PRIVILEGES|TOKEN_QUERY,&raw)!=FALSE,"Service token");
   Handle token(raw); TOKEN_PRIVILEGES p{}; p.PrivilegeCount=1;
@@ -139,7 +164,8 @@ bool authorized(HANDLE pipe,DWORD& session,Handle& owner) {
     if(!n || !GetTokenInformation(token,TokenUser,data.data(),n,&n)) data.clear(); return data;
   };
   const auto a=sid(client.value),b=sid(user.value);
-  return !a.empty() && !b.empty() && EqualSid(reinterpret_cast<const TOKEN_USER*>(a.data())->User.Sid,reinterpret_cast<const TOKEN_USER*>(b.data())->User.Sid);
+  return !a.empty() && !b.empty() && tokenSid(client.value)==allowedSid()
+    && EqualSid(reinterpret_cast<const TOKEN_USER*>(a.data())->User.Sid,reinterpret_cast<const TOKEN_USER*>(b.data())->User.Sid);
 }
 struct Worker {
   Handle job,process,channel;
@@ -216,6 +242,7 @@ void serve(Handle pipe) {
         if(ok) { pixels.resize(response.bytes); ok=timedTransfer(workerProcess.channel.value,pixels.data(),response.bytes,false,1000); }
       }
       if(!ok) break;
+      if(!unlockedConsole(session)) break; // A lock may arrive during GPU readback.
       if(!timedTransfer(pipe.value,&response,sizeof(response),true,1000)) break;
       if(response.bytes && !timedTransfer(pipe.value,pixels.data(),response.bytes,true,1000)) break;
     }
@@ -230,7 +257,9 @@ void WINAPI serviceMain(DWORD,wchar_t**) {
     privilege(SE_TCB_NAME); privilege(SE_ASSIGNPRIMARYTOKEN_NAME); privilege(SE_INCREASE_QUOTA_NAME);
     // No client can replace this first pipe instance before the service starts.
     LocalMemory descriptor;
-    require(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)",SDDL_REVISION_1,reinterpret_cast<PSECURITY_DESCRIPTOR*>(&descriptor.value),nullptr)!=FALSE,"Pipe ACL");
+    const auto allowed=allowedSid(); require(!allowed.empty(),"UAC setup account is missing");
+    const std::wstring pipeAcl=L"D:P(A;;GA;;;SY)(A;;GRGW;;;"+allowed+L")";
+    require(ConvertStringSecurityDescriptorToSecurityDescriptorW(pipeAcl.c_str(),SDDL_REVISION_1,reinterpret_cast<PSECURITY_DESCRIPTOR*>(&descriptor.value),nullptr)!=FALSE,"Pipe ACL");
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES),descriptor.value,FALSE};
     struct Handlers {
       struct Entry { std::thread thread; std::shared_ptr<std::atomic<bool>> done; };
@@ -303,6 +332,18 @@ void install(bool enable) {
     require(CopyFileW((source/name).c_str(),destination.c_str(),TRUE)!=FALSE,"Install UAC binary");
     require(SetFileSecurityW(destination.c_str(),OWNER_SECURITY_INFORMATION|GROUP_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,descriptor.value)!=FALSE,"Protect UAC binary");
   }
+  // Bind this privileged feature to the administrator who explicitly enabled
+  // it. A different local/standard user must not use it to read UAC credentials.
+  const auto sid=currentSid(); const std::string encoded(sid.begin(),sid.end());
+  const auto allowedFile=target/L"allowed-user.sid";
+  const auto existing=GetFileAttributesW(allowedFile.c_str());
+  require(existing==INVALID_FILE_ATTRIBUTES || !(existing&FILE_ATTRIBUTE_REPARSE_POINT),"Reject redirected UAC account file");
+  if(existing!=INVALID_FILE_ATTRIBUTES) require(DeleteFileW(allowedFile.c_str())!=FALSE,"Replace UAC account binding");
+  {
+    Handle file(CreateFileW(allowedFile.c_str(),GENERIC_WRITE,0,&security,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
+    require(static_cast<bool>(file),"Bind UAC setup account");
+    require(transfer(file.value,const_cast<char*>(encoded.data()),static_cast<DWORD>(encoded.size()),true),"Write UAC setup account");
+  }
   const std::wstring command=L"\""+(target/L"sanser-uac-service.exe").wstring()+L"\" --service";
   ServiceHandle service(old.value?OpenServiceW(manager.value,serviceName,SERVICE_CHANGE_CONFIG|SERVICE_START):
     CreateServiceW(manager.value,serviceName,L"Sanser UAC support",SERVICE_START,SERVICE_WIN32_OWN_PROCESS,SERVICE_AUTO_START,SERVICE_ERROR_NORMAL,command.c_str(),nullptr,nullptr,nullptr,L"LocalSystem",nullptr));
@@ -331,9 +372,14 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=2) return 2;
     const std::wstring mode=argv[1];
     if(mode==L"--install" || mode==L"--uninstall") { install(mode==L"--install"); return 0; }
-    if(mode==L"--enable" || mode==L"--disable") return elevate(mode==L"--enable");
+    if(mode==L"--enable" || mode==L"--disable") {
+      const auto result=elevate(mode==L"--enable");
+      if(result==0 && mode==L"--enable" && currentSid()!=allowedSid())
+        throw std::runtime_error("Sign in with the Windows administrator account that enabled UAC support");
+      return result;
+    }
     if(mode==L"--status") {
-      std::cout<<"{\"enabled\":"<<(running()?"true":"false")<<",\"dpiAware\":"<<(IsProcessDPIAware()?"true":"false")<<",\"version\":\""<<sanser::kVersion<<"\"}\n"; return 0;
+      std::cout<<"{\"enabled\":"<<((running() && currentSid()==allowedSid())?"true":"false")<<",\"dpiAware\":"<<(IsProcessDPIAware()?"true":"false")<<",\"version\":\""<<sanser::kVersion<<"\"}\n"; return 0;
     }
     if(mode==L"--host-path") {
       const auto path=(installDirectory()/L"sanser-host-windows.exe").wstring();

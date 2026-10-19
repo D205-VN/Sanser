@@ -21,7 +21,7 @@
   {:else if status?.enabled}
     <p>Update UAC support to match this version of Sanser.</p>
   {:else}
-    <p>Enable the Windows helper once with administrator approval on this computer. It runs as a Windows service; your screen is shared only through an accepted Sanser connection.</p>
+    <p>Enable the Windows helper once while signed in to your Windows administrator account. Approve the prompt on this computer. The service is bound to that account; your screen is shared only through an accepted Sanser connection.</p>
   {/if}
   {#if sessionRunning}<p>Stop the current connection or group sharing before changing this setting.</p>{/if}
   {#if error}<div class="notice error" role="alert">{error}</div>{/if}
