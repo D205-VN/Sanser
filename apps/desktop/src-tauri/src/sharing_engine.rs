@@ -35,6 +35,19 @@ pub(crate) struct SharingPeer {
 
 impl SharingPeer {
     pub fn from_request(request: &LaunchEngineRequest) -> Result<Option<Self>, DesktopError> {
+        // Viewers carry the authenticated group context without host membership.
+        if request.kind == EngineKind::Client && request.sharing_id.is_some() {
+            if request.sharing_viewer_id.is_some()
+                || request.wire_protocol.as_deref() != Some("snv2")
+                || request.input_enabled
+                || request.relative_mouse
+            {
+                return Err(invalid("group voice requires a view-only SNV2 viewer"));
+            }
+            Uuid::parse_str(request.sharing_id.as_deref().unwrap_or_default())
+                .map_err(|_| invalid("sharing identifiers must be UUIDs"))?;
+            return Ok(None);
+        }
         let (Some(group), Some(viewer)) = (&request.sharing_id, &request.sharing_viewer_id) else {
             if request.sharing_id.is_some() || request.sharing_viewer_id.is_some() {
                 return Err(invalid(

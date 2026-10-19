@@ -49,6 +49,9 @@ struct EngineChild {
     sharing: Option<crate::sharing_engine::SharingHost>,
     first_frame: Arc<std::sync::atomic::AtomicBool>,
     sharing_statuses: crate::engine_output::SharingStatuses,
+    voice: crate::voice::ObservedVoice,
+    voice_group: Option<Uuid>,
+    voice_supported: bool,
     direct_bridges: HashMap<Uuid, crate::direct::Bridge>,
 }
 
@@ -66,15 +69,17 @@ impl EngineChild {
         };
         let first_frame = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let sharing_statuses = Arc::new(Mutex::new(HashMap::new()));
+        let voice = Arc::new(Mutex::new(crate::voice::VoiceStatus::default()));
         let (acknowledgements, ack_receiver) = std::sync::mpsc::sync_channel(16);
         if let Some(stdout) = process.stdout.take()
-            && let Err(error) = EngineOutput::start_observed(
+            && let Err(error) = EngineOutput::start_with_voice(
                 stdout,
                 None,
                 metrics.clone(),
                 Some(acknowledgements),
                 Some(Arc::clone(&first_frame)),
                 Some(Arc::clone(&sharing_statuses)),
+                Some(Arc::clone(&voice)),
             )
         {
             let _ = process.kill();
@@ -94,6 +99,9 @@ impl EngineChild {
                 sharing: None,
                 first_frame,
                 sharing_statuses,
+                voice,
+                voice_group: None,
+                voice_supported: false,
                 direct_bridges: HashMap::new(),
             }),
             Err(error) => {
@@ -243,6 +251,8 @@ struct SidecarCapabilities {
     multi_viewer_host: bool,
     #[serde(default)]
     snv2_audio_implementation: bool,
+    #[serde(default)]
+    group_voice_implementation: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +265,7 @@ pub struct SidecarProbe {
     pub cross_platform: bool,
     pub multi_viewer_host: bool,
     pub snv2_audio: bool,
+    pub group_voice: bool,
     pub reason: Option<String>,
 }
 
@@ -268,6 +279,7 @@ impl SidecarProbe {
             cross_platform: false,
             multi_viewer_host: false,
             snv2_audio: false,
+            group_voice: false,
             reason: Some(reason.into()),
         }
     }
@@ -368,6 +380,7 @@ pub(crate) fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
                 cross_platform: capabilities.cross_platform,
                 multi_viewer_host: capabilities.multi_viewer_host,
                 snv2_audio: capabilities.snv2_audio_implementation,
+                group_voice: capabilities.group_voice_implementation,
                 reason: (!capabilities.native_direct).then(|| {
                     "Native sidecar does not advertise the authenticated direct transport"
                         .to_owned()
@@ -555,6 +568,18 @@ fn snv2_args(args: &mut Vec<String>, request: &LaunchEngineRequest) {
     if request.kind == EngineKind::Client && request.audio_muted {
         args.push("--mute-audio".into());
     }
+}
+
+fn build_args_with_voice(
+    request: &LaunchEngineRequest,
+    supported: bool,
+) -> Result<Vec<String>, DesktopError> {
+    let mut args = build_args(request)?;
+    if supported && request.sharing_id.is_some() && request.wire_protocol.as_deref() == Some("snv2")
+    {
+        args.push("--group-voice".into());
+    }
+    Ok(args)
 }
 
 fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError> {
@@ -786,6 +811,84 @@ fn stabilize_child(child: &mut EngineChild) -> Result<(), String> {
 }
 
 impl EngineManager {
+    fn voice_child(
+        state: &mut EngineState,
+        kind: EngineKind,
+        group: Uuid,
+        session: Option<Uuid>,
+    ) -> Result<&mut EngineChild, DesktopError> {
+        let child = state.children.get_mut(&kind).ok_or_else(|| {
+            DesktopError::Process("Group voice is available after a sharing peer connects".into())
+        })?;
+        if kind == EngineKind::LocalServer
+            || child.voice_group != Some(group)
+            || (kind == EngineKind::Client && (session.is_none() || child.session_id != session))
+            || (kind == EngineKind::Host && child.sharing.is_none())
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("Unable to inspect group voice".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "Group voice session is no longer active".into(),
+            ));
+        }
+        Ok(child)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_group_voice(
+        &self,
+        kind: EngineKind,
+        group: Uuid,
+        session: Option<Uuid>,
+        joined: bool,
+        microphone: bool,
+        deafened: bool,
+    ) -> Result<(), DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = Self::voice_child(&mut state, kind, group, session)?;
+        if !child.voice_supported {
+            return Err(DesktopError::Unavailable("Update Sanser's native engine to use group voice; screen sharing remains available".into()));
+        }
+        let input =
+            child.process.stdin.as_mut().ok_or_else(|| {
+                DesktopError::Process("Group voice control is unavailable".into())
+            })?;
+        input
+            .write_all(crate::voice::config_command(joined, microphone, deafened).as_bytes())
+            .and_then(|()| input.flush())
+            .map_err(|_| DesktopError::Process("Unable to change group voice".into()))
+    }
+
+    pub fn group_voice_status(
+        &self,
+        kind: EngineKind,
+        group: Uuid,
+        session: Option<Uuid>,
+    ) -> Result<crate::voice::VoiceStatus, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = Self::voice_child(&mut state, kind, group, session)?;
+        if !child.voice_supported {
+            return Ok(crate::voice::VoiceStatus {
+                code: "unsupported".into(),
+                ..crate::voice::VoiceStatus::default()
+            });
+        }
+        child
+            .voice
+            .lock()
+            .map(|status| status.clone())
+            .map_err(|_| DesktopError::Process("Group voice status is unavailable".into()))
+    }
+
     pub fn set_viewer_audio(&self, session: Uuid, muted: bool) -> Result<(), DesktopError> {
         let mut state = self
             .state
@@ -905,7 +1008,7 @@ impl EngineManager {
         }
         let mut native_request = request.clone();
         let prepared = prepare_direct(reserved_socket, &mut native_request)?;
-        let args = build_args(&native_request)?;
+        let args = build_args_with_voice(&native_request, probe.group_voice)?;
         let mut state = self
             .state
             .lock()
@@ -986,6 +1089,11 @@ impl EngineManager {
         {
             child.direct_bridges.insert(session, bridge);
         }
+        child.voice_supported = probe.group_voice;
+        child.voice_group = request
+            .sharing_id
+            .as_deref()
+            .and_then(|id| Uuid::parse_str(id).ok());
         child.session_id = request
             .session_id
             .as_deref()
@@ -1423,6 +1531,126 @@ mod tests {
     }
 
     #[test]
+    fn group_voice_is_only_enabled_for_valid_view_only_group_engines() -> Result<(), DesktopError> {
+        let mut value = request(EngineKind::Client);
+        value.wire_protocol = Some("snv2".into());
+        assert!(!build_args(&value)?.contains(&"--group-voice".into()));
+        value.sharing_id = Some(Uuid::new_v4().to_string());
+        value.input_enabled = false;
+        assert!(!build_args_with_voice(&value, false)?.contains(&"--group-voice".into()));
+        assert!(build_args_with_voice(&value, true)?.contains(&"--group-voice".into()));
+        let old_args = build_args_with_voice(&value, false)?;
+        assert!(
+            old_args.contains(&"--snv2".into()) && old_args.contains(&"--disable-input".into())
+        );
+        value.input_enabled = true;
+        assert!(build_args(&value).is_err());
+        value.input_enabled = false;
+        value.wire_protocol = Some("legacy".into());
+        assert!(build_args(&value).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn voice_commands_reject_wrong_group_old_session_and_nonsharing_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = EngineChild::spawn(&mut command, None, None)?;
+        let session = Uuid::new_v4();
+        let group = Uuid::new_v4();
+        child.session_id = Some(session);
+        let manager = EngineManager::default();
+        manager
+            .state
+            .lock()
+            .map_err(|_| "state lock")?
+            .children
+            .insert(EngineKind::Client, child);
+        assert!(
+            manager
+                .set_group_voice(EngineKind::Client, group, Some(session), true, true, false)
+                .is_err()
+        );
+        manager
+            .state
+            .lock()
+            .map_err(|_| "state lock")?
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or("child")?
+            .voice_group = Some(group);
+        assert!(
+            manager
+                .set_group_voice(
+                    EngineKind::Client,
+                    Uuid::new_v4(),
+                    Some(session),
+                    true,
+                    true,
+                    false
+                )
+                .is_err()
+        );
+        assert!(
+            manager
+                .set_group_voice(
+                    EngineKind::Client,
+                    group,
+                    Some(Uuid::new_v4()),
+                    true,
+                    true,
+                    false
+                )
+                .is_err()
+        );
+        assert!(
+            manager
+                .set_group_voice(EngineKind::Client, group, None, true, true, false)
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .group_voice_status(EngineKind::Client, group, Some(session))?
+                .code,
+            "unsupported"
+        );
+        assert!(
+            manager
+                .set_group_voice(EngineKind::Client, group, Some(session), true, false, false)
+                .is_err()
+        );
+        manager
+            .state
+            .lock()
+            .map_err(|_| "state lock")?
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or("child")?
+            .voice_supported = true;
+        manager.set_group_voice(EngineKind::Client, group, Some(session), true, false, false)?;
+        assert_eq!(
+            manager.group_voice_status(EngineKind::Client, group, Some(session))?,
+            crate::voice::VoiceStatus::default()
+        );
+        manager.stop(EngineKind::Client)?;
+        assert!(
+            manager
+                .set_group_voice(EngineKind::Client, group, Some(session), true, true, false)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ultra_latency_reaches_both_engines_without_reenabling_tcp_input() -> Result<(), DesktopError>
     {
         for kind in [EngineKind::Host, EngineKind::Client] {
@@ -1648,6 +1876,15 @@ mod tests {
         assert!(parsed.native_direct);
         assert!(parsed.hevc_decoder_implementation);
         assert!(!parsed.snv2_audio_implementation);
+        assert!(!parsed.group_voice_implementation);
+        let voice = valid_json.replace(
+            "\"hevcDecoderImplementation\":true",
+            "\"hevcDecoderImplementation\":true,\"groupVoiceImplementation\":true",
+        );
+        assert!(
+            parse_sidecar_capabilities(voice.as_bytes(), EngineKind::Client)?
+                .group_voice_implementation
+        );
         // Existing legacy audio must not falsely advertise SNV2 support.
         let legacy_audio = valid_json.replace(
             "\"hevcDecoderImplementation\":true",

@@ -15,6 +15,7 @@
 #include "transport.h"
 #include "telemetry.h"
 #include "broadcast.h"
+#include "voice_runtime.h"
 #include "decode_worker.h"
 #include "latest_frame_worker.h"
 #include "audio_player.h"
@@ -434,8 +435,15 @@ int runWindows(bool host,int argc,char** argv) {
     if(options.ultraLowLatency && !encoder->usingGpuInput())
       throw std::runtime_error("Ultra Low Latency requires GPU capture and hardware encoding on Windows. Choose Balanced if the GPU path is unavailable.");
     SharingNotice notice(peer,options.sharing);
+    VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
+    peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
     peer.onInput=[&](Input event) { injector.apply(event); }; HostOutputStop shutdown{peer}; peer.start();
-    AudioCapture audio(options.audio,[&](const AudioSamples& samples) { peer.audio(samples); });
+    std::atomic<bool> loopbackExcludesVoice{!options.groupVoice};
+    AudioCapture audio(options.audio,[&](const AudioSamples& samples) {
+      // Older Windows releases cannot exclude the voice playback process.
+      // Never feed that playback back into the shared screen sound.
+      if(loopbackExcludesVoice || !voice.listening()) peer.audio(samples);
+    },options.groupVoice,[&](bool excluded) { loopbackExcludesVoice=excluded; });
     FrameBgra cached; bool hasCached=false, force=false,capturePaused=false;
     auto generation=display.generation();
     const auto mediaStart=Clock::now();
@@ -485,6 +493,8 @@ int runWindows(bool host,int argc,char** argv) {
     peer.stop(); return 0;
   }
   Peer peer(options); WindowState state; state.sendInput=[&](Input input) { peer.input(input); }; state.viewOnly=!options.input;
+  VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State value) { peer.setVoiceState(value); });
+  peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
   AudioPlayer audio(options.audio);
   if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };
   if(options.audio) peer.onAudioReset=[&] { audio.reset(); };

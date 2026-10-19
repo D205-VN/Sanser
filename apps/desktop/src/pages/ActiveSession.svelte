@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Icon from '../components/Icon.svelte';
+  import GroupVoice from '../components/GroupVoice.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay, routeRecoveryPlan, type RouteRecoveryEvidence } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
@@ -143,6 +144,7 @@
         kind: 'client',
         wireProtocol: target.wireProtocol,
         sessionId: target.id,
+        sharingId: target.sharingId,
         address: relayResult ? '127.0.0.1' : p2pResult?.remoteAddress,
         port: relayResult?.enginePort ?? p2pResult?.localPort,
         codec: target.requestedCodec,
@@ -537,6 +539,10 @@
       <li class:complete={metrics !== null}><span>03</span><div><strong>Remote desktop</strong><small>{metrics ? 'Screen data received' : $connection.engineRunning ? 'Check the remote window' : 'Not started'}</small></div></li>
     </ol>
   {/if}
+  {#if sessionState?.sharingId && sessionState.status === 'accepted' && $connection.engineRunning}
+    <GroupVoice kind="client" sharingId={sessionState.sharingId} sessionId={sessionState.id} />
+  {/if}
+
   {#if soundUnavailable}
     <div class="notice">This viewer does not support sound for this connection yet.</div>
   {:else if groupSound}

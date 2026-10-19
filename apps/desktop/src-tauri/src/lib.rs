@@ -11,6 +11,7 @@ mod relay;
 mod sharing_engine;
 mod storage;
 mod tray;
+mod voice;
 mod windows_uac;
 
 use engine::EngineManager;
@@ -92,6 +93,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::launch_engine,
             commands::stop_engine,
             commands::set_viewer_audio,
+            commands::set_group_voice,
+            commands::get_group_voice_status,
             commands::sharing_engine_add_peer,
             commands::sharing_engine_remove_peer,
             commands::sharing_engine_peer_status,

@@ -175,6 +175,27 @@ impl EngineOutput {
         first_frame: Option<Arc<std::sync::atomic::AtomicBool>>,
         sharing: Option<SharingStatuses>,
     ) -> std::io::Result<Self> {
+        Self::start_with_voice(
+            reader,
+            log,
+            metrics,
+            acknowledgements,
+            first_frame,
+            sharing,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_with_voice(
+        reader: impl Read + Send + 'static,
+        log: Option<File>,
+        metrics: Option<mpsc::SyncSender<crate::connection_report::Sample>>,
+        acknowledgements: Option<mpsc::SyncSender<SharingAck>>,
+        first_frame: Option<Arc<std::sync::atomic::AtomicBool>>,
+        sharing: Option<SharingStatuses>,
+        voice: Option<crate::voice::ObservedVoice>,
+    ) -> std::io::Result<Self> {
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_BYTES)));
         let worker_tail = Arc::clone(&tail);
         let (complete, completed) = mpsc::channel();
@@ -189,6 +210,7 @@ impl EngineOutput {
                     acknowledgements.as_ref(),
                     first_frame.as_deref(),
                     sharing.as_ref(),
+                    voice.as_ref(),
                 );
                 let _ = complete.send(());
             })?;
@@ -214,6 +236,7 @@ impl EngineOutput {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drain(
     mut reader: impl Read,
     mut log: Option<File>,
@@ -222,6 +245,7 @@ fn drain(
     acknowledgements: Option<&mpsc::SyncSender<SharingAck>>,
     first_frame: Option<&std::sync::atomic::AtomicBool>,
     sharing: Option<&SharingStatuses>,
+    voice: Option<&crate::voice::ObservedVoice>,
 ) {
     let mut buffer = [0_u8; 4096];
     let mut written = 0;
@@ -243,9 +267,17 @@ fn drain(
             || acknowledgements.is_some()
             || first_frame.is_some()
             || sharing.is_some()
+            || voice.is_some()
         {
             for byte in &buffer[..length] {
                 if *byte == b'\n' {
+                    if !oversized
+                        && let Some(voice) = voice
+                        && let Some(status) = crate::voice::parse_status(&line)
+                        && let Ok(mut current) = voice.lock()
+                    {
+                        *current = status;
+                    }
                     if !oversized
                         && let Some(sharing) = sharing
                         && let Some(status) = sharing_peer_status(&line)
@@ -400,6 +432,22 @@ mod tests {
         ] {
             assert!(sharing_peer_status(invalid.as_bytes()).is_none());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn voice_status_reaches_ui_without_metrics_or_microphone_commands() -> std::io::Result<()> {
+        let voice = Arc::new(Mutex::new(crate::voice::VoiceStatus::default()));
+        let output = EngineOutput::start_with_voice(
+            Cursor::new(b"SNVOICE_STATUS joined=1 mic=0 deafen=0 capture=0 code=listening\nSNVOICE_STATUS joined=1 mic=1 deafen=0 capture=0 code=permission-denied\nSNVOICE_STATUS joined=1 mic=1 deafen=0 capture=9 code=running\n"),
+            None, None, None, None, None, Some(Arc::clone(&voice)),
+        )?;
+        let _ = output.exit_message(String::new());
+        let status = voice
+            .lock()
+            .map_err(|_| std::io::Error::other("voice status lock"))?;
+        assert_eq!(status.code, "permission-denied");
+        assert!(!status.capture);
         Ok(())
     }
 

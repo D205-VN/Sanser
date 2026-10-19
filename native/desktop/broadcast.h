@@ -38,6 +38,9 @@ public:
   void stop();
   void publish(Frame frame);
   void audio(const AudioSamples& samples);
+  void voicePacket(voice::Packet packet);
+  void setVoiceState(voice::State state);
+  std::function<void(voice::Packet)> onVoice;
   std::uint64_t encodedAudioPackets() const { return encodedAudioPackets_.load(); }
   void setCapturePaused(bool paused);
   void updateHealth(Clock::time_point now=Clock::now());
@@ -61,6 +64,7 @@ private:
   std::uint64_t audioSequence_=0;
   std::atomic<std::uint64_t> encodedAudioPackets_{0};
   Clock::time_point lastKeyframeRequest_{};
+  voice::State voiceState_;
 };
 
 // Single-peer control and multi-viewer share hosts use the same capture/codec.
@@ -77,6 +81,9 @@ public:
   void setCapturePaused(bool paused);
   bool takeKeyframeRequest();
   void pumpControl();
+  void voicePacket(voice::Packet packet);
+  void setVoiceState(voice::State state);
+  std::function<void(voice::Packet)> onVoice;
   std::uint32_t bitrate() const;
   std::function<void(Input)> onInput;
 private:

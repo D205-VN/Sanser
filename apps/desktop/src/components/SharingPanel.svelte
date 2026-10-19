@@ -1,6 +1,7 @@
 <script lang="ts">
   import { get } from 'svelte/store';
   import Icon from './Icon.svelte';
+  import GroupVoice from './GroupVoice.svelte';
   import { sharingViewerCandidates } from '../lib/sharingInvitations';
   import type { SharingMember } from '../lib/types';
   import { host } from '../stores/host';
@@ -58,6 +59,7 @@
       </div>
       {#if candidates.length === 0}<p class="muted">Open Sanser and sign in on the other computer. Only online viewers can receive a new invitation.</p>{/if}
     {/if}
+    <GroupVoice kind="host" sharingId={group.id} />
     {#if $sharing.error}<div class="notice error" role="alert">{$sharing.error}</div>{/if}
   {/if}
 </article>

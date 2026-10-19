@@ -73,7 +73,7 @@ it('enables group sound and mutes only this viewer without restarting video or e
   expect(screen.getByText(/Muting here affects only this viewer/)).toBeInTheDocument();
   expect(screen.queryByText('Sound is unavailable for this connection.')).not.toBeInTheDocument();
   await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
-  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ audioEnabled: true, audioMuted: false, inputEnabled: false })));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ sharingId: 'group', audioEnabled: true, audioMuted: false, inputEnabled: false })));
   await fireEvent.click(screen.getByRole('button', { name: 'Mute sound' }));
   await waitFor(() => expect(mocks.sound).toHaveBeenCalledWith(viewer.id, true));
   await fireEvent.click(await screen.findByRole('button', { name: 'Unmute sound' }));

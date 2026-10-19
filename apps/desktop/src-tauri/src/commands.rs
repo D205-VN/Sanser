@@ -335,6 +335,51 @@ pub fn stop_engine(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn set_group_voice(
+    engines: State<'_, EngineManager>,
+    kind: EngineKind,
+    sharing_id: String,
+    session_id: Option<String>,
+    joined: bool,
+    microphone: bool,
+    deafened: bool,
+) -> Result<(), DesktopError> {
+    let parse = |value: &str| {
+        uuid::Uuid::parse_str(value).map_err(|_| {
+            DesktopError::InvalidRequest("Group voice identifiers must be UUIDs".into())
+        })
+    };
+    engines.set_group_voice(
+        kind,
+        parse(&sharing_id)?,
+        session_id.as_deref().map(parse).transpose()?,
+        joined,
+        microphone,
+        deafened,
+    )
+}
+
+#[tauri::command]
+pub fn get_group_voice_status(
+    engines: State<'_, EngineManager>,
+    kind: EngineKind,
+    sharing_id: String,
+    session_id: Option<String>,
+) -> Result<crate::voice::VoiceStatus, DesktopError> {
+    let parse = |value: &str| {
+        uuid::Uuid::parse_str(value).map_err(|_| {
+            DesktopError::InvalidRequest("Group voice identifiers must be UUIDs".into())
+        })
+    };
+    engines.group_voice_status(
+        kind,
+        parse(&sharing_id)?,
+        session_id.as_deref().map(parse).transpose()?,
+    )
+}
+
+#[tauri::command]
 pub fn set_viewer_audio(
     engines: State<'_, EngineManager>,
     session_id: String,

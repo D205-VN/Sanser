@@ -13,6 +13,9 @@ navigation/reconnection and never stops video or other viewers' sound. A local
 sound preference initially off starts that viewer muted rather than disabling
 its ability to unmute later. Unsupported/old hosts may still send video only.
 
+For the separate opt-in microphone conversation feature in development, see
+[group voice](group-voice.md). Ordinary system sharing never opens a microphone.
+
 ## Native pipeline
 
 - ScreenCaptureKit captures screen and 48 kHz stereo system audio on macOS 13+.

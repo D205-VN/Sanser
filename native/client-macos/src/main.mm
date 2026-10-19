@@ -8609,7 +8609,7 @@ int main(int argc, char** argv) {
                    "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,"
                    "\"h264DecoderImplementation\":true,"
                    "\"hevcDecoderImplementation\":true,\"metalImplementation\":true,"
-                   "\"audioImplementation\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,"
+                   "\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,"
                    "\"gamepadImplementation\":true}\n";
       return 0;
     }

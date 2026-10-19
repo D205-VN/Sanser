@@ -7,6 +7,7 @@
 #include "round_trip_probe.h"
 #include "audio.h"
 #include "opus_audio.h"
+#include "voice.h"
 #include <condition_variable>
 #include <atomic>
 #include <chrono>
@@ -33,6 +34,8 @@ struct Options {
   bool sharedAudioEncoder = false;
   bool audioMuted = false;
   bool sharing = false;
+  bool groupVoice = false;
+  unsigned voiceSlot = 255;
   std::string viewerId;
   std::string peer;
   std::uint16_t port = 0;
@@ -40,6 +43,7 @@ struct Options {
   std::string token;
 };
 Options parseOptions(bool host, int argc, char** argv);
+std::vector<std::string> takeVoiceCommands();
 Bytes encodeInput(const Input& input);
 std::optional<Input> decodeInput(const Bytes& bytes);
 struct Frame { Bytes data; std::uint32_t width = 0, height = 0; bool keyframe = false; std::uint64_t id = 0; };
@@ -122,6 +126,11 @@ public:
   void audio(const AudioSamples& samples);
   void audioPrepared(const Bytes& packet, bool opus);
   void setAudioMuted(bool muted);
+  void setVoiceState(voice::State state);
+  void voicePacket(voice::Packet packet);
+  void forwardVoice(const voice::Packet& packet);
+  bool voiceListening() const;
+  unsigned voiceSpeaker() const { return options_.host ? options_.voiceSlot : voiceSlot_.load(); }
   bool audioReady() const { return options_.audio && options_.host && peerAudio_ && !peerAudioMuted_ && ready_ && running_; }
   bool opusAudioReady() const { return audioReady() && peerAudioOpus_; }
   void requestKeyframe();
@@ -132,6 +141,7 @@ public:
   std::function<void()> onKeyframe;
   std::function<void()> onStopped;
   std::function<void()> onReady;
+  std::function<void(voice::Packet)> onVoice;
   std::uint64_t videoQueueDrops() const { return videoQueueDrops_.load(); }
   std::uint64_t repairedDatagrams() const { return repairedDatagrams_.load(); }
   std::uint64_t repairCacheMisses() const { return repairCacheMisses_.load(); }
@@ -165,6 +175,13 @@ private:
   std::atomic<bool> peerAudio_{false};
   std::atomic<bool> peerAudioOpus_{false};
   std::atomic<bool> peerAudioMuted_{false}, audioMuted_{false};
+  std::atomic<bool> voiceJoined_{false},voiceMic_{false},voiceDeaf_{false};
+  std::atomic<bool> peerVoiceJoined_{false},peerVoiceMic_{false},peerVoiceDeaf_{false};
+  std::atomic<std::int64_t> peerVoiceAt_{0};
+  std::atomic<unsigned> voiceSlot_{255};
+  std::uint64_t lastVoicePreference_=0;
+  Clock::time_point voiceRateAt_{};
+  unsigned voiceRateCount_=0;
   std::mutex audioMutex_;
   std::unique_ptr<sanser::audio::Encoder> audioEncoder_;
   std::unique_ptr<sanser::audio::ReceiveWorker> audioReceiver_;

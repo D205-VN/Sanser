@@ -154,7 +154,29 @@ void Broadcaster::add(ViewerSpec viewer) {
   }
   auto options=source_; options.token=viewer.token; options.peer=viewer.endpoint; options.port=viewer.localPort; options.bitrate=viewer.bitrate;
   options.sharedAudioEncoder=true;
+  if(options.groupVoice) {
+    for(unsigned slot=1;slot<voice::maxSpeakers;++slot) {
+      const bool used=std::any_of(peers_.begin(),peers_.end(),[slot](const auto& item) { return item.second->peer.voiceSpeaker()==slot; });
+      if(!used) { options.voiceSlot=slot; break; }
+    }
+  }
   auto delivery=std::make_shared<Delivery>(std::move(viewer),options);
+  if(options.groupVoice) {
+    const std::weak_ptr<Delivery> weak=delivery;
+    delivery->peer.onVoice=[this,weak](voice::Packet packet) {
+      const auto origin=weak.lock(); if(!origin) return;
+      std::vector<std::shared_ptr<Delivery>> destinations;
+      {
+        std::lock_guard guard(peersMutex_);
+        const auto found=peers_.find(origin->spec.id);
+        if(!running_ || found==peers_.end() || found->second!=origin) return;
+        for(const auto& [id,target]:peers_) { (void)id; if(target!=origin) destinations.push_back(target); }
+      }
+      if(onVoice) onVoice(packet);
+      for(const auto& target:destinations) target->peer.forwardVoice(packet);
+    };
+    delivery->peer.setVoiceState(voiceState_);
+  }
   delivery->peer.setCapturePaused(capturePaused_);
   delivery->start();
   try { peers_.emplace(delivery->spec.id,delivery); }
@@ -198,6 +220,21 @@ void Broadcaster::audio(const AudioSamples& samples) {
     if(!useOpus && pcm.empty()) pcm=encodeAudio(samples);
     delivery->peer.audioPrepared(useOpus ? opus : pcm,useOpus);
   }
+}
+void Broadcaster::setVoiceState(voice::State state) {
+  std::lock_guard lock(peersMutex_); voiceState_=state;
+  for(const auto& [id,delivery]:peers_) { (void)id; delivery->peer.setVoiceState(state); }
+}
+void Broadcaster::voicePacket(voice::Packet packet) {
+  if(!source_.groupVoice || !running_) return;
+  std::vector<std::shared_ptr<Delivery>> destinations;
+  {
+    std::lock_guard lock(peersMutex_);
+    if(!voiceState_.joined || !voiceState_.microphone || voiceState_.deafened) return;
+    for(const auto& [id,target]:peers_) { (void)id; destinations.push_back(target); }
+  }
+  packet.speaker=0;
+  for(const auto& target:destinations) target->peer.forwardVoice(packet);
 }
 void Broadcaster::updateHealth(Clock::time_point now) {
   std::lock_guard lock(peersMutex_);
@@ -258,6 +295,7 @@ std::optional<SharingCommand> parseSharingCommand(const std::string& line,std::u
 HostOutput::HostOutput(const Options& options):options_(options) {
   if(options.sharing) {
     broadcast_=std::make_unique<Broadcaster>(options);
+    broadcast_->onVoice=[this](voice::Packet packet) { if(onVoice) onVoice(std::move(packet)); };
   } else {
     single_=std::make_unique<Peer>(options);
     single_->onInput=[this](Input input) { if(onInput) onInput(input); };
@@ -278,6 +316,8 @@ bool HostOutput::ready() const { return broadcast_ ? broadcast_->ready() : singl
 bool HostOutput::running() const { return !nativeStopRequested() && (broadcast_ ? broadcast_->running() : single_->running()); }
 void HostOutput::video(Frame frame) { if(broadcast_) broadcast_->publish(std::move(frame)); else single_->video(frame); }
 void HostOutput::audio(const AudioSamples& samples) { if(broadcast_) broadcast_->audio(samples); else single_->audio(samples); }
+void HostOutput::voicePacket(voice::Packet packet) { if(broadcast_) broadcast_->voicePacket(std::move(packet)); }
+void HostOutput::setVoiceState(voice::State state) { if(broadcast_) broadcast_->setVoiceState(state); }
 void HostOutput::setCapturePaused(bool paused) { if(broadcast_) broadcast_->setCapturePaused(paused); else single_->setCapturePaused(paused); }
 std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : single_->recommendedBitrate(); }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }

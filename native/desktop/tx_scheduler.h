@@ -12,7 +12,7 @@ namespace sanser::desktop {
 // Reserve independent lanes so video capacity cannot evict input/control/audio.
 class TxScheduler {
 public:
-  enum Lane : std::size_t { Control, InputLane, Audio, Video, Repair, Count };
+  enum Lane : std::size_t { Control, InputLane, Voice, Audio, Video, Repair, Count };
   struct Packet {
     std::vector<std::uint8_t> bytes;
     std::chrono::steady_clock::time_point queued;
@@ -25,10 +25,11 @@ public:
   };
   bool push(Lane lane, Packet packet) {
     packet.repair=lane==Repair;
-    packet.audio=lane==Audio;
+    packet.audio=lane==Audio || lane==Voice;
     // Audio is disposable. Drop the oldest block, never terminate a keyboard
     // session or accumulate seconds of sound when the network is congested.
     if(lane==Audio && queues_[lane].size()>=8) (void)take(lane);
+    if(lane==Voice && queues_[lane].size()>=8) (void)take(lane);
     const std::size_t limit = lane == Video ? 5 * 1024 * 1024 : 256 * 1024;
     if (bytes_[lane] + packet.bytes.size() > limit) return false;
     bytes_[lane] += packet.bytes.size();
@@ -58,11 +59,12 @@ public:
   std::size_t nextVideoBytes() const { return hasVideo() ? queues_[nextVideoLane()].front().bytes.size() : 0; }
   std::size_t queuedVideoBytes() const { return bytes_[Video]; }
   bool hasPriority() const {
-    return latestMove_ || !queues_[Control].empty() || !queues_[InputLane].empty() || !queues_[Audio].empty();
+    return latestMove_ || !queues_[Control].empty() || !queues_[InputLane].empty() || !queues_[Voice].empty() || !queues_[Audio].empty();
   }
   void clearRealtimeVideo() { queues_[Video].clear(); bytes_[Video]=0; }
   void clearVideo() { clearRealtimeVideo(); queues_[Repair].clear(); bytes_[Repair]=0; freshSinceRepair_=0; }
   void clearInput() { queues_[InputLane].clear(); bytes_[InputLane]=0; latestMove_.reset(); }
+  void clearVoice() { queues_[Voice].clear(); bytes_[Voice]=0; }
   void acknowledgeInput(std::uint64_t contiguous,std::uint64_t mask) {
     auto& lane=queues_[InputLane];
     for(auto it=lane.begin();it!=lane.end();) {

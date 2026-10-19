@@ -30,6 +30,7 @@ namespace {
 std::atomic<bool> stopRequested{false};
 std::mutex nativeCommandMutex;
 std::vector<std::string> nativeCommands;
+std::vector<std::string> voiceCommands;
 constexpr std::size_t chunkSize = 1000, maxFrame = 4 * 1024 * 1024;
 void u16(Bytes& b, std::uint16_t n) { b.push_back(static_cast<std::uint8_t>(n >> 8)); b.push_back(static_cast<std::uint8_t>(n)); }
 void u32(Bytes& b, std::uint32_t n) { u16(b, static_cast<std::uint16_t>(n >> 16)); u16(b, static_cast<std::uint16_t>(n)); }
@@ -112,8 +113,13 @@ Options parseOptions(bool host, int argc, char** argv) {
         if(!oversized && line=="stop") break;
         if(!oversized) {
           std::lock_guard lock(nativeCommandMutex);
-          if(nativeCommands.size()>=32) break;
-          nativeCommands.push_back(std::move(line));
+          if(line.starts_with("voice-config\t") || line.starts_with("voice-mute\t")) {
+            if(voiceCommands.size()>=16) voiceCommands.erase(voiceCommands.begin());
+            voiceCommands.push_back(std::move(line));
+          } else {
+            if(nativeCommands.size()>=32) break;
+            nativeCommands.push_back(std::move(line));
+          }
         }
         line.clear(); oversized=false;
       }
@@ -130,6 +136,7 @@ Options parseOptions(bool host, int argc, char** argv) {
     if (arg == "--snv2" || arg == "--udp-video" || arg == "--low-latency-encoder" || arg == "--udp-pacing") continue;
     if (arg == "--ultra-low-latency") o.ultraLowLatency = true;
     else if (arg == "--share-host") o.sharing = true;
+    else if (arg == "--group-voice") o.groupVoice = true;
     else if (arg == "--share-peer-id") o.viewerId = value();
     else if (arg == "--disable-input") o.input = false;
     else if (arg == "--disable-audio") o.audio = false;
@@ -148,12 +155,17 @@ Options parseOptions(bool host, int argc, char** argv) {
   if (o.port == 0 || o.peer.empty() || o.fps < 1 || o.fps > 120 || o.width < 64 || o.height < 64 || o.width > 3840 || o.height > 2160 || o.bitrate < 1000000 || o.bitrate > 200000000) throw std::runtime_error("Invalid native session configuration");
   if(o.sharing && (!host || o.input || o.viewerId.empty())) throw std::runtime_error("Sharing requires a host, viewer identifier and disabled input");
   if(!o.sharing && !o.viewerId.empty()) throw std::runtime_error("Viewer identifier requires sharing mode");
+  if(o.groupVoice && (o.input || (host && !o.sharing))) throw std::runtime_error("Group voice requires a view-only sharing session");
   o.width &= ~1U; o.height &= ~1U;
   return o;
 }
 std::vector<std::string> takeNativeCommands() {
   std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
   result.swap(nativeCommands); return result;
+}
+std::vector<std::string> takeVoiceCommands() {
+  std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
+  result.swap(voiceCommands); return result;
 }
 bool nativeStopRequested() { return stopRequested.load(); }
 Bytes encodeInput(const Input& input) {
@@ -337,6 +349,7 @@ Peer::~Peer() { stop(); if (socket_ != -1) closeSocket(static_cast<Socket>(socke
 void Peer::start() {
   if (running_.exchange(true)) return;
   audioMuted_=options_.audioMuted;
+  voiceSlot_=options_.voiceSlot;
   lastReceived_=Clock::now();
   try {
     if(options_.audio && options_.audioOpus) {
@@ -372,7 +385,7 @@ void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream
   if (type == snv2::PacketType::Disconnect) { datagram(b); return; }
   const auto lane = type == snv2::PacketType::Video ? ((flags & snv2::kFlagRetransmitted) ? TxScheduler::Repair : TxScheduler::Video)
     : reliable ? TxScheduler::InputLane
-    : type == snv2::PacketType::Audio ? TxScheduler::Audio : TxScheduler::Control;
+    : type == snv2::PacketType::Audio ? (voice::isPacket(body) ? TxScheduler::Voice : TxScheduler::Audio) : TxScheduler::Control;
   TxScheduler::Packet queued{b,queuedAt,frame,false,false,deadline};
   queued.inputSequence=reliable ? h.sequence : 0;
   queued.input=reliable || type==snv2::PacketType::MouseMove;
@@ -524,6 +537,33 @@ void Peer::setAudioMuted(bool muted) {
   if(onAudioReset) onAudioReset();
   transmit(snv2::PacketType::Keepalive,Bytes{'S','A','M','1',static_cast<std::uint8_t>(muted)});
 }
+void Peer::setVoiceState(voice::State state) {
+  if(!options_.groupVoice) return;
+  if(!state.joined) state.microphone=state.deafened=false;
+  if(state.deafened) state.microphone=false;
+  voiceJoined_=state.joined; voiceMic_=state.microphone; voiceDeaf_=state.deafened;
+  { std::lock_guard lock(sendMutex_); if(!state.joined || !state.microphone) tx_.clearVoice(); }
+  if(running_) transmit(snv2::PacketType::Keepalive,Bytes{'S','V','C','1',static_cast<std::uint8_t>(state.joined),static_cast<std::uint8_t>(state.microphone),static_cast<std::uint8_t>(state.deafened)});
+}
+bool Peer::voiceListening() const {
+  const auto now=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
+  return options_.groupVoice && running_ && ready_ && peerVoiceJoined_ && !peerVoiceDeaf_
+    && peerVoiceAt_>0 && now-peerVoiceAt_.load()<2000000;
+}
+void Peer::voicePacket(voice::Packet packet) {
+  if(!options_.groupVoice || !voiceJoined_ || !voiceMic_ || voiceDeaf_ || !ready_ || !running_) return;
+  const auto now=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
+  if(peerVoiceAt_==0 || now-peerVoiceAt_.load()>2000000) return;
+  // A sharing host is an SFU: its own join preference is not a requirement for
+  // forwarding viewer microphones. A viewer can only transmit its assigned ID.
+  packet.speaker=voiceSlot_.load();
+  if(packet.speaker>=voice::maxSpeakers) return;
+  transmit(snv2::PacketType::Audio,voice::pack(packet));
+}
+void Peer::forwardVoice(const voice::Packet& packet) {
+  if(!options_.host || !voiceListening()) return;
+  transmit(snv2::PacketType::Audio,voice::pack(packet));
+}
 void Peer::requestKeyframe() {
   std::lock_guard lock(keyframeRequestMutex_);
   if(!running_) return;
@@ -542,6 +582,8 @@ void Peer::process(const Bytes& bytes) {
     peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false;
     receivedRecoverySerial_=receivedRecoveryFence_=0; inputLeaseArmed_=false;
     lastAudio_=0; lastAudioPreference_=0; receivingOpus_=false; peerAudioOpus_=false; peerAudioMuted_=false;
+    peerVoiceJoined_=peerVoiceMic_=peerVoiceDeaf_=false; peerVoiceAt_=0; lastVoicePreference_=0;
+    if(!options_.host) voiceSlot_=255;
     if(audioReceiver_) audioReceiver_->reset(h.keyId);
     if(onAudioReset) onAudioReset();
     { std::lock_guard lock(audioMutex_); audioSequence_=0; if(audioEncoder_) audioEncoder_->reset(); }
@@ -561,6 +603,16 @@ void Peer::process(const Bytes& bytes) {
   const bool becameReady=!ready_.exchange(true);
   if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
+  if(options_.groupVoice && h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
+    if(b.size()==7 && !std::memcmp(b.data(),"SVC1",4) && b[4]<=1 && b[5]<=1 && b[6]<=1 && h.sequence>lastVoicePreference_) {
+      lastVoicePreference_=h.sequence;
+      peerVoiceJoined_=b[4]!=0; peerVoiceDeaf_=b[6]!=0;
+      peerVoiceMic_=b[4] && b[5] && !b[6];
+      peerVoiceAt_=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
+      return;
+    }
+    if(!options_.host && b.size()==5 && !std::memcmp(b.data(),"SVI1",4) && b[4]>0 && b[4]<voice::maxSpeakers) { voiceSlot_=b[4]; return; }
+  }
   if(h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
     if(b==Bytes({'S','I','C','1'})) { peerInputRecovery_=true; return; }
     if(!options_.host && b.size()==5 && std::memcmp(b.data(),"SCP1",4)==0 && b[4]<=1) {
@@ -613,6 +665,20 @@ void Peer::process(const Bytes& bytes) {
   if(options_.host && options_.audio && options_.audioOpus && (audioEncoder_ || options_.sharedAudioEncoder) && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','O','1'})) { peerAudio_=true; peerAudioOpus_=true; }
   if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b.size()==5 && std::equal(b.begin(),b.begin()+4,"SAM1") && b[4]<=1 && h.sequence>lastAudioPreference_) { lastAudioPreference_=h.sequence; peerAudioMuted_=b[4]!=0; }
   if(h.packetType==snv2::PacketType::Audio) {
+    if(voice::isPacket(b)) {
+      if(!options_.groupVoice || h.streamId!=0 || !onVoice) return;
+      const auto now=Clock::now();
+      if(now-voiceRateAt_>=std::chrono::seconds(1)) { voiceRateAt_=now; voiceRateCount_=0; }
+      if(++voiceRateCount_>(options_.host ? 60u : 160u)) return; // Three 50pps sources at a viewer.
+      if(auto packet=voice::unpack(b)) {
+        if(options_.host) {
+          if(!peerVoiceJoined_ || !peerVoiceMic_ || peerVoiceDeaf_ || packet->speaker!=options_.voiceSlot
+              || std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count()-peerVoiceAt_.load()>2000000) return;
+        } else if(!voiceJoined_ || voiceDeaf_ || packet->speaker==voiceSlot_) return;
+        onVoice(std::move(*packet));
+      }
+      return;
+    }
     if(!options_.host && options_.audio && !audioMuted_ && h.streamId==0 && onAudio) {
       if(audioReceiver_ && b.size()>4 && std::equal(b.begin(),b.begin()+4,"SOA1")) {
         if(auto packet=sanser::audio::unpack(b)) {
@@ -901,6 +967,11 @@ void Peer::loop() {
         lastInputLog=now;
       }
       if(now-lastHello>std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 500)) {
+        if(options_.groupVoice) {
+          transmit(snv2::PacketType::Keepalive,Bytes{'S','V','C','1',static_cast<std::uint8_t>(voiceJoined_.load()),static_cast<std::uint8_t>(voiceMic_.load()),static_cast<std::uint8_t>(voiceDeaf_.load())});
+          if(options_.host && options_.voiceSlot>0 && options_.voiceSlot<voice::maxSpeakers)
+            transmit(snv2::PacketType::Keepalive,Bytes{'S','V','I','1',static_cast<std::uint8_t>(options_.voiceSlot)});
+        }
         transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','I','C','1'});
         if(options_.host) transmit(snv2::PacketType::Keepalive,Bytes{'S','C','P','1',static_cast<std::uint8_t>(localCapturePaused_.load())});

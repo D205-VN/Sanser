@@ -4,5 +4,7 @@
 <dict>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Sanser</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Sanser uses your microphone only when you unmute voice chat in a screen-sharing group.</string>
 </dict>
 </plist>
