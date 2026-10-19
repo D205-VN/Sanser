@@ -1,7 +1,7 @@
 # Group voice in multi-computer sharing
 
-Development feature, not a new published installer. Build the updated native
-sidecars and desktop together. Both host and participants need engines advertising
+Included in **2.2.17**. Update both host and viewers to the new installer.
+Both host and participants need engines advertising
 `groupVoiceImplementation: true`; old engines still share video/system sound but
 voice controls explain that an update is needed.
 

@@ -1,9 +1,9 @@
-# Sanser 2.2.16
+# Sanser 2.2.17
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.16
+Product:  Sanser 2.2.17
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,7 +20,7 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.16 includes one-encoder screen sharing for up to three view-only
+Sanser 2.2.17 includes one-encoder screen sharing for up to three view-only
 computers in the same account, common native diagnostics, bounded route reconnect,
 authenticated input-only reset after ACK loss, viewer-close Disconnect and
 reference-safe sharing dispatch. Relay recovery retains the real failure even
@@ -30,7 +30,12 @@ bounded adaptive video FEC on Direct/UDP Relay, and group system audio with
 independent viewer mute. Native Windows loopback capture and Mac SNV2 playback
 complete the shared sound path. Real-device network and listening validation
 remains necessary.
-See [Release notes](docs/releases/v2.2.16.md),
+Version 2.2.17 adds opt-in group voice for the host and up to three viewers,
+with independent Join/Unmute/Deafen/Leave controls. Microphones default off.
+It also packages audio continuity/legacy audio, sharing recovery and sided Shift
+fixes, plus optional Windows UAC support. See [group voice](docs/group-voice.md)
+and [Windows UAC](docs/windows-uac.md) for consent, setup and remaining device checks.
+See [Release notes](docs/releases/v2.2.17.md),
 [stability validation and remaining work](docs/session-stability-2.2.14.md)
 and [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.
@@ -210,7 +215,7 @@ For a local unsigned verification bundle only:
 npm run desktop:bundle:local
 ```
 
-Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.16.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
+Current release scope and remaining platform validation are tracked in [the release notes](docs/releases/v2.2.17.md) and [sharing progress](docs/multi-viewer-progress.md). The [2.0.0 release ledger](docs/sanser-2-release.md) is historical. Local unsigned macOS builds are not notarized.
 
 ## Operating-system permissions
 
@@ -218,7 +223,7 @@ Current release scope and remaining platform validation are tracked in [the rele
 - macOS client requests Accessibility/Input Monitoring when remote input capture is enabled and microphone permission only when microphone forwarding is enabled.
 - macOS hosting is implemented with ScreenCaptureKit and VideoToolbox on macOS 12.3 or newer. Screen Recording is requested when hosting starts; Accessibility is needed when remote input is enabled.
 - Windows includes a native client for viewing and controlling a remote desktop. Cross-platform sessions currently use H.264; system sound uses Opus/PCM, while HEVC support remains incomplete. Packaged engines and server role support must both be available. Automated builds and codec/transport tests do not replace real-device testing of each connection direction.
-- Sanser 2.2.16 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared Opus audio is encoded once and each viewer can mute independently. Real GPU/capture/network testing remains necessary.
+- Sanser 2.2.17 supports one shared capture/encoder and up to three independent view-only viewers. Sharing input is denied at the host; shared Opus audio is encoded once and each viewer can mute independently. Real GPU/capture/network testing remains necessary.
 
 ## Migration
 
