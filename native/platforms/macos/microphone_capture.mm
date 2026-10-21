@@ -2,6 +2,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreAudio/CoreAudio.h>
+#include <mach/mach_time.h>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -30,7 +31,7 @@ struct Queue {
 };
 }
 struct MicrophoneCapture::State {
-  std::function<void(const AudioSamples&)> sink;
+  std::function<void(const AudioSamples&,Clock::time_point)> sink;
   std::function<void(std::string)> status;
   std::atomic<bool> running{true};
   std::atomic<OSStatus> callbackError{noErr};
@@ -44,7 +45,7 @@ struct MicrophoneCapture::State {
   AudioSamples pending{};
   std::thread worker;
 
-  State(std::function<void(const AudioSamples&)> output,std::function<void(std::string)> report)
+  State(std::function<void(const AudioSamples&,Clock::time_point)> output,std::function<void(std::string)> report)
     :sink(std::move(output)),status(std::move(report)),worker([this] { run(); }) {}
   ~State() {
     running=false;
@@ -73,7 +74,7 @@ struct MicrophoneCapture::State {
     return true;
   }
   static void captured(void* context,AudioQueueRef queue,AudioQueueBufferRef buffer,
-                       const AudioTimeStamp*,UInt32,const AudioStreamPacketDescription*) noexcept {
+                       const AudioTimeStamp* timestamp,UInt32,const AudioStreamPacketDescription*) noexcept {
     auto& self=*static_cast<State*>(context);
     if(!self.running) return;
     // AudioQueue supplies requested interleaved float32 mono at 48 kHz. A
@@ -83,6 +84,14 @@ struct MicrophoneCapture::State {
       const auto now=Clock::now();
       const auto* bytes=static_cast<const std::uint8_t*>(buffer->mAudioData);
       const auto frames=buffer->mAudioDataByteSize/sizeof(float);
+      auto first=now-std::chrono::nanoseconds(static_cast<std::int64_t>(frames)*1000000000/audioRate);
+      if(timestamp && (timestamp->mFlags&kAudioTimeStampHostTimeValid)) {
+        const auto host=mach_absolute_time(); mach_timebase_info_data_t timebase{}; mach_timebase_info(&timebase);
+        if(host>=timestamp->mHostTime && timebase.denom) {
+          const auto age=static_cast<std::uint64_t>((static_cast<long double>(host-timestamp->mHostTime)*timebase.numer)/timebase.denom);
+          if(age<500000000) first=now-std::chrono::nanoseconds(age);
+        }
+      }
       for(std::size_t i=0;i<frames;++i) {
         float sample=0; std::memcpy(&sample,bytes+i*sizeof(float),sizeof(float));
         if(!std::isfinite(sample)) sample=0;
@@ -91,7 +100,7 @@ struct MicrophoneCapture::State {
         self.pending[self.used++]=value;
         if(self.used==self.pending.size()) {
           if(self.count==self.blocks.size()) { self.head=(self.head+1)%self.blocks.size(); --self.count; }
-          self.blocks[(self.head+self.count)%self.blocks.size()]={self.pending,now};
+          self.blocks[(self.head+self.count)%self.blocks.size()]={self.pending,first+std::chrono::nanoseconds((static_cast<std::int64_t>(i)+1-audioFrames)*1000000000/audioRate)};
           ++self.count; self.used=0;
         }
       }
@@ -130,17 +139,17 @@ struct MicrophoneCapture::State {
     report("running");
     auto deviceCheck=Clock::now();
     while(running) {
-      std::optional<AudioSamples> samples;
+      std::optional<Block> samples;
       {
         std::unique_lock lock(mutex);
         wake.wait_for(lock,std::chrono::milliseconds(20),[this] { return !running || count || callbackError!=noErr; });
         const auto now=Clock::now();
         while(count && now-blocks[head].captured>std::chrono::milliseconds(40)) { head=(head+1)%blocks.size(); --count; }
-        if(count) { samples=blocks[head].samples; head=(head+1)%blocks.size(); --count; }
+        if(count) { samples=blocks[head]; head=(head+1)%blocks.size(); --count; }
       }
       if(!running) break;
       if(callbackError!=noErr) throw std::runtime_error("Microphone input stopped");
-      if(samples && sink) sink(*samples);
+      if(samples && sink) sink(samples->samples,samples->captured);
       if(Clock::now()-deviceCheck>std::chrono::seconds(2)) {
         if(defaultMicrophone()!=selected) { report("device-changed"); break; }
         UInt32 active=0,size=sizeof(active);
@@ -169,7 +178,7 @@ struct MicrophoneCapture::State {
     }
   }
 };
-MicrophoneCapture::MicrophoneCapture(bool enabled,std::function<void(const AudioSamples&)> sink,
+MicrophoneCapture::MicrophoneCapture(bool enabled,std::function<void(const AudioSamples&,Clock::time_point)> sink,
                                    std::function<void(std::string)> status) {
   if(enabled) state_=std::make_unique<State>(std::move(sink),std::move(status));
 }

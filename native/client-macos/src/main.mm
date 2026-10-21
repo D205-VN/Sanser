@@ -4939,10 +4939,25 @@ void startAudioListener(const AudioOutputSettings& settings,bool udpVideo,
   if(settings.enabled && (audioPort>0 || (udpVideo && controlPort==0))) start();
 }
 
+// Injectable Core Audio calls let recovery tests simulate a drained/stopped
+// device without opening a speaker or depending on OS callback timing.
+struct AudioQueueFunctions {
+  decltype(&AudioQueueNewOutput) create=AudioQueueNewOutput;
+  decltype(&AudioQueueAllocateBuffer) allocate=AudioQueueAllocateBuffer;
+  decltype(&AudioQueueEnqueueBuffer) enqueue=AudioQueueEnqueueBuffer;
+  decltype(&AudioQueueStart) start=AudioQueueStart;
+  decltype(&AudioQueueStop) stop=AudioQueueStop;
+  decltype(&AudioQueueDispose) dispose=AudioQueueDispose;
+  decltype(&AudioQueueGetProperty) getProperty=AudioQueueGetProperty;
+  decltype(&AudioQueueSetProperty) setProperty=AudioQueueSetProperty;
+  decltype(&AudioQueueSetParameter) setParameter=AudioQueueSetParameter;
+  std::chrono::steady_clock::time_point (*now)()=+[] { return std::chrono::steady_clock::now(); };
+};
+
 class AudioQueuePcmPlayer {
 public:
-  explicit AudioQueuePcmPlayer(AudioOutputSettings settings = {})
-    : outputDeviceUid_(std::move(settings.deviceUid)),
+  explicit AudioQueuePcmPlayer(AudioOutputSettings settings = {},AudioQueueFunctions functions = {})
+    : functions_(functions),outputDeviceUid_(std::move(settings.deviceUid)),
       volume_(std::clamp(settings.volume, 0.0, 1.0)),
       muted_(settings.muted) {}
 
@@ -4974,31 +4989,79 @@ public:
       return false;
     }
 
+    // Only producers take this lock. Core Audio callbacks never do, so all
+    // enqueue/start/property calls can run outside the callback's mutex.
+    std::lock_guard serial(submitMutex_);
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!queue_ || sampleRate_ != sampleRate || channels_ != channels || maxBufferBytes_ < payloadSize) {
+    if(requiresRecovery_) {
+      if(functions_.now()-lastProgress_<std::chrono::milliseconds(250)) { ++queueDrops_; return false; }
+      ++outputRecoveries_;
+    }
+    if (!queue_ || requiresRecovery_ || sampleRate_ != sampleRate || channels_ != channels || maxBufferBytes_ < payloadSize) {
       configureLocked(lock, sampleRate, channels, payloadSize);
     }
     // Keep jitter buffering in software. Do not drain it into 48 variable-size
     // hardware buffers or drop each next packet merely because output is busy.
     if (!available_.wait_for(lock, std::chrono::milliseconds(25), [&] {
           return !queue_ || (!freeBuffers_.empty() && budget_.fits(sampleRate, frameCount));
-        }) || !queue_) {
-      queueDrops_ += 1;
-      return false;
+        })) {
+      if(functions_.now()-lastProgress_>=std::chrono::milliseconds(250)) {
+        ++outputRecoveries_;
+        configureLocked(lock,sampleRate,channels,payloadSize);
+      } else { ++queueDrops_; return false; }
     }
+    if(!queue_) { ++queueDrops_; return false; }
 
+    const bool drained=budget_.empty();
     AudioQueueBufferRef buffer = freeBuffers_.front();
     freeBuffers_.pop_front();
     std::memcpy(buffer->mAudioData, payload, payloadSize);
     buffer->mAudioDataByteSize = payloadSize;
-    const OSStatus status = AudioQueueEnqueueBuffer(queue_, buffer, 0, nullptr);
+    // Retire exactly what was admitted, independently of any driver changes to
+    // the mutable byte-size field on a returned buffer.
+    buffer->mUserData=reinterpret_cast<void*>(static_cast<std::uintptr_t>(frameCount));
+    const auto queue=queue_;
+    bool hasSignal=false;
+    for(std::size_t i=0;i<static_cast<std::size_t>(frameCount)*channels;++i) {
+      float sample=0; std::memcpy(&sample,payload+i*sizeof(float),sizeof(sample));
+      if(std::isfinite(sample) && std::abs(sample)>0.0001F) { hasSignal=true; break; }
+    }
+    // Account before enqueue: a fast callback may recycle before enqueue
+    // returns. Neither callback nor producer calls Core Audio under mutex_.
+    budget_.submitted(frameCount);
+    if(drained) lastProgress_=functions_.now();
+    lock.unlock();
+    const OSStatus status = functions_.enqueue(queue, buffer, 0, nullptr);
     if (status != noErr) {
+      lock.lock(); budget_.completed(frameCount);
+      buffer->mUserData=nullptr;
       freeBuffers_.push_back(buffer);
-      queueDrops_ += 1;
+      ++queueDrops_; ++outputErrors_; lastOutputError_=status; requiresRecovery_=true;
       return false;
     }
-    budget_.submitted(frameCount);
+    lock.lock(); outputSubmittedFrames_+=frameCount;
+    if(hasSignal) outputSignalFrames_+=frameCount;
+    const bool checkRunning=drained || functions_.now()-lastRunningCheck_>=std::chrono::milliseconds(100);
+    if(checkRunning) lastRunningCheck_=functions_.now();
+    lock.unlock();
+    if(checkRunning) {
+      UInt32 running=0,size=sizeof(running);
+      const auto query=functions_.getProperty(queue,kAudioQueueProperty_IsRunning,&running,&size);
+      const auto started=query==noErr && running ? noErr : functions_.start(queue,nullptr);
+      std::lock_guard stateLock(mutex_);
+      if(started!=noErr) { ++outputErrors_; lastOutputError_=started; requiresRecovery_=true; }
+      else if(query!=noErr || !running) ++outputStarts_;
+    }
     return true;
+  }
+
+  struct Stats {
+    std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames;
+    OSStatus lastError;
+  };
+  Stats stats() {
+    std::lock_guard lock(mutex_);
+    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,lastOutputError_};
   }
 
   std::uint64_t takeQueueDrops() {
@@ -5013,15 +5076,15 @@ public:
   }
 
 private:
-  static void callback(void* userData, AudioQueueRef, AudioQueueBufferRef buffer) {
+  static void callback(void* userData, AudioQueueRef queue, AudioQueueBufferRef buffer) {
     auto* player = static_cast<AudioQueuePcmPlayer*>(userData);
-    if (player) player->recycle(buffer);
+    if (player) player->recycle(queue,buffer);
   }
 
-  static void disposeQueue(AudioQueueRef queue) {
+  void disposeQueue(AudioQueueRef queue) {
     if (!queue) return;
-    AudioQueueStop(queue, true);
-    AudioQueueDispose(queue, true);
+    functions_.stop(queue, true);
+    functions_.dispose(queue, true);
   }
 
   void configureLocked(std::unique_lock<std::mutex>& lock,
@@ -5035,6 +5098,8 @@ private:
     channels_ = 0;
     maxBufferBytes_ = 0;
     budget_.clear();
+    requiresRecovery_=false;
+    lastProgress_=functions_.now();
 
     lock.unlock();
     disposeQueue(oldQueue);
@@ -5059,10 +5124,11 @@ private:
     constexpr int bufferCount = 48;
     for (int i = 0; i < bufferCount; ++i) {
       AudioQueueBufferRef buffer = nullptr;
-      checkStatus(AudioQueueAllocateBuffer(queue_, maxBufferBytes_, &buffer), "AudioQueueAllocateBuffer");
+      checkStatus(functions_.allocate(queue_, maxBufferBytes_, &buffer), "AudioQueueAllocateBuffer");
       freeBuffers_.push_back(buffer);
     }
-    checkStatus(AudioQueueStart(queue_, nullptr), "AudioQueueStart");
+    // Start only after the first payload has been enqueued. Empty-start is
+    // device-dependent, and a later underrun must be allowed to restart.
     std::cout << "SNA1_AUDIO_PLAYBACK sampleRate=" << sampleRate_
               << " channels=" << channels_
               << " buffers=" << bufferCount
@@ -5077,7 +5143,7 @@ private:
 
   AudioQueueRef createOutputQueue(const AudioStreamBasicDescription& description, bool forceDefault) {
     AudioQueueRef createdQueue = nullptr;
-    checkStatus(AudioQueueNewOutput(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
+    checkStatus(functions_.create(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
                 "AudioQueueNewOutput");
 
     activeOutputDeviceUid_ = "";
@@ -5087,7 +5153,7 @@ private:
                                                   outputDeviceUid_.c_str(),
                                                   kCFStringEncodingUTF8);
       const OSStatus deviceStatus = uid
-        ? AudioQueueSetProperty(createdQueue, kAudioQueueProperty_CurrentDevice, &uid, sizeof(uid))
+        ? functions_.setProperty(createdQueue, kAudioQueueProperty_CurrentDevice, &uid, sizeof(uid))
         : paramErr;
       if (uid) CFRelease(uid);
       if (deviceStatus == noErr) {
@@ -5099,28 +5165,34 @@ private:
         disposeQueue(createdQueue);
         createdQueue = nullptr;
         deviceFallback_ = true;
-        checkStatus(AudioQueueNewOutput(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
+        checkStatus(functions_.create(&description, callback, this, nullptr, nullptr, 0, &createdQueue),
                     "AudioQueueNewOutput(default)");
       }
     }
 
     const Float32 effectiveVolume = muted_ ? 0.0f : static_cast<Float32>(volume_);
-    const OSStatus volumeStatus = AudioQueueSetParameter(createdQueue, kAudioQueueParam_Volume, effectiveVolume);
+    const OSStatus volumeStatus = functions_.setParameter(createdQueue, kAudioQueueParam_Volume, effectiveVolume);
     if (volumeStatus != noErr) {
       std::cerr << "SNA1_AUDIO_VOLUME warning status=" << volumeStatus << "\n";
     }
     return createdQueue;
   }
 
-  void recycle(AudioQueueBufferRef buffer) {
+  void recycle(AudioQueueRef queue,AudioQueueBufferRef buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!queue_) return;
-    if (channels_) budget_.completed(buffer->mAudioDataByteSize/(channels_*sizeof(float)));
+    if (queue_!=queue || !queue_) return;
+    if (channels_) {
+      const auto frames=static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(buffer->mUserData));
+      buffer->mUserData=nullptr;
+      budget_.completed(frames); outputCompletedFrames_+=frames;
+    }
+    lastProgress_=functions_.now();
     freeBuffers_.push_back(buffer);
     available_.notify_one();
   }
 
-  std::mutex mutex_;
+  AudioQueueFunctions functions_;
+  std::mutex submitMutex_,mutex_;
   std::condition_variable available_;
   sanser::AudioDeviceBudget budget_;
   std::deque<AudioQueueBufferRef> freeBuffers_;
@@ -5129,6 +5201,10 @@ private:
   std::uint16_t channels_ = 0;
   std::uint32_t maxBufferBytes_ = 0;
   std::uint64_t queueDrops_ = 0;
+  std::uint64_t outputSubmittedFrames_=0,outputCompletedFrames_=0,outputStarts_=0,outputRecoveries_=0,outputErrors_=0,outputSignalFrames_=0;
+  OSStatus lastOutputError_=noErr;
+  bool requiresRecovery_=false;
+  std::chrono::steady_clock::time_point lastProgress_{},lastRunningCheck_{};
   std::string outputDeviceUid_;
   std::string activeOutputDeviceUid_;
   double volume_ = 1.0;
@@ -5660,7 +5736,6 @@ private:
   std::condition_variable condition_;
   std::map<std::uint64_t, AudioPayloadPacket> buffer_;
   AudioJitterStats stats_;
-  std::thread worker_;
   std::uint64_t expectedSequence_ = 0;
   std::uint64_t highestSequence_ = 0;
   std::uint64_t mediaGeneration_ = 0;
@@ -5678,6 +5753,9 @@ private:
   bool started_ = false;
   bool stopped_ = false;
   double smoothedAvLeadMs_ = 0.0;
+  // The worker reads all of the above immediately; start it only after their
+  // default initialization is complete.
+  std::thread worker_;
 };
 
 template <typename T>
@@ -7261,6 +7339,7 @@ void listenUdpAudio(std::uint16_t audioPort,
         if (statsSeconds >= 1.0) {
           const AudioJitterStats jitterStats = receivingOpus ? opusJitter.takeStats() : jitter.takeStats();
           const auto opusStats=opusReceiver.stats();
+          const auto outputStats=player->stats();
           const double avgAgeMs = jitterStats.ageSamples > 0
             ? jitterStats.ageSumMs / static_cast<double>(jitterStats.ageSamples)
             : -1.0;
@@ -7277,6 +7356,15 @@ void listenUdpAudio(std::uint16_t audioPort,
                << " opusLate=" << opusStats.late << " opusReordered=" << opusStats.reordered << " opusDropped=" << opusStats.dropped << " opusErrors=" << opusStats.errors
                << " played=" << jitterStats.submittedPackets
                << " frames=" << jitterStats.submittedFrames
+               << " outputSubmittedFrames=" << outputStats.submittedFrames
+               << " outputCompletedFrames=" << outputStats.completedFrames
+               << " outputSignalFrames=" << outputStats.signalFrames
+               << " outputQueuedFrames=" << outputStats.queuedFrames
+               << " outputStarts=" << outputStats.starts
+               << " outputRecoveries=" << outputStats.recoveries
+               << " outputErrors=" << outputStats.errors
+               << " outputQueueDrops=" << outputStats.drops
+               << " outputLastError=" << outputStats.lastError
                << " lost=" << jitterStats.lostPackets
                << " reorder=" << jitterStats.reorderedPackets
                << " dup=" << jitterStats.duplicatePackets

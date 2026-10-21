@@ -39,6 +39,10 @@ public:
   Mixer(const Mixer&)=delete; Mixer& operator=(const Mixer&)=delete;
   bool receive(Packet packet,Clock::time_point now=Clock::now());
   std::optional<desktop::AudioSamples> poll(Clock::time_point now=Clock::now());
+  // Produce every elapsed 5ms block (bounded to the player's 40ms capacity).
+  // A worker wakeup is not an audio sample clock: work/timer jitter must not
+  // gradually reduce 48kHz playback into alternating speech and silence.
+  std::vector<desktop::AudioSamples> drain(Clock::time_point now=Clock::now());
   void mute(unsigned speaker,bool muted);
   void clear();
   Stats stats() const;

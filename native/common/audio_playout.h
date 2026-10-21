@@ -18,6 +18,7 @@ public:
   void completed(std::uint32_t frames) { queued_-=std::min<std::uint64_t>(queued_,frames); }
   void clear() { queued_=0; }
   bool empty() const { return queued_==0; }
+  std::uint64_t queuedFrames() const { return queued_; }
 private:
   std::uint64_t queued_=0;
 };

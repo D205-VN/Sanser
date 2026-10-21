@@ -171,6 +171,14 @@ std::optional<desktop::AudioSamples> Mixer::poll(Clock::time_point now) {
   return out;
 }
 void Mixer::mute(unsigned speaker,bool muted) { if(speaker<maxSpeakers) { auto& source=impl_->sources[speaker]; source.muted=muted; source.reset(); } }
+std::vector<desktop::AudioSamples> Mixer::drain(Clock::time_point now) {
+  std::vector<desktop::AudioSamples> blocks; blocks.reserve(8);
+  while(blocks.size()<8) {
+    auto samples=poll(now); if(!samples) break;
+    blocks.push_back(std::move(*samples));
+  }
+  return blocks;
+}
 void Mixer::clear() { for(auto& source:impl_->sources) source.reset(); }
 Stats Mixer::stats() const {
   Stats out; for(const auto& source:impl_->sources) { const auto& s=source.stats; out.decoded+=s.decoded; out.concealed+=s.concealed; out.fecAttempts+=s.fecAttempts; out.late+=s.late; out.dropped+=s.dropped; out.invalid+=s.invalid; } return out;

@@ -7,6 +7,7 @@
 #include "transport.h"
 #include "broadcast.h"
 #include "voice_runtime.h"
+#include "voice_echo.h"
 #include "voice_panel.h"
 #include "engine.h"
 #include "capture_startup.h"
@@ -212,13 +213,14 @@ API_AVAILABLE(macos(12.3))
 @interface SanserCapture : NSObject <SCStreamOutput,SCStreamDelegate>
 @property(nonatomic,assign) Encoder* encoder;
 @property(nonatomic,assign) AudioPacketizer* audio;
+@property(nonatomic,assign) sanser::voice::PlaybackTap* originalSound;
 @property(atomic,assign) BOOL failed;
 @end
 @implementation SanserCapture
 - (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
   (void)stream;
   if(@available(macOS 13.0,*)) {
-    if(type==SCStreamOutputTypeAudio) { if(self.audio) captureSystemAudio(sample,*self.audio); return; }
+    if(type==SCStreamOutputTypeAudio) { if(self.audio) captureSystemAudio(sample,*self.audio,self.originalSound); return; }
   }
   if(type!=SCStreamOutputTypeScreen || !CMSampleBufferIsValid(sample) || !self.encoder) return;
   auto image=CMSampleBufferGetImageBuffer(sample); if(image) self.encoder->encode(image,CMSampleBufferGetPresentationTimeStamp(sample));
@@ -679,10 +681,12 @@ int runMac(bool host,int argc,char** argv) {
         VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
         VoicePanel voicePanel(options.groupVoice,voice);
         peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
+        voice::PlaybackTap originalSound(voice::RenderSource::External);
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
         peer.onInput=[&](Input event) { injector.apply(event); };
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         capture.audio=&audio;
+        capture.originalSound=&originalSound;
         SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
         SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3;
         // Control viewers already draw an immediate local cursor. Only a

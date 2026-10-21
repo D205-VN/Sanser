@@ -46,7 +46,7 @@
     "longDescription": "Sanser 2.2.18 is a secure, low-latency remote desktop and remote game streaming application.",
     "targets": "all",
     "externalBin": [],
-    "resources": ["licenses/opus.txt"],
+    "resources": ["licenses/opus.txt", "licenses/speexdsp.txt"],
     "createUpdaterArtifacts": true
   },
   "plugins": {

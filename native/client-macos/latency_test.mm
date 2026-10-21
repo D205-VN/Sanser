@@ -13,6 +13,7 @@ struct NativeInputPolicyTest {
 void requireLatency(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
 }
+#include "audio_output_test.h"
 SnvPacket testPacket(std::uint64_t sequence, bool keyframe = false) {
   SnvPacket packet;
   packet.sequence = sequence;
@@ -25,6 +26,7 @@ int main() {
   @autoreleasepool {
     try {
       sanser::desktop::testMacRemoteView();
+      testAudioOutputRecovery();
       {
         // Run the production launcher decision with a fake start callback;
         // this test must never open an audio device or capture a real screen.

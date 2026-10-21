@@ -11,6 +11,14 @@ pub(crate) struct UacStatus {
     ready: bool,
 }
 
+// Older helpers do not report `current`: they must be repaired before they can
+// be used to authorize this release's protected native host.
+#[cfg(any(windows, test))]
+fn current_installation(status: &serde_json::Value) -> bool {
+    status.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
+        && status.get("current").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
 #[cfg(windows)]
 fn helper_output(
     app: &AppHandle,
@@ -60,7 +68,7 @@ pub(crate) fn protected_host(app: &AppHandle) -> Option<std::path::PathBuf> {
     use std::time::Duration;
     let output = helper_output(app, "--status", Duration::from_secs(2)).ok()?;
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    if status.get("enabled")?.as_bool()? {
+    if current_installation(&status) {
         let output = helper_output(app, "--host-path", Duration::from_secs(2)).ok()?;
         let path = std::path::PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
         return path.is_absolute().then_some(path).filter(|p| p.is_file());
@@ -76,10 +84,16 @@ pub(crate) fn windows_uac_status(app: AppHandle) -> UacStatus {
         let available = crate::engine::named_candidate_paths(&app, "sanser-uac-service")
             .into_iter()
             .any(|path| path.is_file());
+        let enabled = helper_output(&app, "--status", std::time::Duration::from_secs(2))
+            .ok()
+            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+            .is_some_and(|status| {
+                status.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
+            });
         let path = protected_host(&app);
         return UacStatus {
             available,
-            enabled: path.is_some(),
+            enabled,
             ready: path
                 .is_some_and(|path| crate::engine::probe_path(&path, EngineKind::Host).compatible),
         };
@@ -88,6 +102,47 @@ pub(crate) fn windows_uac_status(app: AppHandle) -> UacStatus {
     {
         let _ = app;
         UacStatus::default()
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn ensure_current(app: &AppHandle) -> Result<(), DesktopError> {
+    let output = match helper_output(app, "--status", std::time::Duration::from_secs(2)) {
+        Ok(output) => output,
+        Err(_) => return Ok(()),
+    };
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        DesktopError::Process("Unable to verify Windows administrator-window support".into())
+    })?;
+    if status.get("enabled").and_then(serde_json::Value::as_bool) == Some(true)
+        && !current_installation(&status)
+    {
+        return Err(DesktopError::Unavailable(
+            "Windows administrator-window support is from an older installation. Reinstall the current Sanser update, or use Host > Windows administrator prompts > Update UAC support before connecting.".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_installation;
+    use serde_json::json;
+
+    #[test]
+    fn stale_or_unknown_protected_helper_never_counts_as_current() {
+        assert!(!current_installation(
+            &json!({"enabled":true,"version":"2.2.18"})
+        ));
+        assert!(!current_installation(
+            &json!({"enabled":true,"current":false})
+        ));
+        assert!(!current_installation(
+            &json!({"enabled":false,"current":true})
+        ));
+        assert!(current_installation(
+            &json!({"enabled":true,"current":true})
+        ));
     }
 }
 

@@ -35,13 +35,13 @@ std::wstring identity(IMMDevice* device) {
 }
 }
 struct MicrophoneCapture::State {
-  std::function<void(const AudioSamples&)> sink;
+  std::function<void(const AudioSamples&,Clock::time_point)> sink;
   std::function<void(std::string)> status;
   std::atomic<bool> running{true};
   std::mutex mutex;
   std::condition_variable wake;
   std::thread worker;
-  State(std::function<void(const AudioSamples&)> output,std::function<void(std::string)> report)
+  State(std::function<void(const AudioSamples&,Clock::time_point)> output,std::function<void(std::string)> report)
     :sink(std::move(output)),status(std::move(report)),worker([this] { run(); }) {}
   ~State() { running=false; wake.notify_all(); if(worker.joinable()) worker.join(); }
   void report(const char* value) noexcept { if(status) try { status(value); } catch(...) { } }
@@ -76,7 +76,11 @@ struct MicrophoneCapture::State {
     check(client->SetEventHandle(event.value),"Microphone event handle");
     ComPtr<IAudioCaptureClient> capture;
     check(client->GetService(IID_PPV_ARGS(&capture)),"Microphone capture service");
-    sanser::audio::Packetizer packetizer(sink);
+    Clock::time_point packetTime{};
+    sanser::audio::Packetizer packetizer([&](const AudioSamples& samples) {
+      if(sink) sink(samples,packetTime);
+      packetTime+=std::chrono::milliseconds(5);
+    });
     std::vector<float> stereo;
     if(!running) return;
     check(client->Start(),"Start microphone"); Stop stop{client.Get()};
@@ -99,7 +103,7 @@ struct MicrophoneCapture::State {
         const bool stale=!(flags&AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && capturedAt && now>capturedAt && now-capturedAt>400000;
         if(stale) {
           check(capture->ReleaseBuffer(frames),"Release stale microphone buffer");
-          packetizer.reset();
+          packetizer.reset(); packetTime={};
           check(capture->GetNextPacketSize(&available),"Next microphone packet");
           continue;
         }
@@ -109,7 +113,11 @@ struct MicrophoneCapture::State {
           frames,wave.nChannels,wave.wBitsPerSample,floating,silent,stereo);
         check(capture->ReleaseBuffer(frames),"Release microphone buffer");
         if(!valid) throw std::runtime_error("Invalid microphone buffer");
-        if(flags&AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) packetizer.reset();
+        const auto first=Clock::now()-std::chrono::nanoseconds(
+          !(flags&AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && capturedAt && now>=capturedAt
+            ? static_cast<std::int64_t>(now-capturedAt)*100 : static_cast<std::int64_t>(frames)*1000000000/wave.nSamplesPerSec);
+        if(flags&AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) { packetizer.reset(); packetTime={}; }
+        if(packetTime==Clock::time_point{} || first-packetTime>std::chrono::milliseconds(40) || packetTime-first>std::chrono::milliseconds(40)) packetTime=first;
         if(!packetizer.push(stereo,wave.nSamplesPerSec)) throw std::runtime_error("Microphone resampling failed");
         check(capture->GetNextPacketSize(&available),"Next microphone packet");
       }
@@ -135,7 +143,7 @@ struct MicrophoneCapture::State {
     report("stopped");
   }
 };
-MicrophoneCapture::MicrophoneCapture(bool enabled,std::function<void(const AudioSamples&)> sink,
+MicrophoneCapture::MicrophoneCapture(bool enabled,std::function<void(const AudioSamples&,Clock::time_point)> sink,
                                    std::function<void(std::string)> status) {
   if(enabled) state_=std::make_unique<State>(std::move(sink),std::move(status));
 }

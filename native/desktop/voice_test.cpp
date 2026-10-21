@@ -89,6 +89,19 @@ int main() {
     for(unsigned i=0;i<40;++i) require(bounded.receive(packet(burst,t+std::chrono::milliseconds(i*20)),t),"bounded burst accepted");
     require(bounded.stats().dropped>=34,"voice queue sheds stale speech rather than accumulating latency");
     require(!bounded.poll(t+std::chrono::milliseconds(100)),"expired packets do not play");
+    // A 7ms worker cadence (5ms wait plus codec/device work) must still deliver
+    // a 48kHz stream. One poll per wake silently produced only ~34kHz of PCM,
+    // with recurring output underruns and stale speech dropped by the mixer.
+    v::Mixer scheduled; v::Encoder paced;
+    unsigned nextPacket=0,delivered=0;
+    for(unsigned ms=0;ms<=2002;ms+=7) {
+      while(nextPacket<=ms && nextPacket<2000) {
+        require(scheduled.receive(packet(paced,t+std::chrono::milliseconds(nextPacket)),t+std::chrono::milliseconds(nextPacket)),"scheduled speech received");
+        nextPacket+=20;
+      }
+      delivered+=static_cast<unsigned>(scheduled.drain(t+std::chrono::milliseconds(ms)).size());
+    }
+    require(delivered>=395 && scheduled.stats().dropped==0,"elapsed voice blocks catch up without reducing the sample rate or dropping speech");
     v::Mixer mixed;
     for(unsigned i=0;i<4;++i) { auto p=first; p.speaker=i; require(mixed.receive(p,t),"independent speakers accepted"); }
     const auto sum=mixed.poll(t+std::chrono::milliseconds(20));

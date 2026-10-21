@@ -3,6 +3,7 @@
 #include "broadcast.h"
 #include "microphone_capture.h"
 #include "audio_player.h"
+#include "voice_echo.h"
 #include <atomic>
 #include <deque>
 #include <iostream>
@@ -42,6 +43,7 @@ struct VoiceRuntime::Impl {
     std::unique_ptr<MicrophoneCapture> mic;
     std::unique_ptr<voice::Encoder> encoder;
     std::unique_ptr<voice::Mixer> mixer;
+    std::unique_ptr<voice::EchoCanceller> echo;
     std::string code="idle";
     bool capturing=false;
     auto lastStatus=Clock::time_point{};
@@ -59,6 +61,7 @@ struct VoiceRuntime::Impl {
             ++captureToken;
             state(); // Revoke transport permission before potentially waiting for a device to close.
             mic.reset(); capturing=false;
+            echo.reset(); // Revoking mic consent destroys its adaptation history.
             { std::lock_guard lock(mutex); captured.clear(); pendingStatus.clear(); if(!joined || deafened) incoming.clear(); }
             if(encoder) encoder->reset();
             if(!joined || deafened) { player.reset(); if(mixer) mixer->clear(); }
@@ -69,12 +72,13 @@ struct VoiceRuntime::Impl {
             code=joined ? deafened ? "deafened" : microphone ? "starting" : "listening" : "idle";
             if(joined && microphone && !deafened) {
               if(!encoder) encoder=std::make_unique<voice::Encoder>();
+              echo=std::make_unique<voice::EchoCanceller>();
               const auto token=captureToken.load();
-              mic=std::make_unique<MicrophoneCapture>(true,[this,token](const AudioSamples& pcm) {
+              mic=std::make_unique<MicrophoneCapture>(true,[this,token](const AudioSamples& pcm,Clock::time_point at) {
                 if(!running || !joined || !microphone || deafened || token!=captureToken) return;
                 std::lock_guard lock(mutex);
                 if(captured.size()>=8) captured.pop_front();
-                captured.push_back({pcm,Clock::now()});
+                captured.push_back({pcm,at});
               },[this,token](std::string value) {
                 if(token!=captureToken) return;
                 std::lock_guard lock(mutex); pendingStatus=std::move(value);
@@ -99,11 +103,12 @@ struct VoiceRuntime::Impl {
         }
         if(joined && !deafened && mixer && player) {
           for(auto& item:received) mixer->receive(std::move(item.packet),item.at);
-          if(auto samples=mixer->poll(began)) player->submit(std::move(*samples));
+          for(auto& samples:mixer->drain(began)) player->submit(std::move(samples));
         }
         if(joined && microphone && !deafened && encoder) {
-          for(const auto& item:pcm) {
+          for(auto& item:pcm) {
             if(Clock::now()-item.at>std::chrono::milliseconds(40)) { encoder->reset(); continue; }
+            if(echo) echo->process(item.pcm,item.at);
             if(auto packet=encoder->push(item.pcm,item.at)) if(send) send(std::move(*packet));
           }
         }

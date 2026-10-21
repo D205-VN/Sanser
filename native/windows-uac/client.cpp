@@ -7,6 +7,33 @@
 namespace sanser::uac {
 namespace {
 std::atomic<ULONGLONG> servedUntil{0};
+DWORD integrityLevel(HANDLE process) {
+  HANDLE raw=nullptr;
+  if(!OpenProcessToken(process,TOKEN_QUERY,&raw)) return 0;
+  Handle token(raw); DWORD size=0;
+  GetTokenInformation(token.value,TokenIntegrityLevel,nullptr,0,&size);
+  std::vector<unsigned char> bytes(size);
+  if(!size || !GetTokenInformation(token.value,TokenIntegrityLevel,bytes.data(),size,&size)) return 0;
+  const auto* label=reinterpret_cast<TOKEN_MANDATORY_LABEL*>(bytes.data());
+  const auto sid=label->Label.Sid;
+  if(!IsValidSid(sid) || !*GetSidSubAuthorityCount(sid)) return 0;
+  return *GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1);
+}
+bool elevatedForeground() {
+  const static DWORD own=integrityLevel(GetCurrentProcess());
+  DWORD pid=0; GetWindowThreadProcessId(GetForegroundWindow(),&pid);
+  if(!own || !pid || pid==GetCurrentProcessId()) return false;
+  thread_local DWORD previous=0;
+  thread_local ULONGLONG checked=0;
+  thread_local bool elevated=false;
+  const auto now=GetTickCount64();
+  if(pid!=previous || now-checked>=50) {
+    Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid));
+    elevated=process && integrityLevel(process.value)>own;
+    previous=pid; checked=now;
+  }
+  return elevated;
+}
 class Connection {
 public:
   bool exchange(Request request,Response& response,FrameBgra* frame=nullptr) {
@@ -72,7 +99,10 @@ UINT sendInput(UINT count,INPUT* inputs,int size) {
   thread_local Connection connection;
   // Ordinary input remains in-process. The helper is also needed for a high-
   // integrity installer window after its UAC prompt returns to Default.
-  UINT sent=active() ? 0 : ::SendInput(count,inputs,size);
+  // An elevated installer on Default is also privileged, even though capture
+  // has already returned from Winlogon. Route it deliberately, rather than
+  // interpreting a low-integrity SendInput result as permission to control it.
+  UINT sent=(active() || elevatedForeground()) ? 0 : ::SendInput(count,inputs,size);
   if(sent==count) return sent;
   for(;sent<count;++sent) {
     const auto& in=inputs[sent]; Request request; request.operation=Operation::Input; request.type=in.type;

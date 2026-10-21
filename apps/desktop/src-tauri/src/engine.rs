@@ -980,6 +980,10 @@ impl EngineManager {
                 "local server mode is disabled; use the deployed PostgreSQL/Neon API".into(),
             ));
         }
+        #[cfg(windows)]
+        if request.kind == EngineKind::Host {
+            crate::windows_uac::ensure_current(app)?;
+        }
         let path = find_sidecar(app, request.kind).ok_or_else(|| {
             DesktopError::Unavailable(format!("{} is not bundled", sidecar_name(request.kind)))
         })?;

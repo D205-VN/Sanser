@@ -73,6 +73,7 @@ jobs:
           Copy-Item apps/desktop/src-tauri/binaries/sanser-uac-service-x86_64-pc-windows-msvc.exe build/portable/sanser-uac-service.exe
           New-Item -ItemType Directory -Force build/portable/licenses | Out-Null
           Copy-Item apps/desktop/src-tauri/licenses/opus.txt build/portable/licenses/opus.txt
+          Copy-Item apps/desktop/src-tauri/licenses/speexdsp.txt build/portable/licenses/speexdsp.txt
           7z a -t7z -mx=9 build/sanser-portable.7z ./build/portable/*
           @'
           ;!@Install@!UTF-8!

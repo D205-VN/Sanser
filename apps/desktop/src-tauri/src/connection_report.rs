@@ -77,6 +77,21 @@ const FIELDS: &[&str] = &[
     "opusErrors",
     "opusTxPackets",
     "opusTxBytes",
+    "played",
+    "underflow",
+    "queueDrop",
+    "avHold",
+    "avDrop",
+    "bufferMs",
+    "outputSubmittedFrames",
+    "outputCompletedFrames",
+    "outputSignalFrames",
+    "outputQueuedFrames",
+    "outputStarts",
+    "outputRecoveries",
+    "outputErrors",
+    "outputQueueDrops",
+    "outputLastError",
     "pcmUnderflows",
     "pcmCapacityDrops",
     "pcmStaleDrops",
@@ -255,7 +270,12 @@ pub(crate) fn parse_sample(line: &[u8]) -> Option<Sample> {
                 return None;
             }
             let value: f64 = value.parse().ok()?;
-            (value.is_finite() && (0.0..=1e12).contains(&value)).then(|| (key.to_owned(), value))
+            let valid_range = if key == "outputLastError" {
+                (f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&value) && value.fract() == 0.0
+            } else {
+                (0.0..=1e12).contains(&value)
+            };
+            (value.is_finite() && valid_range).then(|| (key.to_owned(), value))
         })
         .collect();
     (!values.is_empty()).then(|| Sample {
@@ -707,6 +727,12 @@ mod tests {
         assert!(!output.values.contains_key("samples"));
         assert!(!output.values.contains_key("device"));
         assert!(!output.values.contains_key("token"));
+        let legacy=parse_sample(b"SNA1_AUDIO_STATS opusDecoded=600 played=2 underflow=1 queueDrop=14 avHold=0 avDrop=0 bufferMs=5 outputSubmittedFrames=144000 outputCompletedFrames=143760 outputQueuedFrames=240 outputStarts=2 outputRecoveries=1 outputErrors=1 outputQueueDrops=14 outputLastError=-50 device=123 token=789").unwrap();
+        assert_eq!(legacy.values["outputCompletedFrames"], 143_760.0);
+        assert_eq!(legacy.values["outputLastError"], -50.0);
+        assert_eq!(legacy.values["played"], 2.0);
+        assert!(!legacy.values.contains_key("device"));
+        assert!(!legacy.values.contains_key("token"));
     }
     #[test]
     fn live_recovery_evidence_is_bound_to_the_report_session_without_raw_content() {

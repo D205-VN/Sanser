@@ -1,6 +1,8 @@
 #include "audio_player.h"
 #include "audio_playout.h"
+#include "voice_echo.h"
 #import <AudioToolbox/AudioToolbox.h>
+#include <mach/mach_time.h>
 #include <cstring>
 #include <iostream>
 namespace sanser::desktop {
@@ -9,6 +11,7 @@ struct AudioPlayer::State {
   AudioQueue queue{3};
   sanser::AudioContinuity continuity;
   bool wasSilent=true;
+  voice::PlaybackTap reference;
   static void fill(void* context,AudioQueueRef output,AudioQueueBufferRef buffer) {
     auto& self=*static_cast<State*>(context);
     auto* target=static_cast<std::int16_t*>(buffer->mAudioData);
@@ -20,7 +23,25 @@ struct AudioPlayer::State {
       std::memcpy(target+block*pcm.size(),pcm.data(),pcm.size()*sizeof(std::int16_t));
     }
     buffer->mAudioDataByteSize=audioFrames*audioChannels*2*2;
-    AudioQueueEnqueueBuffer(output,buffer,0,nullptr);
+    AudioTimeStamp actual{};
+    if(AudioQueueEnqueueBufferWithParameters(output,buffer,0,nullptr,0,0,0,nullptr,nullptr,&actual)==noErr) {
+      auto at=voice::EchoClock::now();
+      if(actual.mFlags&kAudioTimeStampHostTimeValid) {
+        const auto host=mach_absolute_time(); mach_timebase_info_data_t timebase{}; mach_timebase_info(&timebase);
+        if(timebase.denom) {
+          const auto delta=static_cast<std::int64_t>((static_cast<long double>(actual.mHostTime)-host)*timebase.numer/timebase.denom);
+          if(delta>-100000000 && delta<200000000) at+=std::chrono::nanoseconds(delta);
+        }
+      } else {
+        AudioTimeStamp current{};
+        if(AudioQueueGetCurrentTime(output,nullptr,&current,nullptr)==noErr &&
+           (actual.mFlags&current.mFlags&kAudioTimeStampSampleTimeValid)) {
+          const auto delta=static_cast<std::int64_t>((actual.mSampleTime-current.mSampleTime)*1000000000.0/audioRate);
+          if(delta>-100000000 && delta<200000000) at+=std::chrono::nanoseconds(delta);
+        }
+      }
+      self.reference.publish(std::span<const std::int16_t>(target,audioFrames*audioChannels*2),at);
+    }
   }
   bool start() {
     AudioStreamBasicDescription format{};

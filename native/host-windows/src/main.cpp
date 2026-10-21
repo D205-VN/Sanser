@@ -3,6 +3,7 @@
 #include "bmp_writer.h"
 #include "desktop_duplication.h"
 #include "../../windows-uac/client.h"
+#include "../../windows-uac/input_test.h"
 #include "mf_video_encoder.h"
 #include "mf_video_packet_encoder.h"
 #include "sanser_version.h"
@@ -7347,6 +7348,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 
 int main(int argc, char** argv) {
   try {
+#ifdef SANSER_UAC_TEST
+  if(argc>=2 && std::string_view(argv[1])=="--test-uac-input") return testUacInput(argc,argv);
+#endif
 #ifdef SANSER_AUDIO_TEST
     if(argc==2 && std::string_view(argv[1])=="--test-audio-wire") {
       WinsockRuntime runtime;

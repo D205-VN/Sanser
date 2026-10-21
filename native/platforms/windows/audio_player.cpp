@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 #include "audio_player.h"
 #include "audio_playout.h"
+#include "voice_echo.h"
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -57,6 +58,7 @@ void AudioPlayer::run() {
       checkAudio(render->ReleaseBuffer(targetFrames,AUDCLNT_BUFFERFLAGS_SILENT),"Submit priming silence");
       checkAudio(client->Start(),"Start audio output"); AudioStop stop{client.Get()};
       sanser::AudioContinuity continuity; bool wasSilent=true;
+      voice::PlaybackTap reference;
       std::cout<<"SNV2_AUDIO_OUTPUT started=1 rate=48000 channels=2 format=pcm16"<<std::endl;
       auto checkDevice=std::chrono::steady_clock::now();
       while(running_) {
@@ -72,6 +74,7 @@ void AudioPlayer::run() {
           checkAudio(render->GetBuffer(audioFrames,&target),"Audio output buffer");
           std::memcpy(target,output.data(),output.size()*sizeof(std::int16_t));
           checkAudio(render->ReleaseBuffer(audioFrames,0),"Submit audio output");
+          reference.publish(output,voice::EchoClock::now()+std::chrono::microseconds(static_cast<std::uint64_t>(padding)*1000000/audioRate));
           padding+=audioFrames;
         }
         if(std::chrono::steady_clock::now()-checkDevice>std::chrono::seconds(2)) {

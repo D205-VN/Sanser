@@ -12,6 +12,8 @@
 #include <atomic>
 #include <cstdio>
 #include <iostream>
+#include <fstream>
+#include <array>
 #include <list>
 #include <memory>
 #include <thread>
@@ -300,6 +302,11 @@ bool running() {
   ServiceHandle service(OpenServiceW(manager.value,serviceName,SERVICE_QUERY_STATUS)); if(!service.value) return false;
   SERVICE_STATUS status{}; return QueryServiceStatus(service.value,&status) && status.dwCurrentState==SERVICE_RUNNING;
 }
+bool registered() {
+  ServiceHandle manager(OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT)); if(!manager.value) return false;
+  ServiceHandle service(OpenServiceW(manager.value,serviceName,SERVICE_QUERY_STATUS));
+  return service.value!=nullptr;
+}
 void stop(SC_HANDLE service) {
   SERVICE_STATUS_PROCESS details{}; DWORD bytes=0;
   QueryServiceStatusEx(service,SC_STATUS_PROCESS_INFO,reinterpret_cast<BYTE*>(&details),sizeof(details),&bytes);
@@ -310,11 +317,45 @@ void stop(SC_HANDLE service) {
   require(status.dwCurrentState==SERVICE_STOPPED,"Stop existing UAC service");
   if(process) require(WaitForSingleObject(process.value,5000)==WAIT_OBJECT_0,"Wait for UAC service exit");
 }
-void install(bool enable) {
+bool sameFileContents(const std::filesystem::path& a,const std::filesystem::path& b) {
+  std::error_code error;
+  const auto size=std::filesystem::file_size(a,error); if(error) return false;
+  if(size!=std::filesystem::file_size(b,error) || error) return false;
+  std::ifstream first(a,std::ios::binary),second(b,std::ios::binary);
+  if(!first || !second) return false;
+  std::array<char,65536> x{},y{};
+  while(first) {
+    first.read(x.data(),x.size()); second.read(y.data(),y.size());
+    if(first.gcount()!=second.gcount() || !std::equal(x.begin(),x.begin()+first.gcount(),y.begin())) return false;
+  }
+  return first.eof() && second.eof();
+}
+bool installedCurrent() {
+  const auto source=imagePath().parent_path(),target=installDirectory();
+  return sameFileContents(source/L"sanser-uac-service.exe",target/L"sanser-uac-service.exe")
+    && sameFileContents(source/L"sanser-host-windows.exe",target/L"sanser-host-windows.exe");
+}
+void install(bool enable,bool preserveBinding=false) {
+  // Updates may run elevated as another administrator or SYSTEM. Never rebind
+  // an existing installation to the updater's token instead of its owner.
+  const auto previous=preserveBinding?allowedSid():std::wstring{};
+  const auto account=previous.empty()?currentSid():previous;
+  if(enable) require(account!=L"S-1-5-18","Initial UAC setup requires an interactive administrator account");
+  const auto disabledFile=installDirectory()/L"disabled";
+  if(enable && preserveBinding && GetFileAttributesW(disabledFile.c_str())!=INVALID_FILE_ATTRIBUTES) return;
   ServiceHandle manager(OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT|SC_MANAGER_CREATE_SERVICE)); require(manager.value!=nullptr,"Administrator approval required");
   ServiceHandle old(OpenServiceW(manager.value,serviceName,SERVICE_STOP|SERVICE_QUERY_STATUS|DELETE));
   if(old.value) stop(old.value);
-  if(!enable) { if(old.value) require(DeleteService(old.value)!=FALSE,"Remove UAC service"); return; }
+  if(!enable) {
+    if(old.value) require(DeleteService(old.value)!=FALSE,"Remove UAC service");
+    // Protected preference survives an updater running under another token or
+    // with the account's HKCU hive unloaded. This marker can only reduce access.
+    if(!preserveBinding && GetFileAttributesW(installDirectory().c_str())!=INVALID_FILE_ATTRIBUTES) {
+      Handle marker(CreateFileW(disabledFile.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
+      require(marker || GetLastError()==ERROR_FILE_EXISTS,"Preserve disabled UAC preference");
+    }
+    return;
+  }
   privilege(SE_RESTORE_NAME);
   const auto target=installDirectory(); const auto source=imagePath().parent_path();
   LocalMemory descriptor;
@@ -334,7 +375,7 @@ void install(bool enable) {
   }
   // Bind this privileged feature to the administrator who explicitly enabled
   // it. A different local/standard user must not use it to read UAC credentials.
-  const auto sid=currentSid(); const std::string encoded(sid.begin(),sid.end());
+  const auto sid=account; const std::string encoded(sid.begin(),sid.end());
   const auto allowedFile=target/L"allowed-user.sid";
   const auto existing=GetFileAttributesW(allowedFile.c_str());
   require(existing==INVALID_FILE_ATTRIBUTES || !(existing&FILE_ATTRIBUTE_REPARSE_POINT),"Reject redirected UAC account file");
@@ -352,11 +393,13 @@ void install(bool enable) {
   require(StartServiceW(service.value,0,nullptr)!=FALSE,"Start UAC service");
   const auto deadline=GetTickCount64()+10000; while(!running() && GetTickCount64()<deadline) Sleep(50);
   require(running(),"UAC service startup");
+  if(GetFileAttributesW(disabledFile.c_str())!=INVALID_FILE_ATTRIBUTES)
+    require(DeleteFileW(disabledFile.c_str())!=FALSE,"Enable UAC preference");
 }
-int elevate(bool enable) {
+int elevate(const wchar_t* mode) {
   const auto exe=imagePath(); SHELLEXECUTEINFOW launch{}; launch.cbSize=sizeof(launch);
   launch.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_NOASYNC; launch.lpVerb=L"runas"; launch.lpFile=exe.c_str();
-  launch.lpParameters=enable?L"--install":L"--uninstall"; launch.nShow=SW_HIDE;
+  launch.lpParameters=mode; launch.nShow=SW_HIDE;
   require(ShellExecuteExW(&launch)!=FALSE,"UAC approval cancelled or unavailable"); Handle process(launch.hProcess);
   require(WaitForSingleObject(process.value,120000)==WAIT_OBJECT_0,"UAC setup timed out");
   DWORD code=1; GetExitCodeProcess(process.value,&code); return static_cast<int>(code);
@@ -372,14 +415,38 @@ int wmain(int argc,wchar_t** argv) {
     if(argc!=2) return 2;
     const std::wstring mode=argv[1];
     if(mode==L"--install" || mode==L"--uninstall") { install(mode==L"--install"); return 0; }
+    if(mode==L"--installer-install") { install(true,true); return 0; }
+    if(mode==L"--installer-uninstall") { install(false,true); return 0; }
+    if(mode==L"--installer-enable") {
+      // The installer owns the elevation prompt; the normal desktop app never
+      // silently elevates itself. An explicit in-app disable survives updates.
+      DWORD disabled=0,bytes=sizeof(disabled);
+      if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\Sanser",L"UacDisabled",RRF_RT_REG_DWORD,nullptr,&disabled,&bytes)==ERROR_SUCCESS && disabled) return 0;
+      if(GetFileAttributesW((installDirectory()/L"disabled").c_str())!=INVALID_FILE_ATTRIBUTES) return 0;
+      if(running() && installedCurrent()) return 0;
+      const auto result=elevate(L"--installer-install");
+      if(result==0 && currentSid()!=allowedSid())
+        throw std::runtime_error("UAC support remains bound to its Windows account; sign in with that administrator account");
+      return result;
+    }
+    if(mode==L"--installer-remove") {
+      // A stopped or failed AUTO_START service is still installed and would
+      // otherwise survive app uninstall and restart after the next reboot.
+      if(currentSid()!=allowedSid() || !registered()) return 0;
+      return elevate(L"--installer-uninstall");
+    }
     if(mode==L"--enable" || mode==L"--disable") {
-      const auto result=elevate(mode==L"--enable");
+      const auto result=elevate(mode==L"--enable"?L"--install":L"--uninstall");
       if(result==0 && mode==L"--enable" && currentSid()!=allowedSid())
         throw std::runtime_error("Sign in with the Windows administrator account that enabled UAC support");
+      if(result==0) {
+        const DWORD disabled=mode==L"--disable"?1:0;
+        require(RegSetKeyValueW(HKEY_CURRENT_USER,L"Software\\Sanser",L"UacDisabled",REG_DWORD,&disabled,sizeof(disabled))==ERROR_SUCCESS,"Save UAC preference");
+      }
       return result;
     }
     if(mode==L"--status") {
-      std::cout<<"{\"enabled\":"<<((running() && currentSid()==allowedSid())?"true":"false")<<",\"dpiAware\":"<<(IsProcessDPIAware()?"true":"false")<<",\"version\":\""<<sanser::kVersion<<"\"}\n"; return 0;
+      std::cout<<"{\"enabled\":"<<((running() && currentSid()==allowedSid())?"true":"false")<<",\"current\":"<<(installedCurrent()?"true":"false")<<",\"dpiAware\":"<<(IsProcessDPIAware()?"true":"false")<<",\"version\":\""<<sanser::kVersion<<"\"}\n"; return 0;
     }
     if(mode==L"--host-path") {
       const auto path=(installDirectory()/L"sanser-host-windows.exe").wstring();

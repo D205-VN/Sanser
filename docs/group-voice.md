@@ -32,9 +32,11 @@ microphone changes reconnect after prior explicit consent; Mute/Leave cancels it
 
 Shared system sound and conversation have separate controls. Muting the shared
 computer's sound does not mute voice. The first version has local microphone
-mute and deafen, not per-person mute controls, a member/speaking list, push-to-talk,
-noise suppression, automatic gain control, or verified acoustic echo cancellation.
-Headphones reduce speaker-to-microphone feedback; Opus PLC is not echo cancellation.
+mute and deafen, not per-person mute controls, a member/speaking list or push-to-talk.
+The next source update adds SpeexDSP acoustic echo cancellation (AEC), using actual
+rendered system sound plus conversation as a reference before microphone Opus
+encoding. This is distinct from PLC, noise gating and automatic gain control.
+Physical speaker/microphone routes still need verification on both machines.
 
 ## Transport and audio
 
@@ -79,9 +81,17 @@ not a promise based on the OS version. If unavailable or not successfully starte
 shared system sound is suppressed while the host listens to voice, then resumes
 after Leave/Deafen. This avoids recapturing and retransmitting conversation.
 
-This does not cancel acoustic echo, nor promise to exclude playback by another
-independent Sanser process (for example simultaneously viewing another host).
-Test simultaneous sharing/viewing and Bluetooth routes separately.
+Digital exclusion does not itself cancel acoustic echo. The AEC reference combines
+native rendered system/voice PCM and the original local host system capture.
+Full Windows endpoint loopback takes precedence over app playback, so a fallback
+cannot count the same voice twice. Reference PCM is bounded to one second in RAM;
+no PCM is written to logs/disk. Missing/stale reference bypasses AEC rather than
+muting speech. Mute/Leave destroys its adaptation state. Capture blocks carry their
+first-sample device timestamp; render references use actual queue start time on
+Mac and WASAPI padding on Windows. The causal 200ms filter learns acoustic delay;
+no fixed 40ms reference shift prevents cancellation of short paths.
+Playback by another independent process, Bluetooth latency/device drift and
+nonlinear speaker clipping still need physical tests.
 
 ## Validation
 
@@ -90,7 +100,11 @@ viewers. It covers strict consent parsing, Opus duration/packet bounds, sequence
 overflow, duplicate/old epoch rejection, loss/FEC attempts, bounded stale dropping,
 per-source mixing/mute, priority under video/audio load, default microphone-off,
 three-viewer forwarding without own-voice return, deafen, a host not participating,
-and a nonvoice viewer. Existing audio/video transport tests remain applicable.
+and a nonvoice viewer. A deterministic 7ms worker cadence also verifies 5ms audio
+blocks catch up instead of reducing the PCM output rate. `sanser-voice-echo-test`
+uses synthetic mixed system/voice output, delayed multipath echo at 0/10/20/30/60/100ms,
+independent near-end speech, batched render callbacks and stale-reference safety.
+It opens no microphones/speakers. Existing audio/video transport tests remain applicable.
 Windows also tests process-exclusion activation/cancellation ownership without
 opening an endpoint. UI/Rust tests exercise scoped commands, capability fallback,
 permission/device statuses and leave racing an in-flight unmute.

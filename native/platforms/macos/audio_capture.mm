@@ -2,7 +2,7 @@
 #include <cstring>
 
 namespace sanser::desktop {
-void captureSystemAudio(CMSampleBufferRef sample,AudioPacketizer& output) {
+void captureSystemAudio(CMSampleBufferRef sample,AudioPacketizer& output,voice::PlaybackTap* reference) {
   if(!sample || !CMSampleBufferIsValid(sample) || !CMSampleBufferDataIsReady(sample)) return;
   const auto format=CMSampleBufferGetFormatDescription(sample);
   const auto* asbd=format ? CMAudioFormatDescriptionGetStreamBasicDescription(format) : nullptr;
@@ -25,6 +25,8 @@ void captureSystemAudio(CMSampleBufferRef sample,AudioPacketizer& output) {
     const auto& buffer=buffers->mBuffers[i];
     if(!buffer.mData || buffer.mNumberChannels!=(planar ? 1U : 2U) || buffer.mDataByteSize<static_cast<std::size_t>(frames)*asbd->mBytesPerFrame) return;
   }
+  std::vector<std::int16_t> rendered;
+  if(reference) rendered.reserve(static_cast<std::size_t>(frames)*audioChannels);
   for(CMItemCount i=0;i<frames;++i) {
     float left=0,right=0;
     const auto* first=static_cast<const std::uint8_t*>(buffers->mBuffers[0].mData);
@@ -32,6 +34,17 @@ void captureSystemAudio(CMSampleBufferRef sample,AudioPacketizer& output) {
     std::memcpy(&left,first+i*asbd->mBytesPerFrame,sizeof(float));
     std::memcpy(&right,second+i*asbd->mBytesPerFrame+(planar ? 0 : sizeof(float)),sizeof(float));
     output.sample(left,right);
+    if(reference) for(float value:{left,right}) rendered.push_back(static_cast<std::int16_t>(
+      std::clamp(std::isfinite(value) ? value : 0.0F,-1.0F,1.0F)*32767));
+  }
+  if(reference) {
+    const auto now=voice::EchoClock::now();
+    auto first=now-std::chrono::microseconds(static_cast<std::uint64_t>(frames)*1000000/audioRate);
+    const auto pts=CMSampleBufferGetPresentationTimeStamp(sample);
+    const auto age=CMTimeGetSeconds(CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()),pts));
+    if(std::isfinite(age) && age>=-0.2 && age<1.0)
+      first=now-std::chrono::nanoseconds(static_cast<std::int64_t>(age*1000000000));
+    reference->publish(rendered,first);
   }
 }
 }

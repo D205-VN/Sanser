@@ -7,6 +7,7 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 #include "audio_capture.h"
+#include "voice_echo.h"
 #include "audio_capture_pcm.h"
 #include "opus_audio.h"
 #include <iostream>
@@ -177,7 +178,13 @@ void AudioCapture::run() {
       if((!floating && !pcm) || wave.nChannels<1 || wave.nChannels>8 || wave.nSamplesPerSec<8000 || wave.nSamplesPerSec>192000 ||
          (floating && wave.wBitsPerSample!=32) || (wave.wBitsPerSample!=16 && wave.wBitsPerSample!=24 && wave.wBitsPerSample!=32) ||
          wave.nBlockAlign!=wave.nChannels*(wave.wBitsPerSample/8)) throw std::runtime_error("Unsupported audio capture mix format");
-      sanser::audio::Packetizer packetizer(sink_);
+      voice::PlaybackTap reference(stream->excluded ? voice::RenderSource::External : voice::RenderSource::FullEndpoint);
+      Clock::time_point referenceTime{};
+      sanser::audio::Packetizer packetizer([&](const AudioSamples& samples) {
+        reference.publish(samples,referenceTime);
+        referenceTime+=std::chrono::milliseconds(5);
+        if(sink_) sink_(samples);
+      });
       std::vector<float> stereo;
       if(!running_) break;
       auto start=stream->client->Start();
@@ -191,20 +198,28 @@ void AudioCapture::run() {
       reportExclusion(stream->excluded);
       std::cout<<"SNV2_AUDIO_CAPTURE started=1 sourceRate="<<wave.nSamplesPerSec<<" channels="<<wave.nChannels
                <<" processExclusion="<<(stream->excluded ? 1 : 0)<<std::endl;
+      LARGE_INTEGER frequency{};
+      if(!QueryPerformanceFrequency(&frequency) || frequency.QuadPart<=0) throw std::runtime_error("Audio capture clock");
       auto deviceCheck=Clock::now();
       while(running_) {
         if(WaitForSingleObject(stream->event.value,20)==WAIT_FAILED) throw std::runtime_error("Audio capture wait");
         UINT32 available=0; check(stream->capture->GetNextPacketSize(&available),"Audio capture packet size");
         while(available && running_) {
-          BYTE* data=nullptr; UINT32 frames=0; DWORD flags=0;
-          check(stream->capture->GetBuffer(&data,&frames,&flags,nullptr,nullptr),"Audio capture buffer");
+          BYTE* data=nullptr; UINT32 frames=0; DWORD flags=0; UINT64 capturedAt=0;
+          check(stream->capture->GetBuffer(&data,&frames,&flags,nullptr,&capturedAt),"Audio capture buffer");
+          LARGE_INTEGER current{}; QueryPerformanceCounter(&current);
+          const auto now=static_cast<UINT64>(static_cast<long double>(current.QuadPart)*10000000.0L/frequency.QuadPart);
+          const auto first=Clock::now()-std::chrono::nanoseconds(
+            !(flags&AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && capturedAt && now>=capturedAt
+              ? static_cast<std::int64_t>(now-capturedAt)*100 : static_cast<std::int64_t>(frames)*1000000000/wave.nSamplesPerSec);
           const bool silent=(flags&AUDCLNT_BUFFERFLAGS_SILENT)!=0;
           const bool valid=sanser::audio::captureStereo(
             data ? std::span<const std::uint8_t>(data,static_cast<std::size_t>(frames)*wave.nBlockAlign) : std::span<const std::uint8_t>{},
             frames,wave.nChannels,wave.wBitsPerSample,floating,silent,stereo);
           check(stream->capture->ReleaseBuffer(frames),"Release audio capture buffer");
           if(!valid) throw std::runtime_error("Invalid audio capture buffer");
-          if(flags&AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) packetizer.reset();
+          if(flags&AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) { packetizer.reset(); referenceTime={}; }
+          if(referenceTime==Clock::time_point{} || first-referenceTime>std::chrono::milliseconds(40) || referenceTime-first>std::chrono::milliseconds(40)) referenceTime=first;
           if(!packetizer.push(stereo,wave.nSamplesPerSec)) throw std::runtime_error("Audio capture resampling failed");
           check(stream->capture->GetNextPacketSize(&available),"Next audio capture packet");
         }

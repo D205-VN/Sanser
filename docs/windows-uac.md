@@ -2,13 +2,17 @@
 
 The normal Windows host runs as the signed-in user. DXGI loses access when an
 installer switches to the UAC secure desktop. Retrying duplication preserves the
-session but does not grant access to that desktop. This change adds an optional
-LocalSystem service for that interval, shared by the legacy and SNV2 hosts.
+session but does not grant access to that desktop. A narrowly scoped LocalSystem
+service supports that interval, shared by the legacy and SNV2 hosts.
 
 ## Enabling it
 
-In a build containing the helper, open **Host → Windows administrator prompts →
-Enable UAC support** on Windows. Stop any current host/group session first.
+The Windows installer installs and refreshes the helper as part of installation
+and update. Approve the ordinary Windows administrator prompt during setup; the
+desktop application itself continues to run unelevated. A previous explicit
+**Disable UAC support** choice survives updates. Portable users, or users who
+declined installer elevation, can use **Host → Windows administrator prompts →
+Enable UAC support**. Stop any current host/group session first.
 Use your Windows administrator account and approve its prompt locally. The helper
 is bound to the account that approved setup, not to every local user. Using a
 different administrator's credentials from a standard user's session does not
@@ -17,12 +21,18 @@ controlled remotely before the helper is installed.
 
 Setup copies the service and host into the protected `Program Files/SanserUac`
 directory and registers `SanserUac` with automatic start. Subsequent host sessions
-use the protected host if its capabilities/version match the app. A version
-change requires **Update UAC support**. The per-user Tauri application continues
-running without elevation. **Disable UAC support** stops and unregisters the
+use the protected host if its capabilities/version match the app and both
+protected executables match the installer copies byte for byte. A running old
+service alone is not proof of readiness. An enabled but stale service reports
+**Update UAC support** and prevents a session silently falling back to an
+unprivileged host that cannot click elevated installer windows. Normal updates
+refresh both copies and preserve the existing account SID, including when an
+updater runs as SYSTEM or a different administrator. **Disable UAC support** stops and unregisters the
 service, with administrator approval; protected binary copies remain on disk.
-Installer and portable packaging both include the helper. Installing/updating
-Sanser alone does not silently install or enable this service.
+Installer and portable packaging both include the helper. A real uninstall
+removes the account's registered service after administrator approval; an update
+uninstall preserves it until installation has copied the new binaries. No UAC
+policy, desktop protection or privilege check is disabled.
 
 ## Data flow and scope
 
@@ -43,6 +53,10 @@ Sanser alone does not silently install or enable this service.
 
 Input uses the helper while it is actively serving UAC capture, or when normal
 `SendInput` is blocked by an elevated installer on the unlocked Default desktop.
+The host also checks foreground-process integrity and routes higher-integrity
+targets through the same broker before attempting normal input. An elevated
+installer's Cancel button is distinct from the UAC secure-desktop prompt: video
+can already be live on Default while user-level input remains restricted by UIPI.
 Both cases use the same authenticated, protected host and user/session checks.
 Applied keys/buttons are tracked by the worker and released on graceful pipe
 disconnect so a viewer cannot leave modifiers held inside the secure desktop.
@@ -77,8 +91,14 @@ helper keeps the existing capture-paused behavior and the session alive.
 
 Automated checks cover bounded IPC parsing, malformed payload rejection, explicit
 UI approval/cancellation, packaging, and on Windows CI actual service
-installation/start/stop, protected ACLs and rejection of an unauthorized test
-executable. These do **not** prove UAC video/input on physical GPU hardware.
+installation/start/stop, stale-copy detection, update as SYSTEM preserving the
+original SID, protected ACLs and rejection of an unauthorized test executable.
+An isolated CI fixture creates its own elevated Cancel button and invokes the
+protected host with a medium-integrity token through the production input
+fallback. It is explicitly skipped when the runner has no unlocked interactive
+desktop. These checks do **not** prove real Secure Desktop capture/input on
+physical GPU hardware; the fixture does not display a real UAC prompt or alter
+Windows policy.
 
 Manual acceptance still requires a Windows/Mac pair: establish ordinary and
 group sessions, launch a benign installer, verify that its real UAC prompt is
@@ -97,3 +117,6 @@ Do not enter or record administrator passwords in test artifacts.
 - [Microsoft: CreateProcessAsUser](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw): session/desktop selection and cross-session handle restrictions.
 - [Microsoft: interactive services](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services): services use a separate worker in the interactive session rather than an interactive Session 0 service.
 - [Microsoft: GetDesc](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgioutput-getdesc): output dimensions are virtualized unless the process is DPI aware.
+- [Microsoft: SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput): UIPI restricts input into higher-integrity applications even after the secure desktop closes.
+- [Tauri installer hooks](https://v2.tauri.app/distribute/windows-installer/#nsis-installer-hooks): install/update and uninstall integration.
+- [RustDesk Windows portable elevation](https://github.com/rustdesk/doc.rustdesk.com/blob/master/content/client/windows/windows-portable-elevation/_index.en.md): analogous distinction between a normal user process and privileged interaction with administrator windows.
