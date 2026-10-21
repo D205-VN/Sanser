@@ -52,6 +52,7 @@ struct EngineChild {
     voice: crate::voice::ObservedVoice,
     voice_group: Option<Uuid>,
     voice_supported: bool,
+    voice_floating_controls: bool,
     direct_bridges: HashMap<Uuid, crate::direct::Bridge>,
 }
 
@@ -102,6 +103,7 @@ impl EngineChild {
                 voice,
                 voice_group: None,
                 voice_supported: false,
+                voice_floating_controls: false,
                 direct_bridges: HashMap::new(),
             }),
             Err(error) => {
@@ -253,6 +255,8 @@ struct SidecarCapabilities {
     snv2_audio_implementation: bool,
     #[serde(default)]
     group_voice_implementation: bool,
+    #[serde(default)]
+    group_voice_floating_controls: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -266,6 +270,7 @@ pub struct SidecarProbe {
     pub multi_viewer_host: bool,
     pub snv2_audio: bool,
     pub group_voice: bool,
+    pub group_voice_floating_controls: bool,
     pub reason: Option<String>,
 }
 
@@ -280,6 +285,7 @@ impl SidecarProbe {
             multi_viewer_host: false,
             snv2_audio: false,
             group_voice: false,
+            group_voice_floating_controls: false,
             reason: Some(reason.into()),
         }
     }
@@ -381,6 +387,7 @@ pub(crate) fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
                 multi_viewer_host: capabilities.multi_viewer_host,
                 snv2_audio: capabilities.snv2_audio_implementation,
                 group_voice: capabilities.group_voice_implementation,
+                group_voice_floating_controls: capabilities.group_voice_floating_controls,
                 reason: (!capabilities.native_direct).then(|| {
                     "Native sidecar does not advertise the authenticated direct transport"
                         .to_owned()
@@ -885,7 +892,11 @@ impl EngineManager {
         child
             .voice
             .lock()
-            .map(|status| status.clone())
+            .map(|status| {
+                let mut observed = status.clone();
+                observed.floating_controls = child.voice_floating_controls;
+                observed
+            })
             .map_err(|_| DesktopError::Process("Group voice status is unavailable".into()))
     }
 
@@ -1090,6 +1101,7 @@ impl EngineManager {
             child.direct_bridges.insert(session, bridge);
         }
         child.voice_supported = probe.group_voice;
+        child.voice_floating_controls = probe.group_voice_floating_controls;
         child.voice_group = request
             .sharing_id
             .as_deref()
@@ -1877,6 +1889,7 @@ mod tests {
         assert!(parsed.hevc_decoder_implementation);
         assert!(!parsed.snv2_audio_implementation);
         assert!(!parsed.group_voice_implementation);
+        assert!(!parsed.group_voice_floating_controls);
         let voice = valid_json.replace(
             "\"hevcDecoderImplementation\":true",
             "\"hevcDecoderImplementation\":true,\"groupVoiceImplementation\":true",
@@ -1884,6 +1897,18 @@ mod tests {
         assert!(
             parse_sidecar_capabilities(voice.as_bytes(), EngineKind::Client)?
                 .group_voice_implementation
+        );
+        assert!(
+            !parse_sidecar_capabilities(voice.as_bytes(), EngineKind::Client)?
+                .group_voice_floating_controls
+        );
+        let floating_voice = voice.replace(
+            "\"groupVoiceImplementation\":true",
+            "\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true",
+        );
+        assert!(
+            parse_sidecar_capabilities(floating_voice.as_bytes(), EngineKind::Client)?
+                .group_voice_floating_controls
         );
         // Existing legacy audio must not falsely advertise SNV2 support.
         let legacy_audio = valid_json.replace(

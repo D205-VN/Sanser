@@ -1785,6 +1785,12 @@ private:
   std::chrono::steady_clock::time_point lastRejectLogAt_{};
 };
 
+// Multiplexed packets have already passed the main socket's peer filter.
+// The demux queue contains bytes only, not a second recvfrom address.
+bool acceptAudioPeer(UdpPeerLock& lock,bool multiplexed,const UdpEndpoint& peer) {
+  return multiplexed || lock.lockOrAccept(peer);
+}
+
 std::shared_ptr<NativeInputSender> gNativeInputSender;
 
 struct ControlRttWindow {
@@ -7180,7 +7186,7 @@ void listenUdpAudio(std::uint16_t audioPort,
           stats.malformed += 1;
           continue;
         }
-        if (!audioPeerLock.lockOrAccept(peerAddress)) {
+        if (!acceptAudioPeer(audioPeerLock,useQueue,peerAddress)) {
           stats.peerRejected += 1;
           continue;
         }
@@ -8609,7 +8615,7 @@ int main(int argc, char** argv) {
                    "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,"
                    "\"h264DecoderImplementation\":true,"
                    "\"hevcDecoderImplementation\":true,\"metalImplementation\":true,"
-                   "\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,"
+                   "\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,"
                    "\"gamepadImplementation\":true}\n";
       return 0;
     }

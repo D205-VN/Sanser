@@ -22,11 +22,14 @@ struct VoiceRuntime::Impl {
   std::deque<Incoming> incoming;
   std::deque<Captured> captured;
   std::string pendingStatus;
+  std::deque<std::string> commands;
+  VoiceRuntime::Status observed;
   std::thread worker;
   Impl(std::function<void(voice::Packet)> output,std::function<void(voice::State)> status)
     :send(std::move(output)),update(std::move(status)),worker([this] { run(); }) {}
   ~Impl() { running=false; ++captureToken; if(worker.joinable()) worker.join(); }
   void status(const std::string& code,bool capturing=false) {
+    { std::lock_guard lock(mutex); observed={{joined.load(),microphone.load(),deafened.load()},capturing,code}; }
     std::ostringstream line;
     line<<"SNVOICE_STATUS joined="<<joined.load()<<" mic="<<microphone.load()
       <<" deafen="<<deafened.load()<<" capture="<<capturing<<" code="<<code;
@@ -46,7 +49,9 @@ struct VoiceRuntime::Impl {
       status(code);
       while(running && !nativeStopRequested()) {
         const auto began=Clock::now();
-        for(const auto& line:takeVoiceCommands()) {
+        auto changes=takeVoiceCommands();
+        { std::lock_guard lock(mutex); for(auto& line:commands) changes.push_back(std::move(line)); commands.clear(); }
+        for(const auto& line:changes) {
           if(const auto config=voice::command(line)) {
             joined=config->joined; microphone=config->microphone; deafened=config->deafened;
             // The consent gates change before closing a device or clearing
@@ -114,6 +119,18 @@ VoiceRuntime::VoiceRuntime(bool enabled,std::function<void(voice::Packet)> send,
   if(enabled) impl_=std::make_unique<Impl>(std::move(send),std::move(state));
 }
 VoiceRuntime::~VoiceRuntime()=default;
+void VoiceRuntime::configure(voice::State state) {
+  if(!impl_) return;
+  std::ostringstream line;
+  line<<"voice-config\t"<<state.joined<<'\t'<<state.microphone<<'\t'<<state.deafened;
+  std::lock_guard lock(impl_->mutex);
+  if(impl_->commands.size()>=16) impl_->commands.pop_front();
+  impl_->commands.push_back(line.str());
+}
+VoiceRuntime::Status VoiceRuntime::snapshot() const {
+  if(!impl_) return {};
+  std::lock_guard lock(impl_->mutex); return impl_->observed;
+}
 void VoiceRuntime::receive(voice::Packet packet) {
   if(!impl_ || !impl_->joined || impl_->deafened) return;
   std::lock_guard lock(impl_->mutex);

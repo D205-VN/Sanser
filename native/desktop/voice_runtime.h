@@ -9,6 +9,9 @@ public:
   VoiceRuntime(bool enabled,std::function<void(voice::Packet)> send,
                std::function<void(voice::State)> state);
   ~VoiceRuntime();
+  struct Status { voice::State state; bool capturing=false; std::string code="idle"; };
+  void configure(voice::State state);
+  Status snapshot() const;
   void receive(voice::Packet packet);
   bool listening() const;
 private:

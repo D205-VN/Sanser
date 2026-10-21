@@ -7,6 +7,7 @@
 #include "transport.h"
 #include "broadcast.h"
 #include "voice_runtime.h"
+#include "voice_panel.h"
 #include "engine.h"
 #include "capture_startup.h"
 #include "audio_capture.h"
@@ -676,6 +677,7 @@ int runMac(bool host,int argc,char** argv) {
         options.height=std::max(64U,static_cast<std::uint32_t>(display.height*scale)&~1U);
         HostOutput peer(options); Encoder encoder(options,peer); MacInputInjector injector(CGDisplayBounds(display.displayID));
         VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
+        VoicePanel voicePanel(options.groupVoice,voice);
         peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
         peer.onInput=[&](Input event) { injector.apply(event); };
@@ -725,6 +727,7 @@ int runMac(bool host,int argc,char** argv) {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     Peer peer(options); Decoder decoder;
     VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
+    VoicePanel voicePanel(options.groupVoice,voice);
     peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
     AudioPlayer audio(options.audio);
     if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };

@@ -7,7 +7,7 @@
 #include <vector>
 
 namespace {
-void renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> texture,
+bool renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> texture,
                  id<MTLCommandBuffer> command, CGColorSpaceRef colorSpace) {
   const CGRect bounds=CGRectMake(0,0,texture.width,texture.height);
   CIImage* canvas=[[CIImage imageWithColor:CIColor.blackColor] imageByCroppingToRect:bounds];
@@ -20,10 +20,13 @@ void renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> tex
     image=[image imageByApplyingTransform:CGAffineTransformMake(scale,0,0,scale,x,y)];
     canvas=[image imageByCompositingOverImage:canvas];
   }
-  // Core Image uses a bottom-left origin; Metal drawables present row zero at
-  // the top. Flip the complete canvas so image and absolute pointer agree.
-  canvas=[canvas imageByApplyingTransform:CGAffineTransformMake(1,0,0,-1,0,bounds.size.height)];
-  [context render:canvas toMTLTexture:texture commandBuffer:command bounds:bounds colorSpace:colorSpace];
+  // Specify destination memory orientation explicitly. The convenience render
+  // overload can choose different defaults for a drawable and an offscreen
+  // texture; a second image transform then inverts the live screen.
+  CIRenderDestination* destination=[[CIRenderDestination alloc] initWithMTLTexture:texture commandBuffer:command];
+  destination.flipped=YES; destination.colorSpace=colorSpace;
+  NSError* error=nil;
+  return [context startTaskToRender:canvas toDestination:destination error:&error]!=nil;
 }
 }
 
@@ -81,7 +84,10 @@ void renderFrame(CIContext* context, CVPixelBufferRef pixels, id<MTLTexture> tex
   id<MTLCommandBuffer> command=[_commands commandBuffer];
   if(!drawable || !command) { dispatch_semaphore_signal(_inFlight); return; }
   CVPixelBufferRef pixels=_pixels ? CVPixelBufferRetain(_pixels) : nullptr;
-  renderFrame(_context,pixels,drawable.texture,command,_colorSpace);
+  if(!renderFrame(_context,pixels,drawable.texture,command,_colorSpace)) {
+    if(pixels) CVPixelBufferRelease(pixels);
+    dispatch_semaphore_signal(_inFlight); return;
+  }
   _pendingRedraw=NO;
   dispatch_semaphore_t slots=_inFlight;
   __weak SanserSnv2MetalView* weakSelf=self;
@@ -113,23 +119,34 @@ void testMacMetalDecodedFrame(CVPixelBufferRef pixels) {
     descriptor.storageMode=MTLStorageModeShared;
     id<MTLTexture> texture=[device newTextureWithDescriptor:descriptor];
     if(!texture) throw std::runtime_error("Unable to create Metal test texture");
-    auto colorSpace=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    id<MTLCommandBuffer> command=[queue commandBuffer];
-    renderFrame(context,pixels,texture,command,colorSpace);
-    [command commit]; [command waitUntilCompleted];
-    CGColorSpaceRelease(colorSpace);
-    if(command.status!=MTLCommandBufferStatusCompleted) throw std::runtime_error("Metal presentation failed");
-    std::vector<unsigned char> result(64*64*4);
-    [texture getBytes:result.data() bytesPerRow:64*4 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];
-    for(unsigned y : {20U,44U}) {
-      const auto* pixel=result.data()+(y*64+32)*4;
-      const int blue=y<32 ? 30 : 200, red=y<32 ? 200 : 30;
-      if(std::abs(static_cast<int>(pixel[0])-blue)>25 || std::abs(static_cast<int>(pixel[1])-100)>25 || std::abs(static_cast<int>(pixel[2])-red)>25)
-        throw std::runtime_error("Metal presenter changed pixel colors or orientation");
-    }
-    for(unsigned y : {0U,63U}) {
-      const auto* bar=result.data()+(y*64+32)*4;
-      if(bar[0]!=0 || bar[1]!=0 || bar[2]!=0) throw std::runtime_error("Metal presenter did not preserve aspect ratio");
+    CAMetalLayer* layer=[CAMetalLayer layer]; layer.device=device;
+    layer.pixelFormat=MTLPixelFormatBGRA8Unorm; layer.framebufferOnly=NO;
+    layer.frame=CGRectMake(0,0,64,64); layer.drawableSize=CGSizeMake(64,64);
+    id<CAMetalDrawable> drawable=[layer nextDrawable];
+    if(!drawable) throw std::runtime_error("Unable to obtain a real Metal drawable for orientation test");
+    // A shared offscreen texture alone missed the live drawable inversion.
+    // Read both destinations with the same GPU blit and verify top/bottom.
+    for(id<MTLTexture> target in @[texture,drawable.texture]) {
+      auto colorSpace=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+      id<MTLCommandBuffer> command=[queue commandBuffer];
+      if(!renderFrame(context,pixels,target,command,colorSpace)) throw std::runtime_error("Unable to render orientation fixture");
+      id<MTLBuffer> readback=[device newBufferWithLength:64*64*4 options:MTLResourceStorageModeShared];
+      id<MTLBlitCommandEncoder> blit=[command blitCommandEncoder];
+      [blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(64,64,1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:64*4 destinationBytesPerImage:64*64*4];
+      [blit endEncoding]; [command commit]; [command waitUntilCompleted];
+      CGColorSpaceRelease(colorSpace);
+      if(command.status!=MTLCommandBufferStatusCompleted) throw std::runtime_error("Metal presentation failed");
+      const auto* result=static_cast<const unsigned char*>(readback.contents);
+      for(unsigned y : {20U,44U}) {
+        const auto* pixel=result+(y*64+32)*4;
+        const int blue=y<32 ? 30 : 200, red=y<32 ? 200 : 30;
+        if(std::abs(static_cast<int>(pixel[0])-blue)>25 || std::abs(static_cast<int>(pixel[1])-100)>25 || std::abs(static_cast<int>(pixel[2])-red)>25)
+          throw std::runtime_error("Metal presenter changed drawable pixel colors or orientation");
+      }
+      for(unsigned y : {0U,63U}) {
+        const auto* bar=result+(y*64+32)*4;
+        if(bar[0]!=0 || bar[1]!=0 || bar[2]!=0) throw std::runtime_error("Metal presenter did not preserve aspect ratio");
+      }
     }
   }
 }

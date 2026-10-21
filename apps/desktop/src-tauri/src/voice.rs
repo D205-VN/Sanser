@@ -5,6 +5,7 @@ use serde::Serialize;
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::struct_excessive_bools)]
 pub struct VoiceStatus {
+    pub floating_controls: bool,
     pub joined: bool,
     pub microphone: bool,
     pub deafened: bool,
@@ -14,6 +15,7 @@ pub struct VoiceStatus {
 impl Default for VoiceStatus {
     fn default() -> Self {
         Self {
+            floating_controls: false,
             joined: false,
             microphone: false,
             deafened: false,
@@ -58,6 +60,7 @@ pub(crate) fn parse_status(line: &[u8]) -> Option<VoiceStatus> {
         return None;
     }
     Some(VoiceStatus {
+        floating_controls: false, // Filled from the probed engine capability.
         joined: bit("joined")?,
         microphone: bit("mic")?,
         deafened: bit("deafen")?,
@@ -99,6 +102,12 @@ mod tests {
         )
         .ok_or("missing native voice status")?;
         assert!(!status.capture);
+        assert!(!status.floating_controls);
+        assert!(
+            !parse_status(b"SNVOICE_STATUS joined=1 mic=0 deafen=0 capture=0 code=listening floatingControls=1")
+                .ok_or("missing native voice status")?
+                .floating_controls
+        );
         assert_eq!(status.code, "permission-denied");
         for code in ["permission-requested", "device-changed", "deafened"] {
             let line = format!("SNVOICE_STATUS joined=1 mic=0 deafen=0 capture=0 code={code}");

@@ -1,4 +1,4 @@
-add_library(sanser-native-macos STATIC backend.mm metal_presenter.mm capture_startup.mm audio_capture.mm audio_player.mm input_injector.mm microphone_capture.mm ../../desktop/voice_runtime.cpp)
+add_library(sanser-native-macos STATIC backend.mm metal_presenter.mm capture_startup.mm audio_capture.mm audio_player.mm input_injector.mm microphone_capture.mm voice_panel.mm ../../desktop/voice_runtime.cpp)
 target_include_directories(sanser-native-macos PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(sanser-desktop-native ALIAS sanser-native-macos)
 target_link_libraries(sanser-native-macos PUBLIC sanser-desktop-transport)

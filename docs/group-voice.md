@@ -1,6 +1,7 @@
 # Group voice in multi-computer sharing
 
-Included in **2.2.17**. Update both host and viewers to the new installer.
+Group voice was introduced in **2.2.17**. The floating controls described below
+require a subsequent build advertising `groupVoiceFloatingControls: true`.
 Both host and participants need engines advertising
 `groupVoiceImplementation: true`; old engines still share video/system sound but
 voice controls explain that an update is needed.
@@ -16,7 +17,16 @@ voice controls explain that an update is needed.
 
 The room supports the host and up to three viewers. Consent is scoped to the
 current native group/session, is not saved, and is not restored on a new engine
-or reconnection. Leaving the page also leaves voice. A native engine exit closes
+or reconnection. Updated engines show a floating **Sanser · Voice** button on
+both host and viewer. Click it to expand Join/Mute/Deafen/Leave without returning
+to the main application. Switching pages or collapsing the button does not leave
+the call; **Leave voice**, disconnect or ending sharing stops participation. Old
+engines without floating controls retain leave-on-navigation for safety.
+The UI waits for native state confirmation after Join/Mute/Leave, rather than
+treating a successful command write as acknowledgement. An older idle status
+must not undo a Join that is still being processed, and Mute/Leave must not label
+the microphone off before native confirmation.
+A native engine exit closes
 capture; a failed/denied microphone does not terminate screen sharing. Default
 microphone changes reconnect after prior explicit consent; Mute/Leave cancels it.
 

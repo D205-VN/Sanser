@@ -204,7 +204,7 @@ export async function exportDiagnostics(contents: string): Promise<DiagnosticsEx
 
 
 export interface GroupVoiceScope { kind: 'host' | 'client'; sharingId: string; sessionId?: string }
-export interface GroupVoiceStatus { joined: boolean; microphone: boolean; deafened: boolean; capture: boolean; code: string }
+export interface GroupVoiceStatus { floatingControls?: boolean; joined: boolean; microphone: boolean; deafened: boolean; capture: boolean; code: string }
 export async function setGroupVoice(scope: GroupVoiceScope, consent: Pick<GroupVoiceStatus, 'joined' | 'microphone' | 'deafened'>): Promise<void> {
   if (!isTauriRuntime()) throw new Error('Group voice requires the Sanser desktop app');
   await invoke('set_group_voice', { ...scope, ...consent });

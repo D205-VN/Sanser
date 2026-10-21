@@ -43,6 +43,16 @@ int main() {
         const auto audioOptions=parseOptions(3,args);
         requireLatency(!audioOptions.audioEnabled && audioOptions.audioMuted,"legacy viewer must parse disabled audio and muted playback separately");
       }
+      {
+        UdpPeerLock demux("test-audio"); UdpEndpoint noSecondRecvfrom{};
+        for(unsigned i=0;i<200;++i)
+          requireLatency(acceptAudioPeer(demux,true,noSecondRecvfrom),"multiplexed audio must not lock an absent peer then reject every later packet");
+        UdpEndpoint one{},two{}; one.length=two.length=sizeof(sockaddr_in);
+        auto* a=reinterpret_cast<sockaddr_in*>(&one.address); a->sin_family=AF_INET; a->sin_addr.s_addr=htonl(INADDR_LOOPBACK); a->sin_port=htons(50000);
+        auto* b=reinterpret_cast<sockaddr_in*>(&two.address); *b=*a; b->sin_port=htons(50001);
+        UdpPeerLock dedicated("test-dedicated");
+        requireLatency(acceptAudioPeer(dedicated,false,one) && acceptAudioPeer(dedicated,false,one) && !acceptAudioPeer(dedicated,false,two),"dedicated audio must still reject a different sender");
+      }
       // Exercise the actual asynchronous UDP sender, demux timestamps and reply
       // parser. A timing receipt must not replace the original pong's T5/T6.
       {

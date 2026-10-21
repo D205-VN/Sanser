@@ -5,7 +5,7 @@ add_library(sanser-native-windows STATIC
   backend.cpp
   audio_player.cpp
   audio_capture.cpp
-  microphone_capture.cpp
+  microphone_capture.cpp voice_panel.cpp
   ../../desktop/voice_runtime.cpp
   window_presenter.cpp
   ../../host-windows/src/desktop_duplication.cpp

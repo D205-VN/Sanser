@@ -9,7 +9,7 @@ beforeEach(() => {
   setVoice.mockReset(); status.mockReset();
   status.mockResolvedValue({ joined: false, microphone: false, deafened: false, capture: false, code: 'idle' });
   setVoice.mockImplementation((_scope: GroupVoiceScope, consent: Pick<GroupVoiceStatus, 'joined' | 'microphone' | 'deafened'>) => {
-    status.mockResolvedValue({ ...consent, capture: consent.microphone, code: consent.microphone ? 'running' : 'listening' }); return Promise.resolve();
+    status.mockResolvedValue({ floatingControls: true, ...consent, capture: consent.microphone, code: consent.microphone ? 'running' : 'listening' }); return Promise.resolve();
   });
 });
 afterEach(cleanup);

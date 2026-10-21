@@ -3,6 +3,7 @@
 namespace sanser::desktop { void testMacVideoCodec(); void testMacBroadcastCodec(); void testMacMetalPresenter(); void testMacEncoderBackpressure(); void writeMacInteropFixture(const char* path); }
 int main(int argc,char** argv) {
   try {
+    if(argc==2 && std::string(argv[1])=="--metal") { sanser::desktop::testMacMetalPresenter(); return 0; }
     if(argc==3 && std::string(argv[1])=="--write-windows-fixture") { sanser::desktop::writeMacInteropFixture(argv[2]); return 0; }
     sanser::desktop::testMacVideoCodec();
     sanser::desktop::testMacEncoderBackpressure();
