@@ -123,7 +123,10 @@ int worker(const wchar_t* channelName) {
     // Lock/logoff/user switch revokes access. We only support UAC in an
     // already unlocked interactive console, not Windows sign-in credentials.
     if(!valid(request)) return 2;
-    if(unlockedConsole(session) && desktop.bind(request.operation==Operation::Input)) {
+    const bool console=unlockedConsole(session);
+    const bool bound=console && desktop.bind(request.operation==Operation::Input);
+    const auto desktopError=bound ? ERROR_SUCCESS : GetLastError();
+    if(bound) {
       try {
         if(request.operation==Operation::Capture) {
           if(!capture || adapter!=request.adapter || output!=request.output) {
@@ -139,9 +142,14 @@ int worker(const wchar_t* channelName) {
         } else {
           INPUT in=winInput(request);
           if(SendInput(1,&in,sizeof(in))==1) { applied.state.applied(request); response.status=Status::Applied; }
+          else { response.status=Status::InputUnavailable; response.left=static_cast<LONG>(GetLastError()); }
         }
       } catch(...) { capture.reset(); response=Response{}; }
-    } else capture.reset();
+    } else {
+      capture.reset();
+      response.status=console ? Status::DesktopUnavailable : Status::ConsoleUnavailable;
+      response.left=static_cast<LONG>(desktopError);
+    }
     if(!transfer(out,&response,sizeof(response),true)) break;
     if(response.bytes && !transfer(out,frame.pixels.data(),response.bytes,true)) break;
   }

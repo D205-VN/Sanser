@@ -31,6 +31,7 @@ int testUacInput(int argc,char** argv) {
   std::cout<<"UAC fixture input events accepted="<<sent<<" error="<<error
     <<" direct="<<dispatch.direct<<" privileged="<<dispatch.privileged
     <<" sourceIL="<<dispatch.sourceIntegrity<<" targetIL="<<dispatch.targetIntegrity
+    <<" failureStatus="<<dispatch.failureStatus<<" failureError="<<dispatch.failureError
     <<" targetForeground="<<(foreground==target)<<" pointerInside="<<PtInRect(&bounds,cursor)
     <<" cursor="<<cursor.x<<','<<cursor.y<<" target="<<bounds.left+100<<','<<bounds.top+100<<'\n';
   return sent==3 && dispatch.privileged==3 && dispatch.direct==0?0:1;

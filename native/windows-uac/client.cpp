@@ -125,13 +125,17 @@ UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
     Response response;
     if(!connection.exchange(request,response)) break;
     if(response.status==Status::Unavailable) {
+      if(dispatch) dispatch->failureStatus=static_cast<DWORD>(response.status);
       // UAC closed between capture and input. A positively rejected event can
       // safely use the normal desktop; never replay a timed-out transaction.
       const auto direct=::SendInput(count-sent,inputs+sent,size);
       if(dispatch) dispatch->direct+=direct;
       return sent+direct;
     }
-    if(response.status!=Status::Applied) break;
+    if(response.status!=Status::Applied) {
+      if(dispatch) { dispatch->failureStatus=static_cast<DWORD>(response.status); dispatch->failureError=static_cast<DWORD>(response.left); }
+      break;
+    }
     if(dispatch) ++dispatch->privileged;
   }
   return sent;

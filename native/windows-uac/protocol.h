@@ -8,7 +8,8 @@ inline constexpr wchar_t pipeName[]=L"\\\\.\\pipe\\Sanser.Uac.v1";
 inline constexpr std::uint32_t magic=0x31435553; // SUC1, local IPC only.
 inline constexpr std::uint32_t maxPixelsBytes=64*1024*1024;
 enum class Operation : std::uint32_t { Capture=1, Input=2 };
-enum class Status : std::uint32_t { Unavailable=0, Frame=1, Idle=2, Applied=3 };
+enum class Status : std::uint32_t { Unavailable=0, Frame=1, Idle=2, Applied=3,
+  ConsoleUnavailable=4, DesktopUnavailable=5, InputUnavailable=6 };
 struct Request {
   std::uint32_t signature=magic;
   Operation operation=Operation::Capture;
@@ -21,6 +22,8 @@ struct Response {
   std::uint32_t signature=magic;
   Status status=Status::Unavailable;
   std::uint32_t width=0,height=0,stride=0,bytes=0;
+  // Frame: screen origin. Explicit failure statuses: left holds Win32 error;
+  // no frame bytes or input content are returned on failure.
   std::int32_t left=0,top=0;
 };
 static_assert(sizeof(Request)==36 && sizeof(Response)==32);
