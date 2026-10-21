@@ -4,6 +4,7 @@
 #include <sddl.h>
 #include <iostream>
 #include <cstdint>
+#include <algorithm>
 
 namespace {
 bool clicked=false;
@@ -45,11 +46,20 @@ int wmain(int argc,wchar_t** argv) {
     TOKEN_MANDATORY_LABEL label{}; label.Label.Attributes=SE_GROUP_INTEGRITY; label.Label.Sid=sid;
     const auto changed=SetTokenInformation(medium.value,TokenIntegrityLevel,&label,sizeof(label)+GetLengthSid(sid));
     LocalFree(sid); require(changed!=FALSE,"Medium integrity token");
+    SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES),nullptr,TRUE};
+    HANDLE readRaw=nullptr,writeRaw=nullptr;
+    require(CreatePipe(&readRaw,&writeRaw,&inherit,0)!=FALSE,"Fixture diagnostic pipe");
+    Handle diagnostics(readRaw),diagnosticWriter(writeRaw);
+    require(SetHandleInformation(readRaw,HANDLE_FLAG_INHERIT,0)!=FALSE,"Private diagnostic reader");
+    Handle nullInput(CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&inherit,OPEN_EXISTING,0,nullptr));
+    require(static_cast<bool>(nullInput),"Fixture null input");
     std::wstring command=L"\""+std::wstring(argv[1])+L"\" --test-uac-input "+std::to_wstring(reinterpret_cast<std::uintptr_t>(window));
     STARTUPINFOW startup{}; startup.cb=sizeof(startup); wchar_t workerDesktop[]=L"winsta0\\default"; startup.lpDesktop=workerDesktop;
+    startup.dwFlags=STARTF_USESTDHANDLES; startup.hStdOutput=writeRaw; startup.hStdError=writeRaw; startup.hStdInput=nullInput.value;
     PROCESS_INFORMATION info{};
-    require(CreateProcessAsUserW(medium.value,argv[1],command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,
+    require(CreateProcessAsUserW(medium.value,argv[1],command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,
       nullptr,nullptr,&startup,&info)!=FALSE,"Launch medium-integrity protected input client");
+    diagnosticWriter=Handle(); nullInput=Handle();
     Handle process(info.hProcess),thread(info.hThread);
     const auto deadline=GetTickCount64()+10000;
     while(GetTickCount64()<deadline && !clicked) {
@@ -58,6 +68,12 @@ int wmain(int argc,wchar_t** argv) {
     }
     require(WaitForSingleObject(process.value,2000)==WAIT_OBJECT_0,"Input client exit");
     DWORD code=1; GetExitCodeProcess(process.value,&code);
+    char details[2048]{}; DWORD available=0,received=0;
+    if(PeekNamedPipe(diagnostics.value,nullptr,0,nullptr,&available,nullptr) && available &&
+       ReadFile(diagnostics.value,details,std::min<DWORD>(available,sizeof(details)-1),&received,nullptr))
+      std::cout.write(details,received);
+    std::cout<<"Fixture client exit="<<code<<" clicked="<<clicked
+      <<" foreground="<<(GetForegroundWindow()==window)<<'\n';
     DestroyWindow(window);
     require(code==0 && clicked,"Medium-integrity host did not click elevated Cancel through authorized broker");
     std::cout<<"Actual elevated Cancel button received click from medium-integrity protected host\n"; return 0;

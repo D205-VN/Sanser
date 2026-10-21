@@ -22,6 +22,11 @@ int testUacInput(int argc,char** argv) {
   // Exercise the same fallback as real clicks after UAC closes. Do not force
   // active() or call the broker directly; that would miss the regression.
   const auto sent=sanser::uac::sendInput(3,events,sizeof(INPUT));
-  std::cout<<"UAC fixture input events accepted="<<sent<<'\n';
+  const auto error=GetLastError();
+  POINT cursor{}; GetCursorPos(&cursor);
+  DWORD foreground=0; GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
+  DWORD target=0; GetWindowThreadProcessId(window,&target);
+  std::cout<<"UAC fixture input events accepted="<<sent<<" error="<<error
+    <<" targetForeground="<<(foreground==target)<<" pointerInside="<<PtInRect(&bounds,cursor)<<'\n';
   return sent==3?0:1;
 }
