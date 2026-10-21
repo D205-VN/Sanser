@@ -74,6 +74,8 @@ int wmain(int argc,wchar_t** argv) {
       std::cout.write(details,received);
     std::cout<<"Fixture client exit="<<code<<" clicked="<<clicked
       <<" foreground="<<(GetForegroundWindow()==window)<<'\n';
+    POINT cursor{}; GetCursorPos(&cursor);
+    std::cout<<"Fixture final pointer="<<cursor.x<<','<<cursor.y<<'\n';
     DestroyWindow(window);
     require(code==0 && clicked,"Medium-integrity host did not click elevated Cancel through authorized broker");
     std::cout<<"Actual elevated Cancel button received click from medium-integrity protected host\n"; return 0;

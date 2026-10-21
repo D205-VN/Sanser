@@ -94,7 +94,8 @@ bool CaptureClient::capture(FrameBgra& frame,unsigned adapter,unsigned output,bo
 }
 bool active() { return GetTickCount64()<servedUntil.load(); }
 void resumed() { servedUntil=0; }
-UINT sendInput(UINT count,INPUT* inputs,int size) {
+UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
+  if(dispatch) *dispatch={};
   if(size!=sizeof(INPUT) || count>16) return 0;
   thread_local Connection connection;
   // Ordinary input remains in-process. The helper is also needed for a high-
@@ -103,6 +104,7 @@ UINT sendInput(UINT count,INPUT* inputs,int size) {
   // has already returned from Winlogon. Route it deliberately, rather than
   // interpreting a low-integrity SendInput result as permission to control it.
   UINT sent=(active() || elevatedForeground()) ? 0 : ::SendInput(count,inputs,size);
+  if(dispatch) dispatch->direct=sent;
   if(sent==count) return sent;
   for(;sent<count;++sent) {
     const auto& in=inputs[sent]; Request request; request.operation=Operation::Input; request.type=in.type;
@@ -114,9 +116,12 @@ UINT sendInput(UINT count,INPUT* inputs,int size) {
     if(response.status==Status::Unavailable) {
       // UAC closed between capture and input. A positively rejected event can
       // safely use the normal desktop; never replay a timed-out transaction.
-      return sent+::SendInput(count-sent,inputs+sent,size);
+      const auto direct=::SendInput(count-sent,inputs+sent,size);
+      if(dispatch) dispatch->direct+=direct;
+      return sent+direct;
     }
     if(response.status!=Status::Applied) break;
+    if(dispatch) ++dispatch->privileged;
   }
   return sent;
 }

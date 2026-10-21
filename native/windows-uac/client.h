@@ -15,5 +15,6 @@ private:
 };
 bool active();
 void resumed();
-UINT sendInput(UINT count,INPUT* inputs,int size);
+struct InputDispatch { UINT direct=0,privileged=0; };
+UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch=nullptr);
 } // namespace sanser::uac

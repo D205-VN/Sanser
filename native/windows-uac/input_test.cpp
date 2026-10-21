@@ -22,12 +22,15 @@ int testUacInput(int argc,char** argv) {
   events[2].type=INPUT_MOUSE; events[2].mi.dwFlags=MOUSEEVENTF_LEFTUP;
   // Exercise the same fallback as real clicks after UAC closes. Do not force
   // active() or call the broker directly; that would miss the regression.
-  const auto sent=sanser::uac::sendInput(3,events,sizeof(INPUT));
+  sanser::uac::InputDispatch dispatch;
+  const auto sent=sanser::uac::sendInput(3,events,sizeof(INPUT),&dispatch);
   const auto error=GetLastError();
   POINT cursor{}; GetCursorPos(&cursor);
   DWORD foreground=0; GetWindowThreadProcessId(GetForegroundWindow(),&foreground);
   DWORD target=0; GetWindowThreadProcessId(window,&target);
   std::cout<<"UAC fixture input events accepted="<<sent<<" error="<<error
-    <<" targetForeground="<<(foreground==target)<<" pointerInside="<<PtInRect(&bounds,cursor)<<'\n';
+    <<" direct="<<dispatch.direct<<" privileged="<<dispatch.privileged
+    <<" targetForeground="<<(foreground==target)<<" pointerInside="<<PtInRect(&bounds,cursor)
+    <<" cursor="<<cursor.x<<','<<cursor.y<<" target="<<bounds.left+100<<','<<bounds.top+100<<'\n';
   return sent==3?0:1;
 }
