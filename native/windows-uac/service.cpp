@@ -201,6 +201,11 @@ struct Worker {
     require(OpenProcessToken(GetCurrentProcess(),TOKEN_DUPLICATE|TOKEN_QUERY,&original)!=FALSE,"System token"); Handle token(original);
     require(DuplicateTokenEx(original,TOKEN_ALL_ACCESS,nullptr,SecurityImpersonation,TokenPrimary,&copy)!=FALSE,"Worker token"); Handle workerToken(copy);
     require(SetTokenInformation(copy,TokenSessionId,&session,sizeof(session))!=FALSE,"Worker interactive session");
+    // Only this fixed, protected SYSTEM worker receives UI automation access.
+    // The service already holds SeTcbPrivilege and authenticates the console
+    // user/host before creating it; the desktop app never receives this token.
+    const DWORD uiAccess=TRUE;
+    require(SetTokenInformation(copy,TokenUIAccess,const_cast<DWORD*>(&uiAccess),sizeof(uiAccess))!=FALSE,"Worker UI input access");
     STARTUPINFOW start{}; start.cb=sizeof(start);
     wchar_t desktop[]=L"winsta0\\default"; start.lpDesktop=desktop;
     const auto exe=installDirectory()/L"sanser-uac-service.exe";
