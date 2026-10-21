@@ -74,6 +74,9 @@ void testAudioOutputRecovery() {
   FakeAudioOutput device;
   AudioQueuePcmPlayer player({},device.functions());
   std::array<float,480> pcm{}; pcm.fill(0.25F);
+  requireLatency(!player.submit(48000,2,reinterpret_cast<const std::uint8_t*>(pcm.data()),sizeof(pcm),536870912U)
+    && !player.submit(48000,2,nullptr,sizeof(pcm),240) && device.queues.empty(),
+    "Malformed PCM size must be rejected before device allocation or signal scanning");
   const auto submit=[&] { return player.submit(48000,2,reinterpret_cast<const std::uint8_t*>(pcm.data()),sizeof(pcm),240); };
   for(unsigned i=0;i<600;++i) {
     requireLatency(submit(),"Synthetic playback failed before the three-second stop");

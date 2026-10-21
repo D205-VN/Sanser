@@ -4985,7 +4985,7 @@ public:
       return false;
     }
     const std::uint32_t bytesPerFrame = static_cast<std::uint32_t>(channels) * sizeof(float);
-    if (bytesPerFrame == 0 || payloadSize < frameCount * bytesPerFrame) {
+    if (!payload || payloadSize < static_cast<std::uint64_t>(frameCount) * bytesPerFrame) {
       return false;
     }
 
