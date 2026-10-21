@@ -1,7 +1,7 @@
 # Group voice in multi-computer sharing
 
 Group voice was introduced in **2.2.17**. The floating controls described below
-require a subsequent build advertising `groupVoiceFloatingControls: true`.
+are included in **2.2.18**, with engines advertising `groupVoiceFloatingControls: true`.
 Both host and participants need engines advertising
 `groupVoiceImplementation: true`; old engines still share video/system sound but
 voice controls explain that an update is needed.

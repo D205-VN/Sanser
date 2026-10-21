@@ -1,9 +1,9 @@
-# Sanser 2.2.17
+# Sanser 2.2.18
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.17
+Product:  Sanser 2.2.18
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,7 +20,7 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.17 includes one-encoder screen sharing for up to three view-only
+Sanser 2.2.18 includes one-encoder screen sharing for up to three view-only
 computers in the same account, common native diagnostics, bounded route reconnect,
 authenticated input-only reset after ACK loss, viewer-close Disconnect and
 reference-safe sharing dispatch. Relay recovery retains the real failure even
@@ -35,7 +35,9 @@ with independent Join/Unmute/Deafen/Leave controls. Microphones default off.
 It also packages audio continuity/legacy audio, sharing recovery and sided Shift
 fixes, plus optional Windows UAC support. See [group voice](docs/group-voice.md)
 and [Windows UAC](docs/windows-uac.md) for consent, setup and remaining device checks.
-See [Release notes](docs/releases/v2.2.17.md),
+Version 2.2.18 fixes missing legacy Mac audio, inverted Metal drawables, and
+Join status races, and adds native floating voice/microphone controls on both
+hosts and viewers. See [Release notes](docs/releases/v2.2.18.md),
 [stability validation and remaining work](docs/session-stability-2.2.14.md)
 and [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.
