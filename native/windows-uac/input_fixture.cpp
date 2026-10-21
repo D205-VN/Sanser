@@ -36,9 +36,36 @@ int wmain(int argc,wchar_t** argv) {
     HWND window=CreateWindowExW(WS_EX_TOPMOST,cls.lpszClassName,L"Sanser CI elevated Cancel fixture",WS_OVERLAPPEDWINDOW|WS_VISIBLE,
       80,80,360,240,nullptr,nullptr,cls.hInstance,nullptr);
     require(window!=nullptr,"Create fixture");
-    require(CreateWindowW(L"BUTTON",L"Cancel",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,30,30,220,100,window,
-      reinterpret_cast<HMENU>(42),cls.hInstance,nullptr)!=nullptr,"Create Cancel button");
+    const auto button=CreateWindowW(L"BUTTON",L"Cancel",WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,30,30,220,100,window,
+      reinterpret_cast<HMENU>(42),cls.hInstance,nullptr);
+    require(button!=nullptr,"Create Cancel button");
     SetForegroundWindow(window); UpdateWindow(window);
+    // A visible/unlocked CI desktop can still reject synthetic input. Prove
+    // that this process can click its own button before testing the broker.
+    RECT target{}; require(GetWindowRect(button,&target)!=FALSE,"Baseline button bounds");
+    const POINT point{(target.left+target.right)/2,(target.top+target.bottom)/2};
+    if(GetForegroundWindow()!=window || WindowFromPoint(point)!=button) {
+      std::cout<<"SKIP: fixture cannot own an unobscured foreground input window\n"; DestroyWindow(window); return 77;
+    }
+    INPUT baseline[3]{}; baseline[0].type=INPUT_MOUSE;
+    baseline[0].mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK;
+    baseline[0].mi.dx=(point.x-GetSystemMetrics(SM_XVIRTUALSCREEN))*65535/(GetSystemMetrics(SM_CXVIRTUALSCREEN)-1);
+    baseline[0].mi.dy=(point.y-GetSystemMetrics(SM_YVIRTUALSCREEN))*65535/(GetSystemMetrics(SM_CYVIRTUALSCREEN)-1);
+    baseline[1].type=baseline[2].type=INPUT_MOUSE;
+    baseline[1].mi.dwFlags=MOUSEEVENTF_LEFTDOWN; baseline[2].mi.dwFlags=MOUSEEVENTF_LEFTUP;
+    const auto baselineSent=SendInput(3,baseline,sizeof(INPUT)); const auto baselineError=GetLastError();
+    const auto baselineDeadline=GetTickCount64()+1000;
+    while(GetTickCount64()<baselineDeadline && !clicked) {
+      MSG message{}; while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+      Sleep(5);
+    }
+    if(!clicked) {
+      POINT cursor{}; GetCursorPos(&cursor);
+      std::cout<<"SKIP: same-integrity synthetic input baseline failed accepted="<<baselineSent<<" error="<<baselineError
+        <<" cursor="<<cursor.x<<','<<cursor.y<<" expected="<<point.x<<','<<point.y<<"; cross-integrity input is not testable here\n";
+      DestroyWindow(window); return 77;
+    }
+    clicked=false;
     HANDLE mediumRaw=nullptr;
     require(CreateRestrictedToken(token.value,DISABLE_MAX_PRIVILEGE,0,nullptr,0,nullptr,0,nullptr,&mediumRaw)!=FALSE,"Restricted input token");
     Handle medium(mediumRaw); PSID sid=nullptr;

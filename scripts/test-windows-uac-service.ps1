@@ -18,7 +18,7 @@ try {
     $path = Join-Path $env:ProgramFiles 'SanserUac'
     $ownerBefore = Get-Content "$path/allowed-user.sid" -Raw
     & "$Build/windows-uac/Release/sanser-uac-input-test.exe" "$path/sanser-host-windows.exe"
-    if ($LASTEXITCODE -eq 77) { Write-Warning 'Runner has no unlocked interactive desktop; actual elevated Cancel click was not exercised' }
+    if ($LASTEXITCODE -eq 77) { Write-Warning 'Runner has no usable synthetic-input desktop; actual elevated Cancel click was not exercised' }
     elseif ($LASTEXITCODE -ne 0) { $inputFailure = 'Elevated Cancel input regression failed' }
 
     # PE overlays do not change executable behavior, but reproduce a protected
@@ -32,7 +32,9 @@ try {
 
     # Updaters may execute as SYSTEM. Exercise the actual installer command in
     # that context and prove it preserves the account authorized before update.
-    $action = New-ScheduledTaskAction -Execute "$stage/sanser-uac-service.exe" -Argument '--installer-install'
+    $updateLog = Join-Path $stage 'system-update.log'
+    $updateCommand = '""{0}" --installer-install > "{1}" 2>&1"' -f "$stage/sanser-uac-service.exe", $updateLog
+    $action = New-ScheduledTaskAction -Execute "$env:WINDIR/System32/cmd.exe" -Argument "/d /s /c $updateCommand"
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal | Out-Null
     Start-ScheduledTask -TaskName $taskName
@@ -42,7 +44,11 @@ try {
         $info = Get-ScheduledTaskInfo -TaskName $taskName
         $task = Get-ScheduledTask -TaskName $taskName
     } while (($info.LastRunTime.Year -lt 2020 -or $task.State -eq 'Running') -and (Get-Date) -lt $deadline)
-    if ($info.LastTaskResult -ne 0 -or $task.State -eq 'Running') { throw 'Installer helper update as SYSTEM failed' }
+    if ($info.LastTaskResult -ne 0 -or $task.State -eq 'Running') {
+        Write-Host "SYSTEM update task result=$($info.LastTaskResult) state=$($task.State)"
+        if (Test-Path $updateLog) { Get-Content $updateLog | Write-Host }
+        throw 'Installer helper update as SYSTEM failed'
+    }
     if ((Get-Content "$path/allowed-user.sid" -Raw) -ne $ownerBefore) { throw 'Installer updater rebound the UAC account to SYSTEM' }
     $status = (& "$stage/sanser-uac-service.exe" --status) | ConvertFrom-Json
     if (-not $status.enabled -or -not $status.current) { throw 'Installer update left stale protected binaries' }
