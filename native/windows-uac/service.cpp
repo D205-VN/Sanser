@@ -77,7 +77,7 @@ class InteractiveStation {
 public:
   InteractiveStation() {
     station_=OpenWindowStationW(L"WinSta0",FALSE,
-      WINSTA_READATTRIBUTES|WINSTA_WRITEATTRIBUTES|WINSTA_ENUMDESKTOPS|WINSTA_READSCREEN);
+      WINSTA_READATTRIBUTES|WINSTA_WRITEATTRIBUTES|WINSTA_ENUMDESKTOPS|WINSTA_READSCREEN|WINSTA_ACCESSGLOBALATOMS);
     require(station_!=nullptr,"Open interactive worker window station");
     if(!SetProcessWindowStation(station_)) {
       const auto error=GetLastError(); CloseWindowStation(station_); station_=nullptr; SetLastError(error);
@@ -93,7 +93,10 @@ class Desktop {
 public:
   ~Desktop() { if(current_) { SetThreadDesktop(original_); CloseDesktop(current_); } }
   bool bind(bool input=false) {
-    HDESK next=OpenInputDesktop(0,FALSE,DESKTOP_READOBJECTS|DESKTOP_WRITEOBJECTS|DESKTOP_SWITCHDESKTOP);
+    // Input requires the mapped GUI write rights, not just WRITEOBJECTS.
+    // This changes only this SYSTEM worker's handle; no desktop ACL/policy is
+    // changed and only the validated Default/Winlogon desktops are accepted.
+    HDESK next=OpenInputDesktop(0,FALSE,GENERIC_READ|GENERIC_WRITE|DESKTOP_SWITCHDESKTOP);
     if(!next) return false;
     wchar_t name[256]{}; DWORD needed=0;
     if(!GetUserObjectInformationW(next,UOI_NAME,name,sizeof(name),&needed)

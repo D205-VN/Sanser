@@ -33,8 +33,12 @@ try {
     # Updaters may execute as SYSTEM. Exercise the actual installer command in
     # that context and prove it preserves the account authorized before update.
     $updateLog = Join-Path $stage 'system-update.log'
-    $updateCommand = '""{0}" --installer-install > "{1}" 2>&1"' -f "$stage/sanser-uac-service.exe", $updateLog
-    $action = New-ScheduledTaskAction -Execute "$env:WINDIR/System32/cmd.exe" -Argument "/d /s /c $updateCommand"
+    $updateScript = Join-Path $stage 'system-update.ps1'
+    @'
+& (Join-Path $PSScriptRoot 'sanser-uac-service.exe') --installer-install *> (Join-Path $PSScriptRoot 'system-update.log')
+exit $LASTEXITCODE
+'@ | Set-Content $updateScript
+    $action = New-ScheduledTaskAction -Execute (Join-Path $PSHOME 'pwsh.exe') -Argument "-NoProfile -NonInteractive -File `"$updateScript`""
     $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal | Out-Null
     Start-ScheduledTask -TaskName $taskName

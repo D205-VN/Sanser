@@ -3,6 +3,7 @@
 #include "win_util.h"
 #include "desktop_duplication.h"
 #include <atomic>
+#include <iostream>
 
 namespace sanser::uac {
 namespace {
@@ -134,6 +135,12 @@ UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
     }
     if(response.status!=Status::Applied) {
       if(dispatch) { dispatch->failureStatus=static_cast<DWORD>(response.status); dispatch->failureError=static_cast<DWORD>(response.left); }
+      thread_local ULONGLONG lastFailure=0;
+      const auto now=GetTickCount64();
+      if(!lastFailure || now-lastFailure>=1000) {
+        std::cerr<<"SNUAC_INPUT_FAILED status="<<static_cast<DWORD>(response.status)<<" win32="<<response.left<<'\n';
+        lastFailure=now;
+      }
       break;
     }
     if(dispatch) ++dispatch->privileged;
