@@ -73,6 +73,21 @@ bool unlockedConsole(DWORD session) {
     && info->Data.WTSInfoExLevel1.SessionFlags==WTS_SESSIONSTATE_UNLOCK;
   WTSFreeMemory(raw); return ok;
 }
+class InteractiveStation {
+public:
+  InteractiveStation() {
+    station_=OpenWindowStationW(L"WinSta0",FALSE,
+      WINSTA_READATTRIBUTES|WINSTA_WRITEATTRIBUTES|WINSTA_ENUMDESKTOPS|WINSTA_READSCREEN);
+    require(station_!=nullptr,"Open interactive worker window station");
+    if(!SetProcessWindowStation(station_)) {
+      const auto error=GetLastError(); CloseWindowStation(station_); station_=nullptr; SetLastError(error);
+      require(false,"Bind interactive worker window station");
+    }
+  }
+  ~InteractiveStation() { if(station_) { SetProcessWindowStation(original_); CloseWindowStation(station_); } }
+private:
+  HWINSTA original_=GetProcessWindowStation(),station_=nullptr;
+};
 // Each worker owns its desktop handle on its own GUI-free thread/process.
 class Desktop {
 public:
@@ -112,6 +127,8 @@ int worker(const wchar_t* channelName) {
   HANDLE raw=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw)!=FALSE,"Worker identity");
   Handle token(raw); require(localSystem(raw),"Worker requires LocalSystem");
   DWORD session=0; require(ProcessIdToSessionId(GetCurrentProcessId(),&session)!=FALSE,"Worker session");
+  require(unlockedConsole(session),"Worker requires an unlocked console");
+  InteractiveStation station;
   Desktop desktop; std::unique_ptr<DesktopDuplicator> capture; unsigned adapter=0,output=0;
   AppliedInput applied{session,desktop,{}};
   Handle channel(CreateFileW(channelName,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr));
@@ -201,11 +218,6 @@ struct Worker {
     require(OpenProcessToken(GetCurrentProcess(),TOKEN_DUPLICATE|TOKEN_QUERY,&original)!=FALSE,"System token"); Handle token(original);
     require(DuplicateTokenEx(original,TOKEN_ALL_ACCESS,nullptr,SecurityImpersonation,TokenPrimary,&copy)!=FALSE,"Worker token"); Handle workerToken(copy);
     require(SetTokenInformation(copy,TokenSessionId,&session,sizeof(session))!=FALSE,"Worker interactive session");
-    // Only this fixed, protected SYSTEM worker receives UI automation access.
-    // The service already holds SeTcbPrivilege and authenticates the console
-    // user/host before creating it; the desktop app never receives this token.
-    const DWORD uiAccess=TRUE;
-    require(SetTokenInformation(copy,TokenUIAccess,const_cast<DWORD*>(&uiAccess),sizeof(uiAccess))!=FALSE,"Worker UI input access");
     STARTUPINFOW start{}; start.cb=sizeof(start);
     wchar_t desktop[]=L"winsta0\\default"; start.lpDesktop=desktop;
     const auto exe=installDirectory()/L"sanser-uac-service.exe";

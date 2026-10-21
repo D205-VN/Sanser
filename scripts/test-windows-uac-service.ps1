@@ -5,6 +5,7 @@ if (Get-Service -Name SanserUac -ErrorAction SilentlyContinue) { throw 'UAC test
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ('sanser-uac-test-' + [Guid]::NewGuid())
 New-Item -ItemType Directory $stage | Out-Null
 $taskName = 'SanserUacUpdateTest-' + [Guid]::NewGuid()
+$inputFailure = $null
 try {
     Copy-Item "$Build/windows-uac/Release/sanser-uac-service.exe" "$stage/sanser-uac-service.exe"
     Copy-Item "$Build/Release/sanser-host-windows.exe" "$stage/sanser-host-windows.exe"
@@ -18,7 +19,7 @@ try {
     $ownerBefore = Get-Content "$path/allowed-user.sid" -Raw
     & "$Build/windows-uac/Release/sanser-uac-input-test.exe" "$path/sanser-host-windows.exe"
     if ($LASTEXITCODE -eq 77) { Write-Warning 'Runner has no unlocked interactive desktop; actual elevated Cancel click was not exercised' }
-    elseif ($LASTEXITCODE -ne 0) { throw 'Elevated Cancel input regression failed' }
+    elseif ($LASTEXITCODE -ne 0) { $inputFailure = 'Elevated Cancel input regression failed' }
 
     # PE overlays do not change executable behavior, but reproduce a protected
     # helper/host left behind after app update, even when version strings match.
@@ -49,15 +50,18 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Updated UAC broker accepted unauthorized caller' }
     & "$stage/sanser-uac-service.exe" --uninstall
     if ($LASTEXITCODE -ne 0) { throw 'Explicit helper disable failed' }
-    $previousRun = (Get-ScheduledTaskInfo -TaskName $taskName).LastRunTime
+    # A fresh task avoids treating two runs in the same clock second as one.
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    $taskName = 'SanserUacDisabledUpdateTest-' + [Guid]::NewGuid()
+    Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal | Out-Null
     Start-ScheduledTask -TaskName $taskName
     $deadline = (Get-Date).AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 150
         $info = Get-ScheduledTaskInfo -TaskName $taskName
         $task = Get-ScheduledTask -TaskName $taskName
-    } while (($info.LastRunTime -eq $previousRun -or $task.State -eq 'Running') -and (Get-Date) -lt $deadline)
-    if ($info.LastTaskResult -ne 0 -or $info.LastRunTime -eq $previousRun -or (Get-Service -Name SanserUac -ErrorAction SilentlyContinue)) {
+    } while (($info.LastRunTime.Year -lt 2020 -or $task.State -eq 'Running') -and (Get-Date) -lt $deadline)
+    if ($info.LastTaskResult -ne 0 -or $info.LastRunTime.Year -lt 2020 -or (Get-Service -Name SanserUac -ErrorAction SilentlyContinue)) {
         throw 'SYSTEM updater ignored explicit helper disable'
     }
     & "$stage/sanser-uac-service.exe" --install
@@ -78,6 +82,7 @@ try {
         }
     }
     Write-Host 'UAC service lifecycle, stale-copy detection, SYSTEM update/account preservation, IPC denial and protected ACL passed'
+    if ($inputFailure) { throw $inputFailure }
 } finally {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
