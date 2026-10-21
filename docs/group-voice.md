@@ -17,9 +17,16 @@ voice controls explain that an update is needed.
 
 The room supports the host and up to three viewers. Consent is scoped to the
 current native group/session, is not saved, and is not restored on a new engine
-or reconnection. Updated engines show a floating **Sanser · Voice** button on
-both host and viewer. Click it to expand Join/Mute/Deafen/Leave without returning
-to the main application. Switching pages or collapsing the button does not leave
+or reconnection. Version 2.2.19 combines the host's screen-sharing
+indicator and voice controls into one compact dark floating bar. The host has a
+screen icon, a microphone shortcut, an expand arrow and a red Stop button; viewers
+only have a **Group voice** bar, without screen-sharing or Stop controls. Click the
+arrow or title to expand the icon buttons for Join/Mute/Deafen/Leave without returning
+to the main application. Icons have tooltips and accessible action names. The bar
+can be dragged and does not take keyboard focus. Joining is still listen-only;
+the microphone shortcut becomes available after joining. Stop sharing also leaves
+voice. The sharing indicator and Stop remain available when voice is unsupported.
+Switching pages or collapsing the bar does not leave
 the call; **Leave voice**, disconnect or ending sharing stops participation. Old
 engines without floating controls retain leave-on-navigation for safety.
 The UI waits for native state confirmation after Join/Mute/Leave, rather than
@@ -33,7 +40,7 @@ microphone changes reconnect after prior explicit consent; Mute/Leave cancels it
 Shared system sound and conversation have separate controls. Muting the shared
 computer's sound does not mute voice. The first version has local microphone
 mute and deafen, not per-person mute controls, a member/speaking list or push-to-talk.
-The next source update adds SpeexDSP acoustic echo cancellation (AEC), using actual
+Version 2.2.19 adds SpeexDSP acoustic echo cancellation (AEC), using actual
 rendered system sound plus conversation as a reference before microphone Opus
 encoding. This is distinct from PLC, noise gating and automatic gain control.
 Physical speaker/microphone routes still need verification on both machines.
@@ -114,5 +121,12 @@ sound. Physical Windows/macOS calls still need verification: permission denial,
 headsets/Bluetooth changes, voice plus shared music, simultaneous speakers,
 loss/WAN/relay, device sleep, page changes and no microphone after Leave. Synthetic
 tests and static REA research cannot establish hardware sound quality or AEC.
+
+`sanser-voice-panel-test` uses a fake voice controller to check host/viewer controls,
+listen-only Join, explicit Unmute, the compact Mute shortcut, collapse without
+leaving, Deafen, Leave, Stop sharing and the sharing-only fallback. It opens no
+audio devices. On macOS, setting `SANSER_PANEL_PREVIEW_DIR` to an existing directory
+exports images of the test panel itself for visual inspection; it does not capture
+the screen or other applications.
 
 Research and primary sources: [group voice investigation](investigations/group-voice-research.md).

@@ -228,14 +228,6 @@ API_AVAILABLE(macos(12.3))
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error { (void)stream; std::cerr<<captureFailure(error,"Screen capture stopped")<<std::endl; self.failed=YES; }
 @end
 
-@interface SanserSharingStop : NSObject
-@property(nonatomic,assign) HostOutput* output;
-- (void)stopSharing:(id)sender;
-@end
-@implementation SanserSharingStop
-- (void)stopSharing:(id)sender { (void)sender; if(self.output) self.output->stop(); }
-@end
-
 @interface SanserSnv2RemoteView : SanserSnv2MetalView
 @property(nonatomic,assign) Peer* peer;
 @property(nonatomic,assign) BOOL inputEnabled;
@@ -319,24 +311,6 @@ struct API_AVAILABLE(macos(12.3)) CaptureStop {
     dispatch_sync(audioQueue, ^{ capture.audio=nullptr; });
     [stream stopCaptureWithCompletionHandler:^(NSError*) {}];
   }
-};
-struct SharingNotice {
-  NSPanel* __strong panel=nil;
-  SanserSharingStop* __strong action=nil;
-  SharingNotice(HostOutput& output,bool enabled) {
-    if(!enabled) return;
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-    const auto area=NSScreen.mainScreen.visibleFrame;
-    panel=[[NSPanel alloc] initWithContentRect:NSMakeRect(NSMaxX(area)-380,NSMaxY(area)-76,360,56) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
-    panel.releasedWhenClosed=NO; panel.level=NSFloatingWindowLevel; panel.movableByWindowBackground=YES; panel.hidesOnDeactivate=NO;
-    panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
-    NSTextField* label=[NSTextField labelWithString:@"Sanser · Screen sharing active"]; label.frame=NSMakeRect(12,18,240,22); [panel.contentView addSubview:label];
-    action=[SanserSharingStop new]; action.output=&output;
-    NSButton* stop=[NSButton buttonWithTitle:@"Stop" target:action action:@selector(stopSharing:)]; stop.frame=NSMakeRect(258,10,88,34); [panel.contentView addSubview:stop];
-    [panel orderFrontRegardless];
-  }
-  ~SharingNotice() { if(action) action.output=nullptr; [panel close]; }
-  void pump() { if(!panel) return; NSEvent* event; while((event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:YES])) [NSApp sendEvent:event]; }
 };
 #ifdef SANSER_CODEC_TEST
 void testMacEncoderBackpressure() {
@@ -679,7 +653,7 @@ int runMac(bool host,int argc,char** argv) {
         options.height=std::max(64U,static_cast<std::uint32_t>(display.height*scale)&~1U);
         HostOutput peer(options); Encoder encoder(options,peer); MacInputInjector injector(CGDisplayBounds(display.displayID));
         VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
-        VoicePanel voicePanel(options.groupVoice,voice);
+        VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{});
         peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
         voice::PlaybackTap originalSound(voice::RenderSource::External);
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
@@ -711,13 +685,12 @@ int runMac(bool host,int argc,char** argv) {
         awaitCaptureOperation([&](CaptureCompletion complete) {
           [stream startCaptureWithCompletionHandler:complete];
         },"Start screen capture");
-        SharingNotice notice(peer,options.sharing);
         HostOutputStop shutdown{peer}; peer.start();
         auto bitrate=options.bitrate;
         auto lastProgress=Clock::now();
         while(peer.running() && !capture.failed && !encoder.failed()) {
           peer.pumpControl();
-          notice.pump(); if(!peer.running()) break;
+          voicePanel.pump(); if(!peer.running()) break;
           const auto target=peer.bitrate();
           if(target!=bitrate && encoder.setBitrate(target)) bitrate=target;
           const bool retry=encoder.takeRetryRequest();

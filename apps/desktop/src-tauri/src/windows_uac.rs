@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn stale_or_unknown_protected_helper_never_counts_as_current() {
         assert!(!current_installation(
-            &json!({"enabled":true,"version":"2.2.18"})
+            &json!({"enabled":true,"version":"2.2.19"})
         ));
         assert!(!current_installation(
             &json!({"enabled":true,"current":false})
