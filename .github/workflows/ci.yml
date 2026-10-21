@@ -107,11 +107,12 @@ jobs:
       - run: cmake -S native/host-windows -B build/host-windows -A x64 -DBUILD_TESTING=ON
       - id: native-build
         run: cmake --build build/host-windows --config Release --parallel
-      - run: ctest --test-dir build/host-windows -C Release --output-on-failure
       - name: Verify UAC install/update, elevated input and unauthorized caller denial
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/test-windows-uac-service.ps1
+      - run: ctest --test-dir build/host-windows -C Release --output-on-failure
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
       - run: ./build/host-windows/cross-platform/Release/sanser-client-windows.exe --capabilities-json
 
   windows-relay:

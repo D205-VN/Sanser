@@ -19,19 +19,30 @@ DWORD integrityLevel(HANDLE process) {
   if(!IsValidSid(sid) || !*GetSidSubAuthorityCount(sid)) return 0;
   return *GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1);
 }
-bool elevatedForeground() {
+bool elevatedForeground(InputDispatch* dispatch) {
   const static DWORD own=integrityLevel(GetCurrentProcess());
+  const static bool protectedHost=[] {
+    try { return _wcsicmp(imagePath().c_str(),(installDirectory()/L"sanser-host-windows.exe").c_str())==0; }
+    catch(...) { return false; }
+  }();
   DWORD pid=0; GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-  if(!own || !pid || pid==GetCurrentProcessId()) return false;
+  if(dispatch) dispatch->sourceIntegrity=own;
+  if(!pid || pid==GetCurrentProcessId()) return false;
   thread_local DWORD previous=0;
   thread_local ULONGLONG checked=0;
   thread_local bool elevated=false;
+  thread_local DWORD target=0;
   const auto now=GetTickCount64();
   if(pid!=previous || now-checked>=50) {
     Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid));
-    elevated=process && integrityLevel(process.value)>own;
+    target=process ? integrityLevel(process.value) : 0;
+    // A denied token query means unknown, not unelevated. Only the protected
+    // host authorized for the broker uses privileged input for unknown targets;
+    // ordinary/uninstalled hosts retain their normal input path.
+    elevated=(own && target && target>own) || ((!own || !target) && protectedHost);
     previous=pid; checked=now;
   }
+  if(dispatch) dispatch->targetIntegrity=target;
   return elevated;
 }
 class Connection {
@@ -103,7 +114,7 @@ UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
   // An elevated installer on Default is also privileged, even though capture
   // has already returned from Winlogon. Route it deliberately, rather than
   // interpreting a low-integrity SendInput result as permission to control it.
-  UINT sent=(active() || elevatedForeground()) ? 0 : ::SendInput(count,inputs,size);
+  UINT sent=(active() || elevatedForeground(dispatch)) ? 0 : ::SendInput(count,inputs,size);
   if(dispatch) dispatch->direct=sent;
   if(sent==count) return sent;
   for(;sent<count;++sent) {
