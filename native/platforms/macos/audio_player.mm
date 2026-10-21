@@ -23,6 +23,10 @@ struct AudioPlayer::State {
       std::memcpy(target+block*pcm.size(),pcm.data(),pcm.size()*sizeof(std::int16_t));
     }
     buffer->mAudioDataByteSize=audioFrames*audioChannels*2*2;
+    // Enqueue transfers buffer ownership to Core Audio. Keep our reference
+    // independent of a buffer that can already be returned/refilled there.
+    std::array<std::int16_t,audioFrames*audioChannels*2> rendered;
+    std::memcpy(rendered.data(),target,buffer->mAudioDataByteSize);
     AudioTimeStamp actual{};
     if(AudioQueueEnqueueBufferWithParameters(output,buffer,0,nullptr,0,0,0,nullptr,nullptr,&actual)==noErr) {
       auto at=voice::EchoClock::now();
@@ -40,7 +44,7 @@ struct AudioPlayer::State {
           if(delta>-100000000 && delta<200000000) at+=std::chrono::nanoseconds(delta);
         }
       }
-      self.reference.publish(std::span<const std::int16_t>(target,audioFrames*audioChannels*2),at);
+      self.reference.publish(rendered,at);
     }
   }
   bool start() {
