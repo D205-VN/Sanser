@@ -11,8 +11,8 @@ namespace sanser::desktop {
 class DecodeWorker {
 public:
   using Now=std::function<Clock::time_point()>;
-  DecodeWorker(std::function<void(Frame)> decode,std::function<void()> reset,std::function<void()> keyframe,bool coldStart=false,bool ultra=false,Now now=[] { return Clock::now(); })
-      :decode_(std::move(decode)),reset_(std::move(reset)),keyframe_(std::move(keyframe)),now_(std::move(now)),coldStart_(coldStart),ultra_(ultra),warming_(coldStart),worker_([this] { loop(); }) {}
+  DecodeWorker(std::function<void(Frame)> decode,std::function<void()> reset,std::function<void()> keyframe,bool coldStart=false,bool ultra=false,Now now=[] { return Clock::now(); },std::function<bool()> outputReady=[] { return true; })
+      :decode_(std::move(decode)),reset_(std::move(reset)),keyframe_(std::move(keyframe)),now_(std::move(now)),outputReady_(std::move(outputReady)),coldStart_(coldStart),ultra_(ultra),warming_(coldStart),worker_([this] { loop(); }) {}
   ~DecodeWorker() { stop(); }
   void submit(Frame frame) {
     bool request=false;
@@ -105,7 +105,10 @@ private:
           timing_.queueUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(began-queued).count());
           timing_.workUs+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(ended-began).count());
           timing_.queueMaxUs=std::max(timing_.queueMaxUs,static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(began-queued).count()));
-          if(queue_.empty()) warming_=false;
+          // ProcessInput can succeed while an MFT still buffers its initial
+          // references. Do not apply steady-state shedding before any picture
+          // has actually been output and the compressed queue has caught up.
+          if(queue_.empty() && outputReady_()) warming_=false;
         }
       } catch(const std::exception& error) {
         ++failures_;
@@ -124,6 +127,7 @@ private:
   std::function<void(Frame)> decode_;
   std::function<void()> reset_,keyframe_;
   Now now_;
+  std::function<bool()> outputReady_;
   mutable std::mutex mutex_;
   std::condition_variable wake_;
   struct Queued { Frame frame; Clock::time_point queued; };

@@ -35,6 +35,38 @@ int main() {
       check(cold.takeTiming().samples==0,"periodic timing snapshots must not replay old measurements");
     }
 
+    {
+      std::mutex mutex; std::condition_variable wake;
+      bool entered=false,release=false,hold=false;
+      std::atomic<bool> output{false};
+      unsigned accepted=0; std::atomic<unsigned> requests{0},readyChecks{0};
+      DecodeWorker buffered([&](Frame) {
+        std::unique_lock lock(mutex);
+        ++accepted; entered=true; wake.notify_all();
+        if(hold) wake.wait_for(lock,std::chrono::seconds(3),[&] { return release; });
+      },[] {},[&] { ++requests; },true,false,[] { return Clock::time_point{}; },[&] { ++readyChecks; wake.notify_all(); return output.load(); });
+      buffered.submit({{1},640,360,true});
+      { std::unique_lock lock(mutex); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return accepted==1; }),"buffered decoder did not accept initial IDR"); }
+      // Synchronize with the end-of-decode readiness check before blocking the
+      // next accepted access unit. No decoded picture has been produced yet.
+      { std::unique_lock lock(mutex); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return readyChecks>=1; }),"decoder never checked actual output readiness"); }
+      { std::lock_guard lock(mutex); hold=true; entered=false; }
+      buffered.submit({{2},640,360,false});
+      { std::unique_lock lock(mutex); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return entered; }),"buffered decoder did not accept P-frame"); }
+      for(unsigned i=0;i<10;++i) buffered.submit({{3},640,360,false});
+      check(buffered.dropped()==0 && requests==0,"accepting input without a decoded picture must not end cold-start protection");
+      { std::unique_lock lock(mutex); output=true; release=true; hold=false; wake.notify_all();
+        check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return accepted==12; }),"buffered reference chain did not catch up"); }
+      { std::unique_lock lock(mutex); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return readyChecks>=2; }),"decoder did not leave warmup after actual output and catch-up");
+        hold=true; release=false; entered=false; }
+      buffered.submit({{4},640,360,true});
+      { std::unique_lock lock(mutex); check(wake.wait_for(lock,std::chrono::seconds(1),[&] { return entered; }),"steady decoder did not enter"); }
+      for(unsigned i=0;i<4;++i) buffered.submit({{5},640,360,false});
+      check(buffered.dropped()>0 && requests>0,"actual output must restore the small steady-state queue");
+      { std::lock_guard lock(mutex); release=true; hold=false; wake.notify_all(); }
+      buffered.stop();
+    }
+
     std::mutex mutex; std::condition_variable wake;
     bool entered=false,release=false;
     std::vector<std::uint8_t> decoded;

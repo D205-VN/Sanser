@@ -102,7 +102,7 @@ public:
     if(!GetUserObjectInformationW(next,UOI_NAME,name,sizeof(name),&needed)
         || (_wcsicmp(name,L"Winlogon") && (!input || _wcsicmp(name,L"Default")))) { CloseDesktop(next); return false; }
     if(current_ && name_==name) { CloseDesktop(next); return true; }
-    if(!SetThreadDesktop(next)) { CloseDesktop(next); return false; }
+    if(!SetThreadDesktop(next)) { const auto error=GetLastError(); CloseDesktop(next); SetLastError(error); return false; }
     if(current_) CloseDesktop(current_);
     current_=next; name_=name; return true;
   }
@@ -145,7 +145,7 @@ int worker(const wchar_t* channelName) {
     if(!valid(request)) return 2;
     const bool console=unlockedConsole(session);
     const bool bound=console && desktop.bind(request.operation==Operation::Input);
-    const auto desktopError=bound ? ERROR_SUCCESS : GetLastError();
+    const auto desktopError=bound ? ERROR_SUCCESS : console ? GetLastError() : ERROR_ACCESS_DENIED;
     if(bound) {
       try {
         if(request.operation==Operation::Capture) {

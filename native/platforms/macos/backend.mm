@@ -736,8 +736,10 @@ int runMac(bool host,int argc,char** argv) {
     AudioPlayer audio(options.audio);
     if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };
     if(options.audio) peer.onAudioReset=[&] { audio.reset(); };
+    std::uint64_t decodedBase=decoder.decoded();
     DecodeWorker decode([&](Frame frame) { @autoreleasepool { decoder.decode(frame); } },
-      [&] { decoder.reset(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency);
+      [&] { decoder.reset(); decodedBase=decoder.decoded(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency,
+      [] { return Clock::now(); },[&] { return decoder.decoded()>decodedBase; });
     peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Control+Option+Escape releases input" : @"Sanser · View only";

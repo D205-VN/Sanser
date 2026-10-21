@@ -378,11 +378,13 @@ void testWindowsMacFixture(const char* path,bool lowDelay) {
     } catch(...) { conversionError=true; changed.notify_all(); }
   });
   std::unique_ptr<Runtime> runtime; std::unique_ptr<Decoder> decoder;
+  unsigned decodedBase=0;
   DecodeWorker worker([&](Frame frame) {
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(width,height,[&](Nv12Image image) { conversion.submit(std::move(image)); ++decoded; changed.notify_all(); });
     decoder->decode(frame);
-  },[&] { decoder.reset(); runtime.reset(); },[&] { ++keyframes; changed.notify_all(); },true);
+  },[&] { decoder.reset(); runtime.reset(); decodedBase=decoded.load(); },[&] { ++keyframes; changed.notify_all(); },true,false,
+    [] { return Clock::now(); },[&] { return decoded.load()>decodedBase; });
   for(unsigned i=0;i<count;++i) {
     const auto size=read(); const auto key=file.get();
     if(size==0 || size>4*1024*1024 || (key!=0 && key!=1)) throw std::runtime_error("Invalid Mac access unit");
@@ -414,8 +416,11 @@ void testWindowsMacFixture(const char* path,bool lowDelay) {
     std::unique_lock lock(mutex);
     const auto blue=[&] { return latest && latest->width==width && latest->height==height && latest->pixels[0]>150 && latest->pixels[1]<80 && latest->pixels[2]<80; };
     if(!changed.wait_for(lock,std::chrono::seconds(3),[&] { return blue() || conversionError; }) || !blue()) {
+      const auto timing=worker.takeTiming();
       std::cerr<<"Mac fixture progress decoded="<<decoded<<" converted="<<converted<<" keyframeRequests="<<keyframes
-        <<" latest="<<(latest ? latest->width : 0)<<'x'<<(latest ? latest->height : 0)<<'\n';
+        <<" latest="<<(latest ? latest->width : 0)<<'x'<<(latest ? latest->height : 0)
+        <<" inputs="<<timing.samples<<" dropped="<<worker.dropped()<<" expired="<<worker.expired()
+        <<" workUs="<<timing.workUs<<" queueMaxUs="<<timing.queueMaxUs<<" lastError="<<worker.error()<<'\n';
       throw std::runtime_error("Windows picture did not advance to the final blue Mac frame");
     }
   }
@@ -516,11 +521,13 @@ int runWindows(bool host,int argc,char** argv) {
     } catch(const std::exception& error) { std::cerr<<"SNV2_COLOR_CONVERSION failed: "<<error.what()<<std::endl; conversionFailed=true; }
   });
   std::unique_ptr<Runtime> runtime; std::unique_ptr<Decoder> decoder;
+  std::uint64_t decodedBase=0;
   DecodeWorker decode([&](Frame frame) {
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(frame.width,frame.height,[&](Nv12Image image) { ++decodedFrames; conversion.submit(std::move(image)); });
     decoder->decode(frame);
-  },[&] { decoder.reset(); runtime.reset(); conversion.clear(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency);
+  },[&] { decoder.reset(); runtime.reset(); conversion.clear(); decodedBase=decodedFrames.load(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency,
+    [] { return Clock::now(); },[&] { return decodedFrames.load()>decodedBase; });
   peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);

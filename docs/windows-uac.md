@@ -58,6 +58,11 @@ targets through the same broker before attempting normal input. An elevated
 installer's Cancel button is distinct from the UAC secure-desktop prompt: video
 can already be live on Default while user-level input remains restricted by UIPI.
 Both cases use the same authenticated, protected host and user/session checks.
+The worker opens its interactive station and active desktop with the required
+GUI input handle rights; opening a desktop with read/write-object rights alone
+was insufficient for injection. No desktop ACL or UAC policy is changed.
+Input failure reports use `SNUAC_INPUT_FAILED status=N win32=N`, without key,
+pointer, credential or frame content, limited to one report per second.
 Applied keys/buttons are tracked by the worker and released on graceful pipe
 disconnect so a viewer cannot leave modifiers held inside the secure desktop.
 A confirmed
@@ -96,7 +101,8 @@ original SID, protected ACLs and rejection of an unauthorized test executable.
 An isolated CI fixture creates its own elevated Cancel button and invokes the
 protected host with a medium-integrity token through the production input
 fallback. It is explicitly skipped when the runner has no unlocked interactive
-desktop. These checks do **not** prove real Secure Desktop capture/input on
+desktop, or when a same-integrity baseline shows that the runner cannot deliver
+synthetic input. These checks do **not** prove real Secure Desktop capture/input on
 physical GPU hardware; the fixture does not display a real UAC prompt or alter
 Windows policy.
 
