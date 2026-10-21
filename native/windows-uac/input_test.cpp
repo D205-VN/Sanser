@@ -6,6 +6,7 @@
 
 int testUacInput(int argc,char** argv) {
   if(argc!=3) return 2;
+  SetProcessDPIAware(); // Match the normal host's physical-screen coordinates.
   const auto window=reinterpret_cast<HWND>(std::stoull(argv[2]));
   wchar_t title[128]{}; GetWindowTextW(window,title,128);
   if(std::wstring(title)!=L"Sanser CI elevated Cancel fixture") return 2;
