@@ -65,6 +65,7 @@ export interface SharingPeerVideoStatus {
   ready: boolean;
   running: boolean;
   videoState: 'active' | 'paused' | 'probing';
+  stopReason?: number;
   pauses: number;
   backoffMs: number;
 }

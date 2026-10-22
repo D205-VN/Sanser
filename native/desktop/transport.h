@@ -106,6 +106,7 @@ public:
   void stop();
   void cancel() { running_=false; sendReady_.notify_all(); }
   bool running() const { return running_.load(); }
+  unsigned stopReason() const { return stopReason_.load(); }
   bool ready() const { return ready_.load(); }
   bool inputAvailable() const { return options_.input && !inputSuspended_.load() && !remoteCapturePaused_.load(); }
   bool capturePaused() const { return remoteCapturePaused_.load(); }

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { RuntimeStatus, SharingGroup } from '../lib/types';
 const mocks = vi.hoisted(() => ({
   api: { supportsSharingMedia: vi.fn(), sharingGroups: vi.fn(), devices: vi.fn(), createSharingGroup: vi.fn(),
-    sessionCredentials: vi.fn(), hostSessions: vi.fn(), sharingHeartbeat: vi.fn(), getAccessToken: vi.fn(),
+    sessionCredentials: vi.fn(), hostSessions: vi.fn(), sharingHeartbeat: vi.fn(), getAccessToken: vi.fn(), disconnectSession: vi.fn(),
     removeSharingViewer: vi.fn(), stopSharingGroup: vi.fn(), respondSharingInvitation: vi.fn(), getSession: vi.fn() },
   coordinate: vi.fn(), release: vi.fn(), launch: vi.fn(), add: vi.fn(), remove: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), relayFailure: vi.fn(), statuses: vi.fn()
 }));
@@ -40,6 +40,7 @@ beforeEach(() => {
   mocks.api.supportsSharingMedia.mockResolvedValue(true); mocks.statuses.mockResolvedValue([]);
   mocks.api.sharingGroups.mockImplementation(() => Promise.resolve({ items: [group] }));
   mocks.api.devices.mockResolvedValue({ items: [] }); mocks.api.createSharingGroup.mockImplementation(() => Promise.resolve(group));
+  mocks.api.disconnectSession.mockResolvedValue(undefined);
   mocks.api.sharingHeartbeat.mockResolvedValue(undefined); mocks.api.getAccessToken.mockResolvedValue('access-token');
   mocks.api.sessionCredentials.mockImplementation((id: string) => Promise.resolve({ wireProtocol: 'snv2', accessMode: 'view-only', sessionToken: `${id}-` + 'a'.repeat(48) }));
   mocks.api.hostSessions.mockImplementation(() => Promise.resolve({ items: group.members.filter((member) => member.sessionId).map((member) => ({ id: member.sessionId, status: 'accepted', requesterReadyAt: '2026-10-14T00:00:00Z' })) }));
@@ -198,4 +199,47 @@ it('shares an in-flight initialization rather than invalidating its generation',
   expect(mocks.api.supportsSharingMedia).toHaveBeenCalledTimes(1);
   finish(true); await Promise.all([first, second]);
   expect(get(store).supported).toBe(true); expect(mocks.api.sharingGroups).toHaveBeenCalledTimes(1);
+});
+
+it('ends only a disconnected native viewer and frees its reservation without restarting it', async () => {
+  const store = await startedStore();
+  mocks.statuses.mockResolvedValue([{ viewerId: 'member-2', ready: false, running: false, stopReason: 1, videoState: 'active', pauses: 0, backoffMs: 0 }]);
+  await store.refresh();
+  expect(mocks.api.disconnectSession).toHaveBeenCalledExactlyOnceWith('session-2');
+  expect(mocks.remove).toHaveBeenCalledExactlyOnceWith('group', 'member-2');
+  expect(get(store).ownGroup?.members.find((member) => member.id === 'member-2')?.state).toBe('removed');
+  expect(get(store).ownGroup?.members.filter((member) => member.state === 'accepted')).toHaveLength(2);
+  expect(mocks.add).toHaveBeenCalledTimes(2); expect(mocks.stop).not.toHaveBeenCalled();
+});
+
+it('retries failed server cleanup for a dead viewer without reattaching or disturbing the others', async () => {
+  const store = await startedStore();
+  mocks.statuses.mockResolvedValue([{ viewerId: 'member-2', ready: false, running: false, stopReason: 1, videoState: 'active', pauses: 0, backoffMs: 0 }]);
+  mocks.api.disconnectSession.mockRejectedValueOnce(new Error('Server unavailable'));
+  await store.refresh();
+  expect(get(store).peerErrors['member-2']).toMatch(/Viewer disconnected/);
+  expect(mocks.remove).not.toHaveBeenCalled(); expect(mocks.add).toHaveBeenCalledTimes(2);
+  await store.refresh();
+  expect(mocks.api.disconnectSession).toHaveBeenCalledTimes(2);
+  expect(mocks.remove).toHaveBeenCalledExactlyOnceWith('group', 'member-2');
+  expect(mocks.stop).not.toHaveBeenCalled();
+});
+
+it('does not end a fresh requester generation because its old native sender stopped', async () => {
+  const store = await startedStore();
+  mocks.statuses.mockResolvedValue([{ viewerId: 'member-2', ready: false, running: false, stopReason: 1, videoState: 'active', pauses: 0, backoffMs: 0 }]);
+  mocks.api.hostSessions.mockResolvedValue({ items: group.members.map((member) => ({ id: member.sessionId, status: 'accepted', requesterReadyAt: '2026-10-14T00:00:01Z' })) });
+  await store.refresh(); await vi.advanceTimersByTimeAsync(1);
+  expect(mocks.api.disconnectSession).not.toHaveBeenCalled();
+  expect(mocks.add.mock.calls.length + mocks.launch.mock.calls.length).toBeGreaterThan(3);
+});
+
+it('preserves reconnect for transport timeouts rather than removing the sharing member', async () => {
+  const store = await startedStore();
+  for (const stopReason of [0, 2, 3, 4, 5, undefined]) {
+    mocks.statuses.mockResolvedValue([{ viewerId: 'member-2', ready: false, running: false, stopReason, videoState: 'active', pauses: 0, backoffMs: 0 }]);
+    await store.refresh();
+  }
+  expect(mocks.api.disconnectSession).not.toHaveBeenCalled();
+  expect(get(store).ownGroup?.members.filter((member) => member.state === 'accepted')).toHaveLength(3);
 });

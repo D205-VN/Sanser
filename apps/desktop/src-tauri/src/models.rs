@@ -179,6 +179,7 @@ pub struct SharingPeerStatus {
     pub ready: bool,
     pub running: bool,
     pub video_state: SharingVideoState,
+    pub stop_reason: u8,
     pub pauses: u64,
     pub backoff_ms: u32,
 }

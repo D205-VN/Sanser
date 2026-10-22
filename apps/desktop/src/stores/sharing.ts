@@ -190,17 +190,37 @@ export function createSharingStore() {
       store.update((state) => ({ ...state, peerVideo }));
       host.setSharingActive(true, own.members.filter((member) => member.state === 'accepted' && member.startedAt !== undefined &&
         (!peerVideo[member.id] || (peerVideo[member.id]?.videoState === 'active' && peerVideo[member.id]?.ready && peerVideo[member.id]?.running))).length);
+      const sessions = await api.hostSessions(own.hostDeviceId);
+      if (epoch !== generation) return;
+      const disconnected = new Set<string>();
       for (const [memberId, peer] of peers) {
         const member = own.members.find((item) => item.id === memberId);
         if (!member || member.state !== 'accepted') await removeNative(own.id, memberId);
+        else if (nativeStatuses.some((status) => status.viewerId === memberId && !status.running && status.stopReason === 1)) {
+          const current = sessions.items.find((item) => item.id === peer.sessionId);
+          // A fresh ready generation may already be replacing the old path.
+          // Never end that replacement because an older sender stopped.
+          if (current?.requesterReadyAt !== peer.readyAt) { await removeNative(own.id, memberId); continue; }
+          try {
+            await api.disconnectSession(peer.sessionId);
+            if (epoch !== generation) return;
+            await removeNative(own.id, memberId);
+            disconnected.add(memberId); retryAfter.delete(memberId); errorForPeer(memberId, null);
+          } catch {
+            errorForPeer(memberId, 'Viewer disconnected. Retrying server cleanup…');
+          }
+        }
         else if (peer.relay) {
           const failure = await relayPeerFailure('host', peer.sessionId);
           if (failure) { await removeNative(own.id, memberId); errorForPeer(memberId, failure); retryAfter.set(memberId, { readyAt: peer.readyAt, at: Number.POSITIVE_INFINITY }); }
         }
       }
-      const sessions = await api.hostSessions(own.hostDeviceId);
-      if (epoch !== generation) return;
+      if (disconnected.size) {
+        const updated = { ...own, members: own.members.map((member) => disconnected.has(member.id) ? { ...member, state: 'removed' as const } : member) };
+        store.update((state) => ({ ...state, ownGroup: updated, groups: state.groups.map((group) => group.id === updated.id ? updated : group) }));
+      }
       for (const member of own.members) {
+        if (disconnected.has(member.id)) continue;
         const current = sessions.items.find((item) => item.id === member.sessionId && item.status === 'accepted');
         if (member.state !== 'accepted' || !current?.requesterReadyAt || tasks.has(member.id)) continue;
         if (peers.get(member.id)?.readyAt === current.requesterReadyAt) continue;

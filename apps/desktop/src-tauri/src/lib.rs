@@ -40,6 +40,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }));
     builder
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineManager::default())
         .manage(commands::P2pSessionManager::default())

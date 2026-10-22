@@ -21,6 +21,7 @@
   import { session } from './stores/session';
   import { sharing } from './stores/sharing';
   import Updater from './components/Updater.svelte';
+  import ConnectionAlerts from './components/ConnectionAlerts.svelte';
   import { incomingSharingInvitations } from './lib/sharingInvitations';
 
   let updater = $state<{ checkForUpdates: (manual?: boolean) => Promise<void> }>();
@@ -36,7 +37,10 @@
   let autoOnlineAccountId = $state<string | null>(null);
   let sharingActionError = $state<string | null>(null);
   const invitations = $derived(incomingSharingInvitations($sharing.groups, $presence.deviceId, $connection.session?.id));
-  const watchingCount = $derived($sharing.paused ? 0 : $sharing.ownGroup?.members.filter((member) => member.state === 'accepted' && member.startedAt !== undefined).length ?? 0);
+  const watchingCount = $derived($sharing.paused ? 0 : $sharing.ownGroup?.members.filter((member) => {
+    const health = $sharing.peerVideo[member.id];
+    return member.state === 'accepted' && member.startedAt !== undefined && (!health || (health.ready && health.running && health.videoState === 'active'));
+  }).length ?? 0);
 
   $effect(() => {
     if (runtime && $session.mode === 'cloud' && !signingOut) void sharing.initialize(runtime);
@@ -207,6 +211,7 @@
   {#if updateAvailable}<div class="welcome-update"><button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button></div>{/if}
   <Welcome />
 {:else}
+  <ConnectionAlerts />
   <div class="app-shell">
     <Sidebar active={page === 'diagnostics' ? 'settings' : page} {navigate} />
     <div class="content-shell">

@@ -131,7 +131,7 @@ struct Broadcaster::Delivery {
       submitted.load(),dispatched.load(),replaced.load(),referenceDrops.load(),
       peer.videoQueueDrops(),peer.repairedDatagrams(),peer.repairCacheMisses(),
       recovery.signals(),recovery.requests(),peer.recommendedBitrate(),policy.label(),policy.pauses(),recovery.backoffMs(Clock::now()),
-      static_cast<unsigned>(policy.state()),policy.pauseReason(),feedback.completedFrame,feedback.sentFrame,feedback.serial,feedback.congested};
+      static_cast<unsigned>(policy.state()),policy.pauseReason(),feedback.completedFrame,feedback.sentFrame,feedback.serial,feedback.congested,peer.stopReason()};
   }
 };
 
@@ -342,7 +342,7 @@ void HostOutput::pumpControl() {
     lastStats_=Clock::now();
     for(const auto& peer:broadcast_->stats()) {
       std::ostringstream line;
-      line<<"SNSHARE_PEER viewer="<<peer.id<<" ready="<<peer.ready<<" running="<<peer.running
+      line<<"SNSHARE_PEER viewer="<<peer.id<<" ready="<<peer.ready<<" running="<<peer.running<<" stopReason="<<peer.stopReason
         <<" submitted="<<peer.submitted<<" dispatched="<<peer.dispatched<<" replaced="<<peer.replaced
         <<" referenceDrops="<<peer.referenceDrops<<" sendQueueDrops="<<peer.sendQueueDrops
         <<" keyframeSignals="<<peer.keyframeSignals<<" keyframeRequests="<<peer.keyframeRequests

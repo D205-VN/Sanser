@@ -185,7 +185,16 @@
     } catch (error) {
       if (selectedP2p && !engineLaunched) await releaseP2pConnection(selectedP2p).catch(() => undefined);
       await stopRelay('client', target.id).catch(() => undefined);
-      if (signal.aborted || $connection.session?.id !== target.id) return false;
+      const stillCurrent = () => !signal.aborted && componentActive && $connection.session?.id === target.id;
+      if (!stillCurrent()) return false;
+      if (phase === 'launching') {
+        const status = await engineStatus('client').catch(() => null);
+        if (!stillCurrent()) return false;
+        if (status?.userClosed && status.sessionId === target.id) {
+          closedViewerSessionId = target.id;
+          await disconnect(); return false;
+        }
+      }
       const message = error instanceof Error ? error.message : 'Unable to start native client';
       p2pRetryCount += 1;
       p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
@@ -415,6 +424,9 @@
       if ($connection.engineRunning) {
         const status = await engineStatus('client');
         if (status.sessionId && status.sessionId !== current.id) return;
+        // Window close is terminal even if native audio/device teardown is
+        // still running. Do not wait for process exit or trigger route recovery.
+        if (status.userClosed && status.sessionId === current.id) { closedViewerSessionId = current.id; await disconnect(); return; }
         if (status.running && status.videoReceived && current.sharingId && current.requesterReadyAt && localDeviceId) {
           await client.markSharingStarted(current.id, localDeviceId, current.requesterReadyAt);
         }
@@ -424,7 +436,6 @@
           // A deliberate viewer X closes only its server session. This page
           // remains mounted across navigation; closing the main shell to tray
           // never emits the native viewer marker.
-          if (status.userClosed && status.sessionId === current.id) { closedViewerSessionId = current.id; await disconnect(); return; }
           const message = status.lastError ?? 'The native client stopped unexpectedly';
           const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;
           if (status.routeFailure && status.startupFailure !== 'auth-rejected' && status.startupFailure !== 'decode-failed' &&

@@ -147,11 +147,11 @@ it('does not equate an open native process with verified streaming', () => {
   expect(screen.getByText(/If the screen stays blank, check connection details/)).toBeInTheDocument();
 });
 
-it.each([false, true])('closes the server session when its native viewer is closed, sharing=%s', async (sharing) => {
+it.each([[false, false], [true, false], [true, true]])('closes the server session when its native viewer is closed, sharing=%s, teardownRunning=%s', async (sharing, teardownRunning) => {
   vi.useFakeTimers();
   const current = sharing ? { ...target, sharingId: 'group', accessMode: 'view-only' as const } : target;
   connection.begin(current); connection.setEngineRunning(true);
-  mocks.status.mockResolvedValue({ running: false, userClosed: true, sessionId: current.id });
+  mocks.status.mockResolvedValue({ running: teardownRunning, userClosed: true, sessionId: current.id });
   render(ActiveSession, { runtime, navigate: vi.fn() });
   await vi.advanceTimersByTimeAsync(10_000);
   expect(mocks.disconnect).toHaveBeenCalledExactlyOnceWith(current.id);
@@ -577,4 +577,28 @@ it('scopes cleanup by session when an old launch finishes after switching sessio
   expect(mocks.stopRelay).toHaveBeenCalledWith('client', target.id);
   expect(get(connection).session?.id).toBe('new-session');
   expect(get(connection).engineRunning).toBe(true);
+});
+
+it('disconnects instead of reopening when the viewer is closed during startup stabilization', async () => {
+  mocks.launch.mockRejectedValueOnce(new Error('Native viewer closed during startup'));
+  mocks.status.mockResolvedValue({ running: false, userClosed: true, sessionId: target.id });
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await waitFor(() => expect(mocks.disconnect).toHaveBeenCalledExactlyOnceWith(target.id));
+  expect(get(connection).session).toBeNull(); expect(mocks.launch).toHaveBeenCalledOnce();
+  expect(mocks.recovery).not.toHaveBeenCalled();
+});
+
+it('ignores a late startup close check after the active session has changed', async () => {
+  mocks.launch.mockRejectedValueOnce(new Error('Old viewer closed during startup'));
+  let finish: ((value: { running: boolean; userClosed: boolean; sessionId: string }) => void) | undefined;
+  mocks.status.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await waitFor(() => expect(finish).toBeDefined());
+  connection.begin({ ...target, id: 'new-session' }); connection.setEngineRunning(true);
+  finish?.({ running: false, userClosed: true, sessionId: target.id });
+  await waitFor(() => expect(get(connection).preparing).toBe(false));
+  expect(mocks.disconnect).not.toHaveBeenCalled();
+  expect(get(connection)).toMatchObject({ session: { id: 'new-session' }, nativeRetryBlocked: false, error: null });
 });

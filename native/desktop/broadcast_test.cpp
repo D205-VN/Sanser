@@ -96,7 +96,7 @@ int main() {
     require(host.publishedFrames()==1,"one encoded publication feeds three viewers");
     for(auto& viewer:viewers) { std::lock_guard lock(viewer.mutex); require(viewer.frames[0].data==Bytes(2500,0x6a) && viewer.frames[0].width==1280,"viewer frame contents"); }
     viewers[1].peer->stop();
-    require(waitFor([&] { for(auto peer:host.stats()) if(peer.id=="viewer-1") return !peer.running; return false; }),"one viewer disconnect is isolated");
+    require(waitFor([&] { for(auto peer:host.stats()) if(peer.id=="viewer-1") return !peer.running && peer.stopReason==1; return false; }),"deliberate viewer disconnect is reported and isolated");
     host.publish(Frame{Bytes(2500,0x7b),1280,720,true});
     require(waitFor([&] { return count(viewers[0])>=2 && count(viewers[2])>=2; }),"survivors continue after another viewer closes");
     host.remove("viewer-1"); host.remove("viewer-1");

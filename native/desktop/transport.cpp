@@ -691,7 +691,12 @@ void Peer::process(const Bytes& bytes) {
     }
     return;
   }
-  if (h.packetType==snv2::PacketType::Disconnect) { stopReason_=1; running_=false; return; }
+  if (h.packetType==snv2::PacketType::Disconnect) {
+    // Empty Disconnect remains a deliberate close for older peers. Optional
+    // authenticated error reasons preserve reconnect instead of ending a share.
+    stopReason_=(b.size()==1 && b[0]>=2 && b[0]<=5) ? b[0] : 1;
+    running_=false; return;
+  }
   if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback && b.size()==12 && std::memcmp(b.data(),"SVP1",4)==0) {
     std::uint64_t completed=0; for(std::size_t i=4;i<12;++i) completed=(completed<<8)|b[i];
     if(completed<=frame_.load()) {
@@ -1076,7 +1081,10 @@ void Peer::loop() {
       }
     }
   } catch (const std::exception& error) { std::cerr<<"SNV2_RECEIVE_ERROR "<<error.what()<<std::endl; stopReason_=5; running_=false; }
-  try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {}
+  try {
+    const auto reason=stopReason_.load();
+    transmit(snv2::PacketType::Disconnect,reason>=2 ? Bytes{static_cast<std::uint8_t>(reason)} : Bytes{});
+  } catch (...) {}
   running_=false; ready_=false; sendReady_.notify_all();
   logHealth();
   if(stopReason_>=2) std::cerr<<"SNV2_STOP reason="<<stopReason_.load()

@@ -1120,7 +1120,21 @@ impl EngineManager {
             // leaves an unmanaged sidecar behind.
             let _ = child.process.kill();
             let _ = child.process.wait();
-            state.last_errors.insert(request.kind, message.clone());
+            if let Some(id) = child.session_id {
+                state.last_sessions.insert(request.kind, id);
+                if request.kind == EngineKind::Client
+                    && (child.output.viewer_was_closed()
+                        || crate::engine_output::viewer_closed(&message))
+                {
+                    state.closed_viewers.insert(request.kind, id);
+                    state.last_errors.remove(&request.kind);
+                } else {
+                    state.closed_viewers.remove(&request.kind);
+                    state.last_errors.insert(request.kind, message.clone());
+                }
+            } else {
+                state.last_errors.insert(request.kind, message.clone());
+            }
             return Err(DesktopError::Process(message));
         }
         if let Some(peer) = sharing {
@@ -1285,9 +1299,11 @@ impl EngineManager {
         let mut process_id = None;
         let mut exited = false;
         let mut video_received = false;
+        let mut viewer_closed = false;
         let mut session_id = state.last_sessions.get(&kind).copied();
         if let Some(child) = state.children.get_mut(&kind) {
             session_id = child.session_id;
+            viewer_closed = kind == EngineKind::Client && child.output.viewer_was_closed();
             match child.process.try_wait() {
                 Ok(None) => {
                     running = true;
@@ -1313,6 +1329,10 @@ impl EngineManager {
                     exited = true;
                 }
             }
+        }
+        if viewer_closed && let Some(id) = session_id {
+            state.closed_viewers.insert(kind, id);
+            state.last_errors.remove(&kind);
         }
         if exited {
             if let Some(id) = session_id {

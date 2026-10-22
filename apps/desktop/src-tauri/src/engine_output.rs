@@ -3,7 +3,11 @@ use std::{
     collections::{HashMap, VecDeque},
     fs::File,
     io::{Read, Write},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -27,6 +31,7 @@ fn sharing_peer_status(line: &[u8]) -> Option<crate::models::SharingPeerStatus> 
     let mut backoff = None;
     let mut ready = None;
     let mut running = None;
+    let mut stop_reason = None;
     for field in line.split_ascii_whitespace() {
         let (key, value) = field.split_once('=')?;
         match key {
@@ -55,7 +60,15 @@ fn sharing_peer_status(line: &[u8]) -> Option<crate::models::SharingPeerStatus> 
                     _ => return None,
                 });
             }
-            "viewer" | "videoState" | "pauses" | "backoffMs" | "ready" | "running" => return None,
+            "stopReason" if stop_reason.is_none() => {
+                let reason = value.parse::<u8>().ok()?;
+                if reason > 5 {
+                    return None;
+                }
+                stop_reason = Some(reason);
+            }
+            "viewer" | "videoState" | "pauses" | "backoffMs" | "ready" | "running"
+            | "stopReason" => return None,
             _ => {}
         }
     }
@@ -64,6 +77,7 @@ fn sharing_peer_status(line: &[u8]) -> Option<crate::models::SharingPeerStatus> 
         ready: ready?,
         running: running?,
         video_state: state?,
+        stop_reason: stop_reason.unwrap_or(0),
         pauses: pauses?,
         backoff_ms: backoff?,
     })
@@ -148,6 +162,7 @@ pub(crate) fn relay_route_failure(message: &str) -> Option<crate::models::Native
 pub(crate) struct EngineOutput {
     tail: Arc<Mutex<VecDeque<u8>>>,
     completed: mpsc::Receiver<()>,
+    viewer_closed: Arc<AtomicBool>,
 }
 
 impl EngineOutput {
@@ -198,6 +213,8 @@ impl EngineOutput {
     ) -> std::io::Result<Self> {
         let tail = Arc::new(Mutex::new(VecDeque::with_capacity(TAIL_BYTES)));
         let worker_tail = Arc::clone(&tail);
+        let viewer_closed = Arc::new(AtomicBool::new(false));
+        let worker_closed = Arc::clone(&viewer_closed);
         let (complete, completed) = mpsc::channel();
         thread::Builder::new()
             .name("sanser-engine-output".into())
@@ -211,10 +228,19 @@ impl EngineOutput {
                     first_frame.as_deref(),
                     sharing.as_ref(),
                     voice.as_ref(),
+                    &worker_closed,
                 );
                 let _ = complete.send(());
             })?;
-        Ok(Self { tail, completed })
+        Ok(Self {
+            tail,
+            completed,
+            viewer_closed,
+        })
+    }
+
+    pub(crate) fn viewer_was_closed(&self) -> bool {
+        self.viewer_closed.load(Ordering::Acquire)
     }
 
     // Call only after the child has exited. A descendant retaining stderr cannot
@@ -246,6 +272,7 @@ fn drain(
     first_frame: Option<&std::sync::atomic::AtomicBool>,
     sharing: Option<&SharingStatuses>,
     voice: Option<&crate::voice::ObservedVoice>,
+    closed: &AtomicBool,
 ) {
     let mut buffer = [0_u8; 4096];
     let mut written = 0;
@@ -263,14 +290,12 @@ fn drain(
             tail.drain(..excess);
             tail.extend(&buffer[..length]);
         }
-        if metrics.is_some()
-            || acknowledgements.is_some()
-            || first_frame.is_some()
-            || sharing.is_some()
-            || voice.is_some()
         {
             for byte in &buffer[..length] {
                 if *byte == b'\n' {
+                    if !oversized && std::str::from_utf8(&line).is_ok_and(viewer_closed) {
+                        closed.store(true, Ordering::Release);
+                    }
                     if !oversized
                         && let Some(voice) = voice
                         && let Some(status) = crate::voice::parse_status(&line)
@@ -332,6 +357,57 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn viewer_close_is_observed_before_pipe_exit_and_survives_tail_eviction() -> std::io::Result<()>
+    {
+        struct LivePipe {
+            data: Cursor<Vec<u8>>,
+            gate: mpsc::Receiver<()>,
+            released: bool,
+        }
+        impl Read for LivePipe {
+            fn read(&mut self, target: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.data.read(target)?;
+                if count > 0 {
+                    return Ok(count);
+                }
+                if self.released {
+                    return Ok(0);
+                }
+                self.gate.recv().map_err(std::io::Error::other)?;
+                self.released = true;
+                self.data = Cursor::new(vec![b'x'; TAIL_BYTES + 4096]);
+                self.data.read(target)
+            }
+        }
+        let (release, gate) = mpsc::channel();
+        let output = EngineOutput::start(
+            LivePipe {
+                data: Cursor::new(b"SNV2_VIEWER_CLOSED\r\n".to_vec()),
+                gate,
+                released: false,
+            },
+            None,
+        )?;
+        let until = Instant::now() + Duration::from_secs(2);
+        while !output.viewer_was_closed() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let observed_before_exit = output.viewer_was_closed();
+        release.send(()).map_err(std::io::Error::other)?;
+        let tail = output.exit_message("fallback".into());
+        assert!(
+            observed_before_exit,
+            "close must be visible while native cleanup is still running"
+        );
+        assert!(!viewer_closed(&tail));
+        assert!(
+            output.viewer_was_closed(),
+            "later logs must not erase a user close"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn explicit_viewer_close_is_distinct_from_capture_pause_failure_and_tray_close() {
         assert!(viewer_closed(
             "SNV2_VIEWER_CLOSED\r\nSNV2_TRANSPORT_HEALTH running=0"
@@ -379,6 +455,27 @@ mod tests {
             None
         );
         assert_eq!(relay_route_failure("relay cipher lock failed"), None);
+    }
+
+    #[test]
+    fn sharing_close_reason_preserves_legacy_status_and_recovery() {
+        let line = format!(
+            "SNSHARE_PEER viewer={} ready=0 running=0 videoState=active pauses=0 backoffMs=0",
+            uuid::Uuid::new_v4()
+        );
+        assert_eq!(sharing_peer_status(line.as_bytes()).unwrap().stop_reason, 0);
+        for reason in 0..=5 {
+            let status =
+                sharing_peer_status(format!("{line} stopReason={reason}").as_bytes()).unwrap();
+            assert_eq!(status.stop_reason, reason);
+        }
+        for suffix in [
+            "stopReason=6",
+            "stopReason=NaN",
+            "stopReason=1 stopReason=2",
+        ] {
+            assert!(sharing_peer_status(format!("{line} {suffix}").as_bytes()).is_none());
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@
   import Toggle from '../components/Toggle.svelte';
   import SharingPanel from '../components/SharingPanel.svelte';
   import WindowsUac from '../components/WindowsUac.svelte';
+  import ConnectionNotificationSettings from '../components/ConnectionNotificationSettings.svelte';
   import { sharing } from '../stores/sharing';
   import type { ConnectionSession, RuntimeStatus } from '../lib/types';
   import { diagnostics } from '../stores/diagnostics';
@@ -112,6 +113,7 @@
   {#if runtime.platform.toLowerCase().includes('mac') && canHost}
     <details class="sharing-help"><summary>Mac permissions</summary><p>On this Mac, allow Sanser in System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording. Allow Accessibility for remote keyboard and mouse control. After changing permissions, quit Sanser completely (Cmd+Q), reopen /Applications/Sanser.app, and reconnect. If permission is already enabled but capture still fails after an update, turn Sanser’s recording permission off and on, then quit and reopen the app.</p></details>
   {/if}
+  <ConnectionNotificationSettings />
   {#if runtime.capabilities.multiViewerHost === true}<SharingPanel />{/if}
   {#if runtime.platform.toLowerCase().includes('win') && canHost}
     <WindowsUac sessionRunning={$host.engineRunning || $host.sharingActive} />

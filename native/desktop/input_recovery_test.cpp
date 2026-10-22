@@ -471,6 +471,33 @@ int main() {
       while(keys==0 && Clock::now()<resumed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
       check(keys==1 && resets>before && host.running(),"capture recovery must retry held-state release before accepting fresh input");
     }
+    // A remote transport failure stops its native peer, but must not look like
+    // the viewer deliberately leaving the server-side sharing membership.
+    for(const auto reason : {0U,2U,3U,4U,5U}) {
+      Stub remote; Options options; options.host=true; options.input=false;
+      options.token="sharing-disconnect-reason-fixture"; options.port=unusedPort(); options.peer="127.0.0.1:"+std::to_string(remote.port);
+      Peer host(options); PacketCodec codec(options.token,false); PeerStop stop{host}; host.start();
+      wire::Header header; header.keyId=777; header.sequence=1; header.packetType=wire::PacketType::Keepalive;
+      remote.send(options.port,codec.seal(header,{}));
+      const auto ready=Clock::now()+std::chrono::seconds(1);
+      while(!host.ready() && Clock::now()<ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(host.ready(),"disconnect reason fixture handshake");
+      ++header.sequence; header.packetType=wire::PacketType::Disconnect;
+      remote.send(options.port,codec.seal(header,reason ? Bytes{static_cast<std::uint8_t>(reason)} : Bytes{}));
+      const auto deadline=Clock::now()+std::chrono::seconds(1);
+      while(host.running() && Clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      check(!host.running() && host.stopReason()==(reason ? reason : 1),"deliberate close and recoverable transport failure remain distinct");
+      host.stop();
+      bool echoed=false; const auto until=Clock::now()+std::chrono::seconds(1);
+      while(!echoed && Clock::now()<until) {
+        const auto response=codec.open(remote.receive());
+        if(response && response->first.packetType==wire::PacketType::Disconnect) {
+          check(response->second==(reason ? Bytes{static_cast<std::uint8_t>(reason)} : Bytes{}),"shutdown preserves the authenticated error reason for the other side");
+          echoed=true;
+        }
+      }
+      check(echoed,"disconnect response remains compatible with legacy peers");
+    }
     std::cout<<"Input: ACK/SACK loss, safe reset fence, lease, capture pause/resume and legacy deadline passed\n";
     return 0;
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
