@@ -144,3 +144,15 @@ exports images of the test panel itself for visual inspection; it does not captu
 the screen or other applications.
 
 Research and primary sources: [group voice investigation](investigations/group-voice-research.md).
+
+## 2.2.20: multiple talkers and compact controls
+
+The mixer emits one shared playback tick for staggered remote talkers, rather
+than emitting extra partial mixes when their packet deadlines differ. Separate
+speaker decoders, jitter reserves and PLC remain. This fixes a reproduced
+scheduling defect; real speaker/microphone quality still requires listening tests.
+
+The compact floating bar exposes Join before joining and an explicit mic state
+and toggle afterward. Expanded controls distinguish Unmute/Mute mic, Hear/Mute
+voice and Leave. Hosts retain the combined sharing bar; viewers retain voice-only
+controls. Join still listens only and Unmute explicitly opens capture.

@@ -1,6 +1,6 @@
 # Viewer close and incoming access alerts
 
-Source changes after 2.2.19; these changes do not update an installed app.
+Packaged in 2.2.20. Update both installed desktops to receive these changes.
 
 ## Disconnect lifetime
 
