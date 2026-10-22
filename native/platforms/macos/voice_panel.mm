@@ -23,13 +23,14 @@ static NSColor* panelRed() { return [NSColor colorWithSRGBRed:1 green:0.49 blue:
 - (void)drawRect:(NSRect)dirty {
   (void)dirty;
   NSBezierPath* shape=[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds,0.5,0.5) xRadius:15 yRadius:15];
-  [[NSColor colorWithSRGBRed:0.065 green:0.082 blue:0.12 alpha:0.98] setFill]; [shape fill];
-  [[NSColor colorWithWhite:1 alpha:0.12] setStroke]; [shape stroke];
-  if(self.bounds.size.height>56) {
+  NSGradient* gradient=[[NSGradient alloc] initWithStartingColor:[NSColor colorWithSRGBRed:0.055 green:0.071 blue:0.105 alpha:1] endingColor:[NSColor colorWithSRGBRed:0.085 green:0.108 blue:0.15 alpha:1]];
+  [gradient drawInBezierPath:shape angle:90];
+  [[NSColor colorWithSRGBRed:0.19 green:0.23 blue:0.30 alpha:1] setStroke]; [shape stroke];
+  if(self.bounds.size.height>52) {
     [[NSColor colorWithWhite:1 alpha:0.08] setStroke];
     NSBezierPath* line=[NSBezierPath bezierPath];
-    [line moveToPoint:NSMakePoint(14,self.bounds.size.height-56)];
-    [line lineToPoint:NSMakePoint(self.bounds.size.width-14,self.bounds.size.height-56)]; [line stroke];
+    [line moveToPoint:NSMakePoint(14,self.bounds.size.height-52)];
+    [line lineToPoint:NSMakePoint(self.bounds.size.width-14,self.bounds.size.height-52)]; [line stroke];
   }
 }
 @end
@@ -48,7 +49,7 @@ static NSColor* panelRed() { return [NSColor colorWithSRGBRed:1 green:0.49 blue:
 - (void)mouseExited:(NSEvent*)event { (void)event; self.hovering=NO; self.needsDisplay=YES; }
 - (void)drawRect:(NSRect)dirty {
   [(self.hovering && self.enabled ? [self.fill blendedColorWithFraction:0.12 ofColor:NSColor.whiteColor] : self.fill) setFill];
-  [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:10 yRadius:10] fill];
+  [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:8 yRadius:8] fill];
   [super drawRect:dirty];
 }
 @end
@@ -80,6 +81,8 @@ static NSColor* panelRed() { return [NSColor colorWithSRGBRed:1 green:0.49 blue:
 @property(nonatomic,strong) NSTextField* titleLabel;
 @property(nonatomic,strong) NSTextField* subtitle;
 @property(nonatomic,strong) NSTextField* status;
+@property(nonatomic,strong) NSTextField* section;
+@property(nonatomic,strong) NSTextField* badge;
 @property(nonatomic,assign) BOOL expanded;
 @property(nonatomic,assign) BOOL voiceEnabled;
 - (void)activateVoice:(NSButton*)sender;
@@ -87,6 +90,7 @@ static NSColor* panelRed() { return [NSColor colorWithSRGBRed:1 green:0.49 blue:
 @end
 
 static void callIcon(NSButton* button,NSString* symbol,NSString* label,NSColor* tint,BOOL active=NO) {
+  button.title=@""; button.imagePosition=NSImageOnly;
   button.image=[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:label];
   button.symbolConfiguration=[NSImageSymbolConfiguration configurationWithPointSize:15 weight:NSFontWeightMedium];
   button.contentTintColor=tint; button.toolTip=label;
@@ -94,13 +98,18 @@ static void callIcon(NSButton* button,NSString* symbol,NSString* label,NSColor* 
   ((SanserCallButton*)button).fill=active ? [tint colorWithAlphaComponent:0.16] : [NSColor colorWithWhite:1 alpha:0.045];
   button.needsDisplay=YES;
 }
+static void callControl(NSButton* button,NSString* symbol,NSString* title,NSString* hint,NSColor* tint,BOOL active=NO) {
+  callIcon(button,symbol,hint,tint,active);
+  button.imagePosition=NSImageLeft; button.imageHugsTitle=YES; button.title=title;
+  button.font=[NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+}
 @implementation SanserVoicePanelActions
 - (void)activateVoice:(NSButton*)sender {
   if(sender.tag==5) { if(stop) { write({false,false,false}); stop(); } return; }
   if(sender.tag==0) {
     if(!self.voiceEnabled) return;
     self.expanded=!self.expanded;
-    NSRect frame=self.panel.frame; const auto height=self.expanded ? 148.0 : 56.0;
+    NSRect frame=self.panel.frame; const auto height=self.expanded ? 164.0 : 52.0;
     frame.origin.y=NSMaxY(frame)-height; frame.size.height=height;
     [self.panel setFrame:frame display:YES]; [self refreshVoice:nil]; return;
   }
@@ -119,34 +128,44 @@ static void callIcon(NSButton* button,NSString* symbol,NSString* label,NSColor* 
   previous=value; hasSnapshot=true; lastExpanded=self.expanded;
   const bool sharing=static_cast<bool>(stop);
   const auto width=self.panel.frame.size.width,height=self.panel.frame.size.height;
-  self.titleLabel.stringValue=sharing ? @"Sharing screen" : @"Group voice";
-  self.subtitle.stringValue=!self.voiceEnabled ? @"Screen sharing active" : value.capturing ? @"Mic on" : state.microphone ? @"Opening mic…" : state.deafened ? @"Voice deafened" : state.joined ? @"Listening · mic off" : @"Voice not joined";
-  self.subtitle.textColor=value.capturing ? panelAccent() : panelMuted();
-  self.titleLabel.frame=NSMakeRect(44,height-27,122,17); self.subtitle.frame=NSMakeRect(44,height-43,122,14);
-  self.toggle.frame=NSMakeRect(10,height-45,28,34);
+  self.titleLabel.stringValue=sharing ? @"Screen sharing" : @"Voice chat";
+  self.subtitle.stringValue=!self.voiceEnabled ? @"Sharing is active" : state.joined ? @"Connected to voice" : @"Voice is off";
+  self.subtitle.textColor=state.joined ? panelAccent() : panelMuted();
+  self.titleLabel.frame=NSMakeRect(48,height-25,124,17); self.subtitle.frame=NSMakeRect(48,height-40,124,13);
+  self.toggle.frame=NSMakeRect(12,height-40,28,28);
   callIcon(self.toggle,sharing ? @"display" : @"waveform",sharing ? @"Screen sharing active · open voice controls" : @"Open voice controls",sharing || state.joined ? panelAccent() : panelInk(),YES);
-  // The title itself also expands the panel without making a tiny icon the only target.
-  self.shortcut.frame=NSMakeRect(width-(sharing ? 126 : 86),height-44,34,32);
-  self.chevron.frame=NSMakeRect(width-(sharing ? 86 : 46),height-44,34,32);
-  self.stopButton.frame=NSMakeRect(width-46,height-44,34,32);
+  self.shortcut.frame=NSMakeRect(width-(sharing ? 164 : 132),height-40,78,28);
+  self.chevron.frame=NSMakeRect(width-(sharing ? 78 : 42),height-40,28,28);
+  self.stopButton.frame=NSMakeRect(width-42,height-40,28,28);
   self.stopButton.hidden=!sharing;
   self.shortcut.hidden=self.chevron.hidden=!self.voiceEnabled;
-  self.toggle.enabled=self.voiceEnabled;
-  self.shortcut.enabled=state.joined;
+  self.toggle.enabled=self.voiceEnabled; self.shortcut.enabled=YES;
+  self.shortcut.tag=state.joined ? 2 : 1;
   const auto micLabel=state.microphone ? @"Mute microphone" : @"Unmute microphone";
-  callIcon(self.shortcut,state.microphone ? @"mic.fill" : @"mic.slash",micLabel,value.capturing ? panelAccent() : state.microphone ? panelRed() : panelMuted(),state.microphone);
+  callControl(self.shortcut,!state.joined ? @"headphones" : state.microphone ? @"mic.fill" : @"mic.slash",!state.joined ? @"Join" : value.capturing ? @"Mic on" : state.microphone ? @"…" : @"Muted",!state.joined ? @"Join voice · listen only" : micLabel,value.capturing ? panelAccent() : panelInk(),state.microphone);
+  self.shortcut.symbolConfiguration=[NSImageSymbolConfiguration configurationWithPointSize:12 weight:NSFontWeightMedium];
   callIcon(self.chevron,self.expanded ? @"chevron.up" : @"chevron.down",self.expanded ? @"Collapse voice controls" : @"Expand voice controls",panelMuted());
+  ((SanserCallButton*)self.chevron).fill=NSColor.clearColor;
   callIcon(self.stopButton,@"stop.fill",@"Stop screen sharing",panelRed(),YES);
-  NSArray<NSButton*>* buttons=@[self.join,self.microphone,self.deafen,self.leave];
-  const auto spacing=(width-32)/4;
-  for(NSUInteger i=0;i<buttons.count;++i) { buttons[i].frame=NSMakeRect(16+i*spacing+(spacing-42)/2,43,42,38); buttons[i].hidden=!self.expanded; }
-  self.status.hidden=!self.expanded; self.status.frame=NSMakeRect(12,10,width-24,26);
-  self.join.enabled=!state.joined; self.microphone.enabled=self.deafen.enabled=self.leave.enabled=state.joined;
-  callIcon(self.join,@"phone.arrow.up.right",@"Join voice · listen only",panelAccent());
-  callIcon(self.microphone,state.microphone ? @"mic.fill" : @"mic.slash",micLabel,value.capturing ? panelAccent() : panelInk(),state.microphone);
-  callIcon(self.deafen,state.deafened ? @"speaker.slash" : @"headphones",state.deafened ? @"Hear voice" : @"Deafen voice and mute microphone",state.deafened ? panelRed() : panelInk(),state.deafened);
+  const auto actionWidth=(width-92)/2;
+  self.join.frame=NSMakeRect(16,40,width-32,36);
+  self.microphone.frame=NSMakeRect(16,40,actionWidth,36);
+  self.deafen.frame=NSMakeRect(24+actionWidth,40,actionWidth,36);
+  self.leave.frame=NSMakeRect(width-52,40,36,36);
+  self.join.hidden=!self.expanded || state.joined;
+  self.microphone.hidden=self.deafen.hidden=self.leave.hidden=!self.expanded || !state.joined;
+  self.section.hidden=self.badge.hidden=self.status.hidden=!self.expanded;
+  self.section.frame=NSMakeRect(16,85,150,16); self.badge.frame=NSMakeRect(width-88,85,72,16);
+  self.section.stringValue=@"VOICE CHAT";
+  self.badge.stringValue=value.capturing ? @"MIC LIVE" : state.microphone ? @"OPENING" : state.joined ? @"MIC OFF" : @"NOT JOINED";
+  self.badge.textColor=value.capturing ? panelAccent() : panelMuted();
+  self.status.frame=NSMakeRect(16,8,width-32,24);
+  self.join.enabled=YES; self.microphone.enabled=self.deafen.enabled=self.leave.enabled=state.joined;
+  callControl(self.join,@"headphones",@"Join voice",@"Join voice · listen only",panelAccent(),YES);
+  callControl(self.microphone,state.microphone ? @"mic.fill" : @"mic.slash",state.microphone ? @"Mute mic" : @"Unmute",micLabel,value.capturing ? panelAccent() : panelInk(),state.microphone);
+  callControl(self.deafen,state.deafened ? @"speaker.slash" : @"headphones",state.deafened ? @"Hear voice" : @"Mute voice",state.deafened ? @"Hear voice" : @"Deafen voice and mute microphone",state.deafened ? panelRed() : panelInk(),state.deafened);
   callIcon(self.leave,@"phone.down",@"Leave voice",panelRed());
-  self.status.stringValue=value.code=="permission-denied" ? @"Allow Microphone in System Settings." : value.code=="no-device" ? @"No microphone available." : value.code=="unavailable" ? @"Microphone unavailable. Unmute to retry." : value.capturing ? @"Microphone on · you can talk" : state.microphone ? @"Opening microphone…" : state.deafened ? @"Voice deafened · microphone off" : state.joined ? @"Listening · unmute to talk" : @"Join to listen · microphone stays off";
+  self.status.stringValue=value.code=="permission-denied" ? @"Allow Microphone in System Settings." : value.code=="no-device" ? @"No microphone available." : value.code=="unavailable" ? @"Microphone unavailable. Unmute to retry." : value.capturing ? @"Your microphone is on." : state.microphone ? @"Opening your microphone…" : state.deafened ? @"Voice muted. Your microphone is off." : state.joined ? @"You're listening. Your microphone is off." : @"Join to listen. Your mic stays off.";
   [self.panel.contentView setNeedsDisplay:YES];
 }
 @end
@@ -159,13 +178,13 @@ struct VoicePanel::Impl {
   Impl(bool enabled,VoiceRuntime& voice,std::function<void()> stop):Impl([&voice] { return voice.snapshot(); },[&voice](sanser::voice::State state) { voice.configure(state); },enabled,std::move(stop)) {}
   Impl(std::function<VoiceRuntime::Status()> read,std::function<void(sanser::voice::State)> write,bool enabled=true,std::function<void()> stop={}) {
     if(stop) [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-    const auto area=NSScreen.mainScreen.visibleFrame; const auto width=stop ? 300.0 : 264.0;
-    panel=[[SanserCallPanel alloc] initWithContentRect:NSMakeRect(NSMaxX(area)-width-20,NSMaxY(area)-76,width,56) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+    const auto area=NSScreen.mainScreen.visibleFrame; const auto width=stop ? 352.0 : 312.0;
+    panel=[[SanserCallPanel alloc] initWithContentRect:NSMakeRect(NSMaxX(area)-width-20,NSMaxY(area)-72,width,52) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
     panel.releasedWhenClosed=NO; panel.level=NSFloatingWindowLevel; panel.movableByWindowBackground=YES; panel.hidesOnDeactivate=NO;
     panel.opaque=NO; panel.backgroundColor=NSColor.clearColor; panel.hasShadow=YES;
     panel.appearance=[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
-    panel.contentView=[[SanserCallSurface alloc] initWithFrame:NSMakeRect(0,0,width,56)];
+    panel.contentView=[[SanserCallSurface alloc] initWithFrame:NSMakeRect(0,0,width,52)];
     action=[SanserVoicePanelActions new]; action->read=std::move(read); action->write=std::move(write); action->stop=std::move(stop); action.panel=panel; action.voiceEnabled=enabled;
     const auto button=[&](NSInteger tag) {
       SanserCallButton* result=[[SanserCallButton alloc] initWithFrame:NSZeroRect];
@@ -180,7 +199,10 @@ struct VoicePanel::Impl {
       [panel.contentView addSubview:result]; return result;
     };
     action.titleLabel=label(12,panelInk()); action.subtitle=label(10,panelMuted());
-    action.status=label(10,panelMuted()); action.status.alignment=NSTextAlignmentCenter; action.status.maximumNumberOfLines=2;
+    action.section=label(9,panelMuted()); action.badge=label(8,panelMuted()); action.badge.alignment=NSTextAlignmentCenter;
+    action.badge.wantsLayer=YES; action.badge.layer.cornerRadius=4; action.badge.layer.backgroundColor=[NSColor colorWithWhite:1 alpha:0.045].CGColor;
+    ((SanserCallLabel*)action.section).control=nil; ((SanserCallLabel*)action.badge).control=nil;
+    action.status=label(10,panelMuted()); action.status.alignment=NSTextAlignmentLeft; action.status.maximumNumberOfLines=2;
     ((SanserCallLabel*)action.status).control=nil;
     [action refreshVoice:nil];
     timer=[NSTimer timerWithTimeInterval:0.1 target:action selector:@selector(refreshVoice:) userInfo:nil repeats:YES];
@@ -231,6 +253,13 @@ void testVoicePanelControls() {
     if(!status.state.deafened || status.state.microphone) throw std::runtime_error("Floating Deafen must mute capture");
     [panel.action.leave performClick:nil];
     if(status.state.joined || status.state.microphone) throw std::runtime_error("Floating Leave did not revoke consent");
+    [panel.action.toggle performClick:nil];
+    [panel.action.shortcut performClick:nil];
+    if(panel.action.expanded || !status.state.joined || status.state.microphone) throw std::runtime_error("Compact Join must listen only without opening capture");
+    [panel.action.chevron performClick:nil];
+    if(!panel.action.join.hidden || panel.action.microphone.hidden) throw std::runtime_error("Joined voice must show mic/sound actions instead of Join");
+    [panel.action.leave performClick:nil];
+    if(panel.action.join.hidden || !panel.action.microphone.hidden) throw std::runtime_error("Leaving voice must restore the Join action");
     VoicePanel::Impl host([&] { return status; },[&](voice::State next) { status.state=next; ++changes; },true,[&] { ++stops; });
     if(host.action.stopButton.hidden || host.action.titleLabel.stringValue.length==0) throw std::runtime_error("Sharing host needs a combined screen/voice panel");
     preview(host,"host-compact.png");

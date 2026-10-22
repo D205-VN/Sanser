@@ -132,6 +132,10 @@ struct Mixer::Impl {
     }
   };
   std::array<Source,maxSpeakers> sources;
+  // Sources keep independent decode/reorder state, but one output device has
+  // one sample clock. Polling each source at wall time on every drain iteration
+  // emitted additional partial mixes when their deadlines had different phases.
+  std::optional<Clock::time_point> outputDue;
 };
 Mixer::Mixer():impl_(std::make_unique<Impl>()) {}
 Mixer::~Mixer()=default;
@@ -155,12 +159,18 @@ bool Mixer::receive(Packet packet,Clock::time_point now) {
   return true;
 }
 std::optional<desktop::AudioSamples> Mixer::poll(Clock::time_point now) {
+  if(impl_->outputDue && now<*impl_->outputDue) return {};
+  // Do not replay a backlog after a stalled worker. Source deadlines retain
+  // their own bounded recovery and stale-packet handling below.
+  if(!impl_->outputDue || now-*impl_->outputDue>std::chrono::milliseconds(40)) impl_->outputDue=now;
+  const auto tick=*impl_->outputDue;
   std::array<std::int32_t,desktop::audioFrames*desktop::audioChannels> mixed{};
   bool any=false;
-  for(auto& source:impl_->sources) if(!source.muted) if(const auto block=source.poll(now)) {
+  for(auto& source:impl_->sources) if(!source.muted) if(const auto block=source.poll(tick)) {
     any=true; for(unsigned i=0;i<mixed.size();++i) mixed[i]+=(*block)[i];
   }
-  if(!any) return {};
+  if(!any) { impl_->outputDue.reset(); return {}; }
+  *impl_->outputDue=tick+std::chrono::milliseconds(5);
   desktop::AudioSamples out{};
   // Leave headroom and smoothly limit simultaneous loud talkers, avoiding
   // integer overflow and hard clipping while preserving ordinary speech gain.
@@ -179,7 +189,7 @@ std::vector<desktop::AudioSamples> Mixer::drain(Clock::time_point now) {
   }
   return blocks;
 }
-void Mixer::clear() { for(auto& source:impl_->sources) source.reset(); }
+void Mixer::clear() { for(auto& source:impl_->sources) source.reset(); impl_->outputDue.reset(); }
 Stats Mixer::stats() const {
   Stats out; for(const auto& source:impl_->sources) { const auto& s=source.stats; out.decoded+=s.decoded; out.concealed+=s.concealed; out.fecAttempts+=s.fecAttempts; out.late+=s.late; out.dropped+=s.dropped; out.invalid+=s.invalid; } return out;
 }

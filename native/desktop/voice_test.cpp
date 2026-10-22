@@ -102,6 +102,26 @@ int main() {
       delivered+=static_cast<unsigned>(scheduled.drain(t+std::chrono::milliseconds(ms)).size());
     }
     require(delivered>=395 && scheduled.stats().dropped==0,"elapsed voice blocks catch up without reducing the sample rate or dropping speech");
+    // Independent talkers arrive at different phases. They still share one
+    // 48kHz device: adding speakers must not add output blocks or speed up PCM.
+    for(unsigned talkers=2;talkers<=3;++talkers) {
+      v::Mixer room; std::array<v::Encoder,3> talker;
+      std::array<unsigned,3> next{0,6,13}; unsigned blocks=0,maxBurst=0;
+      for(unsigned ms=0;ms<=2002;ms+=7) {
+        for(unsigned speaker=0;speaker<talkers;++speaker) {
+          while(next[speaker]<=ms && next[speaker]<2000) {
+            const auto at=t+std::chrono::milliseconds(next[speaker]);
+            require(room.receive(packet(talker[speaker],at,speaker),at),"staggered group speech received");
+            next[speaker]+=20;
+          }
+        }
+        const auto output=room.drain(t+std::chrono::milliseconds(ms));
+        blocks+=static_cast<unsigned>(output.size()); maxBurst=std::max(maxBurst,static_cast<unsigned>(output.size()));
+      }
+      std::cout<<"Staggered voice talkers="<<talkers<<" output5msBlocks="<<blocks<<" maxWorkerBurst="<<maxBurst<<'\n';
+      require(blocks>=395 && blocks<=400 && maxBurst<=2,"two/three talkers must share one playback clock, not multiply PCM output");
+      require(room.stats().decoded>=talkers*96 && room.stats().dropped==0,"all staggered talkers decode without stale drops");
+    }
     v::Mixer mixed;
     for(unsigned i=0;i<4;++i) { auto p=first; p.speaker=i; require(mixed.receive(p,t),"independent speakers accepted"); }
     const auto sum=mixed.poll(t+std::chrono::milliseconds(20));

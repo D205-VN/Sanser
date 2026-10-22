@@ -45,6 +45,20 @@ rendered system sound plus conversation as a reference before microphone Opus
 encoding. This is distinct from PLC, noise gating and automatic gain control.
 Physical speaker/microphone routes still need verification on both machines.
 
+## Group voice playback and panel update after 2.2.19
+
+The next source update replaces the expanded icon grid with a single Join action
+before joining, then labeled Unmute/Mute mic and Mute/Hear voice controls after
+joining. Host and viewer bars retain separate roles. The shorter collapsed bar
+includes a labeled Join/Muted/Mic on shortcut; actual capture confirmation controls
+the live indicator. Leaving restores Join. No participant count or speaking status
+is invented from packet reception.
+
+All remote speakers now feed one 5 ms output sample clock. Independent decoder
+and jitter state remains per source. Adding two or three speakers with staggered
+arrival times must not add output PCM blocks to the same playback interval.
+See [reproduction and before/after measurements](investigations/group-voice-mix-clock.md).
+
 ## Transport and audio
 
 Microphone capture uses AVFoundation permission + Core Audio input on macOS and
