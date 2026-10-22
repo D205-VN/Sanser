@@ -463,11 +463,16 @@ mod tests {
             "SNSHARE_PEER viewer={} ready=0 running=0 videoState=active pauses=0 backoffMs=0",
             uuid::Uuid::new_v4()
         );
-        assert_eq!(sharing_peer_status(line.as_bytes()).unwrap().stop_reason, 0);
+        assert_eq!(
+            sharing_peer_status(line.as_bytes()).map(|status| status.stop_reason),
+            Some(0)
+        );
         for reason in 0..=5 {
-            let status =
-                sharing_peer_status(format!("{line} stopReason={reason}").as_bytes()).unwrap();
-            assert_eq!(status.stop_reason, reason);
+            assert_eq!(
+                sharing_peer_status(format!("{line} stopReason={reason}").as_bytes())
+                    .map(|status| status.stop_reason),
+                Some(reason)
+            );
         }
         for suffix in [
             "stopReason=6",
