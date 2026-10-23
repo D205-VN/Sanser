@@ -44,6 +44,7 @@ public:
   long top() const { return top_; }
 
 private:
+  bool captureFrameOnce(FrameBgra& frame, std::uint32_t timeoutMs);
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::uint32_t width_ = 0;

@@ -15,6 +15,8 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "SNHOST_CAPTURE_RECOVERY",
+    "SNINPUT_OS_REJECTED",
     "FEC_HEALTH",
     "DIRECT_PATH_HEALTH",
     "SNV2_TRANSPORT_HEALTH",
@@ -53,6 +55,8 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "captureRecoveryCode",
+    "inputRejected",
     "fecNegotiated",
     "fecTargetPercent",
     "fecVideoBytes",
@@ -706,6 +710,19 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 // floating-point results from real latency measurements.
 #[allow(clippy::float_cmp)]
 mod tests {
+    #[test]
+    fn capture_and_input_rejections_keep_codes_without_app_or_key_content() {
+        let code = 0x887a_002b_u32;
+        let capture = super::parse_sample(format!("SNHOST_CAPTURE_RECOVERY captureRecoveryCode={code} stage=Map_staging app=private.exe path=C:\\private").as_bytes()).unwrap();
+        assert_eq!(capture.values.len(), 1);
+        assert_eq!(capture.values["captureRecoveryCode"], f64::from(code));
+        let input = super::parse_sample(
+            b"SNINPUT_OS_REJECTED inputRejected=1 kind=3 key=secret retryHeldRelease=1",
+        )
+        .unwrap();
+        assert_eq!(input.values.len(), 1);
+        assert_eq!(input.values["inputRejected"], 1.0);
+    }
     use super::*;
     #[test]
     fn live_path_report_retains_numbers_without_addresses_or_probe_keys() {

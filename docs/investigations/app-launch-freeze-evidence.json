@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-23",
+  "baseline": "569762ac23a3db69a10a3e8ce48e3730057423a9",
+  "reaVersion": "6.5.0",
+  "method": "REA static installed Mac artifact/Mach-O inspection; separate pinned upstream source and official documentation review; no target execution, capture or policy changes",
+  "artifacts": [
+    {
+      "evidenceId": "ev_339a11ace0ef183b3a079745d2288ab71271a14c3605201ceec104d4bd3cf630",
+      "operation": "inspect_artifact",
+      "name": "Parsec.app",
+      "sha256": "174e5ded6cc2fbe5f24048f4378bbe77eaec1b3d2c8f6479ad112abb2686273e",
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics."
+      ]
+    },
+    {
+      "evidenceId": "ev_cfa140bebf703b74977e33e763412d66cbdb1103b2f84983d3026866052bfeab",
+      "operation": "inspect_macho",
+      "name": "parsecd-150-101a.dylib",
+      "sha256": "9cce85059c7f95f1a8e578b3c9f7200cb364520e557b5c85294802c8c596cdd5",
+      "limitations": [
+        "Imports and exports combine dyld_info and nm; stripped or toolchain-hidden symbols may be absent.",
+        "vtool output is retained as provenance but only otool build metadata is normalized."
+      ]
+    },
+    {
+      "evidenceId": "ev_0c235331254f5c4e36be8481723dffed2af1a299aa30fc3d64b8459076f0f814",
+      "operation": "inspect_artifact",
+      "name": "AnyDesk.app",
+      "sha256": "5fcc8cfafe3db8de44256761a5a0bba7bc8b3aaa6c22a9c2e54665e8f9a83f3c",
+      "limitations": [
+        "Inspection derives bounded static hypotheses and next probes; it does not execute the artifact or claim format-specific semantics."
+      ]
+    },
+    {
+      "evidenceId": "ev_d0c0955fc65a45eeda5ef9bae270a31b1244539774666fb2f97550841d3d3b0f",
+      "operation": "inspect_macho",
+      "name": "AnyDesk",
+      "sha256": "95f13e91d14fee2c5d2753e8604fcf790de09ab44069e02bc7f17a43376c0104",
+      "limitations": [
+        "Imports and exports combine dyld_info and nm; stripped or toolchain-hidden symbols may be absent.",
+        "vtool output is retained as provenance but only otool build metadata is normalized."
+      ]
+    }
+  ],
+  "upstream": [
+    {
+      "repo": "LizardByte/Sunshine",
+      "commit": "d0b4a88ef727f8dabf80cc970a14739b55c885de",
+      "path": "src/platform/windows/display_base.cpp",
+      "sha256": "32bc90e02edde11d6091f94df5e70b815649ba23206221057dba6a53fd3e365b"
+    },
+    {
+      "repo": "LizardByte/Sunshine",
+      "commit": "d0b4a88ef727f8dabf80cc970a14739b55c885de",
+      "path": "src/platform/windows/misc.cpp",
+      "sha256": "6dcd6c96a19a53b33559fbddb68f9248b7c25f4e96b3027a69820de0aef38165"
+    },
+    {
+      "repo": "rustdesk/rustdesk",
+      "commit": "25d27422733920926cff0c27f8e37f8fdbd26288",
+      "path": "src/server/video_service.rs",
+      "sha256": "9b5ea12aa3ec261510cf5044dc38c7ffba136b199002708d3c3d3cacf5b34db7"
+    }
+  ]
+}

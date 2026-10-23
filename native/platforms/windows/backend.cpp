@@ -34,6 +34,7 @@
 #include <stdexcept>
 #include <fstream>
 #include <cstdlib>
+#include <functional>
 using Microsoft::WRL::ComPtr;
 namespace sanser::desktop {
 namespace {
@@ -44,7 +45,9 @@ struct Runtime {
 };
 class Injector {
 public:
-  explicit Injector(const DesktopDuplicator& display) : left_(display.left()),top_(display.top()),width_(display.width()),height_(display.height()) {}
+  using Send=std::function<UINT(UINT,INPUT*,int)>;
+  explicit Injector(const DesktopDuplicator& display,Send send=[](UINT count,INPUT* input,int size) { return sanser::uac::sendInput(count,input,size); })
+    : left_(display.left()),top_(display.top()),width_(display.width()),height_(display.height()),send_(std::move(send)) {}
   ~Injector() { reset(); }
   void apply(const Input& event) {
     if(event.kind==Input::Reset) { reset(); return; }
@@ -52,7 +55,6 @@ public:
     if(event.kind==Input::Key) {
       const auto scan=windowsKey(event.code); if(!scan) return;
       input.type=INPUT_KEYBOARD; input.ki.wScan=scan&255; input.ki.dwFlags=KEYEVENTF_SCANCODE|(scan&256?KEYEVENTF_EXTENDEDKEY:0)|(event.down?0:KEYEVENTF_KEYUP);
-      if(event.down) keys_.insert(event.code); else keys_.erase(event.code);
     } else {
       input.type=INPUT_MOUSE;
       const auto vx=GetSystemMetrics(SM_XVIRTUALSCREEN),vy=GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -61,29 +63,42 @@ public:
       input.mi.dy=static_cast<LONG>((top_-vy+event.y/65535.0*std::max(1U,height_-1))*65535/vh);
       input.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK;
       if(event.kind==Input::Button) {
+        if(event.code>2) return;
         static constexpr DWORD down[]={MOUSEEVENTF_LEFTDOWN,MOUSEEVENTF_RIGHTDOWN,MOUSEEVENTF_MIDDLEDOWN};
         static constexpr DWORD up[]={MOUSEEVENTF_LEFTUP,MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_MIDDLEUP};
         input.mi.dwFlags|=event.down?down[event.code]:up[event.code];
-        if(event.down) buttons_.insert(event.code); else buttons_.erase(event.code);
       }
       if(event.kind==Input::Scroll) { input.mi.dwFlags=MOUSEEVENTF_WHEEL; input.mi.mouseData=static_cast<DWORD>(static_cast<int>(event.delta)*WHEEL_DELTA); }
     }
-    sanser::uac::sendInput(1,&input,sizeof(input));
+    // Only track transitions accepted by the OS/helper. A failed release must
+    // remain owned so Reset can retry after an elevated app/desktop returns.
+    if(send_(1,&input,sizeof(input))==1) {
+      if(event.kind==Input::Key) { if(event.down) keys_.insert(event.code); else keys_.erase(event.code); }
+      if(event.kind==Input::Button) { if(event.down) buttons_.insert(event.code); else buttons_.erase(event.code); }
+    } else {
+      const auto now=Clock::now();
+      if(lastFailure_.time_since_epoch().count()==0 || now-lastFailure_>=std::chrono::seconds(1)) {
+        std::cerr<<"SNINPUT_OS_REJECTED inputRejected=1 kind="<<static_cast<unsigned>(event.kind)<<" retryHeldRelease=1"<<std::endl;
+        lastFailure_=now;
+      }
+    }
   }
 private:
   void reset() {
     for(auto it=keys_.begin();it!=keys_.end();) {
       const auto scan=windowsKey(*it); INPUT input{}; input.type=INPUT_KEYBOARD; input.ki.wScan=scan&255;
       input.ki.dwFlags=KEYEVENTF_SCANCODE|KEYEVENTF_KEYUP|(scan&256?KEYEVENTF_EXTENDEDKEY:0);
-      if(sanser::uac::sendInput(1,&input,sizeof(input))==1) it=keys_.erase(it); else ++it;
+      if(send_(1,&input,sizeof(input))==1) it=keys_.erase(it); else ++it;
     }
     static constexpr DWORD up[]={MOUSEEVENTF_LEFTUP,MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_MIDDLEUP};
     for(auto it=buttons_.begin();it!=buttons_.end();) {
       INPUT input{}; input.type=INPUT_MOUSE; input.mi.dwFlags=up[*it];
-      if(sanser::uac::sendInput(1,&input,sizeof(input))==1) it=buttons_.erase(it); else ++it;
+      if(send_(1,&input,sizeof(input))==1) it=buttons_.erase(it); else ++it;
     }
   }
   long left_,top_; std::uint32_t width_,height_; std::set<std::uint16_t> keys_,buttons_;
+  Send send_;
+  Clock::time_point lastFailure_{};
 };
 struct Image { Bytes pixels; std::uint32_t width=0,height=0; Clock::time_point decodedAt=Clock::now(); };
 struct Nv12Image { Bytes pixels; std::uint32_t width=0,height=0,stride=0,rows=0,left=0,top=0; Clock::time_point decodedAt=Clock::now(); };
@@ -277,6 +292,28 @@ void presentReadyFrame(HWND window) {
 #ifdef SANSER_CODEC_TEST
 void testWindowsInput() {
   const auto require=[](bool value,const char* message) { if(!value) throw std::runtime_error(message); };
+  {
+    // No real desktop capture or input. Model SendInput being denied during an
+    // elevated app transition and recovering afterward on the same session.
+    DesktopDuplicator unused;
+    bool allowed=false; std::vector<INPUT> attempts;
+    Injector injector(unused,[&](UINT count,INPUT* input,int) {
+      attempts.push_back(*input); return allowed ? count : 0U;
+    });
+    injector.apply({Input::Key,0,0,225,0,true});
+    attempts.clear(); allowed=true; injector.apply(Input{});
+    require(attempts.empty(),"A rejected key-down must not create an owned key to release");
+    injector.apply({Input::Key,0,0,225,0,true});
+    allowed=false; injector.apply({Input::Key,0,0,225,0,false});
+    attempts.clear(); allowed=true; injector.apply(Input{});
+    require(attempts.size()==1 && attempts[0].type==INPUT_KEYBOARD && (attempts[0].ki.dwFlags&KEYEVENTF_KEYUP),"Failed modifier release must be retried after desktop recovery");
+    injector.apply({Input::Button,100,100,0,0,true});
+    allowed=false; injector.apply({Input::Button,100,100,0,0,false});
+    attempts.clear(); allowed=true; injector.apply(Input{});
+    require(attempts.size()==1 && attempts[0].type==INPUT_MOUSE && attempts[0].mi.dwFlags==MOUSEEVENTF_LEFTUP,"Failed mouse-up must survive until recovery Reset");
+    attempts.clear(); injector.apply(Input{});
+    require(attempts.empty(),"Successful recovery must not replay presses or repeat releases");
+  }
   WindowState state; std::vector<Input> events; state.sendInput=[&](Input input) { events.push_back(input); };
   WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=GetModuleHandleW(nullptr); klass.lpszClassName=L"SanserInputRegression"; RegisterClassW(&klass);
   HWND window=CreateWindowW(klass.lpszClassName,L"Input test",WS_OVERLAPPEDWINDOW,0,0,640,480,nullptr,nullptr,klass.hInstance,&state);

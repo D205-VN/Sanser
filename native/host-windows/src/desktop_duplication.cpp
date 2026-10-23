@@ -1,4 +1,5 @@
 #include "desktop_duplication.h"
+#include "../../common/capture_recovery.h"
 #ifndef SANSER_UAC_WORKER
 #include "../../windows-uac/client.h"
 #endif
@@ -21,7 +22,7 @@ namespace {
 
 void checkHr(HRESULT hr, const char* label) {
   if (FAILED(hr)) {
-    throw std::runtime_error(std::string(label) + ": " + hresultMessage(hr));
+    throw sanser::capture::OperationError(static_cast<std::uint32_t>(hr),std::string(label) + ": " + hresultMessage(hr));
   }
 }
 
@@ -149,6 +150,16 @@ void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t out
 }
 
 bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) {
+  return sanser::capture::guard([&] { return captureFrameOnce(frame,timeoutMs); },
+    [&](const sanser::capture::OperationError& error) {
+      frame=FrameBgra{};
+      impl_->recoveryPending=true;
+      impl_->nextRecoveryAttempt=std::chrono::steady_clock::now();
+      std::fprintf(stderr,"SNHOST_CAPTURE_RECOVERY captureRecoveryCode=%u stage=%s action=recreate\n",error.result(),error.what());
+    });
+}
+
+bool DesktopDuplicator::captureFrameOnce(FrameBgra& frame, std::uint32_t timeoutMs) {
   lastAcquireWaitMicros_ = 0;
   if (impl_->recoveryPending) {
     const auto now = std::chrono::steady_clock::now();
@@ -205,12 +216,8 @@ bool DesktopDuplicator::captureFrame(FrameBgra& frame, std::uint32_t timeoutMs) 
     std::chrono::duration_cast<std::chrono::microseconds>(
       std::chrono::steady_clock::now() - acquireStartedAt).count());
   if (acquireHr == DXGI_ERROR_WAIT_TIMEOUT) return false;
-  if (acquireHr == DXGI_ERROR_ACCESS_LOST || acquireHr == E_ACCESSDENIED ||
-      acquireHr == DXGI_ERROR_SESSION_DISCONNECTED ||
-      acquireHr == DXGI_ERROR_DEVICE_REMOVED || acquireHr == DXGI_ERROR_DEVICE_RESET) {
-    impl_->recoveryPending = true;
-    impl_->nextRecoveryAttempt = std::chrono::steady_clock::now();
-    return false;
+  if (acquireHr == static_cast<HRESULT>(WAIT_ABANDONED)) {
+    throw sanser::capture::OperationError(static_cast<std::uint32_t>(acquireHr),"AcquireNextFrame: abandoned desktop synchronization");
   }
   checkHr(acquireHr, "AcquireNextFrame");
 
