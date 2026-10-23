@@ -1,9 +1,9 @@
-# Sanser 2.2.20
+# Sanser 2.2.21
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.20
+Product:  Sanser 2.2.21
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,7 +20,7 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.20 includes one-encoder screen sharing for up to three view-only
+Sanser 2.2.21 includes one-encoder screen sharing for up to three view-only
 computers in the same account, common native diagnostics, bounded route reconnect,
 authenticated input-only reset after ACK loss, viewer-close Disconnect and
 reference-safe sharing dispatch. Relay recovery retains the real failure even
@@ -46,7 +46,10 @@ Version 2.2.20 uses one group-voice playback clock for staggered speakers and
 refines the compact sharing/voice controls. Closing a viewer ends its sharing
 membership and frees the slot, while the host receives a named access alert
 with a scoped Stop action. Desktop notifications can be enabled in Host.
-See [Release notes](docs/releases/v2.2.20.md),
+Version 2.2.21 recovers transient Windows desktop/GPU capture failures, retains
+rejected input releases for reset, and refreshes SNV2 pointer bounds after display
+mode changes. These repairs do not establish the cause of every WAN latency spike.
+See [Release notes](docs/releases/v2.2.21.md),
 [stability validation and remaining work](docs/session-stability-2.2.14.md)
 and [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.

@@ -2,7 +2,7 @@
 
 Investigation date: 2026-10-23. Source baseline: Sanser 2.2.20, commit
 569762ac23a3db69a10a3e8ce48e3730057423a9. These follow-up fixes are source
-changes; they are not included in the published 2.2.20 installer.
+changes, packaged in 2.2.21; they are not included in the 2.2.20 installer.
 
 ## Evidence from retained Sanser reports
 

@@ -151,12 +151,22 @@ int main() {
         return std::string("missing");
       };
       const auto deadline=Clock::now()+std::chrono::seconds(12);
-      unsigned published=0;
       while(state()!="paused" && Clock::now()<deadline) {
         group.updateHealth();
-        const bool key=group.takeKeyframeRequest() || published==0;
-        group.publish(Frame{Bytes(20000,0x5c),1280,720,key}); ++published;
+        (void)group.takeKeyframeRequest();
+        // Keep offering independent pictures above this viewer's 1 Mbps
+        // budget. Dependent P-frames can enter IDR backoff and give the viewer
+        // clean completed-frame windows, which correctly reset sustained
+        // pressure. That tests intermittent recovery, not continuous overload.
+        // IDR storm/backoff behavior is covered in the preceding case.
+        group.publish(Frame{Bytes(20000,0x5c),1280,720,true});
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      if(state()!="paused") {
+        for(const auto& peer:group.stats()) std::cerr<<"Isolation setup peer="<<peer.id<<" state="<<peer.videoState
+          <<" submitted="<<peer.submitted<<" dispatched="<<peer.dispatched<<" replaced="<<peer.replaced
+          <<" referenceDrops="<<peer.referenceDrops<<" sendQueueDrops="<<peer.sendQueueDrops
+          <<" backoffMs="<<peer.backoffMs<<" completed="<<peer.completedFrame<<'\n';
       }
       require(state()=="paused","a persistently congested viewer is automatically paused");
       require(group.bitrate()>1000000,"paused viewer no longer sets the shared encoder bitrate");
