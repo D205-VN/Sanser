@@ -68,6 +68,12 @@ documentation, not an invented proprietary decompilation.
    retry a failed release after desktop recovery, and never replays a press.
    Rejected injection is logged separately from capture failure. This does not
    itself establish or eliminate the legacy RTT stall in the retained report.
+3. The SNV2 Windows injector copied the display rectangle only at construction.
+   A capture-generation change after a mode/full-screen transition updated video
+   but retained old mouse coordinates. The capture thread now publishes the new
+   rectangle under a short mutex; the input thread reads a snapshot. Zero-sized
+   unavailable displays cannot underflow coordinate calculation. Legacy already
+   refreshed its input bounds and is not changed for this issue.
 
 New bounded numeric report sources retain capture error codes and input
 rejections. They discard app names, input contents, paths and stage strings.
@@ -79,8 +85,20 @@ A device-free native fault-injection test covers desktop/GPU errors, resource
 cleanup before recreation, successful subsequent capture, idle polls and fatal
 errors that must propagate. Windows SDK constants are checked on Windows.
 The native Windows input fixture simulates denied down/up and recovery without
-opening real apps, injecting physical input or invoking UAC. Rust tests cover
+opening real apps, injecting physical input or invoking UAC. It also verifies
+pointer mapping after resolution changes and zero-sized display transitions.
+Rust tests cover
 numeric evidence filtering. Windows CI must validate the platform integration.
+
+The first Windows CI build passed capture recovery and input tests, but its
+prerecorded codec fixture failed after cold Media Foundation initialization took
+964 ms: its finite source overfilled the intentionally bounded live queue and
+could not respond to the resulting IDR request. The fixture now starts its frame
+clock after the first access unit is consumed (without waiting for output).
+Continuous decoding, final-picture and frame-count assertions remain; the
+low-delay fixture retains its strict one-input/one-output timeout. Synthetic
+DecodeWorker tests separately cover cold queue retention, overflow and expiry.
+Production queue/deadline policies are unchanged by this test correction.
 
 Remaining physical reproduction: identify the direction and launched app;
 compare an ordinary window, its elevated variant and full-screen/mode switch

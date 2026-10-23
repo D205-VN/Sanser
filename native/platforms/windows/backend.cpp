@@ -47,8 +47,12 @@ class Injector {
 public:
   using Send=std::function<UINT(UINT,INPUT*,int)>;
   explicit Injector(const DesktopDuplicator& display,Send send=[](UINT count,INPUT* input,int size) { return sanser::uac::sendInput(count,input,size); })
-    : left_(display.left()),top_(display.top()),width_(display.width()),height_(display.height()),send_(std::move(send)) {}
+    : send_(std::move(send)) { setViewport(display.left(),display.top(),display.width(),display.height()); }
   ~Injector() { reset(); }
+  void setViewport(long left,long top,std::uint32_t width,std::uint32_t height) {
+    std::lock_guard lock(viewportMutex_);
+    viewport_={left,top,std::max(1U,width),std::max(1U,height)};
+  }
   void apply(const Input& event) {
     if(event.kind==Input::Reset) { reset(); return; }
     INPUT input{};
@@ -56,11 +60,13 @@ public:
       const auto scan=windowsKey(event.code); if(!scan) return;
       input.type=INPUT_KEYBOARD; input.ki.wScan=scan&255; input.ki.dwFlags=KEYEVENTF_SCANCODE|(scan&256?KEYEVENTF_EXTENDEDKEY:0)|(event.down?0:KEYEVENTF_KEYUP);
     } else {
+      Viewport viewport;
+      { std::lock_guard lock(viewportMutex_); viewport=viewport_; }
       input.type=INPUT_MOUSE;
       const auto vx=GetSystemMetrics(SM_XVIRTUALSCREEN),vy=GetSystemMetrics(SM_YVIRTUALSCREEN);
       const auto vw=std::max(1,GetSystemMetrics(SM_CXVIRTUALSCREEN)-1),vh=std::max(1,GetSystemMetrics(SM_CYVIRTUALSCREEN)-1);
-      input.mi.dx=static_cast<LONG>((left_-vx+event.x/65535.0*std::max(1U,width_-1))*65535/vw);
-      input.mi.dy=static_cast<LONG>((top_-vy+event.y/65535.0*std::max(1U,height_-1))*65535/vh);
+      input.mi.dx=static_cast<LONG>((viewport.left-vx+event.x/65535.0*(viewport.width-1))*65535/vw);
+      input.mi.dy=static_cast<LONG>((viewport.top-vy+event.y/65535.0*(viewport.height-1))*65535/vh);
       input.mi.dwFlags=MOUSEEVENTF_MOVE|MOUSEEVENTF_ABSOLUTE|MOUSEEVENTF_VIRTUALDESK;
       if(event.kind==Input::Button) {
         if(event.code>2) return;
@@ -96,7 +102,9 @@ private:
       if(send_(1,&input,sizeof(input))==1) it=buttons_.erase(it); else ++it;
     }
   }
-  long left_,top_; std::uint32_t width_,height_; std::set<std::uint16_t> keys_,buttons_;
+  struct Viewport { long left=0,top=0; std::uint32_t width=1,height=1; };
+  std::mutex viewportMutex_; Viewport viewport_;
+  std::set<std::uint16_t> keys_,buttons_;
   Send send_;
   Clock::time_point lastFailure_{};
 };
@@ -313,6 +321,19 @@ void testWindowsInput() {
     require(attempts.size()==1 && attempts[0].type==INPUT_MOUSE && attempts[0].mi.dwFlags==MOUSEEVENTF_LEFTUP,"Failed mouse-up must survive until recovery Reset");
     attempts.clear(); injector.apply(Input{});
     require(attempts.empty(),"Successful recovery must not replay presses or repeat releases");
+    injector.setViewport(0,0,640,480);
+    injector.apply({Input::Move,65535,65535});
+    const auto oldTarget=attempts.back().mi;
+    injector.setViewport(0,0,320,240);
+    injector.apply({Input::Move,65535,65535});
+    require(attempts.back().mi.dx<oldTarget.dx && attempts.back().mi.dy<oldTarget.dy,
+      "Display mode recovery must update input geometry instead of retaining the old resolution");
+    injector.setViewport(0,0,0,0);
+    injector.apply({Input::Move,65535,65535});
+    const auto origin=attempts.back().mi;
+    injector.apply({Input::Move,0,0});
+    require(attempts.back().mi.dx==origin.dx && attempts.back().mi.dy==origin.dy,
+      "Unavailable display dimensions must not underflow the input target");
   }
   WindowState state; std::vector<Input> events; state.sendInput=[&](Input input) { events.push_back(input); };
   WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=GetModuleHandleW(nullptr); klass.lpszClassName=L"SanserInputRegression"; RegisterClassW(&klass);
@@ -385,7 +406,7 @@ void testWindowsMacFixture(const char* path,bool lowDelay) {
   const auto width=read(),height=read(),count=read();
   if(width>3840 || height>2160 || count!=45) throw std::runtime_error("Invalid Mac fixture dimensions/count");
   std::mutex mutex; std::condition_variable changed; std::shared_ptr<const Image> latest;
-  std::atomic<unsigned> decoded{0},converted{0},keyframes{0}; std::atomic<bool> conversionError{false};
+  std::atomic<unsigned> decoded{0},converted{0},keyframes{0}; std::atomic<bool> conversionError{false},firstInputConsumed{false};
   LatestFrameWorker<Nv12Image> conversion([&](Nv12Image frame) {
     try {
       auto image=std::make_shared<const Image>(convertNv12(frame));
@@ -399,6 +420,7 @@ void testWindowsMacFixture(const char* path,bool lowDelay) {
     if(!runtime) runtime=std::make_unique<Runtime>();
     if(!decoder) decoder=std::make_unique<Decoder>(width,height,[&](Nv12Image image) { conversion.submit(std::move(image)); ++decoded; changed.notify_all(); });
     decoder->decode(frame);
+    firstInputConsumed=true; changed.notify_all();
   },[&] { decoder.reset(); runtime.reset(); decodedBase=decoded.load(); },[&] { ++keyframes; changed.notify_all(); },true,false,
     [] { return Clock::now(); },[&] { return decoded.load()>decodedBase; });
   for(unsigned i=0;i<count;++i) {
@@ -407,6 +429,16 @@ void testWindowsMacFixture(const char* path,bool lowDelay) {
     Frame frame{Bytes(size),width,height,key==1}; file.read(reinterpret_cast<char*>(frame.data.data()),size);
     if(!file) throw std::runtime_error("Truncated Mac access unit");
     worker.submit(std::move(frame));
+    if(i==0 && !lowDelay) {
+      // This prerecorded source cannot answer an IDR request after a cold MF
+      // initialization exceeds the bounded live queue. Start its frame clock
+      // after first input acceptance, not after the first decoded picture
+      // (which may legitimately need more reference frames). DecodeWorker's
+      // fault-injection tests separately exercise cold queue overflow/expiry.
+      std::unique_lock lock(mutex);
+      if(!changed.wait_for(lock,std::chrono::seconds(5),[&] { return firstInputConsumed || worker.failures()>0; }) || worker.failures()>0)
+        throw std::runtime_error("Windows decoder did not accept the initial Mac access unit");
+    }
     if(lowDelay) {
       // Submit exactly one access unit, then stop feeding. An idle remote
       // desktop must not wait for another mouse movement to expose this frame.
@@ -488,6 +520,7 @@ int runWindows(bool host,int argc,char** argv) {
           std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue;
         }
         if(generation!=display.generation()) {
+          injector.setViewport(display.left(),display.top(),display.width(),display.height());
           if(encoding.gpuDevice && encoding.gpuDevice!=display.gpuDevice()) {
             encoding.gpuDevice=display.gpuDevice();
             encoder=std::make_unique<MfVideoPacketEncoder>(options.width,options.height,encoding);
