@@ -2941,6 +2941,16 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
               << " udpWaitOvershootAvgMs=" << gLiveLatency.pacingOvershoot.load()
               << " udpSocketAvgMs=" << gLiveLatency.socketSend.load() << "\n";
     std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
+    if(payload.find("\"inputOsRejected\"")!=std::string::npos) {
+      std::cout<<"SNINPUT_OS_HEALTH inputOsDirect="<<jsonUint64Value(payload,"inputOsDirect")
+        <<" inputOsPrivileged="<<jsonUint64Value(payload,"inputOsPrivileged")
+        <<" inputOsRejected="<<jsonUint64Value(payload,"inputOsRejected")
+        <<" inputSourceIntegrity="<<jsonUint64Value(payload,"inputSourceIntegrity")
+        <<" inputTargetIntegrity="<<jsonUint64Value(payload,"inputTargetIntegrity")
+        <<" inputFailureStatus="<<jsonUint64Value(payload,"inputFailureStatus")
+        <<" inputFailureError="<<jsonUint64Value(payload,"inputFailureError")
+        <<" inputAllowed="<<jsonUint64Value(payload,"inputAllowed")<<'\n';
+    }
     return HostControlEvent::Pong;
   }
   if (payload.find("\"type\":\"input-ack\"") != std::string::npos) {

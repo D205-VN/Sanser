@@ -17,6 +17,7 @@ const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
     "SNHOST_CAPTURE_RECOVERY",
     "SNINPUT_OS_REJECTED",
+    "SNINPUT_OS_HEALTH",
     "FEC_HEALTH",
     "DIRECT_PATH_HEALTH",
     "SNV2_TRANSPORT_HEALTH",
@@ -57,6 +58,16 @@ const SOURCES: &[&str] = &[
 const FIELDS: &[&str] = &[
     "captureRecoveryCode",
     "inputRejected",
+    "inputOsDirect",
+    "inputOsPrivileged",
+    "inputOsRejected",
+    "inputSourceIntegrity",
+    "inputTargetIntegrity",
+    "inputFailureStatus",
+    "inputFailureError",
+    "inputAllowed",
+    "applied",
+    "events",
     "fecNegotiated",
     "fecTargetPercent",
     "fecVideoBytes",
@@ -710,6 +721,20 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 // floating-point results from real latency measurements.
 #[allow(clippy::float_cmp)]
 mod tests {
+    #[test]
+    fn legacy_execution_health_and_ack_counts_exclude_input_content() {
+        let sample=super::parse_sample(b"SNINPUT_OS_HEALTH inputOsDirect=12 inputOsPrivileged=3 inputOsRejected=4 inputSourceIntegrity=8192 inputTargetIntegrity=12288 inputFailureStatus=4 inputFailureError=5 inputAllowed=1 app=private.exe key=65 x=0.25 path=C:\\private").unwrap();
+        assert_eq!(sample.values.len(), 8);
+        assert_eq!(sample.values["inputOsRejected"], 4.0);
+        assert_eq!(sample.values["inputTargetIntegrity"], 12288.0);
+        let ack =
+            super::parse_sample(b"SNINPUT_ACK applied=0 events=2 rttMs=9 key=65 text=private")
+                .unwrap();
+        assert_eq!(ack.values.len(), 3);
+        assert_eq!(ack.values["applied"], 0.0);
+        assert_eq!(ack.values["events"], 2.0);
+        assert!(!serde_json::to_string(&sample).unwrap().contains("private"));
+    }
     #[test]
     fn capture_and_input_rejections_keep_codes_without_app_or_key_content() {
         let code = 0x887a_002b_u32;

@@ -26,6 +26,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -1516,6 +1517,31 @@ void recordInputHealth(InputHealthKind kind, bool ok) {
   maybeLogInputHealth();
 }
 
+std::atomic<std::uint64_t> gInputOsDirect{0},gInputOsPrivileged{0},gInputOsRejected{0};
+std::atomic<DWORD> gInputSourceIntegrity{0},gInputTargetIntegrity{0},gInputFailureStatus{0},gInputFailureError{0};
+#ifdef SANSER_UAC_TEST
+thread_local std::function<UINT(INPUT&,sanser::uac::InputDispatch&)> gInputDispatchTestHook;
+#endif
+bool sendAcceptedInput(INPUT& input) {
+  sanser::uac::InputDispatch dispatch;
+  UINT sent=0;
+#ifdef SANSER_UAC_TEST
+  if(gInputDispatchTestHook) sent=gInputDispatchTestHook(input,dispatch);
+  else
+#endif
+    sent=sanser::uac::sendInput(1,&input,sizeof(input),&dispatch);
+  gInputOsDirect+=dispatch.direct;
+  gInputOsPrivileged+=dispatch.privileged;
+  gInputSourceIntegrity=dispatch.sourceIntegrity;
+  gInputTargetIntegrity=dispatch.targetIntegrity;
+  if(sent!=1) {
+    ++gInputOsRejected;
+    gInputFailureStatus=dispatch.failureStatus;
+    gInputFailureError=dispatch.failureError;
+  }
+  return sent==1;
+}
+
 bool movePointerNormalized(double normalizedX, double normalizedY) {
   const POINT target = normalizedToScreenPoint(normalizedX, normalizedY);
 
@@ -1534,7 +1560,7 @@ bool movePointerNormalized(double normalizedX, double normalizedY) {
   input.mi.dx = absoluteX;
   input.mi.dy = absoluteY;
   input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1
+  if (sendAcceptedInput(input)
       && (sanser::uac::active() || cursorNearTarget(target))) return true;
 
   mouse_event(input.mi.dwFlags,
@@ -1596,17 +1622,14 @@ RelativePointerApplyResult movePointerRelative(double deltaX, double deltaY) {
 #ifdef MOUSEEVENTF_MOVE_NOCOALESCE
   input.mi.dwFlags |= MOUSEEVENTF_MOVE_NOCOALESCE;
 #endif
-  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) {
+  if (sendAcceptedInput(input)) {
     result.moved = true;
     return result;
   }
 
-  mouse_event(MOUSEEVENTF_MOVE,
-              static_cast<DWORD>(relativeX),
-              static_cast<DWORD>(relativeY),
-              0,
-              0);
-  result.moved = GetLastError() == ERROR_SUCCESS;
+  // A void compatibility API cannot confirm execution after SendInput failed.
+  // Retain failure rather than treating an unrelated GetLastError as success.
+  result.moved = false;
   return result;
 }
 
@@ -1632,9 +1655,7 @@ bool sendMouseButtonRaw(int button, bool down) {
   INPUT input{};
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = normalizeMacMouseButton(button, down);
-  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
-  mouse_event(input.mi.dwFlags, 0, 0, 0, 0);
-  return GetLastError() == ERROR_SUCCESS;
+  return sendAcceptedInput(input);
 }
 
 bool sendMouseButton(int button, bool down) {
@@ -1656,9 +1677,7 @@ bool sendWheel(double deltaY, bool precise) {
   input.type = INPUT_MOUSE;
   input.mi.dwFlags = MOUSEEVENTF_WHEEL;
   input.mi.mouseData = static_cast<DWORD>(static_cast<LONG>(std::lround(clamped)));
-  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
-  mouse_event(MOUSEEVENTF_WHEEL, 0, 0, static_cast<DWORD>(static_cast<LONG>(std::lround(clamped))), 0);
-  return GetLastError() == ERROR_SUCCESS;
+  return sendAcceptedInput(input);
 }
 
 WORD macKeyCodeToVirtualKey(int keyCode, const std::string& keyText) {
@@ -1867,9 +1886,7 @@ bool sendVirtualKeyRaw(WORD virtualKey, bool down) {
   input.type = INPUT_KEYBOARD;
   input.ki.wVk = virtualKey;
   input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
-  if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
-  keybd_event(static_cast<BYTE>(virtualKey), 0, down ? 0 : KEYEVENTF_KEYUP, 0);
-  return GetLastError() == ERROR_SUCCESS;
+  return sendAcceptedInput(input);
 }
 
 bool sendKeyInjectionRaw(const KeyInjection& key, bool down) {
@@ -1879,15 +1896,9 @@ bool sendKeyInjectionRaw(const KeyInjection& key, bool down) {
     input.ki.wScan = static_cast<WORD>(key.scanCode);
     input.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
     if (key.extended) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-    if (sanser::uac::sendInput(1, &input, sizeof(input)) == 1) return true;
-
-    if (key.virtualKey != 0) {
-      keybd_event(static_cast<BYTE>(key.virtualKey),
-                  static_cast<BYTE>(key.scanCode),
-                  input.ki.dwFlags,
-                  0);
-      if (GetLastError() == ERROR_SUCCESS) return true;
-    }
+    // A rejected scan-code transaction is not permission to replay the key
+    // through a second API. The broker already owns elevated fallback.
+    return sendAcceptedInput(input);
   }
   return sendVirtualKeyRaw(static_cast<WORD>(key.virtualKey), down);
 }
@@ -2028,31 +2039,30 @@ void resetRemoteInputState(const std::string& reason) {
           gRemoteKeysDown[i].extended,
           gRemoteKeysDown[i].scanCodeMode
         });
-        gRemoteKeysDown[i].down = false;
       }
     }
     for (std::size_t i = 0; i < gRemoteMouseButtonsDown.size(); ++i) {
       if (gRemoteMouseButtonsDown[i]) {
         buttonsToRelease.push_back(static_cast<int>(i));
-        gRemoteMouseButtonsDown[i] = false;
       }
     }
   }
 
   int releasedButtons = 0;
   for (const int button : buttonsToRelease) {
-    if (sendMouseButtonRaw(button, false)) releasedButtons += 1;
+    if (sendMouseButton(button, false)) releasedButtons += 1;
   }
   int releasedKeys = 0;
   for (auto it = keysToRelease.rbegin(); it != keysToRelease.rend(); ++it) {
-    if (sendKeyInjectionRaw(*it, false)) releasedKeys += 1;
+    if (sendKeyInjection(*it, false)) releasedKeys += 1;
   }
 
   std::cerr << "SNINPUT_RESET reason=" << reason
             << " keys=" << releasedKeys
             << " buttons=" << releasedButtons
             << "\n";
-  recordInputHealth(InputHealthKind::Reset, true);
+  recordInputHealth(InputHealthKind::Reset,
+    releasedButtons==static_cast<int>(buttonsToRelease.size()) && releasedKeys==static_cast<int>(keysToRelease.size()));
 }
 
 void sendShortcut(WORD virtualKey) {
@@ -3939,6 +3949,14 @@ private:
                << ",\"pacingOvershootMs\":" << gPacingOvershootMs.load()
                << ",\"socketSendMs\":" << gSocketSendMs.load()
                << ",\"gpuInput\":" << gGpuInput.load()
+               << ",\"inputOsDirect\":" << gInputOsDirect.load()
+               << ",\"inputOsPrivileged\":" << gInputOsPrivileged.load()
+               << ",\"inputOsRejected\":" << gInputOsRejected.load()
+               << ",\"inputSourceIntegrity\":" << gInputSourceIntegrity.load()
+               << ",\"inputTargetIntegrity\":" << gInputTargetIntegrity.load()
+               << ",\"inputFailureStatus\":" << gInputFailureStatus.load()
+               << ",\"inputFailureError\":" << gInputFailureError.load()
+               << ",\"inputAllowed\":" << (gRemoteInputAllowed.load() ? 1 : 0)
                << "}";
           sendTimedControlReply(pong.str(), payload, receivedMicros, dequeuedMicros);
           flushGamepadRumbleEvents("control-ping");
@@ -7350,6 +7368,44 @@ int main(int argc, char** argv) {
   try {
 #ifdef SANSER_UAC_TEST
   if(argc>=2 && std::string_view(argv[1])=="--test-uac-input") return testUacInput(argc,argv);
+  if(argc==2 && std::string_view(argv[1])=="--test-input-dispatch") {
+    // Simulate OS/helper rejection, including a stale ERROR_SUCCESS. No real
+    // input, UAC desktop, foreground app, capture or audio device is accessed.
+    bool allowed=false; unsigned attempts=0;
+    gInputDispatchTestHook=[&](INPUT&,sanser::uac::InputDispatch& dispatch) -> UINT {
+      ++attempts; SetLastError(ERROR_SUCCESS);
+      dispatch.sourceIntegrity=8192; dispatch.targetIntegrity=12288;
+      if(allowed) { dispatch.privileged=1; return 1; }
+      dispatch.failureStatus=4; dispatch.failureError=ERROR_ACCESS_DENIED; return 0;
+    };
+    struct Restore { ~Restore() { gInputDispatchTestHook={}; } } restore;
+    const auto require=[](bool ok,const char* message) { if(!ok) throw std::runtime_error(message); };
+    const KeyInjection key{static_cast<std::uint16_t>('A'),0x1e,false,true};
+    require(!sendMouseButtonRaw(0,true),"Denied click must not report success from a void fallback API");
+    require(!sendWheel(1.0,false),"Denied scroll must not report success from stale GetLastError");
+    require(!sendVirtualKeyRaw('A',true),"Denied virtual key must not report false success");
+    require(!sendKeyInjectionRaw(key,true),"Denied scan-code key must not replay through another API");
+    require(!movePointerRelative(1,1).moved,"Denied relative movement must remain rejected");
+    require(attempts==5 && gInputOsRejected==5 && gInputOsDirect==0 && gInputOsPrivileged==0,
+      "Exactly one attempt and one rejection must be recorded per denied event");
+    allowed=true; require(sendMouseButton(0,true),"Accepted click must still work");
+    allowed=false; require(!sendMouseButton(0,false) && gRemoteMouseButtonsDown[0],"Denied mouse release must retain owned state");
+    allowed=true; require(sendMouseButton(0,false) && !gRemoteMouseButtonsDown[0],"Recovered mouse release must clear owned state");
+    require(sendKeyInjection(key,true),"Accepted scan-code key must still work");
+    allowed=false; require(!sendKeyInjection(key,false) && remoteKeyDown(key),"Denied key release must retain owned state");
+    allowed=true; require(sendKeyInjection(key,false) && !remoteKeyDown(key),"Recovered key release must clear owned state");
+    require(gInputOsPrivileged==4 && gInputOsRejected==7 && gInputFailureError==ERROR_ACCESS_DENIED,
+      "Execution health must distinguish privileged acceptance and rejection");
+    require(sendMouseButton(0,true) && sendKeyInjection(key,true),"Set up owned input for Reset recovery");
+    allowed=false; resetRemoteInputState("synthetic-denial");
+    require(gRemoteMouseButtonsDown[0] && remoteKeyDown(key),"Denied Reset must retain keys/buttons for a later recovery");
+    allowed=true; resetRemoteInputState("synthetic-recovery");
+    require(!gRemoteMouseButtonsDown[0] && !remoteKeyDown(key),"Later Reset must release retained input without replaying presses");
+    const auto settled=attempts; resetRemoteInputState("synthetic-idempotent");
+    require(attempts==settled,"A successful Reset must not repeat releases");
+    std::cout<<"Legacy input: denied clicks/scroll/keys, no false-success fallback, no key replay and recovered releases passed\n";
+    return 0;
+  }
 #endif
 #ifdef SANSER_AUDIO_TEST
     if(argc==2 && std::string_view(argv[1])=="--test-audio-wire") {
