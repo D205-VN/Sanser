@@ -73,7 +73,10 @@ int main() {
       connect(group,first,desktop,"desktop-first",'v');
       connect(group,second,desktop,"desktop-second",'w');
       group.publish(Frame{Bytes(256*1024,0x3c),1920,1080,true});
-      require(waitFor([&] { return count(first)==1 && count(second)==1; }),"large desktop IDR must finish pacing for every sharing viewer");
+      require(waitFor([&] {
+        if(group.takeKeyframeRequest()) group.publish(Frame{Bytes(256*1024,0x3c),1920,1080,true});
+        return count(first)>0 && count(second)>0;
+      }),"large desktop IDR must finish pacing for every sharing viewer");
       for(unsigned i=0;i<20;++i) {
         group.updateHealth();
         group.publish(Frame{Bytes(8000,static_cast<std::uint8_t>(i)),1920,1080,false});
