@@ -1,13 +1,56 @@
 // Isolated Windows CI fixture. This never changes UAC policy or opens a real
 // installer: its only elevated target is the Cancel button created below.
 #include "win_util.h"
+#include "client.h"
+#include "protocol.h"
+#include <aclapi.h>
 #include <sddl.h>
 #include <iostream>
 #include <cstdint>
 #include <algorithm>
 
+using namespace sanser::uac;
 namespace {
 bool clicked=false;
+class DenyServerQuery {
+public:
+  DenyServerQuery() {
+    SC_HANDLE manager=OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT);
+    require(manager!=nullptr,"Fixture SCM query");
+    SC_HANDLE service=OpenServiceW(manager,serviceName,SERVICE_QUERY_STATUS);
+    SERVICE_STATUS_PROCESS status{}; DWORD bytes=0;
+    const bool found=service && QueryServiceStatusEx(service,SC_STATUS_PROCESS_INFO,reinterpret_cast<BYTE*>(&status),sizeof(status),&bytes);
+    if(service) CloseServiceHandle(service); CloseServiceHandle(manager);
+    require(found && status.dwCurrentState==SERVICE_RUNNING,"Fixture running service PID");
+    HANDLE debugRaw=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_ADJUST_PRIVILEGES|TOKEN_QUERY,&debugRaw)!=FALSE,"Fixture debug token");
+    Handle debug(debugRaw); TOKEN_PRIVILEGES privilege{}; privilege.PrivilegeCount=1;
+    require(LookupPrivilegeValueW(nullptr,L"SeDebugPrivilege",&privilege.Privileges[0].Luid)!=FALSE,"Fixture debug privilege");
+    privilege.Privileges[0].Attributes=SE_PRIVILEGE_ENABLED;
+    require(AdjustTokenPrivileges(debug.value,FALSE,&privilege,0,nullptr,nullptr) && GetLastError()!=ERROR_NOT_ALL_ASSIGNED,"Enable fixture process DACL test");
+    process_=Handle(OpenProcess(READ_CONTROL|WRITE_DAC,FALSE,status.dwProcessId));
+    require(static_cast<bool>(process_),"Fixture SYSTEM process security handle");
+    require(GetSecurityInfo(process_.value,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,&original_,nullptr,&descriptor_)==ERROR_SUCCESS,"Save fixture process DACL");
+    HANDLE raw=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw)!=FALSE,"Fixture user SID");
+    Handle token(raw); DWORD size=0; GetTokenInformation(token.value,TokenUser,nullptr,0,&size);
+    std::vector<BYTE> user(size); require(size && GetTokenInformation(token.value,TokenUser,user.data(),size,&size),"Read fixture user SID");
+    EXPLICIT_ACCESSW deny{}; deny.grfAccessPermissions=PROCESS_QUERY_LIMITED_INFORMATION;
+    deny.grfAccessMode=DENY_ACCESS; deny.grfInheritance=NO_INHERITANCE;
+    deny.Trustee.TrusteeForm=TRUSTEE_IS_SID; deny.Trustee.TrusteeType=TRUSTEE_IS_USER;
+    deny.Trustee.ptstrName=reinterpret_cast<LPWSTR>(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid);
+    PACL changed=nullptr;
+    require(SetEntriesInAclW(1,&deny,original_,&changed)==ERROR_SUCCESS,"Deny fixture process query only");
+    const auto error=SetSecurityInfo(process_.value,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,changed,nullptr);
+    LocalFree(changed); require(error==ERROR_SUCCESS,"Apply fixture process query denial");
+  }
+  ~DenyServerQuery() {
+    if(process_ && descriptor_) SetSecurityInfo(process_.value,SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,original_,nullptr);
+    if(descriptor_) LocalFree(descriptor_);
+  }
+private:
+  sanser::uac::Handle process_;
+  PSECURITY_DESCRIPTOR descriptor_=nullptr;
+  PACL original_=nullptr;
+};
 LRESULT CALLBACK fixture(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_COMMAND && LOWORD(w)==42 && HIWORD(w)==BN_CLICKED) { clicked=true; return 0; }
   return DefWindowProcW(window,message,w,l);
@@ -31,6 +74,19 @@ int wmain(int argc,wchar_t** argv) {
     HANDLE raw=nullptr; require(OpenProcessToken(GetCurrentProcess(),TOKEN_ALL_ACCESS,&raw)!=FALSE,"Fixture token");
     Handle token(raw); TOKEN_ELEVATION elevated{}; DWORD bytes=0;
     require(GetTokenInformation(raw,TokenElevation,&elevated,sizeof(elevated),&bytes) && elevated.TokenIsElevated,"Run fixture elevated");
+    // A user-owned pipe must never pass identity verification while the real
+    // service is running. No request or input is sent to this fake endpoint.
+    {
+      const auto name=L"\\\\.\\pipe\\Sanser.CI.FakeServer."+std::to_wstring(GetCurrentProcessId());
+      Handle server(CreateNamedPipeW(name.c_str(),PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,4096,4096,0,nullptr));
+      require(static_cast<bool>(server),"Create fake endpoint fixture");
+      Handle client(CreateFileW(name.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr));
+      require(static_cast<bool>(client),"Connect fake endpoint fixture");
+      const auto fake=verifyServiceEndpoint(client.value);
+      require(!fake.trusted && fake.check==4,"SCM must reject a user-owned pipe with the wrong service PID");
+      std::cout<<"User-owned fake service endpoint rejected\n";
+    }
     WNDCLASSW cls{}; cls.lpfnWndProc=fixture; cls.hInstance=GetModuleHandleW(nullptr); cls.lpszClassName=L"SanserUacCancelFixture";
     require(RegisterClassW(&cls)!=0,"Register fixture");
     HWND window=CreateWindowExW(WS_EX_TOPMOST,cls.lpszClassName,L"Sanser CI elevated Cancel fixture",WS_OVERLAPPEDWINDOW|WS_VISIBLE,
@@ -67,12 +123,19 @@ int wmain(int argc,wchar_t** argv) {
     }
     clicked=false;
     HANDLE mediumRaw=nullptr;
-    require(CreateRestrictedToken(token.value,DISABLE_MAX_PRIVILEGE,0,nullptr,0,nullptr,0,nullptr,&mediumRaw)!=FALSE,"Restricted input token");
+    BYTE adminBuffer[SECURITY_MAX_SID_SIZE]{}; DWORD adminSize=sizeof(adminBuffer);
+    require(CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,adminBuffer,&adminSize)!=FALSE,"Administrator SID fixture");
+    SID_AND_ATTRIBUTES denyAdmin{adminBuffer,0};
+    require(CreateRestrictedToken(token.value,DISABLE_MAX_PRIVILEGE,1,&denyAdmin,0,nullptr,0,nullptr,&mediumRaw)!=FALSE,"Filtered input token");
     Handle medium(mediumRaw); PSID sid=nullptr;
     require(ConvertStringSidToSidW(L"S-1-16-8192",&sid)!=FALSE,"Medium integrity SID");
     TOKEN_MANDATORY_LABEL label{}; label.Label.Attributes=SE_GROUP_INTEGRITY; label.Label.Sid=sid;
     const auto changed=SetTokenInformation(medium.value,TokenIntegrityLevel,&label,sizeof(label)+GetLengthSid(sid));
     LocalFree(sid); require(changed!=FALSE,"Medium integrity token");
+    // Deterministically reproduce the permission the old client demanded.
+    // This only tightens the isolated CI service process DACL; the saved DACL
+    // is restored before fixture exit. No production service DACL is changed.
+    DenyServerQuery blockedQuery;
     SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES),nullptr,TRUE};
     HANDLE readRaw=nullptr,writeRaw=nullptr;
     require(CreatePipe(&readRaw,&writeRaw,&inherit,0)!=FALSE,"Fixture diagnostic pipe");

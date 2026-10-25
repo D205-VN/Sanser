@@ -3965,6 +3965,7 @@ private:
                << ",\"uacStage\":" << uacHealth.lastStage
                << ",\"uacError\":" << uacHealth.lastError
                << ",\"uacStatus\":" << uacHealth.lastStatus
+               << ",\"uacCheck\":" << uacHealth.lastCheck
                << "}";
           sendTimedControlReply(pong.str(), payload, receivedMicros, dequeuedMicros);
           flushGamepadRumbleEvents("control-ping");

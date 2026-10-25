@@ -67,7 +67,7 @@ bool gViewOnly = false;
 std::atomic<bool> gHostCapturePaused{false};
 struct HostHelperFailure {
   bool known=false;
-  std::uint64_t failures=0,stage=0,status=0,error=0;
+  std::uint64_t failures=0,stage=0,status=0,error=0,check=0;
 };
 std::mutex gHostHelperMutex;
 HostHelperFailure gHostHelperFailure;
@@ -82,6 +82,17 @@ std::string hostHelperFailureText(const HostHelperFailure& failure) {
     case 5: reason="Windows helper response failed"; break;
     case 6: reason="Windows helper frame failed"; break;
     default: break;
+  }
+  if(failure.stage==2) {
+    switch(failure.check) {
+      case 2: reason="Cannot query Windows service manager"; break;
+      case 3: reason="Cannot query helper service status/config"; break;
+      case 4: reason="Helper endpoint does not match the service"; break;
+      case 5: reason="Helper service configuration is unavailable"; break;
+      case 6: reason="Helper service identity does not match"; break;
+      case 7: reason="Helper service installation path does not match"; break;
+      default: break;
+    }
   }
   if(failure.status==4) reason="Host console session is unavailable";
   if(failure.status==5) reason="Helper cannot access the input desktop";
@@ -2969,14 +2980,15 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
     if(payload.find("\"uacFailures\"")!=std::string::npos) {
       { std::lock_guard lock(gHostHelperMutex);
         gHostHelperFailure={true,jsonUint64Value(payload,"uacFailures"),jsonUint64Value(payload,"uacStage"),
-          jsonUint64Value(payload,"uacStatus"),jsonUint64Value(payload,"uacError")}; }
+          jsonUint64Value(payload,"uacStatus"),jsonUint64Value(payload,"uacError"),jsonUint64Value(payload,"uacCheck")}; }
       std::cout<<"SNUAC_HEALTH uacFailures="<<jsonUint64Value(payload,"uacFailures")
         <<" uacReady="<<jsonUint64Value(payload,"uacReady")
         <<" uacFrames="<<jsonUint64Value(payload,"uacFrames")
         <<" uacIdle="<<jsonUint64Value(payload,"uacIdle")
         <<" uacStage="<<jsonUint64Value(payload,"uacStage")
         <<" uacError="<<jsonUint64Value(payload,"uacError")
-        <<" uacStatus="<<jsonUint64Value(payload,"uacStatus")<<'\n';
+        <<" uacStatus="<<jsonUint64Value(payload,"uacStatus")
+        <<" uacCheck="<<jsonUint64Value(payload,"uacCheck")<<'\n';
     }
     if(payload.find("\"inputOsRejected\"")!=std::string::npos) {
       std::cout<<"SNINPUT_OS_HEALTH inputOsDirect="<<jsonUint64Value(payload,"inputOsDirect")

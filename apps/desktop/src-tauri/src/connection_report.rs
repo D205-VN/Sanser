@@ -66,6 +66,7 @@ const FIELDS: &[&str] = &[
     "uacStage",
     "uacError",
     "uacStatus",
+    "uacCheck",
     "inputOsDirect",
     "inputOsPrivileged",
     "inputOsRejected",
@@ -731,8 +732,8 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 mod tests {
     #[test]
     fn helper_startup_and_capture_failures_keep_only_numeric_evidence() {
-        let sample=super::parse_sample(b"SNUAC_HEALTH uacFailures=3 uacReady=1 uacFrames=0 uacIdle=0 uacStage=7 uacError=2147942405 uacStatus=8 app=private.exe path=C:\\private sid=123 token=secret").unwrap();
-        assert_eq!(sample.values.len(), 7);
+        let sample=super::parse_sample(b"SNUAC_HEALTH uacFailures=3 uacReady=1 uacFrames=0 uacIdle=0 uacStage=7 uacError=2147942405 uacStatus=8 uacCheck=0 app=private.exe path=C:\\private sid=123 token=secret").unwrap();
+        assert_eq!(sample.values.len(), 8);
         assert_eq!(sample.values["uacError"], 2_147_942_405.0);
         assert_eq!(sample.values["uacReady"], 1.0);
         assert!(!serde_json::to_string(&sample).unwrap().contains("private"));

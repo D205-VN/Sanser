@@ -60,7 +60,8 @@ public:
         pipe_=Handle(CreateFileW(pipeName,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,
           FILE_FLAG_OVERLAPPED|SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION,nullptr));
         if(!pipe_) return failed(Stage::Open,GetLastError());
-        if(!trustedServer()) return failed(Stage::Verify,ERROR_ACCESS_DENIED);
+        const auto identity=verifyServiceEndpoint(pipe_.value);
+        if(!identity.trusted) return failed(Stage::Verify,identity.error,Status::Unavailable,identity.check);
         // Worker creation can take up to 3 seconds. Establish readiness before
         // sending input, with a distinct bounded cold-start deadline. A failed
         // handshake has not submitted any click/key for execution.
@@ -96,39 +97,55 @@ public:
     } catch(...) { return failed(Stage::Response,ERROR_GEN_FAILURE); }
   }
 private:
-  bool trustedServer() {
-    ULONG pid=0; if(!GetNamedPipeServerProcessId(pipe_.value,&pid)) return false;
-    Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid)); if(!process) return false;
-    wchar_t path[32768]; DWORD length=32768;
-    if(!QueryFullProcessImageNameW(process.value,0,path,&length)) return false;
-    const auto expected=installDirectory()/L"sanser-uac-service.exe";
-    if(_wcsicmp(std::wstring(path,length).c_str(),expected.c_str())) return false;
-    // A medium-integrity host cannot query a SYSTEM process token. Ask SCM
-    // for the running service PID instead of weakening the service's DACL.
-    SC_HANDLE manager=OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT); if(!manager) return false;
-    SC_HANDLE service=OpenServiceW(manager,serviceName,SERVICE_QUERY_STATUS);
-    SERVICE_STATUS_PROCESS status{}; DWORD bytes=0;
-    const bool ok=service && QueryServiceStatusEx(service,SC_STATUS_PROCESS_INFO,
-      reinterpret_cast<BYTE*>(&status),sizeof(status),&bytes)
-      && status.dwCurrentState==SERVICE_RUNNING && status.dwProcessId==pid;
-    if(service) CloseServiceHandle(service); CloseServiceHandle(manager); return ok;
-  }
-  bool failed(Stage stage,DWORD error,Status status=Status::Unavailable) {
+  bool failed(Stage stage,DWORD error,Status status=Status::Unavailable,std::uint32_t check=0) {
     const auto now=GetTickCount64(); bool log=false;
     {
       std::lock_guard lock(healthMutex);
       ++brokerHealth.failures; brokerHealth.lastStage=static_cast<std::uint32_t>(stage);
       brokerHealth.lastError=error; brokerHealth.lastStatus=static_cast<std::uint32_t>(status);
+      brokerHealth.lastCheck=check;
       if(!lastFailureLog || now-lastFailureLog>=1000) { lastFailureLog=now; log=true; }
     }
     if(log) std::cerr<<"SNUAC_HEALTH uacStage="<<static_cast<std::uint32_t>(stage)
-      <<" uacError="<<error<<" uacStatus="<<static_cast<std::uint32_t>(status)<<'\n';
+      <<" uacError="<<error<<" uacStatus="<<static_cast<std::uint32_t>(status)<<" uacCheck="<<check<<'\n';
     pipe_=Handle(); firstCapture_=true; retryAt_=now+1000; return false;
   }
   Handle pipe_;
   ULONGLONG retryAt_=0;
   bool firstCapture_=true;
 };
+}
+ServerIdentity verifyServiceEndpoint(HANDLE pipe) {
+  ULONG pid=0;
+  if(!GetNamedPipeServerProcessId(pipe,&pid)) return {false,GetLastError(),1};
+  // SCM is authoritative for the running own-process service. A standard
+  // user's token may not open/query a SYSTEM process, even when that service
+  // is correctly installed and its pipe is accessible. Do not require that
+  // unrelated process-object permission or grant it to users.
+  struct ServiceGuard { SC_HANDLE value; ~ServiceGuard() { if(value) CloseServiceHandle(value); } };
+  ServiceGuard manager{OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT)};
+  if(!manager.value) return {false,GetLastError(),2};
+  ServiceGuard service{OpenServiceW(manager.value,serviceName,SERVICE_QUERY_STATUS|SERVICE_QUERY_CONFIG)};
+  if(!service.value) return {false,GetLastError(),3};
+  SERVICE_STATUS_PROCESS status{}; DWORD bytes=0;
+  if(!QueryServiceStatusEx(service.value,SC_STATUS_PROCESS_INFO,reinterpret_cast<BYTE*>(&status),sizeof(status),&bytes))
+    return {false,GetLastError(),4};
+  if(status.dwCurrentState!=SERVICE_RUNNING || !pid || status.dwProcessId!=pid)
+    return {false,ERROR_INVALID_OWNER,4};
+  if(status.dwServiceType!=SERVICE_WIN32_OWN_PROCESS) return {false,ERROR_INVALID_SERVICE_ACCOUNT,5};
+  DWORD needed=0;
+  QueryServiceConfigW(service.value,nullptr,0,&needed);
+  if(GetLastError()!=ERROR_INSUFFICIENT_BUFFER || needed<sizeof(QUERY_SERVICE_CONFIGW) || needed>65536)
+    return {false,ERROR_INVALID_DATA,5};
+  std::vector<BYTE> storage(needed);
+  auto* config=reinterpret_cast<QUERY_SERVICE_CONFIGW*>(storage.data());
+  if(!QueryServiceConfigW(service.value,config,needed,&needed)) return {false,GetLastError(),5};
+  if(config->dwServiceType!=SERVICE_WIN32_OWN_PROCESS || !config->lpServiceStartName
+      || _wcsicmp(config->lpServiceStartName,L"LocalSystem")) return {false,ERROR_INVALID_SERVICE_ACCOUNT,6};
+  const auto expected=L"\""+(installDirectory()/L"sanser-uac-service.exe").wstring()+L"\" --service";
+  if(!config->lpBinaryPathName || _wcsicmp(config->lpBinaryPathName,expected.c_str()))
+    return {false,ERROR_BAD_PATHNAME,7};
+  return {true,ERROR_SUCCESS,0};
 }
 struct CaptureClient::Impl { Connection connection; };
 CaptureClient::CaptureClient():impl_(std::make_unique<Impl>()) {}
