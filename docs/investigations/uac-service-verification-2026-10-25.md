@@ -57,6 +57,13 @@ that user's PROCESS_QUERY_LIMITED_INFORMATION access to the synthetic SYSTEM
 service process. The original process DACL is restored on fixture exit; this test
 code is excluded from production builds.
 
+Hosted CI may grant its interactive desktop through Administrators only. A child
+with that SID deny-only exited with `0xC0000142` before reaching its test entry
+point on the first run. The fixture now temporarily grants its own user access to
+the CI window station/desktop as required by CreateProcessAsUser, restoring both
+DACLs on exit. This is confined to the isolated fixture; production desktop ACLs
+are not changed.
+
 The protected medium-integrity host must demonstrate both the deny-only SID and
 failure of the old OpenProcess dependency, then deliver a real click to the
 fixture's elevated Cancel button through the authorized helper. A separate

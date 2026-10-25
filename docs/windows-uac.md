@@ -81,8 +81,12 @@ UAC prompts or change Windows UAC policy.
 
 The public pipe rejects remote clients, has an explicit ACL for SYSTEM and the
 setup account SID (stored in a protected file), and authenticates
-the client's PID, executable path and user SID. The host checks the server image
-and running SCM service PID without requiring permission to read a SYSTEM token.
+the client's PID, executable path and user SID. The host checks the connected
+pipe PID against the running SCM service and verifies its own-process type,
+LocalSystem account and exact protected installation command. This does not
+require opening the SYSTEM process or its token. Numeric `uacCheck` and the real
+Win32 error distinguish endpoint verification failures from worker startup or
+input rejection; see the [service verification investigation](investigations/uac-service-verification-2026-10-25.md).
 The worker executable and host are installed with protected administrator/SYSTEM
 ownership and user read/execute permissions. Setup rejects reparse-point targets
 and replaces files rather than overwriting a possible hard link. The worker has
@@ -99,8 +103,10 @@ UI approval/cancellation, packaging, and on Windows CI actual service
 installation/start/stop, stale-copy detection, update as SYSTEM preserving the
 original SID, protected ACLs and rejection of an unauthorized test executable.
 An isolated CI fixture creates its own elevated Cancel button and invokes the
-protected host with a medium-integrity token through the production input
-fallback. It is explicitly skipped when the runner has no unlocked interactive
+protected host with a medium-integrity token and deny-only Administrators SID
+through the production input fallback. The fixture denies the old SYSTEM
+process-query dependency and checks that a user-owned fake endpoint is rejected.
+It is explicitly skipped when the runner has no unlocked interactive
 desktop, or when a same-integrity baseline shows that the runner cannot deliver
 synthetic input. These checks do **not** prove real Secure Desktop capture/input on
 physical GPU hardware; the fixture does not display a real UAC prompt or alter

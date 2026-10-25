@@ -12,6 +12,36 @@
 using namespace sanser::uac;
 namespace {
 bool clicked=false;
+// Hosted CI desktops may grant access through Administrators only. Once that
+// SID is deny-only, USER32 cannot initialize (0xC0000142). Grant the fixture's
+// same user access for this test, then restore the original user-object DACL.
+// This is never built into the service or a production host.
+class FixtureDesktopAccess {
+public:
+  FixtureDesktopAccess(HANDLE object,PSID user):object_(object) {
+    require(GetSecurityInfo(object_,SE_WINDOW_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,&original_,nullptr,&descriptor_)==ERROR_SUCCESS,"Save fixture desktop security");
+    EXPLICIT_ACCESSW allow{}; allow.grfAccessPermissions=GENERIC_ALL;
+    allow.grfAccessMode=GRANT_ACCESS; allow.grfInheritance=NO_INHERITANCE;
+    allow.Trustee.TrusteeForm=TRUSTEE_IS_SID; allow.Trustee.TrusteeType=TRUSTEE_IS_USER;
+    allow.Trustee.ptstrName=reinterpret_cast<LPWSTR>(user);
+    PACL changed=nullptr;
+    const auto combined=SetEntriesInAclW(1,&allow,original_,&changed);
+    const auto applied=combined==ERROR_SUCCESS ? SetSecurityInfo(object_,SE_WINDOW_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,changed,nullptr) : combined;
+    if(changed) LocalFree(changed);
+    if(applied!=ERROR_SUCCESS) { LocalFree(descriptor_); descriptor_=nullptr; SetLastError(applied); require(false,"Grant fixture user desktop access"); }
+  }
+  ~FixtureDesktopAccess() {
+    if(descriptor_) {
+      if(SetSecurityInfo(object_,SE_WINDOW_OBJECT,DACL_SECURITY_INFORMATION,nullptr,nullptr,original_,nullptr)!=ERROR_SUCCESS)
+        std::cerr<<"Failed to restore isolated CI desktop security\n";
+      LocalFree(descriptor_);
+    }
+  }
+private:
+  HANDLE object_;
+  PSECURITY_DESCRIPTOR descriptor_=nullptr;
+  PACL original_=nullptr;
+};
 class DenyServerQuery {
 public:
   DenyServerQuery() {
@@ -132,6 +162,12 @@ int wmain(int argc,wchar_t** argv) {
     TOKEN_MANDATORY_LABEL label{}; label.Label.Attributes=SE_GROUP_INTEGRITY; label.Label.Sid=sid;
     const auto changed=SetTokenInformation(medium.value,TokenIntegrityLevel,&label,sizeof(label)+GetLengthSid(sid));
     LocalFree(sid); require(changed!=FALSE,"Medium integrity token");
+    DWORD userBytes=0; GetTokenInformation(medium.value,TokenUser,nullptr,0,&userBytes);
+    std::vector<BYTE> userData(userBytes);
+    require(userBytes && GetTokenInformation(medium.value,TokenUser,userData.data(),userBytes,&userBytes),"Fixture desktop user SID");
+    const auto userSid=reinterpret_cast<TOKEN_USER*>(userData.data())->User.Sid;
+    FixtureDesktopAccess stationAccess(GetProcessWindowStation(),userSid);
+    FixtureDesktopAccess desktopAccess(GetThreadDesktop(GetCurrentThreadId()),userSid);
     // Deterministically reproduce the permission the old client demanded.
     // This only tightens the isolated CI service process DACL; the saved DACL
     // is restored before fixture exit. No production service DACL is changed.
