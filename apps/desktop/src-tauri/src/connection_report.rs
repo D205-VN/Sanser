@@ -18,6 +18,7 @@ const SOURCES: &[&str] = &[
     "SNHOST_CAPTURE_RECOVERY",
     "SNINPUT_OS_REJECTED",
     "SNINPUT_OS_HEALTH",
+    "SNUAC_HEALTH",
     "FEC_HEALTH",
     "DIRECT_PATH_HEALTH",
     "SNV2_TRANSPORT_HEALTH",
@@ -58,6 +59,13 @@ const SOURCES: &[&str] = &[
 const FIELDS: &[&str] = &[
     "captureRecoveryCode",
     "inputRejected",
+    "uacFailures",
+    "uacReady",
+    "uacFrames",
+    "uacIdle",
+    "uacStage",
+    "uacError",
+    "uacStatus",
     "inputOsDirect",
     "inputOsPrivileged",
     "inputOsRejected",
@@ -721,6 +729,14 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 // floating-point results from real latency measurements.
 #[allow(clippy::float_cmp)]
 mod tests {
+    #[test]
+    fn helper_startup_and_capture_failures_keep_only_numeric_evidence() {
+        let sample=super::parse_sample(b"SNUAC_HEALTH uacFailures=3 uacReady=1 uacFrames=0 uacIdle=0 uacStage=7 uacError=2147942405 uacStatus=8 app=private.exe path=C:\\private sid=123 token=secret").unwrap();
+        assert_eq!(sample.values.len(), 7);
+        assert_eq!(sample.values["uacError"], 2_147_942_405.0);
+        assert_eq!(sample.values["uacReady"], 1.0);
+        assert!(!serde_json::to_string(&sample).unwrap().contains("private"));
+    }
     #[test]
     fn legacy_execution_health_and_ack_counts_exclude_input_content() {
         let sample=super::parse_sample(b"SNINPUT_OS_HEALTH inputOsDirect=12 inputOsPrivileged=3 inputOsRejected=4 inputSourceIntegrity=8192 inputTargetIntegrity=12288 inputFailureStatus=4 inputFailureError=5 inputAllowed=1 app=private.exe key=65 x=0.25 path=C:\\private").unwrap();

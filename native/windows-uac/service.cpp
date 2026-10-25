@@ -4,6 +4,7 @@
 #include "input_state.h"
 #include "win_util.h"
 #include "desktop_duplication.h"
+#include "../common/capture_recovery.h"
 #include "sanser_version.h"
 #include <wtsapi32.h>
 #include <sddl.h>
@@ -99,8 +100,12 @@ public:
     HDESK next=OpenInputDesktop(0,FALSE,GENERIC_READ|GENERIC_WRITE|DESKTOP_SWITCHDESKTOP);
     if(!next) return false;
     wchar_t name[256]{}; DWORD needed=0;
-    if(!GetUserObjectInformationW(next,UOI_NAME,name,sizeof(name),&needed)
-        || (_wcsicmp(name,L"Winlogon") && (!input || _wcsicmp(name,L"Default")))) { CloseDesktop(next); return false; }
+    if(!GetUserObjectInformationW(next,UOI_NAME,name,sizeof(name),&needed)) {
+      const auto error=GetLastError(); CloseDesktop(next); SetLastError(error); return false;
+    }
+    if(_wcsicmp(name,L"Winlogon") && (!input || _wcsicmp(name,L"Default"))) {
+      CloseDesktop(next); SetLastError(ERROR_ACCESS_DENIED); return false;
+    }
     if(current_ && name_==name) { CloseDesktop(next); return true; }
     if(!SetThreadDesktop(next)) { const auto error=GetLastError(); CloseDesktop(next); SetLastError(error); return false; }
     if(current_) CloseDesktop(current_);
@@ -131,6 +136,11 @@ int worker(const wchar_t* channelName) {
   Handle token(raw); require(localSystem(raw),"Worker requires LocalSystem");
   DWORD session=0; require(ProcessIdToSessionId(GetCurrentProcessId(),&session)!=FALSE,"Worker session");
   require(unlockedConsole(session),"Worker requires an unlocked console");
+#ifdef SANSER_UAC_TEST_WORKER_DELAY_MS
+  // CI-only regression: a cold worker must outlast the old 1-second response
+  // deadline, without ever delaying installed production workers deliberately.
+  Sleep(SANSER_UAC_TEST_WORKER_DELAY_MS);
+#endif
   InteractiveStation station;
   Desktop desktop; std::unique_ptr<DesktopDuplicator> capture; unsigned adapter=0,output=0;
   AppliedInput applied{session,desktop,{}};
@@ -144,11 +154,13 @@ int worker(const wchar_t* channelName) {
     // already unlocked interactive console, not Windows sign-in credentials.
     if(!valid(request)) return 2;
     const bool console=unlockedConsole(session);
-    const bool bound=console && desktop.bind(request.operation==Operation::Input);
+    const bool bound=console && desktop.bind(request.operation!=Operation::Capture);
     const auto desktopError=bound ? ERROR_SUCCESS : console ? GetLastError() : ERROR_ACCESS_DENIED;
     if(bound) {
       try {
-        if(request.operation==Operation::Capture) {
+        if(request.operation==Operation::Probe) {
+          response.status=Status::Ready;
+        } else if(request.operation==Operation::Capture) {
           if(!capture || adapter!=request.adapter || output!=request.output) {
             capture=std::make_unique<DesktopDuplicator>(); adapter=request.adapter; output=request.output;
             capture->initialize(adapter,output); // Worker build excludes broker fallback.
@@ -164,7 +176,13 @@ int worker(const wchar_t* channelName) {
           if(SendInput(1,&in,sizeof(in))==1) { applied.state.applied(request); response.status=Status::Applied; }
           else { response.status=Status::InputUnavailable; response.left=static_cast<LONG>(GetLastError()); }
         }
-      } catch(...) { capture.reset(); response=Response{}; }
+      } catch(const sanser::capture::OperationError& error) {
+        capture.reset(); response=Response{}; response.status=Status::CaptureUnavailable;
+        response.left=static_cast<LONG>(error.result());
+      } catch(...) {
+        capture.reset(); response=Response{}; response.status=Status::CaptureUnavailable;
+        response.left=static_cast<LONG>(E_FAIL);
+      }
     } else {
       capture.reset();
       response.status=console ? Status::DesktopUnavailable : Status::ConsoleUnavailable;
@@ -240,7 +258,7 @@ struct Worker {
     if(!ConnectNamedPipe(channel.value,&io)) {
       const auto error=GetLastError();
       if(error==ERROR_IO_PENDING) {
-        if(WaitForSingleObject(event.value,3000)!=WAIT_OBJECT_0) { CancelIoEx(channel.value,&io); WaitForSingleObject(event.value,INFINITE); throw std::runtime_error("UAC worker startup timed out"); }
+        if(WaitForSingleObject(event.value,workerStartupTimeoutMs)!=WAIT_OBJECT_0) { CancelIoEx(channel.value,&io); WaitForSingleObject(event.value,INFINITE); throw std::runtime_error("UAC worker startup timed out"); }
         DWORD n=0; require(GetOverlappedResult(channel.value,&io,&n,FALSE)!=FALSE,"UAC worker connection");
       } else require(error==ERROR_PIPE_CONNECTED,"UAC worker connection");
     }
@@ -261,12 +279,15 @@ void serve(Handle pipe) {
   try {
     DWORD session=0; Handle owner;
     if(!authorized(pipe.value,session,owner)) return;
-    Worker workerProcess(session); Request request;
+    Worker workerProcess(session); Request request; bool firstCapture=true;
     while(nextRequest(pipe.value,owner.value,request)) {
       if(!valid(request) || !unlockedConsole(session)) break;
       Response response; std::vector<unsigned char> pixels;
+      const auto timeout=request.operation==Operation::Probe ? readyTimeoutMs
+        : request.operation==Operation::Capture && firstCapture ? captureStartupTimeoutMs : responseTimeoutMs;
+      if(request.operation==Operation::Capture) firstCapture=false;
       bool ok=timedTransfer(workerProcess.channel.value,&request,sizeof(request),true,250)
-        && timedTransfer(workerProcess.channel.value,&response,sizeof(response),false,1000) && response.signature==magic;
+        && timedTransfer(workerProcess.channel.value,&response,sizeof(response),false,timeout) && response.signature==magic;
       if(ok && response.bytes) {
         ok=validFrame(response);
         if(ok) { pixels.resize(response.bytes); ok=timedTransfer(workerProcess.channel.value,pixels.data(),response.bytes,false,1000); }

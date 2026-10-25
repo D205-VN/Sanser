@@ -25,6 +25,11 @@ SnvPacket testPacket(std::uint64_t sequence, bool keyframe = false) {
 int main() {
   @autoreleasepool {
     try {
+      requireLatency(hostHelperFailureText({}).empty(),"Old host must not invent a helper failure");
+      requireLatency(hostHelperFailureText({true,0,0,0,0}).empty(),"No failure must not produce a repair warning");
+      requireLatency(hostHelperFailureText({true,1,3,0,1460}).find("worker was not ready")!=std::string::npos,"Cold worker timeout must have a distinct actionable reason");
+      requireLatency(hostHelperFailureText({true,1,7,5,5}).find("input desktop")!=std::string::npos,"Desktop denial must remain distinct from network delay");
+      requireLatency(hostHelperFailureText({true,1,7,8,2147942405ULL}).find("2147942405")!=std::string::npos,"Capture HRESULT bits must survive the client status text");
       sanser::desktop::testMacRemoteView();
       testAudioOutputRecovery();
       {

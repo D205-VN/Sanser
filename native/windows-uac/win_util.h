@@ -54,7 +54,7 @@ inline bool timedTransfer(HANDLE pipe,void* data,DWORD size,bool write,DWORD tim
       if(GetLastError()!=ERROR_IO_PENDING) return false;
       const auto now=GetTickCount64();
       if(now>=deadline || WaitForSingleObject(event.value,static_cast<DWORD>(deadline-now))!=WAIT_OBJECT_0) {
-        CancelIoEx(pipe,&io); WaitForSingleObject(event.value,INFINITE); return false;
+        CancelIoEx(pipe,&io); WaitForSingleObject(event.value,INFINITE); SetLastError(ERROR_TIMEOUT); return false;
       }
       if(!GetOverlappedResult(pipe,&io,&n,FALSE)) return false;
     }

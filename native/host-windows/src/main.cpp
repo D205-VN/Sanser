@@ -3936,6 +3936,7 @@ private:
           continue;
         }
         if (payloadType == "control-ping") {
+          const auto uacHealth=sanser::uac::health();
           std::ostringstream pong;
           pong << "{\"type\":\"control-pong\""
                << ",\"sentSteadyMicros\":" << jsonUint64Value(payload, "sentSteadyMicros")
@@ -3957,6 +3958,13 @@ private:
                << ",\"inputFailureStatus\":" << gInputFailureStatus.load()
                << ",\"inputFailureError\":" << gInputFailureError.load()
                << ",\"inputAllowed\":" << (gRemoteInputAllowed.load() ? 1 : 0)
+               << ",\"uacFailures\":" << uacHealth.failures
+               << ",\"uacReady\":" << uacHealth.readyConnections
+               << ",\"uacFrames\":" << uacHealth.captureFrames
+               << ",\"uacIdle\":" << uacHealth.captureIdle
+               << ",\"uacStage\":" << uacHealth.lastStage
+               << ",\"uacError\":" << uacHealth.lastError
+               << ",\"uacStatus\":" << uacHealth.lastStatus
                << "}";
           sendTimedControlReply(pong.str(), payload, receivedMicros, dequeuedMicros);
           flushGamepadRumbleEvents("control-ping");

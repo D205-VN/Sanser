@@ -4,10 +4,15 @@
 #include "desktop_duplication.h"
 #include <atomic>
 #include <iostream>
+#include <mutex>
 
 namespace sanser::uac {
 namespace {
 std::atomic<ULONGLONG> servedUntil{0};
+std::mutex healthMutex;
+Health brokerHealth;
+ULONGLONG lastFailureLog=0;
+enum class Stage : std::uint32_t { Open=1,Verify=2,Ready=3,Request=4,Response=5,Frame=6,Rejected=7 };
 DWORD integrityLevel(HANDLE process) {
   HANDLE raw=nullptr;
   if(!OpenProcessToken(process,TOKEN_QUERY,&raw)) return 0;
@@ -54,20 +59,41 @@ public:
       if(!pipe_) {
         pipe_=Handle(CreateFileW(pipeName,GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,
           FILE_FLAG_OVERLAPPED|SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION,nullptr));
-        if(!pipe_ || !trustedServer()) return failed();
+        if(!pipe_) return failed(Stage::Open,GetLastError());
+        if(!trustedServer()) return failed(Stage::Verify,ERROR_ACCESS_DENIED);
+        // Worker creation can take up to 3 seconds. Establish readiness before
+        // sending input, with a distinct bounded cold-start deadline. A failed
+        // handshake has not submitted any click/key for execution.
+        Request probe; probe.operation=Operation::Probe; Response ready;
+        if(!timedTransfer(pipe_.value,&probe,sizeof(probe),true,250)
+            || !timedTransfer(pipe_.value,&ready,sizeof(ready),false,readyTimeoutMs))
+          return failed(Stage::Ready,GetLastError());
+        if(ready.signature!=magic) return failed(Stage::Ready,ERROR_INVALID_DATA);
+        if(ready.status!=Status::Ready || ready.bytes)
+          return failed(Stage::Ready,static_cast<DWORD>(ready.left),ready.status);
+        { std::lock_guard lock(healthMutex); ++brokerHealth.readyConnections; }
       }
-      if(!timedTransfer(pipe_.value,&request,sizeof(request),true,250)
-          || !timedTransfer(pipe_.value,&response,sizeof(response),false,1000)
-          || response.signature!=magic) return failed();
+      const auto timeout=request.operation==Operation::Capture && firstCapture_ ? captureStartupTimeoutMs : responseTimeoutMs;
+      if(request.operation==Operation::Capture) firstCapture_=false;
+      if(!timedTransfer(pipe_.value,&request,sizeof(request),true,250)) return failed(Stage::Request,GetLastError());
+      if(!timedTransfer(pipe_.value,&response,sizeof(response),false,timeout)) return failed(Stage::Response,GetLastError());
+      if(response.signature!=magic) return failed(Stage::Response,ERROR_INVALID_DATA);
       if(response.status==Status::Frame) {
-        if(!frame || !validFrame(response)) return failed();
+        if(!frame || !validFrame(response)) return failed(Stage::Frame,ERROR_INVALID_DATA);
         frame->pixels.resize(response.bytes);
-        if(!timedTransfer(pipe_.value,frame->pixels.data(),response.bytes,false,1000)) return failed();
+        if(!timedTransfer(pipe_.value,frame->pixels.data(),response.bytes,false,1000)) return failed(Stage::Frame,GetLastError());
         frame->width=response.width; frame->height=response.height; frame->stride=response.stride;
         frame->texture.reset();
-      } else if(response.bytes) return failed();
+      } else if(response.bytes) return failed(Stage::Response,ERROR_INVALID_DATA);
+      if(response.status==Status::ConsoleUnavailable || response.status==Status::DesktopUnavailable
+          || response.status==Status::InputUnavailable || response.status==Status::CaptureUnavailable
+          || response.status==Status::Unavailable) {
+        // Retain the explicit status for the caller; close this worker before
+        // a later retry rather than silently classifying it as healthy idle.
+        failed(Stage::Rejected,static_cast<DWORD>(response.left),response.status);
+      }
       return true;
-    } catch(...) { return failed(); }
+    } catch(...) { return failed(Stage::Response,ERROR_GEN_FAILURE); }
   }
 private:
   bool trustedServer() {
@@ -87,20 +113,34 @@ private:
       && status.dwCurrentState==SERVICE_RUNNING && status.dwProcessId==pid;
     if(service) CloseServiceHandle(service); CloseServiceHandle(manager); return ok;
   }
-  bool failed() { pipe_=Handle(); retryAt_=GetTickCount64()+1000; return false; }
+  bool failed(Stage stage,DWORD error,Status status=Status::Unavailable) {
+    const auto now=GetTickCount64(); bool log=false;
+    {
+      std::lock_guard lock(healthMutex);
+      ++brokerHealth.failures; brokerHealth.lastStage=static_cast<std::uint32_t>(stage);
+      brokerHealth.lastError=error; brokerHealth.lastStatus=static_cast<std::uint32_t>(status);
+      if(!lastFailureLog || now-lastFailureLog>=1000) { lastFailureLog=now; log=true; }
+    }
+    if(log) std::cerr<<"SNUAC_HEALTH uacStage="<<static_cast<std::uint32_t>(stage)
+      <<" uacError="<<error<<" uacStatus="<<static_cast<std::uint32_t>(status)<<'\n';
+    pipe_=Handle(); firstCapture_=true; retryAt_=now+1000; return false;
+  }
   Handle pipe_;
   ULONGLONG retryAt_=0;
+  bool firstCapture_=true;
 };
 }
 struct CaptureClient::Impl { Connection connection; };
 CaptureClient::CaptureClient():impl_(std::make_unique<Impl>()) {}
 CaptureClient::~CaptureClient()=default;
+Health health() { std::lock_guard lock(healthMutex); return brokerHealth; }
 bool CaptureClient::capture(FrameBgra& frame,unsigned adapter,unsigned output,bool& changed) {
   Request request; request.adapter=adapter; request.output=output; Response response;
   changed=false;
   if(!impl_->connection.exchange(request,response,&frame)
       || (response.status!=Status::Frame && response.status!=Status::Idle)) return false;
   servedUntil.store(GetTickCount64()+1500);
+  { std::lock_guard lock(healthMutex); if(response.status==Status::Frame) ++brokerHealth.captureFrames; else ++brokerHealth.captureIdle; }
   changed=response.status==Status::Frame;
   return true;
 }

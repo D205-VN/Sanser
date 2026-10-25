@@ -7,6 +7,10 @@ using namespace sanser::uac;
 void check(bool ok) { if(!ok) throw std::runtime_error("Invalid UAC IPC validation"); }
 int main() {
   Request request; check(valid(request)); request.adapter=8; check(!valid(request));
+  request=Request{}; request.operation=Operation::Probe; check(valid(request));
+  request.data=1; check(!valid(request)); request.data=0; request.flags=1; check(!valid(request));
+  request.flags=0; request.adapter=1; check(!valid(request));
+  request.adapter=0; request.type=1; check(!valid(request));
   request=Request{}; request.signature=0; check(!valid(request));
   request=Request{}; request.operation=Operation::Input; request.type=1; request.flags=8; request.data=0x2a;
   check(valid(request)); request.flags=4; check(!valid(request));

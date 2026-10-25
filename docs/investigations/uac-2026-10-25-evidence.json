@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-25",
+  "reaVersion": "6.5.0",
+  "method": "Static REA artifact/Mach-O inspection on installed Mac applications; separate Windows source/docs review; no competitor execution or UAC policy changes",
+  "artifacts": [
+    {
+      "file": "parsec-artifact.json",
+      "evidenceId": "ev_339a11ace0ef183b3a079745d2288ab71271a14c3605201ceec104d4bd3cf630",
+      "operation": "inspect_artifact",
+      "subject": "Parsec.app",
+      "sha256": "174e5ded6cc2fbe5f24048f4378bbe77eaec1b3d2c8f6479ad112abb2686273e"
+    },
+    {
+      "file": "parsec-macho.json",
+      "evidenceId": "ev_cfa140bebf703b74977e33e763412d66cbdb1103b2f84983d3026866052bfeab",
+      "operation": "inspect_macho",
+      "subject": "parsecd-150-101a.dylib",
+      "sha256": "9cce85059c7f95f1a8e578b3c9f7200cb364520e557b5c85294802c8c596cdd5"
+    },
+    {
+      "file": "anydesk-artifact.json",
+      "evidenceId": "ev_0c235331254f5c4e36be8481723dffed2af1a299aa30fc3d64b8459076f0f814",
+      "operation": "inspect_artifact",
+      "subject": "AnyDesk.app",
+      "sha256": "5fcc8cfafe3db8de44256761a5a0bba7bc8b3aaa6c22a9c2e54665e8f9a83f3c"
+    },
+    {
+      "file": "anydesk-macho.json",
+      "evidenceId": "ev_d0c0955fc65a45eeda5ef9bae270a31b1244539774666fb2f97550841d3d3b0f",
+      "operation": "inspect_macho",
+      "subject": "AnyDesk",
+      "sha256": "95f13e91d14fee2c5d2753e8604fcf790de09ab44069e02bc7f17a43376c0104"
+    }
+  ],
+  "sources": [
+    {
+      "repository": "rustdesk/rustdesk",
+      "commit": "1297da6d186e58d9096be24072ae3998cdbbf8fe",
+      "path": "src/platform/windows.cc",
+      "sha256": "b7a3ab36148ddc90a66f9daffa16ff598887a8725327023ba32dee6731f53287"
+    },
+    {
+      "repository": "rustdesk/rustdesk",
+      "commit": "1297da6d186e58d9096be24072ae3998cdbbf8fe",
+      "path": "src/platform/windows.rs",
+      "sha256": "c1e7aa968d54eaafea451914f8c6228b4ecdb830c2d8d5e31606ce83a62c3971"
+    }
+  ],
+  "limits": [
+    "Mac imports/artifact inventories do not establish Windows UAC behavior.",
+    "The supplied UAC screenshot establishes a Secure Desktop transition, not the internal broker failure stage.",
+    "The Windows integration fixture exercises elevated Default input and deliberately delayed SYSTEM-worker startup; real Winlogon capture still needs a physical-host test."
+  ]
+}

@@ -65,6 +65,31 @@ sanser::LatencyPolicy gLatencyPolicy;
 std::atomic<bool> gShowLatencyOverlay{false};
 bool gViewOnly = false;
 std::atomic<bool> gHostCapturePaused{false};
+struct HostHelperFailure {
+  bool known=false;
+  std::uint64_t failures=0,stage=0,status=0,error=0;
+};
+std::mutex gHostHelperMutex;
+HostHelperFailure gHostHelperFailure;
+std::string hostHelperFailureText(const HostHelperFailure& failure) {
+  if(!failure.known || !failure.failures) return {};
+  const char* reason="Helper response failed";
+  switch(failure.stage) {
+    case 1: reason="Cannot connect to Windows helper"; break;
+    case 2: reason="Windows helper verification failed"; break;
+    case 3: reason="Windows worker was not ready"; break;
+    case 4: reason="Cannot send to Windows helper"; break;
+    case 5: reason="Windows helper response failed"; break;
+    case 6: reason="Windows helper frame failed"; break;
+    default: break;
+  }
+  if(failure.status==4) reason="Host console session is unavailable";
+  if(failure.status==5) reason="Helper cannot access the input desktop";
+  if(failure.status==6) reason="Windows helper input was rejected";
+  if(failure.status==8) reason="Helper cannot capture the protected desktop";
+  return std::string("\n\nLast helper failure:\n")+reason+"\nError code: "+std::to_string(failure.error)
+    +"\nCheck UAC support on the Windows host.";
+}
 bool gOverlayShortcutDown = false;
 constexpr unsigned short kOverlayShortcutKeyCode = 0x1C; // macOS ANSI 8 (number row)
 struct LiveLatency {
@@ -2941,6 +2966,18 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
               << " udpWaitOvershootAvgMs=" << gLiveLatency.pacingOvershoot.load()
               << " udpSocketAvgMs=" << gLiveLatency.socketSend.load() << "\n";
     std::cout << "SNINPUT_RTT rttMs=" << std::fixed << std::setprecision(1) << rttMs << "\n";
+    if(payload.find("\"uacFailures\"")!=std::string::npos) {
+      { std::lock_guard lock(gHostHelperMutex);
+        gHostHelperFailure={true,jsonUint64Value(payload,"uacFailures"),jsonUint64Value(payload,"uacStage"),
+          jsonUint64Value(payload,"uacStatus"),jsonUint64Value(payload,"uacError")}; }
+      std::cout<<"SNUAC_HEALTH uacFailures="<<jsonUint64Value(payload,"uacFailures")
+        <<" uacReady="<<jsonUint64Value(payload,"uacReady")
+        <<" uacFrames="<<jsonUint64Value(payload,"uacFrames")
+        <<" uacIdle="<<jsonUint64Value(payload,"uacIdle")
+        <<" uacStage="<<jsonUint64Value(payload,"uacStage")
+        <<" uacError="<<jsonUint64Value(payload,"uacError")
+        <<" uacStatus="<<jsonUint64Value(payload,"uacStatus")<<'\n';
+    }
     if(payload.find("\"inputOsRejected\"")!=std::string::npos) {
       std::cout<<"SNINPUT_OS_HEALTH inputOsDirect="<<jsonUint64Value(payload,"inputOsDirect")
         <<" inputOsPrivileged="<<jsonUint64Value(payload,"inputOsPrivileged")
@@ -7032,8 +7069,11 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"* Includes OS queues / receive scheduling\nLocal timings; excludes display scan-out"]];
     _latencyOverlay.attributedStringValue = overlay;
     if (hostFresh && gHostCapturePaused.load()) {
+      HostHelperFailure failure;
+      { std::lock_guard lock(gHostHelperMutex); failure=gHostHelperFailure; }
+      const auto text=std::string("Screen capture temporarily unavailable.\nWindows may be showing UAC, a locked screen,\nor switching displays.\n\nWaiting for the desktop to return…")+hostHelperFailureText(failure);
       _latencyOverlay.attributedStringValue = [[NSAttributedString alloc]
-        initWithString:@"Screen capture temporarily unavailable.\nWindows may be showing UAC, a locked screen,\nor switching displays.\n\nWaiting for the desktop to return…"
+        initWithString:[NSString stringWithUTF8String:text.c_str()]
         attributes:@{NSForegroundColorAttributeName:NSColor.systemOrangeColor}];
       _latencyOverlay.hidden = NO;
     }

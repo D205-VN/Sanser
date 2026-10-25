@@ -7,9 +7,13 @@ inline constexpr wchar_t serviceName[]=L"SanserUac";
 inline constexpr wchar_t pipeName[]=L"\\\\.\\pipe\\Sanser.Uac.v1";
 inline constexpr std::uint32_t magic=0x31435553; // SUC1, local IPC only.
 inline constexpr std::uint32_t maxPixelsBytes=64*1024*1024;
-enum class Operation : std::uint32_t { Capture=1, Input=2 };
+enum class Operation : std::uint32_t { Capture=1, Input=2, Probe=3 };
 enum class Status : std::uint32_t { Unavailable=0, Frame=1, Idle=2, Applied=3,
-  ConsoleUnavailable=4, DesktopUnavailable=5, InputUnavailable=6 };
+  ConsoleUnavailable=4, DesktopUnavailable=5, InputUnavailable=6, Ready=7, CaptureUnavailable=8 };
+inline constexpr std::uint32_t workerStartupTimeoutMs=3000;
+inline constexpr std::uint32_t readyTimeoutMs=4000;
+inline constexpr std::uint32_t captureStartupTimeoutMs=4000;
+inline constexpr std::uint32_t responseTimeoutMs=1000;
 struct Request {
   std::uint32_t signature=magic;
   Operation operation=Operation::Capture;
@@ -29,6 +33,8 @@ struct Response {
 static_assert(sizeof(Request)==36 && sizeof(Response)==32);
 inline bool valid(const Request& r) {
   if(r.signature!=magic) return false;
+  if(r.operation==Operation::Probe)
+    return !r.adapter && !r.output && !r.type && !r.flags && !r.data && !r.x && !r.y;
   if(r.operation==Operation::Capture)
     return r.adapter<8 && r.output<16 && !r.type && !r.flags && !r.data && !r.x && !r.y;
   if(r.operation!=Operation::Input || r.adapter || r.output) return false;
