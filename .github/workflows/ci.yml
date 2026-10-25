@@ -111,8 +111,19 @@ jobs:
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         shell: pwsh
         run: ./scripts/test-windows-uac-service.ps1
-      - run: ctest --test-dir build/host-windows -C Release --output-on-failure
+      - name: Test native Windows engines and render floating control previews
+        shell: pwsh
+        run: |
+          $env:SANSER_PANEL_PREVIEW_DIR = Join-Path $env:RUNNER_TEMP 'sanser-voice-panel'
+          New-Item -ItemType Directory -Force $env:SANSER_PANEL_PREVIEW_DIR | Out-Null
+          ctest --test-dir build/host-windows -C Release --output-on-failure
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        with:
+          name: windows-voice-panel-previews
+          path: ${{ runner.temp }}/sanser-voice-panel/*.png
+          if-no-files-found: error
       - run: ./build/host-windows/cross-platform/Release/sanser-client-windows.exe --capabilities-json
 
   windows-relay:
