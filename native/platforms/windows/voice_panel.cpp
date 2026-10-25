@@ -20,6 +20,9 @@ namespace sanser::desktop {
 namespace {
 constexpr COLORREF surface=RGB(28,36,49),ink=RGB(225,232,247),muted=RGB(141,156,181),accent=RGB(102,219,184),red=RGB(255,125,138),edge=RGB(48,59,77);
 Gdiplus::Color tint(COLORREF value) { return Gdiplus::Color(255,GetRValue(value),GetGValue(value),GetBValue(value)); }
+Gdiplus::Rect pixels(RECT value) {
+  return Gdiplus::Rect(static_cast<INT>(value.left),static_cast<INT>(value.top),static_cast<INT>(value.right-value.left),static_cast<INT>(value.bottom-value.top));
+}
 struct DrawingSession {
   ULONG_PTR token=0;
   DrawingSession() {
@@ -171,7 +174,7 @@ struct VoicePanel::Impl {
     Gdiplus::Graphics graphics(dc);
     Gdiplus::LinearGradientBrush gradient(Gdiplus::Point(0,-offsetY),Gdiplus::Point(0,px(height())-offsetY),
       Gdiplus::Color(255,14,18,27),Gdiplus::Color(255,22,28,38));
-    graphics.FillRectangle(&gradient,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top);
+    graphics.FillRectangle(&gradient,pixels(rect));
   }
   void fill(HDC dc,RECT rect,COLORREF color,int diameter=0) const {
     Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -180,7 +183,7 @@ struct VoicePanel::Impl {
       Gdiplus::GraphicsPath path;
       roundedPath(path,static_cast<float>(rect.left),static_cast<float>(rect.top),static_cast<float>(rect.right),static_cast<float>(rect.bottom),static_cast<float>(px(diameter)));
       graphics.FillPath(&brush,&path);
-    } else graphics.FillRectangle(&brush,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top);
+    } else graphics.FillRectangle(&brush,pixels(rect));
   }
   void text(HDC dc,const wchar_t* value,RECT rect,HFONT font,COLORREF color,UINT flags) const {
     const auto old=SelectObject(dc,font); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,color); DrawTextW(dc,value,-1,&rect,flags); SelectObject(dc,old);
