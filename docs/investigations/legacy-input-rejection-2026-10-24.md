@@ -59,3 +59,5 @@ The exact failure remains to be tested on the user's Windows host: compare
 Start/Explorer with the affected launcher, check whether its window keeps
 changing, and correlate updated host input counters with the click. Source
 repairs here are not included in the published 2.2.21 installer.
+
+Packaged in [Sanser 2.2.22](../releases/v2.2.22.md).

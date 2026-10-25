@@ -87,3 +87,5 @@ and checks the changing picture on both peers instead of an exact frame count
 which can legitimately include a recovery IDR. Runtime sharing policy is
 unchanged. Mac tests also verify helper errors through the authenticated pong
 parser, not only the status-message formatter.
+
+Packaged in [Sanser 2.2.22](../releases/v2.2.22.md).
