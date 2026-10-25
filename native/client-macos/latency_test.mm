@@ -106,11 +106,15 @@ int main() {
           "outbound request carries per-attempt probe and enqueue time");
         const auto received = steadyMicros();
         const std::string pong = "{\"type\":\"control-pong\",\"timingProbe\":" + std::to_string(probe) +
-          ",\"sentSteadyMicros\":" + std::to_string(originalSent) + "}";
+          ",\"sentSteadyMicros\":" + std::to_string(originalSent) +
+          ",\"uacFailures\":1,\"uacReady\":0,\"uacFrames\":0,\"uacIdle\":0,\"uacStage\":3,\"uacError\":1460,\"uacStatus\":0}";
         takeControlRttWindow();
         requireLatency(handleHostControlPayload(makeSecureControlEnvelope(token, "h2c", 1, pong), received) == HostControlEvent::Pong,
           "production pong parser");
         requireLatency(gLiveLatency.controlTimingUpdated == 0, "no fabricated wire RTT before receipt");
+        { std::lock_guard lock(gHostHelperMutex);
+          requireLatency(gHostHelperFailure.known && gHostHelperFailure.stage==3 && gHostHelperFailure.error==1460,
+            "Authenticated pong must publish actual helper readiness failure for the status overlay"); }
         const auto beforeReceipt = steadyMicros();
         const std::string receipt = "{\"type\":\"control-timing\",\"timingProbe\":" + std::to_string(probe) +
           ",\"hostReceivedMicros\":900000000,\"hostDequeuedMicros\":900000000,\"hostSentMicros\":900000000}";
@@ -144,6 +148,7 @@ int main() {
         requireLatency(takeControlRttWindow().samples == 0, "input ACK must not pollute ping RTT");
         gLiveLatency.controlTimingUpdated = 0;
         gExpectedSessionToken.clear(); gHostPacketAuthVerified = false; gLastHostSecureSequence = 0;
+        { std::lock_guard lock(gHostHelperMutex); gHostHelperFailure={}; }
       }
       // A deliberately stalled video consumer must not prevent socket demux.
       {

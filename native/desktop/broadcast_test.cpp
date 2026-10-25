@@ -77,7 +77,19 @@ int main() {
       for(unsigned i=0;i<20;++i) {
         group.updateHealth();
         group.publish(Frame{Bytes(8000,static_cast<std::uint8_t>(i)),1920,1080,false});
-        require(waitFor([&] { return count(first)==i+2 && count(second)==i+2; }),"sharing froze after its first desktop frame");
+        const auto current=[&](Viewer& viewer) {
+          std::lock_guard lock(viewer.mutex);
+          return !viewer.frames.empty() && viewer.frames.back().data==Bytes(8000,static_cast<std::uint8_t>(i));
+        };
+        // Behave like the real encoder loop while waiting for delivery. A
+        // late startup/loss request is legitimate; a finite fixture which
+        // never answers it can deadlock its dependent P-frame chain itself.
+        // Compare the changed picture, since a healthy peer can receive both
+        // the original P and its recovery IDR while another peer recovers.
+        require(waitFor([&] {
+          if(group.takeKeyframeRequest()) group.publish(Frame{Bytes(8000,static_cast<std::uint8_t>(i)),1920,1080,true});
+          return current(first) && current(second);
+        }),"sharing froze after its first desktop frame");
       }
       for(const auto& peer:group.stats()) require(peer.sendQueueDrops==0 && peer.pauses==0,"pacer's own serialization must not be treated as a slow viewer");
       const auto firstBefore=count(first),secondBefore=count(second);

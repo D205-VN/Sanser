@@ -78,3 +78,12 @@ capture: test that on the affected Windows host after installing an updated
 bundle. Use the new stage/code if the helper still fails. Also retest ordinary
 apps and elevated launchers after dismissing UAC. These source changes are not
 in the published 2.2.21 installer.
+
+Initial CI passed all 37 Windows tests and the actual elevated Cancel click
+with the 1500 ms cold worker, but the Mac sharing fixture stalled waiting for
+a P-frame. That finite source did not answer pending keyframe requests while
+waiting, unlike the real encoder loop. The fixture now answers those requests
+and checks the changing picture on both peers instead of an exact frame count
+which can legitimately include a recovery IDR. Runtime sharing policy is
+unchanged. Mac tests also verify helper errors through the authenticated pong
+parser, not only the status-message formatter.
