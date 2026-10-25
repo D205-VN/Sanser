@@ -166,6 +166,23 @@ int wmain(int argc,wchar_t** argv) {
     std::vector<BYTE> userData(userBytes);
     require(userBytes && GetTokenInformation(medium.value,TokenUser,userData.data(),userBytes,&userBytes),"Fixture desktop user SID");
     const auto userSid=reinterpret_cast<TOKEN_USER*>(userData.data())->User.Sid;
+    // An elevated runner's default owner/DACL can name Administrators rather
+    // than its user. Once Administrators is deny-only, new process/thread and
+    // loader synchronization objects must still be accessible to their user.
+    TOKEN_OWNER owner{userSid};
+    require(SetTokenInformation(medium.value,TokenOwner,&owner,sizeof(owner))!=FALSE,"Fixture token user ownership");
+    DWORD aclBytes=0; GetTokenInformation(medium.value,TokenDefaultDacl,nullptr,0,&aclBytes);
+    std::vector<BYTE> aclData(aclBytes);
+    require(aclBytes && GetTokenInformation(medium.value,TokenDefaultDacl,aclData.data(),aclBytes,&aclBytes),"Fixture token default DACL");
+    EXPLICIT_ACCESSW ownAccess{}; ownAccess.grfAccessPermissions=GENERIC_ALL;
+    ownAccess.grfAccessMode=GRANT_ACCESS; ownAccess.grfInheritance=NO_INHERITANCE;
+    ownAccess.Trustee.TrusteeForm=TRUSTEE_IS_SID; ownAccess.Trustee.TrusteeType=TRUSTEE_IS_USER;
+    ownAccess.Trustee.ptstrName=reinterpret_cast<LPWSTR>(userSid);
+    PACL ownAcl=nullptr;
+    require(SetEntriesInAclW(1,&ownAccess,reinterpret_cast<TOKEN_DEFAULT_DACL*>(aclData.data())->DefaultDacl,&ownAcl)==ERROR_SUCCESS,"Fixture token user object access");
+    TOKEN_DEFAULT_DACL ownDefault{ownAcl};
+    const auto defaultSet=SetTokenInformation(medium.value,TokenDefaultDacl,&ownDefault,sizeof(ownDefault));
+    LocalFree(ownAcl); require(defaultSet!=FALSE,"Set fixture token user DACL");
     FixtureDesktopAccess stationAccess(GetProcessWindowStation(),userSid);
     FixtureDesktopAccess desktopAccess(GetThreadDesktop(GetCurrentThreadId()),userSid);
     // Deterministically reproduce the permission the old client demanded.

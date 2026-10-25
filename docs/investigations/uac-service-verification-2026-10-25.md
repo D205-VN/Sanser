@@ -57,12 +57,16 @@ that user's PROCESS_QUERY_LIMITED_INFORMATION access to the synthetic SYSTEM
 service process. The original process DACL is restored on fixture exit; this test
 code is excluded from production builds.
 
-Hosted CI may grant its interactive desktop through Administrators only. A child
-with that SID deny-only exited with `0xC0000142` before reaching its test entry
-point on the first run. The fixture now temporarily grants its own user access to
-the CI window station/desktop as required by CreateProcessAsUser, restoring both
-DACLs on exit. This is confined to the isolated fixture; production desktop ACLs
-are not changed.
+On the first runs a child with that SID deny-only exited with `0xC0000142` before
+reaching its test entry point. Preparing window station/desktop access alone did
+not resolve startup. An elevated runner's default owner/DACL can also depend on
+Administrators, so the fixture sets its cloned token's default owner to its user
+and merges a user access entry into the token's default DACL. This lets the child
+access its own new process/thread and loader synchronization objects without
+reenabling Administrators. It also temporarily grants its own user access to the
+CI window station/desktop as required by CreateProcessAsUser, restoring both
+desktop DACLs on exit. This is confined to the isolated fixture; production
+desktop ACLs and user tokens are not changed.
 
 The protected medium-integrity host must demonstrate both the deny-only SID and
 failure of the old OpenProcess dependency, then deliver a real click to the
@@ -80,5 +84,6 @@ This patch is subsequent to the published 2.2.22 installer.
 ## References
 
 - [Restricted tokens](https://learn.microsoft.com/en-us/windows/win32/secauthz/restricted-tokens)
+- [Access tokens and default DACLs](https://learn.microsoft.com/en-us/windows/win32/secauthz/access-tokens)
 - [Service security and access rights](https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights)
 - [QueryServiceStatusEx](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex)
