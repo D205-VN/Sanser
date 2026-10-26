@@ -15,6 +15,7 @@ struct FakeAudioOutput {
   bool immediate=false,emptyStart=false,clearReturnedSize=false;
   OSStatus enqueueError=noErr,startError=noErr;
   unsigned starts=0;
+  AudioOutputRoute route{1,1,48000};
   FakeAudioOutput() { active=this; }
   ~FakeAudioOutput() { active=nullptr; }
   Queue& current() { return *queues.back(); }
@@ -66,6 +67,7 @@ struct FakeAudioOutput {
     api.setProperty=+[](AudioQueueRef,AudioQueuePropertyID,const void*,UInt32)->OSStatus { return noErr; };
     api.setParameter=+[](AudioQueueRef,AudioQueueParameterID,AudioQueueParameterValue)->OSStatus { return noErr; };
     api.now=+[] { return active->time; };
+    api.route=+[](const std::string&) { return active->route; };
     return api;
   }
 };
@@ -110,4 +112,22 @@ void testAudioOutputRecovery() {
   device.time+=std::chrono::milliseconds(300);
   requireLatency(submit() && player.stats().recoveries==3 && device.current().running,"Start failure must not permanently silence output");
   device.complete();
+  // Hot-unplug can leave a queue reporting running=true on the old route.
+  // A source change on the same device (built-in headphones -> speakers)
+  // must replace it without waiting for a callback failure or a session reset.
+  for(unsigned i=0;i<8000;++i) {
+    if(i==4000) ++device.route.source;
+    if(i==6000) { device.route.device=2; device.route.rate=44100; }
+    const auto previousChanges=player.stats().routeChanges;
+    device.time+=std::chrono::milliseconds(5);
+    requireLatency(submit(),"Audio stopped during a forty-second route-switch run");
+    if(player.stats().routeChanges>previousChanges) {
+      const auto* pcm=static_cast<const float*>(device.current().pending.front()->mAudioData);
+      requireLatency(std::abs(pcm[0])<0.01F && std::abs(pcm[478]-0.25F)<0.0001F,
+        "A new output route must ramp in without clipping continuous speech");
+    }
+    device.complete();
+  }
+  requireLatency(player.stats().recoveries==5 && player.stats().routeChanges==2 && player.stats().queuedFrames==0,
+    "Both same-device jack changes and default device/rate changes must recover");
 }

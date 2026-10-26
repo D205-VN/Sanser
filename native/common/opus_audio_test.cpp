@@ -41,6 +41,21 @@ int main() {
   jitter.reset(); check(jitter.push(packets[0],now+std::chrono::seconds(1)),"Restart sequence rejected");
   auto fresh=jitter.poll(now+std::chrono::seconds(1)+std::chrono::milliseconds(10)); check(fresh && fresh->sequence==1 && !fresh->concealed,"Restart retained old decoder sequence");
   Jitter stalled; stalled.push(packets[0],now); check(!stalled.poll(now+std::chrono::milliseconds(50)),"Stale audio survived 40ms age limit");
+  Jitter backlog;
+  backlog.push(packets[0],now); backlog.push(packets[1],now);
+  check(backlog.poll(now+std::chrono::milliseconds(10)).has_value(),"Backlog test did not start");
+  backlog.push(packets[2],now+std::chrono::milliseconds(25));
+  // Due is 15ms, so the 36ms scheduler delay is below the old 40ms
+  // overdue guard, while packet 2 itself has expired. Never PLC that packet.
+  auto resumed=backlog.poll(now+std::chrono::milliseconds(51));
+  check(resumed && resumed->sequence==3 && !resumed->concealed && backlog.stats().concealed==0,
+    "Freshness discard must skip stale playout time instead of concealing retired audio");
+  for(unsigned i=3;i<40;++i) {
+    const auto at=now+std::chrono::milliseconds(51+(i-2)*5);
+    backlog.push(packets[i],at);
+    auto block=backlog.poll(at);
+    check(block && block->sequence==i+1 && !block->concealed,"Fresh audio remained stuck behind an expired backlog");
+  }
   Samples silence{}; Encoder quiet; Jitter silent;
   check(silent.push({1,0,0,quiet.encode(silence)},now),"Valid Opus silence/mono coding rejected for stereo output");
   check(silent.poll(now+std::chrono::milliseconds(10)).has_value(),"Opus silence did not decode");

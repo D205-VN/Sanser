@@ -125,6 +125,8 @@ const FIELDS: &[&str] = &[
     "opusReordered",
     "opusDropped",
     "opusErrors",
+    "opusFreshnessResets",
+    "audioSendDrops",
     "opusTxPackets",
     "opusTxBytes",
     "played",
@@ -139,6 +141,7 @@ const FIELDS: &[&str] = &[
     "outputQueuedFrames",
     "outputStarts",
     "outputRecoveries",
+    "outputRouteChanges",
     "outputErrors",
     "outputQueueDrops",
     "outputLastError",
@@ -829,6 +832,11 @@ mod tests {
         assert_eq!(legacy.values["played"], 2.0);
         assert!(!legacy.values.contains_key("device"));
         assert!(!legacy.values.contains_key("token"));
+        let recovery=parse_sample(b"SNA1_AUDIO_STATS opusFreshnessResets=3 outputRouteChanges=2 audioSendDrops=1 device=123 token=789").unwrap();
+        assert_eq!(recovery.values.len(),3);
+        assert_eq!(recovery.values["opusFreshnessResets"],3.0);
+        assert_eq!(recovery.values["outputRouteChanges"],2.0);
+        assert_eq!(recovery.values["audioSendDrops"],1.0);
     }
     #[test]
     fn live_recovery_evidence_is_bound_to_the_report_session_without_raw_content() {

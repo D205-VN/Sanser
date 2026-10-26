@@ -63,7 +63,17 @@ bool Jitter::push(Packet packet,Clock::time_point now) {
   return true;
 }
 std::optional<Decoded> Jitter::poll(Clock::time_point now) {
-  while(!packets_.empty() && now-packets_.begin()->second.received>std::chrono::milliseconds(40)) { packets_.erase(packets_.begin()); ++stats_.dropped; }
+  bool expired=false;
+  while(!packets_.empty() && now-packets_.begin()->second.received>std::chrono::milliseconds(40)) { packets_.erase(packets_.begin()); ++stats_.dropped; expired=true; }
+  if(expired) {
+    ++stats_.freshnessResets;
+    // These samples were deliberately retired, not lost on the wire. Keeping
+    // the old due_/expected_ would synthesize PLC for the discarded backlog,
+    // aging the fresh packets until they too are discarded on the next poll.
+    // Resume at the fresh head with at most the normal reorder reserve.
+    started_=false; decoder_.reset(); missing_=0;
+    first_=packets_.empty() ? now : packets_.begin()->second.received;
+  }
   if(started_ && now-due_>std::chrono::milliseconds(40)) { started_=false; decoder_.reset(); first_=now; }
   if(!started_) {
     if(packets_.empty() || now-first_<std::chrono::milliseconds(10)) return {};

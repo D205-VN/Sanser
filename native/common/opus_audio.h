@@ -41,7 +41,7 @@ struct Packet { std::uint64_t sequence=0,timestamp=0,unixMicros=0; Bytes payload
 Bytes pack(const Packet& packet);
 std::optional<Packet> unpack(std::span<const std::uint8_t> bytes);
 struct Decoded { Samples samples; std::uint64_t sequence=0,unixMicros=0,generation=0; bool concealed=false; };
-struct Stats { std::uint64_t decoded=0,concealed=0,late=0,reordered=0,dropped=0,errors=0; };
+struct Stats { std::uint64_t decoded=0,concealed=0,late=0,reordered=0,dropped=0,errors=0,freshnessResets=0; };
 
 // Pure playout policy, called under ReceiveWorker's mutex (or with a virtual
 // clock in tests). 10ms reorder reserve, 40ms freshness, <=30ms consecutive PLC.

@@ -22,9 +22,60 @@ SnvPacket testPacket(std::uint64_t sequence, bool keyframe = false) {
   packet.flags = keyframe ? 1 : 0;
   return packet;
 }
-int main() {
+void testEarlyVideoRepair() {
+  using namespace std::chrono;
+  const auto start=steady_clock::time_point{}+seconds(1);
+  UdpPacketAssembly assembly;
+  assembly.fragmentCount=20; assembly.receivedFragments=2;
+  assembly.highestFragment=2; assembly.lastFragmentAt=start;
+  requireLatency(!assembly.repairDue(start,false),"Interior fragment hole needs reorder grace");
+  requireLatency(assembly.repairDue(start+milliseconds(3),false),
+    "Interior hole must NACK before waiting for the next frame or jitter hold");
+  assembly.receivedFragments=3;
+  requireLatency(!assembly.repairDue(start+milliseconds(4),false),"Reordered fragment must cancel pending repair");
+  requireLatency(!assembly.repairDue(start+milliseconds(6),false),"Missing tail needs a short stalled-send grace");
+  requireLatency(assembly.repairDue(start+milliseconds(9),false),"Lost tail must repair without an RTT-sized initial delay");
+  assembly.nackNotified=true;
+  requireLatency(!assembly.repairDue(start+milliseconds(100),false),"Assembly must not flood duplicate NACKs");
+
+  // Exercise the production parser/reassembler as well as the timer policy:
+  // packet 1 has neither a tail fragment nor a successor packet yet.
+  UdpVideoReassembler receiver;
+  UdpVideoStats stats;
+  UdpPeerLock peerLock("early-repair-test");
+  const auto peer=resolveUdpAddress("127.0.0.1:55000");
+  std::vector<std::uint8_t> bytes;
+  std::uint64_t id=0,epoch=0;
+  bool grace=false;
+  auto fragment=[&](std::uint16_t index) {
+    UdpVideoFragmentHeader header;
+    header.packetId=1; header.packetSize=10; header.fragmentCount=10;
+    header.fragmentIndex=index; header.fragmentOffset=index; header.payloadSize=1;
+    std::vector<std::uint8_t> datagram(sizeof(header)+1,static_cast<std::uint8_t>(index));
+    std::memcpy(datagram.data(),&header,sizeof(header));
+    return receiver.push(datagram,bytes,stats,id,epoch,grace,peer,peerLock);
+  };
+  requireLatency(!fragment(0) && !fragment(2),"Interior-loss frame unexpectedly completed");
+  const auto received=steady_clock::now();
+  receiver.pollRepairs(stats,received);
+  receiver.pollRepairs(stats,received+milliseconds(3));
+  requireLatency(stats.newNackPacketIds==std::vector<std::uint64_t>{1},
+    "Production reassembler must NACK an interior gap before the frame tail");
+  for(std::uint16_t i=1;i<10;++i) if(i!=2) {
+    const bool completed=fragment(i);
+    requireLatency(completed==(i==9),"Early NACK discarded the recoverable partial frame");
+  }
+  requireLatency(bytes==std::vector<std::uint8_t>({0,1,2,3,4,5,6,7,8,9}) && stats.droppedAssemblies==0,
+    "Recovered interior gap must retain every original fragment");
+}
+int main(int argc,char** argv) {
   @autoreleasepool {
     try {
+      if(argc==2 && std::string_view(argv[1])=="--media-recovery-only") {
+        testAudioOutputRecovery(); testEarlyVideoRepair();
+        std::cout<<"Media recovery: forty-second fake AudioQueue, route changes, output stalls and early video repair passed\n";
+        return 0;
+      }
       requireLatency(hostHelperFailureText({}).empty(),"Old host must not invent a helper failure");
       requireLatency(hostHelperFailureText({true,0,0,0,0}).empty(),"No failure must not produce a repair warning");
       requireLatency(hostHelperFailureText({true,1,3,0,1460}).find("worker was not ready")!=std::string::npos,"Cold worker timeout must have a distinct actionable reason");
@@ -33,6 +84,7 @@ int main() {
       requireLatency(hostHelperFailureText({true,1,7,8,2147942405ULL}).find("2147942405")!=std::string::npos,"Capture HRESULT bits must survive the client status text");
       sanser::desktop::testMacRemoteView();
       testAudioOutputRecovery();
+      testEarlyVideoRepair();
       {
         // Run the production launcher decision with a fake start callback;
         // this test must never open an audio device or capture a real screen.

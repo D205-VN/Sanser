@@ -4224,12 +4224,23 @@ struct UdpPacketAssembly {
   std::uint32_t receivedBytes = 0;
   std::uint16_t receivedFragments = 0;
   std::uint16_t fragmentCount = 0;
+  std::uint16_t highestFragment = 0;
   std::uint64_t mediaEpoch = 0;
   bool rekeyGrace = false;
   bool hadRetransmit = false;
   bool lastFragmentSeen = false;
   bool nackNotified = false;
   std::chrono::steady_clock::time_point gapDetectedAt{};
+  bool repairDue(std::chrono::steady_clock::time_point now,bool laterFrame) {
+    // An interior hole is observable before the frame's tail or its successor
+    // arrives. Tail loss is observable after the sender's <=5ms Ultra burst
+    // stops. Do not wait an entire RTT-sized jitter hold before starting NACK.
+    const bool gap=receivedFragments<static_cast<unsigned>(highestFragment)+1;
+    const bool stalled=now-lastFragmentAt>=std::chrono::milliseconds(6);
+    if(!laterFrame && !gap && !stalled) { gapDetectedAt={}; return false; }
+    if(gapDetectedAt.time_since_epoch().count()==0) gapDetectedAt=now;
+    return !nackNotified && now-gapDetectedAt>=std::chrono::milliseconds(3);
+  }
 };
 
 class UdpVideoReassembler {
@@ -4253,11 +4264,7 @@ public:
     for (auto& [key, assembly] : assemblies_) {
       const auto highest = highestPacketIdByEpoch_.find(key.mediaEpoch);
       const bool laterFrame = highest != highestPacketIdByEpoch_.end() && highest->second > key.packetId;
-      const bool stalled = now - assembly.lastFragmentAt >= std::chrono::milliseconds(
-        gLatencyPolicy.jitterHoldMs(gLiveLatency.jitter.load(), gLiveLatency.rtt.load()));
-      if (assembly.nackNotified || (!laterFrame && !assembly.lastFragmentSeen && !stalled)) continue;
-      if (assembly.gapDetectedAt.time_since_epoch().count() == 0) assembly.gapDetectedAt = now;
-      if (now - assembly.gapDetectedAt >= std::chrono::milliseconds(3)) {
+      if (assembly.repairDue(now,laterFrame)) {
         recordNackPacket(stats, key.packetId);
         assembly.nackNotified = true;
       }
@@ -4428,6 +4435,7 @@ public:
       assembly.createdAt = std::chrono::steady_clock::now();
       assembly.receivedBytes = 0;
       assembly.receivedFragments = 0;
+      assembly.highestFragment = 0;
       assembly.fragmentCount = header.fragmentCount;
       assembly.mediaEpoch = fragmentMediaEpoch;
       assembly.rekeyGrace = authenticatedVideo && videoCrypto.rekeyGrace;
@@ -4451,6 +4459,7 @@ public:
     assembly.received[header.fragmentIndex] = 1;
     assembly.receivedBytes += header.payloadSize;
     assembly.receivedFragments += 1;
+    assembly.highestFragment = std::max(assembly.highestFragment,header.fragmentIndex);
     assembly.lastFragmentAt = std::chrono::steady_clock::now();
     if (header.fragmentIndex + 1 == header.fragmentCount) assembly.lastFragmentSeen = true;
 
@@ -4998,6 +5007,39 @@ void startAudioListener(const AudioOutputSettings& settings,bool udpVideo,
   if(settings.enabled && (audioPort>0 || (udpVideo && controlPort==0))) start();
 }
 
+struct AudioOutputRoute {
+  AudioDeviceID device=kAudioObjectUnknown;
+  UInt32 source=0;
+  Float64 rate=0;
+  bool operator==(const AudioOutputRoute&) const = default;
+};
+
+AudioOutputRoute audioOutputRoute(const std::string& requestedUid) {
+  AudioOutputRoute route;
+  if(!requestedUid.empty()) {
+    CFStringRef uid=CFStringCreateWithCString(kCFAllocatorDefault,requestedUid.c_str(),kCFStringEncodingUTF8);
+    if(uid) {
+      AudioValueTranslation value{&uid,sizeof(uid),&route.device,sizeof(route.device)};
+      UInt32 size=sizeof(value);
+      AudioObjectPropertyAddress address{kAudioHardwarePropertyTranslateUIDToDevice,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+      (void)AudioObjectGetPropertyData(kAudioObjectSystemObject,&address,0,nullptr,&size,&value);
+      CFRelease(uid);
+    }
+  }
+  if(route.device==kAudioObjectUnknown) route.device=defaultOutputAudioDevice();
+  if(route.device!=kAudioObjectUnknown) {
+    // Built-in headphones and speakers can share a device ID. Track the
+    // output data source and nominal rate too, not just the default ID.
+    AudioObjectPropertyAddress address{kAudioDevicePropertyDataSource,kAudioDevicePropertyScopeOutput,kAudioObjectPropertyElementMain};
+    UInt32 size=sizeof(route.source);
+    (void)AudioObjectGetPropertyData(route.device,&address,0,nullptr,&size,&route.source);
+    address={kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+    size=sizeof(route.rate);
+    (void)AudioObjectGetPropertyData(route.device,&address,0,nullptr,&size,&route.rate);
+  }
+  return route;
+}
+
 // Injectable Core Audio calls let recovery tests simulate a drained/stopped
 // device without opening a speaker or depending on OS callback timing.
 struct AudioQueueFunctions {
@@ -5010,6 +5052,7 @@ struct AudioQueueFunctions {
   decltype(&AudioQueueGetProperty) getProperty=AudioQueueGetProperty;
   decltype(&AudioQueueSetProperty) setProperty=AudioQueueSetProperty;
   decltype(&AudioQueueSetParameter) setParameter=AudioQueueSetParameter;
+  AudioOutputRoute (*route)(const std::string&)=audioOutputRoute;
   std::chrono::steady_clock::time_point (*now)()=+[] { return std::chrono::steady_clock::now(); };
 };
 
@@ -5051,7 +5094,23 @@ public:
     // Only producers take this lock. Core Audio callbacks never do, so all
     // enqueue/start/property calls can run outside the callback's mutex.
     std::lock_guard serial(submitMutex_);
+    const auto now=functions_.now();
+    bool routeChanged=false;
+    if(lastRouteCheck_.time_since_epoch().count()==0 || now-lastRouteCheck_>=std::chrono::milliseconds(250)) {
+      lastRouteCheck_=now;
+      const auto route=functions_.route(outputDeviceUid_);
+      if(route.device!=kAudioObjectUnknown) {
+        routeChanged=outputRoute_.device!=kAudioObjectUnknown && !(route==outputRoute_);
+        outputRoute_=route;
+      }
+    }
     std::unique_lock<std::mutex> lock(mutex_);
+    if(routeChanged && queue_) {
+      ++outputRouteChanges_;
+      ++outputRecoveries_;
+      std::cout<<"SNA1_AUDIO_ROUTE_CHANGE action=recreate-output\n";
+      configureLocked(lock,sampleRate,channels,payloadSize);
+    }
     if(requiresRecovery_) {
       if(functions_.now()-lastProgress_<std::chrono::milliseconds(250)) { ++queueDrops_; return false; }
       ++outputRecoveries_;
@@ -5075,6 +5134,8 @@ public:
     AudioQueueBufferRef buffer = freeBuffers_.front();
     freeBuffers_.pop_front();
     std::memcpy(buffer->mAudioData, payload, payloadSize);
+    outputContinuity_.floats(static_cast<std::uint8_t*>(buffer->mAudioData),frameCount,channels,sampleRate,outputGap_);
+    outputGap_=false;
     buffer->mAudioDataByteSize = payloadSize;
     // Retire exactly what was admitted, independently of any driver changes to
     // the mutable byte-size field on a returned buffer.
@@ -5115,12 +5176,12 @@ public:
   }
 
   struct Stats {
-    std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames;
+    std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames,routeChanges;
     OSStatus lastError;
   };
   Stats stats() {
     std::lock_guard lock(mutex_);
-    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,lastOutputError_};
+    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,outputRouteChanges_,lastOutputError_};
   }
 
   std::uint64_t takeQueueDrops() {
@@ -5158,6 +5219,8 @@ private:
     maxBufferBytes_ = 0;
     budget_.clear();
     requiresRecovery_=false;
+    outputContinuity_=sanser::AudioContinuity{};
+    outputGap_=true;
     lastProgress_=functions_.now();
 
     lock.unlock();
@@ -5174,23 +5237,28 @@ private:
     description.mChannelsPerFrame = channels;
     description.mBitsPerChannel = 32;
 
-    AudioQueueRef createdQueue = createOutputQueue(description, false);
-    queue_ = createdQueue;
-    sampleRate_ = sampleRate;
-    channels_ = channels;
-    maxBufferBytes_ = std::max<std::uint32_t>(requiredBytes, 4096);
+    try {
+      AudioQueueRef createdQueue = createOutputQueue(description, false);
+      queue_ = createdQueue;
+      sampleRate_ = sampleRate;
+      channels_ = channels;
+      maxBufferBytes_ = std::max<std::uint32_t>(requiredBytes, 4096);
 
-    constexpr int bufferCount = 48;
-    for (int i = 0; i < bufferCount; ++i) {
-      AudioQueueBufferRef buffer = nullptr;
-      checkStatus(functions_.allocate(queue_, maxBufferBytes_, &buffer), "AudioQueueAllocateBuffer");
-      freeBuffers_.push_back(buffer);
+      constexpr int bufferCount = 48;
+      for (int i = 0; i < bufferCount; ++i) {
+        AudioQueueBufferRef buffer = nullptr;
+        checkStatus(functions_.allocate(queue_, maxBufferBytes_, &buffer), "AudioQueueAllocateBuffer");
+        freeBuffers_.push_back(buffer);
+      }
+    } catch(...) {
+      ++outputErrors_; requiresRecovery_=true;
+      throw;
     }
     // Start only after the first payload has been enqueued. Empty-start is
     // device-dependent, and a later underrun must be allowed to restart.
     std::cout << "SNA1_AUDIO_PLAYBACK sampleRate=" << sampleRate_
               << " channels=" << channels_
-              << " buffers=" << bufferCount
+              << " buffers=" << freeBuffers_.size()
               << " bufferBytes=" << maxBufferBytes_
               << " device=\"" << (activeOutputDeviceUid_.empty() ? "default" : activeOutputDeviceUid_) << "\""
               << " requestedDevice=\"" << (outputDeviceUid_.empty() ? "default" : outputDeviceUid_) << "\""
@@ -5261,9 +5329,14 @@ private:
   std::uint32_t maxBufferBytes_ = 0;
   std::uint64_t queueDrops_ = 0;
   std::uint64_t outputSubmittedFrames_=0,outputCompletedFrames_=0,outputStarts_=0,outputRecoveries_=0,outputErrors_=0,outputSignalFrames_=0;
+  std::uint64_t outputRouteChanges_=0;
   OSStatus lastOutputError_=noErr;
   bool requiresRecovery_=false;
   std::chrono::steady_clock::time_point lastProgress_{},lastRunningCheck_{};
+  std::chrono::steady_clock::time_point lastRouteCheck_{};
+  AudioOutputRoute outputRoute_;
+  sanser::AudioContinuity outputContinuity_;
+  bool outputGap_=true;
   std::string outputDeviceUid_;
   std::string activeOutputDeviceUid_;
   double volume_ = 1.0;
@@ -7416,6 +7489,7 @@ void listenUdpAudio(std::uint16_t audioPort,
                << "SNA1_AUDIO_STATS datagrams=" << stats.datagrams
                << " opusDecoded=" << opusStats.decoded << " opusPlc=" << opusStats.concealed
                << " opusLate=" << opusStats.late << " opusReordered=" << opusStats.reordered << " opusDropped=" << opusStats.dropped << " opusErrors=" << opusStats.errors
+               << " opusFreshnessResets=" << opusStats.freshnessResets
                << " played=" << jitterStats.submittedPackets
                << " frames=" << jitterStats.submittedFrames
                << " outputSubmittedFrames=" << outputStats.submittedFrames
@@ -7424,6 +7498,7 @@ void listenUdpAudio(std::uint16_t audioPort,
                << " outputQueuedFrames=" << outputStats.queuedFrames
                << " outputStarts=" << outputStats.starts
                << " outputRecoveries=" << outputStats.recoveries
+               << " outputRouteChanges=" << outputStats.routeChanges
                << " outputErrors=" << outputStats.errors
                << " outputQueueDrops=" << outputStats.drops
                << " outputLastError=" << outputStats.lastError

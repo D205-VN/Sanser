@@ -12,6 +12,8 @@
 #include "control_timing.h"
 #include "stream_adaptation_policy.h"
 #include "opus_audio.h"
+#include "audio_route_watch.h"
+#include "audio_playout.h"
 
 #include <algorithm>
 #include <atomic>
@@ -4682,8 +4684,9 @@ struct WasapiFormatInfo {
 
 class UdpAudioClient {
 public:
-  explicit UdpAudioClient(const std::string& endpoint, std::shared_ptr<MediaCryptoState> mediaCrypto = {})
-    : mediaCrypto_(std::move(mediaCrypto)) {
+  explicit UdpAudioClient(const std::string& endpoint, std::shared_ptr<MediaCryptoState> mediaCrypto = {},
+                          decltype(&::send) sendFunction=::send)
+    : sendFunction_(sendFunction),mediaCrypto_(std::move(mediaCrypto)) {
     const auto separator = endpoint.rfind(':');
     if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
       throw std::runtime_error("--audio-udp-connect must be HOST:PORT");
@@ -4737,6 +4740,14 @@ public:
 
   UdpAudioClient(const UdpAudioClient&) = delete;
   UdpAudioClient& operator=(const UdpAudioClient&) = delete;
+
+  void resetCapture() {
+    // Keep the authenticated transport sequence monotonic across a local
+    // device restart; discard only partial PCM and codec history.
+    if(opusPacketizer_) opusPacketizer_->reset();
+    if(opusEncoder_) opusEncoder_->reset();
+    opusNextUnix_=0;
+  }
 
   std::uint32_t sendStereoFloat(std::uint32_t sampleRate,
                                 const float* samples,
@@ -4829,19 +4840,20 @@ public:
         std::memcpy(sendBuf.data() + 1, datagram.data(), datagramSize);
         
         std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
-        sent = send(gUdpMainSocket,
+        sent = sendFunction_(gUdpMainSocket,
                     reinterpret_cast<const char*>(sendBuf.data()),
                     static_cast<int>(sendBuf.size()),
                     0);
         if (sent > 0) sent -= 1;
       } else {
-        sent = send(socket_,
+        sent = sendFunction_(socket_,
                     reinterpret_cast<const char*>(datagram.data()),
                     datagramSize,
                     0);
       }
-      if (sent == SOCKET_ERROR || sent != datagramSize) {
-        throw std::runtime_error("SNA1 audio UDP send failed, WSA error " + std::to_string(WSAGetLastError()));
+      if (!sentAudio(sent,datagramSize)) {
+        offsetFrames += chunkFrames;
+        continue;
       }
       sentPackets += 1;
       audioDatagramBytes_+=static_cast<std::uint64_t>(datagramSize);
@@ -4850,8 +4862,23 @@ public:
     return sentPackets;
   }
   std::uint64_t audioDatagramBytes() const { return audioDatagramBytes_; }
+  std::uint64_t audioSendDrops() const { return audioSendDrops_; }
 
 private:
+  bool sentAudio(int sent,int expected) {
+    if(sent==expected) return true;
+    const int error=sent==SOCKET_ERROR ? WSAGetLastError() : 0;
+    switch(error) {
+      case WSAEWOULDBLOCK: case WSAENOBUFS: case WSAENETUNREACH:
+      case WSAEHOSTUNREACH: case WSAECONNRESET: case WSAENETDOWN: case WSAETIMEDOUT:
+        // Realtime UDP loss must not permanently kill the capture thread.
+        // Retire this sequence and let the receiver conceal a bounded gap.
+        if(++audioSendDrops_==1 || audioSendDrops_%200==0)
+          std::cerr<<"SNA1_AUDIO_SEND_DROP drops="<<audioSendDrops_<<" error="<<error<<"\n";
+        return false;
+      default: throw std::runtime_error("Audio UDP send failed, WSA error "+std::to_string(error));
+    }
+  }
   void sendOpus(const sanser::audio::Samples& samples) {
     const auto crypto=mediaCrypto_ ? mediaCrypto_->snapshot() : MediaCryptoSnapshot{};
     syncMediaAuthEpoch(crypto,"audio");
@@ -4878,9 +4905,9 @@ private:
     int sent;
     if(gSingleSocketMode && gUdpMainSocket!=INVALID_SOCKET) {
       std::vector<std::uint8_t> multiplexed{0x01}; multiplexed.insert(multiplexed.end(),datagram.begin(),datagram.begin()+static_cast<std::ptrdiff_t>(size));
-      std::lock_guard lock(gUdpMainSocketMutex); sent=send(gUdpMainSocket,reinterpret_cast<const char*>(multiplexed.data()),static_cast<int>(multiplexed.size()),0); if(sent>0) --sent;
-    } else sent=send(socket_,reinterpret_cast<const char*>(datagram.data()),static_cast<int>(size),0);
-    if(sent!=static_cast<int>(size)) throw std::runtime_error("Opus audio UDP send failed");
+      std::lock_guard lock(gUdpMainSocketMutex); sent=sendFunction_(gUdpMainSocket,reinterpret_cast<const char*>(multiplexed.data()),static_cast<int>(multiplexed.size()),0); if(sent>0) --sent;
+    } else sent=sendFunction_(socket_,reinterpret_cast<const char*>(datagram.data()),static_cast<int>(size),0);
+    if(!sentAudio(sent,static_cast<int>(size))) return;
     ++opusPacketsSent_;
     audioDatagramBytes_+=size;
   }
@@ -4933,6 +4960,7 @@ private:
   }
 
   SOCKET socket_ = INVALID_SOCKET;
+  decltype(&::send) sendFunction_=::send;
   std::uint64_t nextSequence_ = 1;
   std::shared_ptr<MediaCryptoState> mediaCrypto_;
   std::uint64_t mediaAuthSequence_ = 0;
@@ -4943,6 +4971,7 @@ private:
   std::unique_ptr<sanser::audio::Packetizer> opusPacketizer_;
   std::uint64_t opusPacketsSent_=0,opusNextUnix_=0;
   std::uint64_t audioDatagramBytes_=0;
+  std::uint64_t audioSendDrops_=0;
   bool pcm16WireFormat_ = false;
 };
 
@@ -5134,7 +5163,7 @@ private:
     std::ostringstream out;
     out << "GetDefaultAudioEndpoint failed for all render roles hr=0x"
         << std::hex << static_cast<unsigned long>(lastHr);
-    throw std::runtime_error(out.str());
+    throw WasapiRestartError(out.str());
   }
 
   void runCaptureSession(UdpAudioClient& audioClient, IMMDeviceEnumerator* enumerator) {
@@ -5168,6 +5197,14 @@ private:
     try {
       ERole selectedRole = eConsole;
       ComPtr<IMMDevice> device = defaultRenderEndpoint(enumerator, &selectedRole);
+      LPWSTR endpointId=nullptr;
+      requireHr(device->GetId(&endpointId),"IMMDevice::GetId");
+      const std::wstring captureEndpoint=endpointId ? endpointId : L"";
+      CoTaskMemFree(endpointId);
+      sanser::audio::LoopbackRouteWatch routeWatch(captureEndpoint);
+      audioClient.resetCapture();
+      sanser::AudioContinuity continuity;
+      bool firstBlock=true;
 
       requireHr(device->Activate(__uuidof(IAudioClient),
                                  CLSCTX_ALL,
@@ -5247,6 +5284,14 @@ private:
         } else if (wait != WAIT_OBJECT_0) {
           throw WasapiRestartError("WASAPI audio wait failed.");
         }
+        if(routeWatch.changed(std::chrono::steady_clock::now(),[&]() -> std::optional<std::wstring> {
+          auto current=defaultRenderEndpoint(enumerator,nullptr);
+          LPWSTR id=nullptr;
+          requireHr(current->GetId(&id),"IMMDevice::GetId(current)");
+          std::wstring result=id ? id : L"";
+          CoTaskMemFree(id);
+          return result;
+        })) throw WasapiRestartError("default-render-route-changed");
 
         UINT32 packetFrames = 0;
         requireHr(captureClient->GetNextPacketSize(&packetFrames), "IAudioCaptureClient::GetNextPacketSize");
@@ -5260,6 +5305,9 @@ private:
           const bool discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) != 0;
           convertToStereoFloat(data, frameCount, format, silent, stereoSamples);
           requireHr(captureClient->ReleaseBuffer(frameCount), "IAudioCaptureClient::ReleaseBuffer");
+          continuity.floats(reinterpret_cast<std::uint8_t*>(stereoSamples.data()),frameCount,2,format.sampleRate,
+            firstBlock || discontinuity);
+          firstBlock=false;
           const bool usePcm16 = gClientAudioPcm16.load(std::memory_order_acquire);
           const bool useOpus = gClientAudioOpus.load(std::memory_order_acquire);
           const auto audioBytesBefore=audioClient.audioDatagramBytes();
@@ -5297,6 +5345,7 @@ private:
                     << " discontinuityPackets=" << statsDiscontinuityPackets
                     << " discontinuityFrames=" << statsDiscontinuityFrames
                     << " timeouts=" << statsTimeouts
+                    << " audioSendDrops=" << audioClient.audioSendDrops()
                     << "\n";
           statsStartedAt = statsNow;
           statsPackets = 0;
@@ -7443,23 +7492,46 @@ int main(int argc, char** argv) {
       startLegacyAudioSender(parseOptions(3,enabledArgs),launch);
       if(starts!=1 || !sender) throw std::runtime_error("Legacy audio launcher failed to start the configured sender");
       std::array<float,480> samples{}; for(std::size_t i=0;i<samples.size();i+=2) { samples[i]=0.25F; samples[i+1]=-0.25F; }
-      for(unsigned epoch=0;epoch<2;++epoch) {
-        if(epoch) crypto->rotateForNonce("synthetic-audio-nonce-two");
+      for(unsigned epoch=0;epoch<3;++epoch) {
+        if(epoch==1) crypto->rotateForNonce("synthetic-audio-nonce-two");
+        if(epoch==2) sender->resetCapture(); // hot-unplug without a network epoch change
+        const auto expectedSequence=epoch==2 ? 2U : 1U;
         if(sender->sendStereoFloat(48000,samples.data(),240,true,true)!=1) throw std::runtime_error("Fixed Opus block missing");
         std::array<std::uint8_t,1400> packet{}; const int received=recv(listener.fd,reinterpret_cast<char*>(packet.data()),static_cast<int>(packet.size()),0);
         if(received<=static_cast<int>(sizeof(AudioAuthenticatedPacketHeader))) throw std::runtime_error("Opus wire receive timeout");
         AudioAuthenticatedPacketHeader header; std::memcpy(&header,packet.data(),sizeof(header));
         const auto state=crypto->snapshot();
-        if(std::memcmp(header.magic,"SNA6",4) || header.sequence!=1 || header.authEpoch!=state.epoch || header.payloadSize+sizeof(header)!=static_cast<std::size_t>(received)) throw std::runtime_error("Opus epoch/size/header mismatch");
+        if(std::memcmp(header.magic,"SNA6",4) || header.sequence!=expectedSequence || header.authSeq!=expectedSequence || header.authEpoch!=state.epoch || header.payloadSize+sizeof(header)!=static_cast<std::size_t>(received)) throw std::runtime_error("Opus epoch/route/size/header mismatch");
         std::memset(packet.data()+offsetof(AudioAuthenticatedPacketHeader,authTag),0,kUdpAuthTagHexSize);
         if(std::string(header.authTag,kUdpAuthTagHexSize)!=udpDatagramMacHex(state.audioAuthKey,"audio",packet.data(),received)) throw std::runtime_error("Opus audio authentication mismatch");
         chacha20Xor(packet.data()+sizeof(header),header.payloadSize,state.audioCryptoKey,"audio",header.authSeq);
         const auto decoded=sanser::audio::unpack({packet.data()+sizeof(header),header.payloadSize});
         sanser::audio::Decoder decoder;
-        if(!decoded || decoded->sequence!=1 || !decoder.decode(decoded->payload)) throw std::runtime_error("Opus audio payload cannot decode");
+        if(!decoded || decoded->sequence!=expectedSequence || !decoder.decode(decoded->payload)) throw std::runtime_error("Opus audio payload cannot decode");
       }
       if(sender->sendStereoFloat(48000,samples.data(),240,true,false)!=1) throw std::runtime_error("PCM fallback block missing");
       std::array<char,1400> pcm{}; if(recv(listener.fd,pcm.data(),static_cast<int>(pcm.size()),0)<=0 || std::memcmp(pcm.data(),"SNA4",4)) throw std::runtime_error("PCM fallback format changed");
+      static int nextSendError=0;
+      UdpAudioClient intermittent(endpoint,crypto,+[](SOCKET fd,const char* data,int length,int flags)->int {
+        if(nextSendError) { const int error=std::exchange(nextSendError,0); WSASetLastError(error); return SOCKET_ERROR; }
+        return ::send(fd,data,length,flags);
+      });
+      unsigned expectedSequence=0;
+      for(bool opus:{false,true}) for(int error:{WSAEWOULDBLOCK,WSAENOBUFS,WSAENETUNREACH,WSAECONNRESET}) {
+        nextSendError=error;
+        if(intermittent.sendStereoFloat(48000,samples.data(),240,true,opus)!=0)
+          throw std::runtime_error("Transient audio loss reported a successful send");
+        if(intermittent.sendStereoFloat(48000,samples.data(),240,true,opus)!=1)
+          throw std::runtime_error("Transient audio loss permanently stopped the sender");
+        expectedSequence+=2;
+        std::array<char,1400> receivedPacket{};
+        const int bytes=recv(listener.fd,receivedPacket.data(),static_cast<int>(receivedPacket.size()),0);
+        if(bytes<=static_cast<int>(sizeof(AudioAuthenticatedPacketHeader))) throw std::runtime_error("Recovered audio did not reach the wire");
+        AudioAuthenticatedPacketHeader header;
+        std::memcpy(&header,receivedPacket.data(),sizeof(header));
+        if(header.sequence!=expectedSequence || header.authSeq!=expectedSequence)
+          throw std::runtime_error("Lost audio sequence was reused after a transient send error");
+      }
       std::cout<<"Legacy Opus: authenticated UDP, epoch reset, 5ms decode and PCM fallback passed\n";
       return 0;
     }
