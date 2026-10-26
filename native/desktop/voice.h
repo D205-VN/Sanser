@@ -30,7 +30,7 @@ public:
 private:
   struct Impl; std::unique_ptr<Impl> impl_;
 };
-struct Stats { std::uint64_t decoded=0,concealed=0,fecAttempts=0,late=0,dropped=0,invalid=0; };
+struct Stats { std::uint64_t decoded=0,concealed=0,fecAttempts=0,late=0,dropped=0,invalid=0,limitedFrames=0; };
 // One decoder/reorder timeline per speaker and one shared output sample clock.
 // No global sequence number with screen sound, video, control or another talker.
 class Mixer {

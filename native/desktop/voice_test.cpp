@@ -1,5 +1,6 @@
 #include "broadcast.h"
 #include "tx_scheduler.h"
+#include <opus.h>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -61,6 +62,21 @@ int main() {
     const auto t=Clock::time_point{}+std::chrono::seconds(100);
     v::Encoder encoder;
     const auto first=packet(encoder,t);
+    std::array<opus_int16,v::packetFrames> firstDecoded{};
+    {
+      int error=0;
+      std::unique_ptr<OpusDecoder,decltype(&opus_decoder_destroy)> rawDecoder(opus_decoder_create(48000,1,&error),opus_decoder_destroy);
+      require(error==OPUS_OK && rawDecoder,"reference decoder");
+      auto& raw=firstDecoded;
+      require(opus_decode(rawDecoder.get(),first.opus.data(),static_cast<opus_int32>(first.opus.size()),raw.data(),v::packetFrames,0)==v::packetFrames,"reference speech decode");
+      v::Mixer oneSpeaker; require(oneSpeaker.receive(first,t),"one-speaker speech received");
+      for(unsigned chunk=0;chunk<4;++chunk) {
+        const auto linear=oneSpeaker.poll(t+std::chrono::milliseconds(20+5*chunk));
+        require(linear.has_value(),"one-speaker output block");
+        for(unsigned i=0;i<audioFrames;++i)
+          require((*linear)[2*i]==raw[chunk*audioFrames+i] && (*linear)[2*i+1]==raw[chunk*audioFrames+i],"in-range single-speaker audio was nonlinearly distorted after Opus decode");
+      }
+    }
     const auto bytes=v::pack(first);
     require(bytes.size()<417 && v::unpack(bytes)->opus==first.opus,"bounded Opus20 voice wire roundtrip");
     auto corrupt=bytes; corrupt[4]=4;
@@ -126,7 +142,17 @@ int main() {
     for(unsigned i=0;i<4;++i) { auto p=first; p.speaker=i; require(mixed.receive(p,t),"independent speakers accepted"); }
     const auto sum=mixed.poll(t+std::chrono::milliseconds(20));
     require(sum && mixed.stats().decoded==4,"four independent Opus decoders mixed");
-    for(auto sample:*sum) require(sample>-32768 && sample<32767,"mix limits loud talkers without integer wrap or hard clipping");
+    for(unsigned chunk=0;chunk<4;++chunk) {
+      const auto output=chunk ? mixed.poll(t+std::chrono::milliseconds(20+5*chunk)) : sum;
+      require(output.has_value(),"overloaded mix lost an output block");
+      for(unsigned i=0;i<audioFrames;++i) {
+        const auto original=firstDecoded[chunk*audioFrames+i];
+        require(output->at(2*i)==output->at(2*i+1),"mixed mono voice lost stereo parity");
+        if(original>9000) require(output->at(2*i)>0,"positive mix overflow wrapped negative");
+        if(original<-9000) require(output->at(2*i)<0,"negative mix overflow wrapped positive");
+      }
+    }
+    require(mixed.stats().limitedFrames>0,"overlapping loud speakers did not exercise overload protection");
     TxScheduler schedule;
     for(unsigned i=0;i<30;++i) {
       require(schedule.push(TxScheduler::Audio,{Bytes{3},t}),"system audio enqueue");

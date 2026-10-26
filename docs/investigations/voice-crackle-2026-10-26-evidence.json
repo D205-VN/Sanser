@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-26",
+  "reaVersion": "6.5.0",
+  "scope": "Static local analysis and pinned source review; no app launch, microphone/speaker access or user audio recording.",
+  "parsec": {
+    "bundleVersion": "150.101.1",
+    "artifactSha256": "9cce85059c7f95f1a8e578b3c9f7200cb364520e557b5c85294802c8c596cdd5",
+    "evidenceId": "ev_cfa140bebf703b74977e33e763412d66cbdb1103b2f84983d3026866052bfeab",
+    "observedApiImports": [
+      "AudioQueueNewInput",
+      "AudioQueueNewOutput",
+      "AudioQueueEnqueueBuffer"
+    ],
+    "limit": "Imports establish API use, not buffering, AEC algorithms, or runtime quality."
+  },
+  "mumble": {
+    "commit": "162f42805ce095c37ab57f1d81ba92cdb31bbac5",
+    "reaAuthority": "historical-reference",
+    "referenceManifest": {
+      "schema": "HistoricalSourceManifest",
+      "authority": "historical-reference",
+      "manifest_id": "hsm_889317fff745e97ceb08ee3c310b372fe149cf2dfa2db75f1636d20a5bdd0ede",
+      "graph_sha256": "4406b259bcbf0435513a9d3260e5502f5283f194d923971911720c167e0429fb",
+      "root_sha256": "687f4643d2e84ead4d87342d47c8c043f0b04b9d6a81f1758f264fa7f3782cee",
+      "inventory_state": "partial",
+      "entry_count": 3,
+      "relationship_count": 0
+    },
+    "files": [
+      {
+        "path": "src/mumble/AudioInput.cpp",
+        "gitBlob": "992f7c2c3554db9cdf68d0ef0f9df723e81b626e",
+        "localSha256": "1f1d4aa31914d46cb2f5d9de7f0a95e6356163b1d44b346176e2ddc54ef18b68",
+        "gitBlobVerified": true
+      },
+      {
+        "path": "src/mumble/AudioOutput.cpp",
+        "gitBlob": "159264253461db4cff18f81b8e7ee5b12f2b9a7f",
+        "localSha256": "820d75981ab1ecef27061476f9d67aa327afc1989085f13eaa9214fbe84e347c",
+        "gitBlobVerified": true
+      },
+      {
+        "path": "src/mumble/AudioOutputSpeech.cpp",
+        "gitBlob": "993e770c1612a8ed438ec84dfff77bd40300a89d",
+        "localSha256": "46ff20e6f4ff8dc8e377bfd1dd1cd15ec92e98d11bae2d3b738d352b0b8a89ae",
+        "gitBlobVerified": true
+      }
+    ]
+  },
+  "comparison": {
+    "voice_probe_old": [
+      "samples=95280 mixerGain=0.88537 nonlinearErrorPercent=4.03194 decoded=100 concealed=0"
+    ],
+    "voice_probe": [
+      "samples=95280 mixerGain=1 nonlinearErrorPercent=0 decoded=100 concealed=0"
+    ],
+    "echo_gap_probe_old": [
+      "nearOnly referenceMissingBlocksPer5=0 gain=-0.965377 errorPercent=24.3531 blanked5msBlocks=0 maxBoundaryJump=764",
+      "nearOnly referenceMissingBlocksPer5=1 gain=-0.373109 errorPercent=90.7185 blanked5msBlocks=120 maxBoundaryJump=2149",
+      "nearOnly referenceMissingBlocksPer5=4 gain=0.8 errorPercent=44.7214 blanked5msBlocks=120 maxBoundaryJump=784"
+    ],
+    "echo_gap_probe": [
+      "nearOnly referenceMissingBlocksPer5=0 gain=-1 errorPercent=0.00160871 blanked5msBlocks=0 maxBoundaryJump=784",
+      "nearOnly referenceMissingBlocksPer5=1 gain=-1 errorPercent=0.00160871 blanked5msBlocks=0 maxBoundaryJump=784",
+      "nearOnly referenceMissingBlocksPer5=4 gain=-1 errorPercent=0.00160871 blanked5msBlocks=0 maxBoundaryJump=784"
+    ]
+  },
+  "referenceArtifacts": {
+    "parsec-macho.json": "09c0f8bd31a40165463c5718baae7bd8cf155683c7edd3bb80905c6da9f4e367",
+    "mumble-reference.json": "98706122a42ed8d278debaade0c72966920418b9a859921a4b29d18b4e31aa3d"
+  },
+  "comparisonNotes": "Synthetic PCM only. Mixer error is measured against the same independent Opus decode, not the original input. Raw echo-probe correlation is not latency aligned: a 5ms delay inverts a 500Hz tone, so its negative gain is not amplitude inversion/quality evidence. Blanked-block counts compare measured near-only blocks after warmup."
+}

@@ -106,8 +106,12 @@ Digital exclusion does not itself cancel acoustic echo. The AEC reference combin
 native rendered system/voice PCM and the original local host system capture.
 Full Windows endpoint loopback takes precedence over app playback, so a fallback
 cannot count the same voice twice. Reference PCM is bounded to one second in RAM;
-no PCM is written to logs/disk. Missing/stale reference bypasses AEC rather than
-muting speech. Mute/Leave destroys its adaptation state. Capture blocks carry their
+no PCM is written to logs/disk. Missing/stale or silent reference uses dry speech
+with the same one-block (5ms) delay as Speex preprocessing. Brief reference holes
+do not reset the overlap/add history or insert a fresh silent block; a longer
+reference gap resets acoustic adaptation separately. Wet/dry changes crossfade
+on the aligned timeline. Mute/Leave destroys adaptation and delayed microphone
+PCM. Capture blocks carry their
 first-sample device timestamp; render references use actual queue start time on
 Mac and WASAPI padding on Windows. The causal 200ms filter learns acoustic delay;
 no fixed 40ms reference shift prevents cancellation of short paths.
@@ -125,6 +129,11 @@ and a nonvoice viewer. A deterministic 7ms worker cadence also verifies 5ms audi
 blocks catch up instead of reducing the PCM output rate. `sanser-voice-echo-test`
 uses synthetic mixed system/voice output, delayed multipath echo at 0/10/20/30/60/100ms,
 independent near-end speech, batched render callbacks and stale-reference safety.
+It also covers silent/intermittent references and the fixed processing timeline.
+Single-speaker in-range PCM is checked against an independent Opus decoder;
+overloaded sums use stateful Opus soft clipping instead of applying tanh to all
+speech. `SNVOICE_HEALTH` reports bounded numeric clipping, queue, PLC, AEC and
+playback counters without storing speech or device/speaker identity.
 It opens no microphones/speakers. Existing audio/video transport tests remain applicable.
 Windows also tests process-exclusion activation/cancellation ownership without
 opening an endpoint. UI/Rust tests exercise scoped commands, capability fallback,

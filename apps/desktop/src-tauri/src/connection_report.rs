@@ -15,6 +15,7 @@ const MAX_REPORTS: usize = 20;
 const MAX_SAMPLES: usize = 120;
 const MAX_REPORT_BYTES: u64 = 256 * 1024;
 const SOURCES: &[&str] = &[
+    "SNVOICE_HEALTH",
     "SNHOST_CAPTURE_RECOVERY",
     "SNINPUT_OS_REJECTED",
     "SNINPUT_OS_HEALTH",
@@ -57,6 +58,30 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "voiceCapturedFrames",
+    "voiceRawPeak",
+    "voiceCleanPeak",
+    "voiceRawClippedFrames",
+    "voiceCleanClippedFrames",
+    "voiceCaptureQueueDrops",
+    "voiceIncomingQueueDrops",
+    "voiceStaleCaptureBlocks",
+    "voicePacketsSent",
+    "voiceWorkerGapMaxMs",
+    "voiceDecoded",
+    "voicePlc",
+    "voiceLate",
+    "voiceDropped",
+    "voiceInvalid",
+    "voiceLimitedFrames",
+    "voicePcmUnderflows",
+    "voicePcmCapacityDrops",
+    "voicePcmStaleDrops",
+    "voicePcmReprimes",
+    "voiceAecBlocks",
+    "voiceAecMissingReference",
+    "voiceAecDryBlocks",
+    "voiceAecResets",
     "captureRecoveryCode",
     "inputRejected",
     "uacFailures",
@@ -730,6 +755,17 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 // floating-point results from real latency measurements.
 #[allow(clippy::float_cmp)]
 mod tests {
+    #[test]
+    fn voice_quality_reports_keep_counts_and_levels_without_speech_or_identity() {
+        let sample=super::parse_sample(b"SNVOICE_HEALTH voiceCapturedFrames=48000 voiceRawPeak=32000 voiceCleanPeak=24000 voiceRawClippedFrames=3 voiceCleanClippedFrames=0 voiceCaptureQueueDrops=2 voiceIncomingQueueDrops=1 voiceStaleCaptureBlocks=0 voicePacketsSent=50 voiceWorkerGapMaxMs=16.7 voiceDecoded=49 voicePlc=1 voiceLate=0 voiceDropped=0 voiceInvalid=0 voiceLimitedFrames=240 voicePcmUnderflows=1 voicePcmCapacityDrops=0 voicePcmStaleDrops=0 voicePcmReprimes=1 voiceAecBlocks=200 voiceAecMissingReference=4 voiceAecDryBlocks=5 voiceAecResets=0 pcm=123 opus=456 device=789 speaker=123 token=secret").unwrap();
+        assert_eq!(sample.values.len(), 24);
+        assert_eq!(sample.values["voiceWorkerGapMaxMs"], 16.7);
+        assert_eq!(sample.values["voiceAecMissingReference"], 4.0);
+        for private in ["pcm", "opus", "device", "speaker", "token"] {
+            assert!(!sample.values.contains_key(private));
+        }
+    }
+
     #[test]
     fn helper_startup_and_capture_failures_keep_only_numeric_evidence() {
         let sample=super::parse_sample(b"SNUAC_HEALTH uacFailures=3 uacReady=1 uacFrames=0 uacIdle=0 uacStage=7 uacError=2147942405 uacStatus=8 uacCheck=0 app=private.exe path=C:\\private sid=123 token=secret").unwrap();

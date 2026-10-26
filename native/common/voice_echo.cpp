@@ -3,6 +3,7 @@
 #include <speex/speex_preprocess.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -62,8 +63,10 @@ struct EchoCanceller::Impl {
   PlaybackReference& reference;
   SpeexEchoState* echo=nullptr;
   SpeexPreprocessState* preprocess=nullptr;
-  EchoClock::time_point next{};
-  bool hadReference=false;
+  EchoClock::time_point next{},lastFarSignal{};
+  std::array<spx_int16_t,frames> delayedNear{};
+  unsigned missingFrames=0;
+  double wet=0;
   explicit Impl(PlaybackReference& input):reference(input) {
     echo=speex_echo_state_init(frames,rate/5); // 200ms acoustic/device tail.
     preprocess=speex_preprocess_state_init(frames,rate);
@@ -85,28 +88,49 @@ struct EchoCanceller::Impl {
 EchoCanceller::EchoCanceller(PlaybackReference& reference):impl_(std::make_unique<Impl>(reference)) {}
 EchoCanceller::~EchoCanceller()=default;
 void EchoCanceller::reset() {
-  auto fresh=std::make_unique<Impl>(impl_->reference); impl_=std::move(fresh);
+  auto fresh=std::make_unique<Impl>(impl_->reference); impl_=std::move(fresh); ++stats_.resets;
 }
 void EchoCanceller::process(std::span<std::int16_t> stereo,EchoClock::time_point captured) {
   if(stereo.size()!=frames*2) return;
-  if(impl_->next==EchoClock::time_point{} || captured-impl_->next>std::chrono::milliseconds(40) || impl_->next-captured>std::chrono::milliseconds(40)) {
-    reset(); impl_->next=captured;
-  }
+  ++stats_.blocks;
+  if(impl_->next!=EchoClock::time_point{} && (captured-impl_->next>std::chrono::milliseconds(40) || impl_->next-captured>std::chrono::milliseconds(40))) reset();
+  if(impl_->next==EchoClock::time_point{}) impl_->next=captured;
   auto& self=*impl_;
   std::array<spx_int16_t,frames> reference{},near{},clean{};
   // Capture timestamps describe each block's first sample. A causal filter
   // must receive reference at that point: shifting it 40ms into the past
   // cannot cancel a short (e.g. 10ms) acoustic path.
   const bool available=self.reference.read(reference,self.next);
+  const auto at=self.next;
   self.next+=std::chrono::milliseconds(5);
   if(!available) {
-    if(self.hadReference) reset();
-    return; // Missing/stale reference must not mute speech.
+    ++stats_.missingReference; reference.fill(0);
+    // Advance the processing timeline through brief reference holes. A long
+    // gap invalidates acoustic adaptation, but must not reset the WOLA output
+    // history or repeatedly insert a fresh silent block into speech.
+    if(self.missingFrames<rate/25) {
+      self.missingFrames+=frames;
+      if(self.missingFrames==rate/25) { speex_echo_state_reset(self.echo); ++stats_.resets; }
+    }
+  } else {
+    self.missingFrames=0;
+    if(std::any_of(reference.begin(),reference.end(),[](auto value) { return std::abs(static_cast<int>(value))>32; })) self.lastFarSignal=at;
   }
-  self.hadReference=true;
   for(unsigned i=0;i<frames;++i) near[i]=pcm((static_cast<int>(stereo[2*i])+stereo[2*i+1])/2);
+  // Speex preprocessing uses one frame of overlap/add latency. Returning raw
+  // current PCM on a missing reference switched between 0ms and 5ms audio;
+  // rebuilding the preprocessor then discarded its overlap on every recovery.
+  // Keep it warm, and align safe dry speech to the same previous-frame time.
   speex_echo_cancellation(self.echo,near.data(),reference.data(),clean.data());
   speex_preprocess_run(self.preprocess,clean.data());
-  for(unsigned i=0;i<frames;++i) stereo[2*i]=stereo[2*i+1]=clean[i];
+  const bool active=available && self.lastFarSignal!=EchoClock::time_point{} && at-self.lastFarSignal<std::chrono::milliseconds(200);
+  if(!active) ++stats_.dryBlocks;
+  const double target=active ? 1.0 : 0.0;
+  for(unsigned i=0;i<frames;++i) {
+    self.wet+=std::clamp(target-self.wet,-1.0/frames,1.0/frames);
+    const auto sample=static_cast<std::int32_t>(std::lround(self.delayedNear[i]+self.wet*(clean[i]-self.delayedNear[i])));
+    stereo[2*i]=stereo[2*i+1]=pcm(sample);
+  }
+  self.delayedNear=near;
 }
 }

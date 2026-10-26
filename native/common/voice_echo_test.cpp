@@ -1,4 +1,5 @@
 #include "voice_echo.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -31,6 +32,46 @@ int main() {
       for(unsigned chunk=0;chunk<2;++chunk) tap.publish(app,timeAt(callback*480)+jitter);
     }
     require(batched.read(mono,timeAt(12000)-std::chrono::milliseconds(2)),"batched render callbacks retain a continuous sample timeline");
+    // Silent/missing render reference is common while only the local mic is
+    // speaking. Both paths must emit the same previous 5ms, not alternate
+    // current dry PCM with a newly initialized/delayed WOLA frame.
+    for(unsigned missing:{0U,1U,4U,5U}) {
+      PlaybackReference intermittent; EchoCanceller local(intermittent);
+      Block previous{},silence{}; unsigned lostBlocks=0;
+      for(unsigned block=0;block<200;++block) {
+        Block speech{};
+        for(unsigned i=0;i<frames;++i) speech[i*2]=speech[i*2+1]=static_cast<std::int16_t>(12000*std::sin((block*frames+i)*0.06544984695));
+        const auto at=timeAt(block*frames);
+        if(block%5>=missing) intermittent.publish(silence,at,RenderSource::Application);
+        auto clean=speech; local.process(clean,at);
+        require(clean==previous,"silent/intermittent reference changed the near-end sample timeline");
+        if(block && std::all_of(clean.begin(),clean.end(),[](auto value) { return value==0; })) ++lostBlocks;
+        previous=speech;
+      }
+      require(lostBlocks==0 && local.stats().resets<=1,"brief missing references repeatedly reset or blanked microphone blocks");
+      std::cout<<"Near-only missing reference blocks/5="<<missing<<" blanked5msBlocks="<<lostBlocks<<'\n';
+    }
+    {
+      PlaybackReference holes; EchoCanceller live(holes);
+      Block previous{};
+      for(unsigned block=0;block<400;++block) {
+        Block speech{},render{};
+        for(unsigned i=0;i<frames;++i) {
+          speech[i*2]=speech[i*2+1]=static_cast<std::int16_t>(12000*std::sin((block*frames+i)*0.06544984695));
+          render[i*2]=render[i*2+1]=static_cast<std::int16_t>(2000*std::sin((block*frames+i)*0.1178097245));
+        }
+        const auto at=timeAt(block*frames);
+        if(block%5==0) holes.publish(render,at,RenderSource::Application);
+        auto clean=speech; live.process(clean,at);
+        if(block>20) {
+          double originalEnergy=0,cleanEnergy=0;
+          for(unsigned i=0;i<frames;++i) { originalEnergy+=static_cast<double>(previous[i*2])*previous[i*2]; cleanEnergy+=static_cast<double>(clean[i*2])*clean[i*2]; }
+          require(cleanEnergy>originalEnergy*0.25,"recovering an active playback reference blanked near-end speech");
+        }
+        previous=speech;
+      }
+      require(live.stats().resets==0,"brief active-reference holes erased acoustic adaptation");
+    }
     // Feed two independent render streams, delayed multipath acoustic echo,
     // then independent near-end speech while far-end playback continues.
     constexpr unsigned seconds=12,count=rate*seconds;
@@ -70,9 +111,13 @@ int main() {
     require(nearGain>0.45 && nearGain<1.3,"AEC must preserve independent near-end speech during double talk");
     Block speech{}; speech.fill(6000); auto unchanged=speech;
     echo.process(unchanged,timeAt(count+rate*2));
-    require(unchanged==speech,"missing/stale playback reference bypasses cancellation without muting speech");
+    require(std::all_of(unchanged.begin(),unchanged.end(),[](auto value) { return value==0; }),"capture gap must clear the delayed block");
+    unchanged=speech; echo.process(unchanged,timeAt(count+rate*2+frames));
+    require(unchanged==speech,"missing/stale reference retains speech after the fixed one-block warmup");
     echo.reset(); unchanged=speech; echo.process(unchanged,timeAt(count+rate*3));
-    require(unchanged==speech,"mute/new capture clears adaptation and does not reuse old PCM");
+    require(std::all_of(unchanged.begin(),unchanged.end(),[](auto value) { return value==0; }),"mute/new capture reused delayed microphone PCM");
+    unchanged=speech; echo.process(unchanged,timeAt(count+rate*3+frames));
+    require(unchanged==speech,"new capture did not resume delayed dry speech");
     }
     std::cout<<"AEC: mixed render references, full-loopback precedence, delay/multipath, double talk and stale-reference safety passed\n";
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

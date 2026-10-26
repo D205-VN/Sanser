@@ -136,6 +136,8 @@ struct Mixer::Impl {
   // one sample clock. Polling each source at wall time on every drain iteration
   // emitted additional partial mixes when their deadlines had different phases.
   std::optional<Clock::time_point> outputDue;
+  std::array<float,desktop::audioChannels> softClip{};
+  std::uint64_t limitedFrames=0;
 };
 Mixer::Mixer():impl_(std::make_unique<Impl>()) {}
 Mixer::~Mixer()=default;
@@ -169,14 +171,18 @@ std::optional<desktop::AudioSamples> Mixer::poll(Clock::time_point now) {
   for(auto& source:impl_->sources) if(!source.muted) if(const auto block=source.poll(tick)) {
     any=true; for(unsigned i=0;i<mixed.size();++i) mixed[i]+=(*block)[i];
   }
-  if(!any) { impl_->outputDue.reset(); return {}; }
+  if(!any) { impl_->outputDue.reset(); impl_->softClip.fill(0); return {}; }
   *impl_->outputDue=tick+std::chrono::milliseconds(5);
   desktop::AudioSamples out{};
-  // Leave headroom and smoothly limit simultaneous loud talkers, avoiding
-  // integer overflow and hard clipping while preserving ordinary speech gain.
+  std::array<float,desktop::audioFrames*desktop::audioChannels> pcm{};
+  for(unsigned i=0;i<pcm.size();++i) pcm[i]=mixed[i]/32768.f;
+  for(unsigned i=0;i<desktop::audioFrames;++i)
+    if(std::abs(pcm[i*2])>1 || std::abs(pcm[i*2+1])>1) ++impl_->limitedFrames;
+  // Opus leaves an in-range signal unchanged and keeps clipping state across
+  // blocks. tanh() distorted even one unclipped speaker on every sample.
+  opus_pcm_soft_clip(pcm.data(),desktop::audioFrames,desktop::audioChannels,impl_->softClip.data());
   for(unsigned i=0;i<out.size();++i) {
-    const double value=mixed[i]/32768.0;
-    out[i]=static_cast<std::int16_t>(std::tanh(value)*32767);
+    out[i]=static_cast<std::int16_t>(std::clamp(std::lround(pcm[i]*32768.f),-32768L,32767L));
   }
   return out;
 }
@@ -189,8 +195,8 @@ std::vector<desktop::AudioSamples> Mixer::drain(Clock::time_point now) {
   }
   return blocks;
 }
-void Mixer::clear() { for(auto& source:impl_->sources) source.reset(); impl_->outputDue.reset(); }
+void Mixer::clear() { for(auto& source:impl_->sources) source.reset(); impl_->outputDue.reset(); impl_->softClip.fill(0); }
 Stats Mixer::stats() const {
-  Stats out; for(const auto& source:impl_->sources) { const auto& s=source.stats; out.decoded+=s.decoded; out.concealed+=s.concealed; out.fecAttempts+=s.fecAttempts; out.late+=s.late; out.dropped+=s.dropped; out.invalid+=s.invalid; } return out;
+  Stats out; for(const auto& source:impl_->sources) { const auto& s=source.stats; out.decoded+=s.decoded; out.concealed+=s.concealed; out.fecAttempts+=s.fecAttempts; out.late+=s.late; out.dropped+=s.dropped; out.invalid+=s.invalid; } out.limitedFrames=impl_->limitedFrames; return out;
 }
 } // namespace sanser::voice

@@ -4,12 +4,14 @@
 #include "microphone_capture.h"
 #include "audio_player.h"
 #include "voice_echo.h"
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <iostream>
 #include <mutex>
 #include <sstream>
 #include <cstdio>
+#include <cmath>
 
 namespace sanser::desktop {
 struct VoiceRuntime::Impl {
@@ -17,6 +19,7 @@ struct VoiceRuntime::Impl {
   std::function<void(voice::State)> update;
   std::atomic<bool> running{true},joined{false},microphone{false},deafened{false};
   std::atomic<unsigned> captureToken{0};
+  std::atomic<std::uint64_t> captureDrops{0},incomingDrops{0};
   std::mutex mutex;
   struct Incoming { voice::Packet packet; Clock::time_point at; };
   struct Captured { AudioSamples pcm; Clock::time_point at; };
@@ -47,10 +50,21 @@ struct VoiceRuntime::Impl {
     std::string code="idle";
     bool capturing=false;
     auto lastStatus=Clock::time_point{};
+    auto previousWake=Clock::time_point{};
+    std::uint64_t capturedFrames=0,rawClipped=0,cleanClipped=0,staleCapture=0,sentPackets=0;
+    unsigned rawPeak=0,cleanPeak=0; double wakeGapMax=0;
+    const auto signalLevel=[](const AudioSamples& samples,unsigned& peak,std::uint64_t& clipped) {
+      for(unsigned i=0;i<audioFrames;++i) {
+        const auto level=static_cast<unsigned>(std::max(std::abs(static_cast<int>(samples[i*2])),std::abs(static_cast<int>(samples[i*2+1]))));
+        peak=std::max(peak,level); if(level>=32760) ++clipped;
+      }
+    };
     try {
       status(code);
       while(running && !nativeStopRequested()) {
         const auto began=Clock::now();
+        if(joined && previousWake!=Clock::time_point{}) wakeGapMax=std::max(wakeGapMax,std::chrono::duration<double,std::milli>(began-previousWake).count());
+        previousWake=began;
         auto changes=takeVoiceCommands();
         { std::lock_guard lock(mutex); for(auto& line:commands) changes.push_back(std::move(line)); commands.clear(); }
         for(const auto& line:changes) {
@@ -77,7 +91,7 @@ struct VoiceRuntime::Impl {
               mic=std::make_unique<MicrophoneCapture>(true,[this,token](const AudioSamples& pcm,Clock::time_point at) {
                 if(!running || !joined || !microphone || deafened || token!=captureToken) return;
                 std::lock_guard lock(mutex);
-                if(captured.size()>=8) captured.pop_front();
+                if(captured.size()>=8) { captured.pop_front(); ++captureDrops; }
                 captured.push_back({pcm,at});
               },[this,token](std::string value) {
                 if(token!=captureToken) return;
@@ -107,12 +121,33 @@ struct VoiceRuntime::Impl {
         }
         if(joined && microphone && !deafened && encoder) {
           for(auto& item:pcm) {
-            if(Clock::now()-item.at>std::chrono::milliseconds(40)) { encoder->reset(); continue; }
+            if(Clock::now()-item.at>std::chrono::milliseconds(40)) { ++staleCapture; encoder->reset(); continue; }
+            capturedFrames+=audioFrames; signalLevel(item.pcm,rawPeak,rawClipped);
             if(echo) echo->process(item.pcm,item.at);
-            if(auto packet=encoder->push(item.pcm,item.at)) if(send) send(std::move(*packet));
+            signalLevel(item.pcm,cleanPeak,cleanClipped);
+            if(auto packet=encoder->push(item.pcm,item.at)) if(send) { send(std::move(*packet)); ++sentPackets; }
           }
         }
-        if(began-lastStatus>=std::chrono::seconds(1)) { status(code,capturing); lastStatus=began; }
+        if(began-lastStatus>=std::chrono::seconds(1)) {
+          status(code,capturing); lastStatus=began;
+          if(joined) {
+            const auto aec=echo ? echo->stats() : voice::EchoCanceller::Stats{};
+            const auto mix=mixer ? mixer->stats() : voice::Stats{};
+            const auto output=player ? player->stats() : AudioQueue::Stats{};
+            std::ostringstream line;
+            line<<"SNVOICE_HEALTH voiceCapturedFrames="<<capturedFrames<<" voiceRawPeak="<<rawPeak<<" voiceCleanPeak="<<cleanPeak
+              <<" voiceRawClippedFrames="<<rawClipped<<" voiceCleanClippedFrames="<<cleanClipped
+              <<" voiceCaptureQueueDrops="<<captureDrops.load()<<" voiceIncomingQueueDrops="<<incomingDrops.load()
+              <<" voiceStaleCaptureBlocks="<<staleCapture<<" voicePacketsSent="<<sentPackets<<" voiceWorkerGapMaxMs="<<wakeGapMax
+              <<" voiceDecoded="<<mix.decoded<<" voicePlc="<<mix.concealed<<" voiceLate="<<mix.late
+              <<" voiceDropped="<<mix.dropped<<" voiceInvalid="<<mix.invalid<<" voiceLimitedFrames="<<mix.limitedFrames
+              <<" voicePcmUnderflows="<<output.underflows<<" voicePcmCapacityDrops="<<output.capacityDrops
+              <<" voicePcmStaleDrops="<<output.staleDrops<<" voicePcmReprimes="<<output.reprimes
+              <<" voiceAecBlocks="<<aec.blocks<<" voiceAecMissingReference="<<aec.missingReference
+              <<" voiceAecDryBlocks="<<aec.dryBlocks<<" voiceAecResets="<<aec.resets<<'\n';
+            const auto text=line.str(); std::fwrite(text.data(),1,text.size(),stdout); std::fflush(stdout);
+          }
+        }
         std::this_thread::sleep_until(began+std::chrono::milliseconds(5));
       }
     } catch(...) { code="unavailable"; }
@@ -139,7 +174,7 @@ VoiceRuntime::Status VoiceRuntime::snapshot() const {
 void VoiceRuntime::receive(voice::Packet packet) {
   if(!impl_ || !impl_->joined || impl_->deafened) return;
   std::lock_guard lock(impl_->mutex);
-  if(impl_->incoming.size()>=24) impl_->incoming.pop_front();
+  if(impl_->incoming.size()>=24) { impl_->incoming.pop_front(); ++impl_->incomingDrops; }
   impl_->incoming.push_back({std::move(packet),Clock::now()});
 }
 bool VoiceRuntime::listening() const { return impl_ && impl_->joined && !impl_->deafened; }

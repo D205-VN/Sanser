@@ -31,13 +31,17 @@ private:
 };
 class EchoCanceller {
 public:
+  struct Stats { std::uint64_t blocks=0,missingReference=0,dryBlocks=0,resets=0; };
   explicit EchoCanceller(PlaybackReference& reference=PlaybackReference::shared());
   ~EchoCanceller();
   void reset();
-  // 5ms/48kHz stereo input (dual mono). Process only after explicit mic consent;
+  // 5ms/48kHz stereo input (dual mono), with a consistent one-block processing
+  // delay on both wet and dry paths. Process only after explicit mic consent;
   // no devices/files are opened and reference PCM lives in a bounded RAM ring.
   void process(std::span<std::int16_t> stereo,EchoClock::time_point captured);
+  Stats stats() const { return stats_; }
 private:
   struct Impl; std::unique_ptr<Impl> impl_;
+  Stats stats_;
 };
 }
