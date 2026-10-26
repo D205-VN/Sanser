@@ -5,6 +5,7 @@ struct FakeAudioOutput {
   struct Queue {
     AudioQueueOutputCallback callback; void* context;
     bool running=false,disposed=false;
+    UInt32 converterError=0;
     std::vector<std::unique_ptr<std::uint8_t[]>> storage;
     std::vector<std::unique_ptr<AudioQueueBuffer>> buffers;
     std::deque<AudioQueueBufferRef> pending;
@@ -13,6 +14,7 @@ struct FakeAudioOutput {
   std::vector<std::unique_ptr<Queue>> queues;
   std::chrono::steady_clock::time_point time=std::chrono::steady_clock::time_point{}+std::chrono::seconds(1);
   bool immediate=false,emptyStart=false,clearReturnedSize=false;
+  bool converterSupported=true;
   OSStatus enqueueError=noErr,startError=noErr;
   unsigned starts=0;
   AudioOutputRoute route{1,1,48000};
@@ -61,8 +63,11 @@ struct FakeAudioOutput {
       return noErr;
     };
     api.getProperty=+[](AudioQueueRef q,AudioQueuePropertyID property,void* data,UInt32* bytes)->OSStatus {
-      if(property!=kAudioQueueProperty_IsRunning || *bytes!=sizeof(UInt32)) return paramErr;
-      *static_cast<UInt32*>(data)=cast(q).running; return noErr;
+      if(*bytes!=sizeof(UInt32)) return paramErr;
+      if(property==kAudioQueueProperty_IsRunning) *static_cast<UInt32*>(data)=cast(q).running;
+      else if(property==kAudioQueueProperty_ConverterError && active->converterSupported) *static_cast<UInt32*>(data)=cast(q).converterError;
+      else return paramErr;
+      return noErr;
     };
     api.setProperty=+[](AudioQueueRef,AudioQueuePropertyID,const void*,UInt32)->OSStatus { return noErr; };
     api.setParameter=+[](AudioQueueRef,AudioQueueParameterID,AudioQueueParameterValue)->OSStatus { return noErr; };
@@ -130,4 +135,41 @@ void testAudioOutputRecovery() {
   }
   requireLatency(player.stats().recoveries==5 && player.stats().routeChanges==2 && player.stats().queuedFrames==0,
     "Both same-device jack changes and default device/rate changes must recover");
+  const auto before=player.stats().routeChanges;
+  for(unsigned i=0;i<8;++i) {
+    device.time+=std::chrono::milliseconds(250);
+    device.route.sourceKnown=device.route.rateKnown=i%2==0;
+    device.route.rate=device.route.rateKnown ? 44100.0001 : 0;
+    device.route.source=device.route.sourceKnown ? 2 : 0;
+    requireLatency(submit(),"Temporary USB property lookup loss stopped playback");
+    device.complete();
+  }
+  requireLatency(player.stats().routeChanges==before,
+    "Unknown USB source/rate reads and fractional nominal-rate noise must not restart output");
+
+  // A USB converter can report an error while IsRunning and enqueue still
+  // succeed. Detect it and retry from the fault time, not the last callback.
+  device.current().converterError=static_cast<UInt32>(paramErr);
+  device.time+=std::chrono::milliseconds(100);
+  requireLatency(submit() && device.current().running && player.stats().converterErrors==1 && player.stats().lastError==paramErr,
+    "USB converter failure must be visible even while the queue reports running");
+  const auto failedAt=device.time;
+  device.time=failedAt+std::chrono::milliseconds(100); device.complete();
+  requireLatency(!submit(),"Converter failure must use a bounded restart cooldown");
+  device.time=failedAt+std::chrono::milliseconds(250);
+  const auto oldQueues=device.queues.size();
+  requireLatency(submit() && device.queues.size()==oldQueues+1 && device.current().converterError==0,
+    "A late USB callback must not postpone converter recovery indefinitely");
+  device.complete();
+  for(unsigned i=0;i<1000;++i) {
+    device.time+=std::chrono::milliseconds(5);
+    requireLatency(submit(),"Recovered USB converter did not keep playing beyond forty seconds");
+    device.complete();
+  }
+  device.converterSupported=false;
+  const auto errors=player.stats().errors;
+  device.time+=std::chrono::milliseconds(200);
+  requireLatency(submit() && player.stats().errors==errors,
+    "An unsupported converter property must not be treated as USB output failure");
+  device.complete();
 }

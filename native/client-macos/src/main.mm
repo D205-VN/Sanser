@@ -5011,7 +5011,19 @@ struct AudioOutputRoute {
   AudioDeviceID device=kAudioObjectUnknown;
   UInt32 source=0;
   Float64 rate=0;
-  bool operator==(const AudioOutputRoute&) const = default;
+  bool sourceKnown=true,rateKnown=true;
+  // USB drivers may briefly fail an optional property read or report tiny
+  // nominal-rate rounding differences. Neither means a different output.
+  bool changedFrom(const AudioOutputRoute& previous) const {
+    return device!=previous.device ||
+      (sourceKnown && previous.sourceKnown && source!=previous.source) ||
+      (rateKnown && previous.rateKnown && std::abs(rate-previous.rate)>1.0);
+  }
+  void retainKnownProperties(const AudioOutputRoute& previous) {
+    if(device!=previous.device) return;
+    if(!sourceKnown) { source=previous.source; sourceKnown=previous.sourceKnown; }
+    if(!rateKnown) { rate=previous.rate; rateKnown=previous.rateKnown; }
+  }
 };
 
 AudioOutputRoute audioOutputRoute(const std::string& requestedUid) {
@@ -5032,10 +5044,11 @@ AudioOutputRoute audioOutputRoute(const std::string& requestedUid) {
     // output data source and nominal rate too, not just the default ID.
     AudioObjectPropertyAddress address{kAudioDevicePropertyDataSource,kAudioDevicePropertyScopeOutput,kAudioObjectPropertyElementMain};
     UInt32 size=sizeof(route.source);
-    (void)AudioObjectGetPropertyData(route.device,&address,0,nullptr,&size,&route.source);
+    route.sourceKnown=AudioObjectGetPropertyData(route.device,&address,0,nullptr,&size,&route.source)==noErr;
     address={kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
     size=sizeof(route.rate);
-    (void)AudioObjectGetPropertyData(route.device,&address,0,nullptr,&size,&route.rate);
+    route.rateKnown=AudioObjectGetPropertyData(route.device,&address,0,nullptr,&size,&route.rate)==noErr &&
+      std::isfinite(route.rate) && route.rate>0;
   }
   return route;
 }
@@ -5098,9 +5111,10 @@ public:
     bool routeChanged=false;
     if(lastRouteCheck_.time_since_epoch().count()==0 || now-lastRouteCheck_>=std::chrono::milliseconds(250)) {
       lastRouteCheck_=now;
-      const auto route=functions_.route(outputDeviceUid_);
+      auto route=functions_.route(outputDeviceUid_);
       if(route.device!=kAudioObjectUnknown) {
-        routeChanged=outputRoute_.device!=kAudioObjectUnknown && !(route==outputRoute_);
+        route.retainKnownProperties(outputRoute_);
+        routeChanged=outputRoute_.device!=kAudioObjectUnknown && route.changedFrom(outputRoute_);
         outputRoute_=route;
       }
     }
@@ -5112,7 +5126,7 @@ public:
       configureLocked(lock,sampleRate,channels,payloadSize);
     }
     if(requiresRecovery_) {
-      if(functions_.now()-lastProgress_<std::chrono::milliseconds(250)) { ++queueDrops_; return false; }
+      if(functions_.now()<recoveryDue_) { ++queueDrops_; return false; }
       ++outputRecoveries_;
     }
     if (!queue_ || requiresRecovery_ || sampleRate_ != sampleRate || channels_ != channels || maxBufferBytes_ < payloadSize) {
@@ -5156,7 +5170,7 @@ public:
       lock.lock(); budget_.completed(frameCount);
       buffer->mUserData=nullptr;
       freeBuffers_.push_back(buffer);
-      ++queueDrops_; ++outputErrors_; lastOutputError_=status; requiresRecovery_=true;
+      ++queueDrops_; outputFailureLocked(status);
       return false;
     }
     lock.lock(); outputSubmittedFrames_+=frameCount;
@@ -5167,21 +5181,27 @@ public:
     if(checkRunning) {
       UInt32 running=0,size=sizeof(running);
       const auto query=functions_.getProperty(queue,kAudioQueueProperty_IsRunning,&running,&size);
-      const auto started=query==noErr && running ? noErr : functions_.start(queue,nullptr);
+      UInt32 converterError=0; size=sizeof(converterError);
+      const auto converterQuery=functions_.getProperty(queue,kAudioQueueProperty_ConverterError,&converterError,&size);
+      const bool converterFailed=converterQuery==noErr && converterError!=0;
+      const auto started=converterFailed || (query==noErr && running) ? noErr : functions_.start(queue,nullptr);
       std::lock_guard stateLock(mutex_);
-      if(started!=noErr) { ++outputErrors_; lastOutputError_=started; requiresRecovery_=true; }
+      // IsRunning and enqueue success do not report the queue's internal
+      // sample-format converter error. USB output can fail there separately.
+      if(converterFailed) { ++outputConverterErrors_; outputFailureLocked(static_cast<OSStatus>(converterError)); }
+      else if(started!=noErr) outputFailureLocked(started);
       else if(query!=noErr || !running) ++outputStarts_;
     }
     return true;
   }
 
   struct Stats {
-    std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames,routeChanges;
+    std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames,routeChanges,converterErrors;
     OSStatus lastError;
   };
   Stats stats() {
     std::lock_guard lock(mutex_);
-    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,outputRouteChanges_,lastOutputError_};
+    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,outputRouteChanges_,outputConverterErrors_,lastOutputError_};
   }
 
   std::uint64_t takeQueueDrops() {
@@ -5196,6 +5216,11 @@ public:
   }
 
 private:
+  void outputFailureLocked(OSStatus status) {
+    ++outputErrors_; lastOutputError_=status;
+    if(!requiresRecovery_) recoveryDue_=functions_.now()+std::chrono::milliseconds(250);
+    requiresRecovery_=true;
+  }
   static void callback(void* userData, AudioQueueRef queue, AudioQueueBufferRef buffer) {
     auto* player = static_cast<AudioQueuePcmPlayer*>(userData);
     if (player) player->recycle(queue,buffer);
@@ -5252,6 +5277,7 @@ private:
       }
     } catch(...) {
       ++outputErrors_; requiresRecovery_=true;
+      recoveryDue_=functions_.now()+std::chrono::milliseconds(250);
       throw;
     }
     // Start only after the first payload has been enqueued. Empty-start is
@@ -5330,9 +5356,11 @@ private:
   std::uint64_t queueDrops_ = 0;
   std::uint64_t outputSubmittedFrames_=0,outputCompletedFrames_=0,outputStarts_=0,outputRecoveries_=0,outputErrors_=0,outputSignalFrames_=0;
   std::uint64_t outputRouteChanges_=0;
+  std::uint64_t outputConverterErrors_=0;
   OSStatus lastOutputError_=noErr;
   bool requiresRecovery_=false;
   std::chrono::steady_clock::time_point lastProgress_{},lastRunningCheck_{};
+  std::chrono::steady_clock::time_point recoveryDue_{};
   std::chrono::steady_clock::time_point lastRouteCheck_{};
   AudioOutputRoute outputRoute_;
   sanser::AudioContinuity outputContinuity_;
@@ -7499,6 +7527,7 @@ void listenUdpAudio(std::uint16_t audioPort,
                << " outputStarts=" << outputStats.starts
                << " outputRecoveries=" << outputStats.recoveries
                << " outputRouteChanges=" << outputStats.routeChanges
+               << " outputConverterErrors=" << outputStats.converterErrors
                << " outputErrors=" << outputStats.errors
                << " outputQueueDrops=" << outputStats.drops
                << " outputLastError=" << outputStats.lastError
