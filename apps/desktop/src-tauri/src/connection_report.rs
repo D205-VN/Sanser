@@ -69,7 +69,8 @@ const FIELDS: &[&str] = &[
     "voicePacketsSent",
     "voiceWorkerGapMaxMs",
     "voiceDecoded",
-    "voicePlc",
+    "voiceConcealed",
+    "voiceFecAttempts",
     "voiceLate",
     "voiceDropped",
     "voiceInvalid",
@@ -757,8 +758,8 @@ pub(crate) fn recent(directory: &Path) -> Vec<serde_json::Value> {
 mod tests {
     #[test]
     fn voice_quality_reports_keep_counts_and_levels_without_speech_or_identity() {
-        let sample=super::parse_sample(b"SNVOICE_HEALTH voiceCapturedFrames=48000 voiceRawPeak=32000 voiceCleanPeak=24000 voiceRawClippedFrames=3 voiceCleanClippedFrames=0 voiceCaptureQueueDrops=2 voiceIncomingQueueDrops=1 voiceStaleCaptureBlocks=0 voicePacketsSent=50 voiceWorkerGapMaxMs=16.7 voiceDecoded=49 voicePlc=1 voiceLate=0 voiceDropped=0 voiceInvalid=0 voiceLimitedFrames=240 voicePcmUnderflows=1 voicePcmCapacityDrops=0 voicePcmStaleDrops=0 voicePcmReprimes=1 voiceAecBlocks=200 voiceAecMissingReference=4 voiceAecDryBlocks=5 voiceAecResets=0 pcm=123 opus=456 device=789 speaker=123 token=secret").unwrap();
-        assert_eq!(sample.values.len(), 24);
+        let sample=super::parse_sample(b"SNVOICE_HEALTH voiceCapturedFrames=48000 voiceRawPeak=32000 voiceCleanPeak=24000 voiceRawClippedFrames=3 voiceCleanClippedFrames=0 voiceCaptureQueueDrops=2 voiceIncomingQueueDrops=1 voiceStaleCaptureBlocks=0 voicePacketsSent=50 voiceWorkerGapMaxMs=16.7 voiceDecoded=49 voiceConcealed=1 voiceFecAttempts=1 voiceLate=0 voiceDropped=0 voiceInvalid=0 voiceLimitedFrames=240 voicePcmUnderflows=1 voicePcmCapacityDrops=0 voicePcmStaleDrops=0 voicePcmReprimes=1 voiceAecBlocks=200 voiceAecMissingReference=4 voiceAecDryBlocks=5 voiceAecResets=0 pcm=123 opus=456 device=789 speaker=123 token=secret").unwrap();
+        assert_eq!(sample.values.len(), 25);
         assert_eq!(sample.values["voiceWorkerGapMaxMs"], 16.7);
         assert_eq!(sample.values["voiceAecMissingReference"], 4.0);
         for private in ["pcm", "opus", "device", "speaker", "token"] {

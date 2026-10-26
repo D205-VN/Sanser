@@ -139,7 +139,7 @@ struct VoiceRuntime::Impl {
               <<" voiceRawClippedFrames="<<rawClipped<<" voiceCleanClippedFrames="<<cleanClipped
               <<" voiceCaptureQueueDrops="<<captureDrops.load()<<" voiceIncomingQueueDrops="<<incomingDrops.load()
               <<" voiceStaleCaptureBlocks="<<staleCapture<<" voicePacketsSent="<<sentPackets<<" voiceWorkerGapMaxMs="<<wakeGapMax
-              <<" voiceDecoded="<<mix.decoded<<" voicePlc="<<mix.concealed<<" voiceLate="<<mix.late
+              <<" voiceDecoded="<<mix.decoded<<" voiceConcealed="<<mix.concealed<<" voiceFecAttempts="<<mix.fecAttempts<<" voiceLate="<<mix.late
               <<" voiceDropped="<<mix.dropped<<" voiceInvalid="<<mix.invalid<<" voiceLimitedFrames="<<mix.limitedFrames
               <<" voicePcmUnderflows="<<output.underflows<<" voicePcmCapacityDrops="<<output.capacityDrops
               <<" voicePcmStaleDrops="<<output.staleDrops<<" voicePcmReprimes="<<output.reprimes
