@@ -1,9 +1,9 @@
-# Sanser 2.2.23
+# Sanser 2.2.24
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.23
+Product:  Sanser 2.2.24
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,7 +20,7 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.23 includes one-encoder screen sharing for up to three view-only
+Sanser 2.2.24 includes one-encoder screen sharing for up to three view-only
 computers in the same account, common native diagnostics, bounded route reconnect,
 authenticated input-only reset after ACK loss, viewer-close Disconnect and
 reference-safe sharing dispatch. Relay recovery retains the real failure even
@@ -57,7 +57,12 @@ Version 2.2.23 verifies the Windows privileged helper through SCM without openin
 a SYSTEM process, and gives Windows floating voice/sharing controls the same
 rounded compact presentation as Mac. The filtered-token CI fixture verifies an
 actual elevated Cancel click even when the old SYSTEM process query is denied.
-See [Release notes](docs/releases/v2.2.23.md),
+Version 2.2.24 repairs audio freshness recovery and follows headphone/speaker
+changes on both Windows capture and Mac playback. Transient UDP audio send
+failures retire the affected packet instead of terminating capture. Earlier
+video fragment repair preserves recoverable frames, while group voice keeps
+one AEC timeline and avoids distorting unclipped speech.
+See [Release notes](docs/releases/v2.2.24.md),
 [stability validation and remaining work](docs/session-stability-2.2.14.md)
 and [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.
