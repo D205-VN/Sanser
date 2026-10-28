@@ -41,8 +41,8 @@ public static class SanserWindowSmoke {
 }
 '@
 
-function Wait-Until([scriptblock]$Condition, [string]$Failure) {
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+function Wait-Until([scriptblock]$Condition, [string]$Failure, [int]$TimeoutSeconds = 30) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         if (& $Condition) { return }
         Start-Sleep -Milliseconds 100
@@ -69,11 +69,14 @@ try {
     } 'Vite did not start'
 
     $primary = Start-Sanser 'primary'
+    # A cold Windows CI process can enter main near the normal 30s deadline.
+    # Allow its initial setup more time without relaxing any restore/close or
+    # duplicate-process assertion. Early process exit still fails immediately.
     Wait-Until {
         $primary.Refresh()
         if ($primary.HasExited) { throw 'Primary Sanser exited before setup completed' }
         return (Test-Path $logs[0]) -and [bool](Select-String -Path $logs[0] -SimpleMatch 'Sanser lifecycle: setup completed' -Quiet)
-    } 'Primary Sanser did not complete setup'
+    } 'Primary Sanser did not complete setup' 60
     Wait-Until {
         $primary.Refresh()
         if ($primary.HasExited) { throw 'Primary Sanser exited during startup' }
