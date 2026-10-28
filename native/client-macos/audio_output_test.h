@@ -15,6 +15,7 @@ struct FakeAudioOutput {
   std::chrono::steady_clock::time_point time=std::chrono::steady_clock::time_point{}+std::chrono::seconds(1);
   bool immediate=false,emptyStart=false,clearReturnedSize=false;
   bool converterSupported=true;
+  bool clockSupported=true,frozenClock=false,clockHasSampleTime=true;
   OSStatus enqueueError=noErr,startError=noErr;
   unsigned starts=0;
   AudioOutputRoute route{1,1,48000};
@@ -72,6 +73,13 @@ struct FakeAudioOutput {
     api.setProperty=+[](AudioQueueRef,AudioQueuePropertyID,const void*,UInt32)->OSStatus { return noErr; };
     api.setParameter=+[](AudioQueueRef,AudioQueueParameterID,AudioQueueParameterValue)->OSStatus { return noErr; };
     api.now=+[] { return active->time; };
+    api.deviceTime=+[](AudioQueueRef,AudioTimeStamp* stamp)->OSStatus {
+      if(!active->clockSupported) return paramErr;
+      stamp->mFlags=active->clockHasSampleTime ? kAudioTimeStampSampleTimeValid : kAudioTimeStampHostTimeValid;
+      stamp->mSampleTime=active->frozenClock ? 100.0 :
+        std::chrono::duration<double>(active->time.time_since_epoch()).count()*48000;
+      return noErr;
+    };
     api.route=+[](const std::string&) { return active->route; };
     return api;
   }
@@ -172,4 +180,39 @@ void testAudioOutputRecovery() {
   requireLatency(submit() && player.stats().errors==errors,
     "An unsupported converter property must not be treated as USB output failure");
   device.complete();
+  // The physical output can stop advancing while enqueue and completion
+  // callbacks still succeed. The audio worker must recover without unplugging.
+  const auto oldClockQueues=device.queues.size();
+  device.frozenClock=true;
+  for(unsigned i=0;i<100;++i) {
+    device.time+=std::chrono::milliseconds(5);
+    if(submit()) device.complete();
+  }
+  requireLatency(player.stats().clockStalls==1 && player.stats().errors==errors,
+    "Stalled device clock must be detected separately from API/converter errors");
+  device.frozenClock=false;
+  for(unsigned i=0;i<60;++i) {
+    device.time+=std::chrono::milliseconds(5);
+    if(submit()) device.complete();
+  }
+  requireLatency(device.queues.size()==oldClockQueues+1 && player.stats().clockStalls==1,
+    "A frozen output clock did not recover on the same headphone route");
+  device.clockSupported=false;
+  for(unsigned i=0;i<100;++i) {
+    device.time+=std::chrono::milliseconds(5);
+    requireLatency(submit(),"Unsupported device clock must not stop valid playback");
+    device.complete();
+  }
+  requireLatency(player.stats().clockStalls==1,"An unsupported clock query caused a false recovery");
+  device.clockSupported=true;
+  device.clockHasSampleTime=false;
+  device.frozenClock=true;
+  const auto healthyQueues=device.queues.size();
+  for(unsigned i=0;i<100;++i) {
+    device.time+=std::chrono::milliseconds(5);
+    requireLatency(submit(),"A timestamp without valid sample time must not stop playback");
+    device.complete();
+  }
+  requireLatency(device.queues.size()==healthyQueues && player.stats().clockStalls==1,
+    "An invalid sample timestamp caused a false output recovery");
 }

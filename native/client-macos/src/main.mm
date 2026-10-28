@@ -5065,6 +5065,7 @@ struct AudioQueueFunctions {
   decltype(&AudioQueueGetProperty) getProperty=AudioQueueGetProperty;
   decltype(&AudioQueueSetProperty) setProperty=AudioQueueSetProperty;
   decltype(&AudioQueueSetParameter) setParameter=AudioQueueSetParameter;
+  decltype(&AudioQueueDeviceGetCurrentTime) deviceTime=AudioQueueDeviceGetCurrentTime;
   AudioOutputRoute (*route)(const std::string&)=audioOutputRoute;
   std::chrono::steady_clock::time_point (*now)()=+[] { return std::chrono::steady_clock::now(); };
 };
@@ -5184,24 +5185,31 @@ public:
       UInt32 converterError=0; size=sizeof(converterError);
       const auto converterQuery=functions_.getProperty(queue,kAudioQueueProperty_ConverterError,&converterError,&size);
       const bool converterFailed=converterQuery==noErr && converterError!=0;
+      AudioTimeStamp deviceTime{};
+      const auto clockStatus=query==noErr && running
+        ? functions_.deviceTime(queue,&deviceTime) : kAudioQueueErr_InvalidRunState;
       const auto started=converterFailed || (query==noErr && running) ? noErr : functions_.start(queue,nullptr);
       std::lock_guard stateLock(mutex_);
       // IsRunning and enqueue success do not report the queue's internal
-      // sample-format converter error. USB output can fail there separately.
+      // sample-format converter error. Headphone output can fail there separately.
       if(converterFailed) { ++outputConverterErrors_; outputFailureLocked(static_cast<OSStatus>(converterError)); }
       else if(started!=noErr) outputFailureLocked(started);
+      else if(deviceClockStalledLocked(clockStatus,deviceTime)) {
+        ++outputClockStalls_;
+        scheduleRecoveryLocked();
+      }
       else if(query!=noErr || !running) ++outputStarts_;
     }
     return true;
   }
 
   struct Stats {
-    std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames,routeChanges,converterErrors;
+    std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames,routeChanges,converterErrors,clockStalls;
     OSStatus lastError;
   };
   Stats stats() {
     std::lock_guard lock(mutex_);
-    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,outputRouteChanges_,outputConverterErrors_,lastOutputError_};
+    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,outputRouteChanges_,outputConverterErrors_,outputClockStalls_,lastOutputError_};
   }
 
   std::uint64_t takeQueueDrops() {
@@ -5216,10 +5224,26 @@ public:
   }
 
 private:
-  void outputFailureLocked(OSStatus status) {
-    ++outputErrors_; lastOutputError_=status;
+  void scheduleRecoveryLocked() {
     if(!requiresRecovery_) recoveryDue_=functions_.now()+std::chrono::milliseconds(250);
     requiresRecovery_=true;
+  }
+  void outputFailureLocked(OSStatus status) {
+    ++outputErrors_; lastOutputError_=status;
+    scheduleRecoveryLocked();
+  }
+  bool deviceClockStalledLocked(OSStatus status,const AudioTimeStamp& time) {
+    // Returned buffers are not proof that the physical output clock advances.
+    // Ignore unsupported/invalid clock queries, and never use remote clocks.
+    if(status!=noErr || !(time.mFlags&kAudioTimeStampSampleTimeValid) || !std::isfinite(time.mSampleTime)) {
+      hasDeviceSampleTime_=false; return false;
+    }
+    const auto now=functions_.now();
+    if(!hasDeviceSampleTime_ || time.mSampleTime!=lastDeviceSampleTime_) {
+      hasDeviceSampleTime_=true; lastDeviceSampleTime_=time.mSampleTime; lastDeviceProgress_=now;
+      return false;
+    }
+    return now-lastDeviceProgress_>=std::chrono::milliseconds(250);
   }
   static void callback(void* userData, AudioQueueRef queue, AudioQueueBufferRef buffer) {
     auto* player = static_cast<AudioQueuePcmPlayer*>(userData);
@@ -5244,6 +5268,7 @@ private:
     maxBufferBytes_ = 0;
     budget_.clear();
     requiresRecovery_=false;
+    hasDeviceSampleTime_=false;
     outputContinuity_=sanser::AudioContinuity{};
     outputGap_=true;
     lastProgress_=functions_.now();
@@ -5357,10 +5382,14 @@ private:
   std::uint64_t outputSubmittedFrames_=0,outputCompletedFrames_=0,outputStarts_=0,outputRecoveries_=0,outputErrors_=0,outputSignalFrames_=0;
   std::uint64_t outputRouteChanges_=0;
   std::uint64_t outputConverterErrors_=0;
+  std::uint64_t outputClockStalls_=0;
   OSStatus lastOutputError_=noErr;
   bool requiresRecovery_=false;
   std::chrono::steady_clock::time_point lastProgress_{},lastRunningCheck_{};
   std::chrono::steady_clock::time_point recoveryDue_{};
+  std::chrono::steady_clock::time_point lastDeviceProgress_{};
+  Float64 lastDeviceSampleTime_=0;
+  bool hasDeviceSampleTime_=false;
   std::chrono::steady_clock::time_point lastRouteCheck_{};
   AudioOutputRoute outputRoute_;
   sanser::AudioContinuity outputContinuity_;
@@ -7528,6 +7557,7 @@ void listenUdpAudio(std::uint16_t audioPort,
                << " outputRecoveries=" << outputStats.recoveries
                << " outputRouteChanges=" << outputStats.routeChanges
                << " outputConverterErrors=" << outputStats.converterErrors
+               << " outputClockStalls=" << outputStats.clockStalls
                << " outputErrors=" << outputStats.errors
                << " outputQueueDrops=" << outputStats.drops
                << " outputLastError=" << outputStats.lastError
