@@ -304,12 +304,19 @@ int main(int argc,char** argv) {
         sockaddr_in local{}; local.sin_family=AF_INET; local.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
         requireLatency(bind(fd.get(), reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "bind nonmultiplexed test");
         socklen_t size=sizeof(local); getsockname(fd.get(), reinterpret_cast<sockaddr*>(&local), &size);
-        UdpReceivePump pump(fd.get(), false, nullptr);
+        static std::atomic<unsigned> receiveFailures{2};
+        receiveFailures=2;
+        UdpReceivePump pump(fd.get(),false,nullptr,1024,50000,{},
+          +[](int socket,void* bytes,std::size_t size,int flags,sockaddr* peer,socklen_t* length)->ssize_t {
+            if(receiveFailures.load()) { --receiveFailures; errno=ECONNREFUSED; return -1; }
+            return ::recvfrom(socket,bytes,size,flags,peer,length);
+          });
         const char bytes[] = "SNU1";
         requireLatency(sendto(fd.get(), bytes, 4, 0, reinterpret_cast<sockaddr*>(&local), size) == 4, "send unprefixed video");
         UdpReceivePump::Datagram packet;
         requireLatency(pump.pop(packet, std::chrono::seconds(2)) && packet.size == 4 && packet.bytes[0] == 'S',
           "nonmultiplexed video keeps its first byte");
+        requireLatency(pump.receiveTransientErrors==2,"temporary UDP receive faults must recover on the same socket");
       }
       {
         UdpReceivePump broken(std::numeric_limits<int>::max(), false, nullptr);

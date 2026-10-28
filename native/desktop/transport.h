@@ -9,6 +9,7 @@
 #include "opus_audio.h"
 #include "voice.h"
 #include <condition_variable>
+#include <cstddef>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -25,6 +26,13 @@
 namespace sanser::desktop {
 using Bytes = std::vector<std::uint8_t>;
 using Clock = std::chrono::steady_clock;
+// Optional socket adapter for fault injection with real authenticated peers.
+// Production uses the platform socket calls when these pointers are null.
+struct DatagramIo {
+  struct Result { std::ptrdiff_t bytes; int error; };
+  Result (*send)(std::intptr_t,const std::uint8_t*,std::size_t)=nullptr;
+  Result (*receive)(std::intptr_t,std::uint8_t*,std::size_t)=nullptr;
+};
 struct Options {
   bool host = false;
   bool ultraLowLatency = false;
@@ -98,7 +106,7 @@ private:
 };
 class Peer {
 public:
-  explicit Peer(const Options& options);
+  explicit Peer(const Options& options,DatagramIo io = {});
   ~Peer();
   Peer(const Peer&) = delete;
   Peer& operator=(const Peer&) = delete;
@@ -146,6 +154,8 @@ public:
   std::uint64_t videoQueueDrops() const { return videoQueueDrops_.load(); }
   std::uint64_t repairedDatagrams() const { return repairedDatagrams_.load(); }
   std::uint64_t repairCacheMisses() const { return repairCacheMisses_.load(); }
+  struct SocketStats { std::uint64_t sendTransientErrors,receiveTransientErrors; };
+  SocketStats socketStats() const { return {sendTransientErrors_.load(),receiveTransientErrors_.load()}; }
   std::uint32_t recommendedBitrate() const { return videoBudget_.load(); }
 private:
   void loop();
@@ -162,6 +172,8 @@ private:
   void serviceVideoRepairs();
   void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline = {});
   Options options_;
+  DatagramIo io_;
+  std::atomic<std::uint64_t> sendTransientErrors_{0},receiveTransientErrors_{0};
   PacketCodec codec_;
   std::intptr_t socket_ = -1;
   bool timerResolution_=false;

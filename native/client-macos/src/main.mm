@@ -1,3 +1,4 @@
+#include "udp_io_policy.h"
 #include "engine.h"
 #include "latency_policy.h"
 #include "control_timing.h"
@@ -7848,13 +7849,14 @@ public:
   };
   std::atomic<std::uint64_t> raw{0}, unexpectedPeer{0}, control{0}, video{0};
   std::atomic<std::uint64_t> dropped{0}, expired{0}, oversized{0};
+  std::atomic<std::uint64_t> receiveTransientErrors{0};
 
   UdpReceivePump(int fd, bool multiplexed, const UdpEndpoint* peer,
                  std::size_t capacity = 1024, std::uint64_t maxAgeMicros = 50000,
-                 const std::string& echoToken = {})
+                 const std::string& echoToken = {},decltype(&::recvfrom) receiveFunction = ::recvfrom)
       : fd_(fd), multiplexed_(multiplexed), hasPeer_(peer != nullptr),
         peer_(peer ? *peer : UdpEndpoint{}), capacity_(std::clamp<std::size_t>(capacity, 1, 1024)),
-        maxAgeMicros_(std::max<std::uint64_t>(1, maxAgeMicros)) {
+        maxAgeMicros_(std::max<std::uint64_t>(1, maxAgeMicros)),receiveFunction_(receiveFunction) {
     if (hasPeer_ && multiplexed_ && !echoToken.empty()) {
       std::uint64_t nonce = 0;
       do { arc4random_buf(&nonce, sizeof(nonce)); } while (!nonce);
@@ -7923,16 +7925,31 @@ private:
         const int ready = poll(&readable, 1, 10);
         if (stopped_) break;
         if (ready < 0 && errno == EINTR) continue;
-        if (ready < 0 || (readable.revents & (POLLERR | POLLHUP | POLLNVAL)))
+        if (ready < 0 || (readable.revents & (POLLHUP | POLLNVAL)))
           throw std::runtime_error("UDP receive pump socket failed.");
         if (!ready) continue;
+        if(readable.revents & POLLERR) {
+          int error=0; socklen_t size=sizeof(error);
+          if(getsockopt(fd_,SOL_SOCKET,SO_ERROR,&error,&size)!=0 ||
+              (error && sanser::udp::receiveFailure(error)==sanser::udp::ReceiveFailure::Fatal))
+            throw std::runtime_error("UDP receive pump socket failed.");
+          if(error) ++receiveTransientErrors;
+          // Reading SO_ERROR consumes pending datagram errors. A brief route
+          // failure must not permanently kill video/control demultiplexing.
+          if(!(readable.revents & POLLIN)) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); continue; }
+        }
         Datagram packet;
         packet.peer.length = sizeof(packet.peer.address);
-        const auto received = recvfrom(fd_, packet.bytes.data(), packet.bytes.size(), MSG_DONTWAIT,
+        const auto received = receiveFunction_(fd_, packet.bytes.data(), packet.bytes.size(), MSG_DONTWAIT,
           reinterpret_cast<sockaddr*>(&packet.peer.address), &packet.peer.length);
         packet.receivedMicros = steadyMicros(); // T5 stays at the actual socket read.
         if (received < 0) {
-          if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+          const auto action=sanser::udp::receiveFailure(errno);
+          if(action==sanser::udp::ReceiveFailure::Idle) continue;
+          if(action==sanser::udp::ReceiveFailure::Retry) {
+            ++receiveTransientErrors;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); continue;
+          }
           throw std::runtime_error("UDP receive pump read failed.");
         }
         if (!received) continue;
@@ -7993,6 +8010,7 @@ private:
   const UdpEndpoint peer_;
   const std::size_t capacity_;
   const std::uint64_t maxAgeMicros_;
+  decltype(&::recvfrom) receiveFunction_=::recvfrom;
   std::atomic<bool> stopped_{false};
   std::mutex mutex_;
   std::condition_variable ready_;
@@ -8372,6 +8390,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                     << " receiveDropped=" << receiver.dropped.load()
                     << " receiveExpired=" << receiver.expired.load()
                     << " receiveOversized=" << receiver.oversized.load()
+                    << " receiveTransientErrors=" << receiver.receiveTransientErrors.load()
                     << " receiveQueueAvgMs=" << (receiveWindow.samples ? receiveWindow.ageSumMs / receiveWindow.samples : -1)
                     << " receiveQueueMaxMs=" << (receiveWindow.samples ? receiveWindow.ageMaxMs : -1) << "\n";
           const UdpVideoNackWindowStats nackWindow = nackController.takeWindowStats();

@@ -1,3 +1,4 @@
+#include "udp_io_policy.h"
 #include "telemetry.h"
 #include "transport.h"
 #include <algorithm>
@@ -91,6 +92,21 @@ void closeSocket(Socket fd) { closesocket(fd); }
 using Socket = int;
 void closeSocket(Socket fd) { close(fd); }
 #endif
+int socketError() {
+#ifdef _WIN32
+  return WSAGetLastError();
+#else
+  return errno;
+#endif
+}
+DatagramIo::Result sendDatagram(std::intptr_t socket,const std::uint8_t* bytes,std::size_t size) {
+  const auto sent=::send(static_cast<Socket>(socket),reinterpret_cast<const char*>(bytes),static_cast<int>(size),0);
+  return {sent,sent<0 ? socketError() : 0};
+}
+DatagramIo::Result receiveDatagram(std::intptr_t socket,std::uint8_t* bytes,std::size_t size) {
+  const auto received=::recv(static_cast<Socket>(socket),reinterpret_cast<char*>(bytes),static_cast<int>(size),0);
+  return {received,received<0 ? socketError() : 0};
+}
 sockaddr_in endpoint(const std::string& value) {
   const auto separator = value.rfind(':');
   if (separator == std::string::npos) throw std::runtime_error("Expected an IPv4 address and port");
@@ -309,7 +325,9 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
   return result;
 }
 
-Peer::Peer(const Options& o) : options_(o), codec_(o.token, o.host), reassembler_(o.bitrate,o.ultraLowLatency) {
+Peer::Peer(const Options& o,DatagramIo io) : options_(o), io_(io), codec_(o.token, o.host), reassembler_(o.bitrate,o.ultraLowLatency) {
+  if(!io_.send) io_.send=sendDatagram;
+  if(!io_.receive) io_.receive=receiveDatagram;
   videoBudget_=o.bitrate;
 #ifdef _WIN32
   WSADATA data{}; if (WSAStartup(MAKEWORD(2,2), &data) != 0) throw std::runtime_error("Winsock unavailable");
@@ -373,7 +391,17 @@ void Peer::start() {
   catch(...) { running_=false; sendReady_.notify_all(); if(sender_.joinable()) sender_.join(); if(inputWorker_) inputWorker_->stop(); throw; }
 }
 void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); audioReceiver_.reset(); if(inputWorker_) inputWorker_->stop(); }
-void Peer::datagram(const Bytes& b) { ::send(static_cast<Socket>(socket_), reinterpret_cast<const char*>(b.data()), static_cast<int>(b.size()), 0); }
+void Peer::datagram(const Bytes& b) {
+  const auto result=io_.send(socket_,b.data(),b.size());
+  if(result.bytes==static_cast<std::ptrdiff_t>(b.size())) return;
+  if(result.bytes<0 && udp::transientSendError(result.error)) {
+    ++sendTransientErrors_;
+    // Reliable input keeps its pending sequence/retry deadline. Missing video
+    // fragments use NACK/cache repair; audio expires instead of accumulating.
+    return;
+  }
+  throw std::runtime_error("UDP send failed, socket error "+std::to_string(result.error));
+}
 void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable,Clock::time_point deadline) {
   const auto queuedAt=Clock::now(); // Include sender mutex/encryption time in application input latency.
   std::lock_guard lock(sendMutex_);
@@ -928,7 +956,8 @@ void Peer::logHealth() {
     <<" videoDatagrams="<<videoDatagrams_<<" completed="<<completedFrames_
     <<" keyframeWaitDropped="<<keyframeWaitDropped_<<" nackSent="<<nackSent_
     <<" repaired="<<repairedDatagrams_.load()<<" repairCacheMisses="<<repairCacheMisses_.load()
-    <<" sendQueueDrops="<<videoQueueDrops_.load()<<" pending="<<pending<<" stopReason="<<stopReason_.load(); writeTelemetry(line);
+    <<" sendQueueDrops="<<videoQueueDrops_.load()<<" pending="<<pending<<" stopReason="<<stopReason_.load()
+    <<" sendTransientErrors="<<sendTransientErrors_.load()<<" receiveTransientErrors="<<receiveTransientErrors_.load(); writeTelemetry(line);
   if(inputRttSamples_ || work.samples || sendSamples) {
     line.str(""); line.clear();
     line<<"SNV2_INPUT_TIMING";
@@ -1036,7 +1065,20 @@ void Peer::loop() {
           }
         }
       }
-      std::array<char,1500> buffer{}; const auto received=recv(static_cast<Socket>(socket_),buffer.data(),static_cast<int>(buffer.size()),0);
+      std::array<std::uint8_t,1500> buffer{};
+      const auto result=io_.receive(socket_,buffer.data(),buffer.size());
+      const auto received=result.bytes;
+      if(received<0) {
+        const auto action=udp::receiveFailure(result.error);
+        if(action==udp::ReceiveFailure::Fatal)
+          throw std::runtime_error("UDP receive failed, socket error "+std::to_string(result.error));
+        if(action==udp::ReceiveFailure::Retry) {
+          ++receiveTransientErrors_;
+          // Network errors can return immediately. Avoid a CPU spin while
+          // retaining heartbeat, repair and authenticated peer-timeout budgets.
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
       if(received>0) process(Bytes(buffer.begin(),buffer.begin()+received));
       if(options_.host) serviceVideoRepairs();
       else {

@@ -1,3 +1,4 @@
+#include "udp_io_policy.h"
 #include "udp_echo.h"
 #include "engine.h"
 #include "bmp_writer.h"
@@ -4139,11 +4140,12 @@ public:
                           bool pacingEnabled,
                           std::shared_ptr<MediaCryptoState> mediaCrypto = {},
                           std::uint16_t udpBindPort = 0,
-                          const std::string& echoToken = {})
+                          const std::string& echoToken = {},
+                          decltype(&::send) sendFunction = ::send)
     : bitrate_(std::max<std::uint32_t>(bitrate, 1000000)),
       pacingEnabled_(pacingEnabled),
       mediaCrypto_(std::move(mediaCrypto)),
-      nextSendAt_(std::chrono::steady_clock::now()) {
+      nextSendAt_(std::chrono::steady_clock::now()),sendFunction_(sendFunction) {
     const auto separator = endpoint.rfind(':');
     if (separator == std::string::npos || separator == 0 || separator == endpoint.size() - 1) {
       throw std::runtime_error("--udp-connect must be HOST:PORT");
@@ -4523,13 +4525,13 @@ private:
         std::memcpy(sendBuf.data() + 1, datagram.data(), datagram.size());
         
         std::lock_guard<std::mutex> lock(gUdpMainSocketMutex);
-        sent = send(socket_,
+        sent = sendFunction_(socket_,
                     reinterpret_cast<const char*>(sendBuf.data()),
                     static_cast<int>(sendBuf.size()),
                     0);
         if (sent > 0) sent -= 1;
       } else {
-        sent = send(socket_,
+        sent = sendFunction_(socket_,
                     reinterpret_cast<const char*>(datagram.data()),
                     static_cast<int>(datagram.size()),
                     0);
@@ -4537,7 +4539,15 @@ private:
       socketSendMs_ += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - socketStartedAt).count();
       if (sent == SOCKET_ERROR || sent != static_cast<int>(datagram.size())) {
-        throw std::runtime_error("UDP video send failed, WSA error " + std::to_string(WSAGetLastError()));
+        const int error=sent==SOCKET_ERROR ? WSAGetLastError() : 0;
+        if(sent==SOCKET_ERROR && sanser::udp::transientSendError(error)) {
+          if(++sendTransientErrors_==1 || sendTransientErrors_%64==0)
+            std::cerr<<"SNUDP_IO_HEALTH sendTransientErrors="<<sendTransientErrors_<<" socketError="<<error<<"\n";
+          // Keep the cached frame for NACK repair. Return the successful prefix
+          // so repair resumes at the failed fragment, never a later offset.
+          break;
+        }
+        throw std::runtime_error("UDP video send failed, WSA error " + std::to_string(error));
       }
 	      fragmentsSent += 1;
 	    }
@@ -4661,6 +4671,8 @@ private:
   double pacedSleepMs_ = 0.0;
   double pacedOvershootMs_ = 0.0;
   double socketSendMs_ = 0.0;
+  decltype(&::send) sendFunction_=::send;
+  std::uint64_t sendTransientErrors_=0;
   double pacedClampMs_ = 0.0;
   std::uint64_t pacedClampEvents_ = 0;
   std::uint64_t pacedClampPackets_ = 0;
@@ -4868,16 +4880,14 @@ private:
   bool sentAudio(int sent,int expected) {
     if(sent==expected) return true;
     const int error=sent==SOCKET_ERROR ? WSAGetLastError() : 0;
-    switch(error) {
-      case WSAEWOULDBLOCK: case WSAENOBUFS: case WSAENETUNREACH:
-      case WSAEHOSTUNREACH: case WSAECONNRESET: case WSAENETDOWN: case WSAETIMEDOUT:
+    if(sent==SOCKET_ERROR && sanser::udp::transientSendError(error)) {
         // Realtime UDP loss must not permanently kill the capture thread.
         // Retire this sequence and let the receiver conceal a bounded gap.
         if(++audioSendDrops_==1 || audioSendDrops_%200==0)
           std::cerr<<"SNA1_AUDIO_SEND_DROP drops="<<audioSendDrops_<<" error="<<error<<"\n";
         return false;
-      default: throw std::runtime_error("Audio UDP send failed, WSA error "+std::to_string(error));
     }
+    throw std::runtime_error("Audio UDP send failed, WSA error "+std::to_string(error));
   }
   void sendOpus(const sanser::audio::Samples& samples) {
     const auto crypto=mediaCrypto_ ? mediaCrypto_->snapshot() : MediaCryptoSnapshot{};
@@ -7532,7 +7542,39 @@ int main(int argc, char** argv) {
         if(header.sequence!=expectedSequence || header.authSeq!=expectedSequence)
           throw std::runtime_error("Lost audio sequence was reused after a transient send error");
       }
-      std::cout<<"Legacy Opus: authenticated UDP, epoch reset, 5ms decode and PCM fallback passed\n";
+      // The legacy video path must preserve cached partial frames when the
+      // socket briefly refuses a datagram. No screen/encoder is opened here.
+      static unsigned videoCalls=0,failVideoAt=0;
+      static int videoError=0;
+      UdpVideoClient video(endpoint,20000000,false,crypto,0,{},
+        +[](SOCKET fd,const char* data,int length,int flags)->int {
+          if(++videoCalls==failVideoAt) { WSASetLastError(videoError); return SOCKET_ERROR; }
+          return ::send(fd,data,length,flags);
+        });
+      const std::vector<std::uint8_t> picture(2400,0x62);
+      for(int error:{WSAEWOULDBLOCK,WSAENOBUFS,WSAENETUNREACH,WSAECONNRESET}) {
+        videoCalls=0; failVideoAt=2; videoError=error;
+        if(video.sendPacket(picture)!=1) throw std::runtime_error("Transient video failure lost its successful fragment prefix");
+        std::array<char,1500> receivedPacket{};
+        if(recv(listener.fd,receivedPacket.data(),static_cast<int>(receivedPacket.size()),0)<=0)
+          throw std::runtime_error("Video prefix did not reach the receiver");
+        UdpVideoAuthenticatedFragmentHeader header{}; std::memcpy(&header,receivedPacket.data(),sizeof(header));
+        if(header.fragmentIndex!=0) throw std::runtime_error("Video prefix offset mismatch");
+        const auto repaired=video.resendPacketChunk(header.packetId,video.retransmitGeneration(),1,32,std::chrono::microseconds(1000));
+        if(!repaired.cacheHit || repaired.fragmentsSent!=2 || repaired.nextFragment!=3 || !repaired.complete)
+          throw std::runtime_error("Transient video failure could not resume at its missing fragment");
+        for(unsigned fragment=1;fragment<=2;++fragment) {
+          if(recv(listener.fd,receivedPacket.data(),static_cast<int>(receivedPacket.size()),0)<=0)
+            throw std::runtime_error("Repaired video fragment did not reach the receiver");
+          std::memcpy(&header,receivedPacket.data(),sizeof(header));
+          if(header.fragmentIndex!=fragment) throw std::runtime_error("Video repair skipped or replayed the wrong fragment");
+        }
+      }
+      videoCalls=0; failVideoAt=1; videoError=WSAENOTSOCK;
+      bool fatal=false;
+      try { (void)video.sendPacket(picture); } catch(const std::runtime_error&) { fatal=true; }
+      if(!fatal) throw std::runtime_error("Invalid legacy video socket was hidden as packet loss");
+      std::cout<<"Legacy media: authenticated Opus/PCM, route reset and partial UDP video repair after transient errors passed\n";
       return 0;
     }
 #endif

@@ -23,6 +23,7 @@ const SOURCES: &[&str] = &[
     "FEC_HEALTH",
     "DIRECT_PATH_HEALTH",
     "SNV2_TRANSPORT_HEALTH",
+    "SNUDP_IO_HEALTH",
     "SNSHARE_PEER",
     "SNV2_HOST_TIMING",
     "SNV2_VIDEO_HEALTH",
@@ -127,6 +128,8 @@ const FIELDS: &[&str] = &[
     "opusErrors",
     "opusFreshnessResets",
     "audioSendDrops",
+    "sendTransientErrors",
+    "receiveTransientErrors",
     "opusTxPackets",
     "opusTxBytes",
     "played",
@@ -967,6 +970,10 @@ mod tests {
     }
     #[test]
     fn sharing_and_transport_health_retain_only_numeric_failure_evidence() {
+        let io=parse_sample(b"SNUDP_IO_HEALTH sendTransientErrors=3 receiveTransientErrors=2 socketError=10055 endpoint=private token=123").unwrap();
+        assert_eq!(io.values.len(), 2);
+        assert_eq!(io.values["sendTransientErrors"], 3.0);
+        assert_eq!(io.values["receiveTransientErrors"], 2.0);
         let sample=parse_sample(b"SNSHARE_PEER viewer=private-device ready=1 running=1 submitted=80 dispatched=1 replaced=79 referenceDrops=78 pauses=1 backoffMs=2000 videoState=paused videoStateCode=1 pauseReason=2 completedFrame=4 sentFrame=80 feedbackSerial=10 feedbackCongested=0 token=123").unwrap();
         assert_eq!(sample.values["replaced"], 79.0);
         assert_eq!(sample.values["videoStateCode"], 1.0);
