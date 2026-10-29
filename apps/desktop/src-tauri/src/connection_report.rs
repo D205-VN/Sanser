@@ -130,6 +130,10 @@ const FIELDS: &[&str] = &[
     "audioSendDrops",
     "sendTransientErrors",
     "receiveTransientErrors",
+    "udpPacingWaitCalls",
+    "udpPacingGrouped",
+    "renderBusyDeferrals",
+    "renderCompletionWakeups",
     "opusTxPackets",
     "opusTxBytes",
     "played",
@@ -1181,6 +1185,19 @@ mod tests {
     }
     #[test]
     fn ultra_report_tracks_frame_queue_budget_without_inventing_missing_samples() {
+        let render = parse_sample(
+            b"SNV1_RENDER_STATS renderBusyDeferrals=4 renderCompletionWakeups=3 token=123",
+        )
+        .unwrap();
+        assert_eq!(render.values.len(), 2);
+        assert_eq!(render.values["renderBusyDeferrals"], 4.0);
+        assert_eq!(render.values["renderCompletionWakeups"], 3.0);
+        let pacing =
+            parse_sample(b"SNV1_STATS udpPacingWaitCalls=63 udpPacingGrouped=192 endpoint=private")
+                .unwrap();
+        assert_eq!(pacing.values.len(), 2);
+        assert_eq!(pacing.values["udpPacingWaitCalls"], 63.0);
+        assert_eq!(pacing.values["udpPacingGrouped"], 192.0);
         let mut value = request();
         value.ultra_low_latency = true;
         let mut report = Report::new(&value);

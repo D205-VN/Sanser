@@ -3,6 +3,16 @@
 #include "src/main.mm"
 namespace sanser::desktop { void testMacRemoteView(); }
 
+// The busy-GPU path returns before accessing a Metal drawable. Count its
+// completion-triggered main-thread wake without opening a window or GPU work.
+@interface LegacyDrawWakeTarget : NSObject
+@property(nonatomic) NSUInteger draws;
+- (void)draw;
+@end
+@implementation LegacyDrawWakeTarget
+- (void)draw { ++_draws; }
+@end
+
 namespace {
 struct NativeInputPolicyTest {
   static auto retryDelay(unsigned attempts=1) { return NativeInputSender::retryDelay(attempts); }
@@ -515,6 +525,23 @@ int main(int argc,char** argv) {
       metadata.sequence=1; metadata.timestampMicros=8333; metadata.decodeSubmittedAtMicros=101;
       [renderer submitPixelBuffer:pixels metadata:&metadata];
       requireLatency([renderer testQueueSize]==1 && [renderer testQueuedSequence]==1,"sender sequence restart must not freeze newest frame queue");
+      LegacyDrawWakeTarget* wakeTarget=[[LegacyDrawWakeTarget alloc] init];
+      [renderer testBlockGpuWithView:(MTKView*)wakeTarget];
+      [renderer drawInMTKView:nil]; // Slot is busy; no timer callback follows.
+      requireLatency(wakeTarget.draws==0,"busy GPU must not submit a second render");
+      [renderer testCompleteGpu];
+      [renderer renderCompleted]; [renderer renderCompleted];
+      const auto wakeDeadline=steady_clock::now()+seconds(2);
+      while(wakeTarget.draws==0 && steady_clock::now()<wakeDeadline)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.005,false);
+      requireLatency(wakeTarget.draws==1 && [renderer testQueuedSequence]==1,
+        "GPU completion must coalesce one immediate draw of the newest frame without waiting for the periodic timer");
+      SanserVideoRenderer* idleRenderer=[[SanserVideoRenderer alloc] initForQueueTest];
+      LegacyDrawWakeTarget* idleTarget=[[LegacyDrawWakeTarget alloc] init];
+      [idleRenderer testBlockGpuWithView:(MTKView*)idleTarget];
+      [idleRenderer drawInMTKView:nil]; [idleRenderer testCompleteGpu];
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.005,false);
+      requireLatency(idleTarget.draws==0,"a busy periodic redraw with no fresh picture must not create a completion redraw loop");
       CVPixelBufferRelease(pixels);
 
       gLatencyPolicy.ultra = false;

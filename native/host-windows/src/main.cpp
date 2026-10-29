@@ -10,6 +10,7 @@
 #include "sanser_version.h"
 #include "wheel_delta.h"
 #include "latency_policy.h"
+#include "pacing_group.h"
 #include "control_timing.h"
 #include "stream_adaptation_policy.h"
 #include "opus_audio.h"
@@ -4120,6 +4121,7 @@ public:
     double clampedMs = 0.0;
     std::uint64_t clampEvents = 0;
     std::uint64_t clampPackets = 0;
+    std::uint64_t waitCalls = 0, groupedDatagrams = 0;
   };
 
   struct RetransmitChunkResult {
@@ -4342,6 +4344,8 @@ public:
     stats.sleptMs = pacedSleepMs_;
     stats.overshootMs = pacedOvershootMs_;
     stats.socketMs = socketSendMs_;
+    stats.waitCalls=pacedWaitCalls_; stats.groupedDatagrams=pacedGroupedDatagrams_;
+    pacedWaitCalls_=pacedGroupedDatagrams_=0;
     pacedOvershootMs_ = 0;
     socketSendMs_ = 0;
     stats.clampedMs = pacedClampMs_;
@@ -4607,7 +4611,10 @@ private:
     if (nextSendAt_ + maxBurstWindow < now) {
       nextSendAt_ = now - maxBurstWindow;
     }
-    if (nextSendAt_ > now) {
+    const bool waitRequired=pacingGroup_.waitRequired(gUltraLowLatency,
+      std::chrono::ceil<std::chrono::microseconds>(nextSendAt_-now).count());
+    if(nextSendAt_>now && !waitRequired) ++pacedGroupedDatagrams_;
+    if (waitRequired) {
       auto sleepFor = nextSendAt_ - now;
       if (packetBudget.count() > 0) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - packetStartedAt);
@@ -4631,6 +4638,8 @@ private:
         const auto waitStartedAt = std::chrono::steady_clock::now();
         const auto deadline = nextSendAt_;
         preciseWait_.until(deadline);
+        ++pacedWaitCalls_;
+        pacingGroup_.waited();
         const auto finished = std::chrono::steady_clock::now();
         // Measure actual waiting, including OS overshoot, not requested sleep.
         pacedSleepMs_ += std::chrono::duration<double, std::milli>(finished - waitStartedAt).count();
@@ -4647,6 +4656,7 @@ private:
     // Preserve the bounded burst credit in Ultra instead of adding another
     // sleep after every datagram (Windows timer granularity can amplify it).
     nextSendAt_ = (gUltraLowLatency ? nextSendAt_ : std::max(nextSendAt_, std::chrono::steady_clock::now())) + spacing;
+    pacingGroup_.datagram();
   }
 
   SOCKET socket_ = INVALID_SOCKET;
@@ -4668,9 +4678,11 @@ private:
   bool hasMediaAuthEpoch_ = false;
   std::chrono::steady_clock::time_point nextSendAt_;
   sanser::WindowsPreciseWait preciseWait_;
+  sanser::PacingGroup pacingGroup_;
   double pacedSleepMs_ = 0.0;
   double pacedOvershootMs_ = 0.0;
   double socketSendMs_ = 0.0;
+  std::uint64_t pacedWaitCalls_=0,pacedGroupedDatagrams_=0;
   decltype(&::send) sendFunction_=::send;
   std::uint64_t sendTransientErrors_=0;
   double pacedClampMs_ = 0.0;
@@ -5921,6 +5933,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   double statsUdpPacedMs = 0.0;
   double statsUdpOvershootMs = 0.0;
   double statsUdpSocketMs = 0.0;
+  std::uint64_t statsUdpPacingWaitCalls=0,statsUdpPacingGrouped=0;
   std::uint64_t statsKeyframes = 0;
   std::uint32_t currentAdaptiveBitrate = initialAdaptiveBitrate;
   std::uint64_t seenFeedbackSequence = 0;
@@ -6727,6 +6740,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
         statsUdpPacedMs += pacingStats.sleptMs;
         statsUdpOvershootMs += pacingStats.overshootMs;
         statsUdpSocketMs += pacingStats.socketMs;
+        statsUdpPacingWaitCalls+=pacingStats.waitCalls;
+        statsUdpPacingGrouped+=pacingStats.groupedDatagrams;
         statsUdpPacingClampMs += pacingStats.clampedMs;
         statsUdpPacingClampEvents += pacingStats.clampEvents;
         statsUdpPacingClampPackets += pacingStats.clampPackets;
@@ -6840,6 +6855,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 		                << " udpPacedAvgMs=" << udpPacedAvgMs
                     << " udpWaitOvershootAvgMs=" << gPacingOvershootMs.load()
                     << " udpSocketAvgMs=" << gSocketSendMs.load()
+                    << " udpPacingWaitCalls=" << statsUdpPacingWaitCalls
+                    << " udpPacingGrouped=" << statsUdpPacingGrouped
 		                << " udpPacedTotalMs=" << statsUdpPacedMs
 #ifdef _WIN32
 	                << " udpPaceClampMs=" << statsUdpPacingClampMs
@@ -7372,6 +7389,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      statsUdpPacedMs = 0.0;
           statsUdpOvershootMs = 0.0;
           statsUdpSocketMs = 0.0;
+          statsUdpPacingWaitCalls=statsUdpPacingGrouped=0;
 	      statsKeyframes = 0;
 #ifdef _WIN32
       statsCursorFrames = 0;
@@ -7574,6 +7592,17 @@ int main(int argc, char** argv) {
       bool fatal=false;
       try { (void)video.sendPacket(picture); } catch(const std::runtime_error&) { fatal=true; }
       if(!fatal) throw std::runtime_error("Invalid legacy video socket was hidden as packet loss");
+      const bool oldUltra=gUltraLowLatency;
+      gUltraLowLatency=true;
+      UdpVideoClient paced(endpoint,20000000,true,crypto,0,{},
+        +[](SOCKET,const char*,int length,int)->int { return length; });
+      paced.sendPacket(std::vector<std::uint8_t>(48000,0x63));
+      const auto pacedStats=paced.takePacingStats();
+      gUltraLowLatency=oldUltra;
+      // Report the runner's actual waits without a flaky latency threshold.
+      // Virtual-clock tests enforce the advance/group/bandwidth contracts.
+      std::cout<<"Legacy pacing runner: waitCalls="<<pacedStats.waitCalls
+        <<" groupedDatagrams="<<pacedStats.groupedDatagrams<<" overshootMs="<<pacedStats.overshootMs<<'\n';
       std::cout<<"Legacy media: authenticated Opus/PCM, route reset and partial UDP video repair after transient errors passed\n";
       return 0;
     }

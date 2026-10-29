@@ -6601,10 +6601,15 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 @interface SanserVideoRenderer : NSObject <MTKViewDelegate>
 - (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view;
 - (void)submitPixelBuffer:(CVPixelBufferRef)pixelBuffer metadata:(const DecodedVideoFrameMetadata*)metadata;
+- (void)schedulePendingDraw;
+- (void)scheduleDrawFromCompletion:(BOOL)completion;
+- (void)renderCompleted;
 #ifdef SANSER_LATENCY_TEST
 - (instancetype)initForQueueTest;
 - (std::size_t)testQueueSize;
 - (std::uint64_t)testQueuedSequence;
+- (void)testBlockGpuWithView:(MTKView*)view;
+- (void)testCompleteGpu;
 #endif
 @end
 
@@ -6621,6 +6626,8 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   __weak MTKView* _renderView;
   dispatch_semaphore_t _renderSlot;
   bool _drawScheduled;
+  bool _drawDeferred;
+  std::uint64_t _renderBusyDeferrals,_renderCompletionWakeups;
   std::uint64_t _submittedBuffers;
   std::uint64_t _renderedBuffers;
   std::uint64_t _drawCalls;
@@ -6659,6 +6666,10 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 }
 - (std::size_t)testQueueSize { return _frameQueue.size(); }
 - (std::uint64_t)testQueuedSequence { return _frameQueue.empty() ? 0 : _frameQueue.front().packetSequence; }
+- (void)testBlockGpuWithView:(MTKView*)view {
+  _renderView=view; _renderSlot=dispatch_semaphore_create(0); _drawScheduled=false;
+}
+- (void)testCompleteGpu { dispatch_semaphore_signal(_renderSlot); [self renderCompleted]; }
 #endif
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device view:(MTKView*)view {
@@ -6904,15 +6915,39 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
     _frameQueue.pop_front();
     _droppedQueueFrames += 1;
   }
-  const bool scheduleDraw = gLatencyPolicy.ultra && !_drawScheduled;
-  if (scheduleDraw) _drawScheduled = true;
   [_lock unlock];
-  if (scheduleDraw) dispatch_async(dispatch_get_main_queue(), ^{
+  [self schedulePendingDraw];
+}
+
+- (void)schedulePendingDraw {
+  [self scheduleDrawFromCompletion:NO];
+}
+
+- (void)scheduleDrawFromCompletion:(BOOL)completion {
+  [_lock lock];
+  if(!gLatencyPolicy.ultra || _drawScheduled || (_frameQueue.empty() && !_drawDeferred)) {
+    [_lock unlock]; return;
+  }
+  _drawScheduled=true;
+  if(completion) ++_renderCompletionWakeups;
+  const auto now=steadyMicros();
+  const auto due=_frameQueue.empty() ? now : _frameQueue.front().presentAtMicros;
+  const auto delay=due>now ? due-now : 0;
+  [_lock unlock];
+  void (^draw)(void)=^{
     [self->_lock lock];
     self->_drawScheduled = false;
     [self->_lock unlock];
     [self->_renderView draw];
-  });
+  };
+  if(delay) dispatch_after(dispatch_time(DISPATCH_TIME_NOW,static_cast<int64_t>(delay*1000)),dispatch_get_main_queue(),draw);
+  else dispatch_async(dispatch_get_main_queue(),draw);
+}
+
+- (void)renderCompleted {
+  // A decoder callback may already have attempted a draw while the GPU slot
+  // was occupied. Wake that newest frame now instead of waiting for a timer.
+  [self scheduleDrawFromCompletion:YES];
 }
 
 - (void)mtkView:(MTKView*)view drawableSizeWillChange:(CGSize)size {
@@ -6921,7 +6956,13 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 }
 
 - (void)drawInMTKView:(MTKView*)view {
-  if (dispatch_semaphore_wait(_renderSlot, DISPATCH_TIME_NOW) != 0) return;
+  [_lock lock];
+  if (dispatch_semaphore_wait(_renderSlot, DISPATCH_TIME_NOW) != 0) {
+    if(!_frameQueue.empty()) { _drawDeferred=true; ++_renderBusyDeferrals; }
+    [_lock unlock]; return;
+  }
+  _drawDeferred=false;
+  [_lock unlock];
   MTLRenderPassDescriptor* pass = [view currentRenderPassDescriptor];
   id<CAMetalDrawable> drawable = [view currentDrawable];
   if (!pass || !drawable) { dispatch_semaphore_signal(_renderSlot); return; }
@@ -7019,9 +7060,12 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   [encoder endEncoding];
   [commandBuffer presentDrawable:drawable];
   const auto renderSlot = _renderSlot;
+  __weak SanserVideoRenderer* weakRenderer=self;
   [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
     if (pixelBuffer) CVPixelBufferRelease(pixelBuffer);
     dispatch_semaphore_signal(renderSlot);
+    SanserVideoRenderer* renderer=weakRenderer;
+    [renderer renderCompleted];
     if (completed.status == MTLCommandBufferStatusCompleted && completed.GPUEndTime >= completed.GPUStartTime) {
       gLiveLatency.renderGpu = (completed.GPUEndTime - completed.GPUStartTime) * 1000.0;
     }
@@ -7041,6 +7085,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 	    std::uint64_t held = 0;
 	    std::uint64_t pacingReset = 0;
     std::uint64_t queuePressureReset = 0;
+    std::uint64_t renderBusyDeferrals=0,renderCompletionWakeups=0;
 	    double targetDelayMs = 0.0;
     double avgRenderAgeMs = -1.0;
     double maxRenderAgeMs = 0.0;
@@ -7060,6 +7105,8 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 	    held = _heldForPacing;
 	    pacingReset = _pacingResets;
     queuePressureReset = _queuePressurePacingResets;
+    renderBusyDeferrals=_renderBusyDeferrals; renderCompletionWakeups=_renderCompletionWakeups;
+    _renderBusyDeferrals=_renderCompletionWakeups=0;
 	    targetDelayMs = static_cast<double>(_lastTargetDelayMicros) / 1000.0;
     avgRenderAgeMs = _renderAgeSamples > 0
       ? _renderAgeSumMs / static_cast<double>(_renderAgeSamples)
@@ -7153,6 +7200,8 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
 	              << " held=" << held
 	              << " pacingReset=" << pacingReset
               << " queuePressureReset=" << queuePressureReset
+              << " renderBusyDeferrals=" << renderBusyDeferrals
+              << " renderCompletionWakeups=" << renderCompletionWakeups
 	              << std::fixed << std::setprecision(1)
               << " targetDelayMs=" << targetDelayMs
               << " adaptiveDelayMs=" << adaptiveDelayMs
