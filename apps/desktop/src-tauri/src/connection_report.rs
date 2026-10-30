@@ -22,6 +22,7 @@ const SOURCES: &[&str] = &[
     "SNUAC_HEALTH",
     "FEC_HEALTH",
     "DIRECT_PATH_HEALTH",
+    "DIRECT_ROUTER_HEALTH",
     "SNV2_TRANSPORT_HEALTH",
     "SNUDP_IO_HEALTH",
     "SNSHARE_PEER",
@@ -59,6 +60,19 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "routerExternalReceived",
+    "routerExternalProbes",
+    "routerPeerPayloads",
+    "routerExternalRejected",
+    "routerNativeReceived",
+    "routerNativeRejected",
+    "routerToNative",
+    "routerToPeer",
+    "routerToNativeDrops",
+    "routerToPeerDrops",
+    "routerExternalReceiveErrors",
+    "routerNativeReceiveErrors",
+    "routerStopReason",
     "voiceCapturedFrames",
     "voiceRawPeak",
     "voiceCleanPeak",
@@ -821,6 +835,22 @@ mod tests {
         assert_eq!(sample.values.len(), 5);
         assert_eq!(sample.values["pathRttMs"], 13.0);
         assert!(!serde_json::to_string(&sample).unwrap().contains("secret"));
+    }
+    #[test]
+    fn router_health_is_numeric_and_does_not_invent_video_or_rtt() {
+        let sample=parse_sample(b"DIRECT_ROUTER_HEALTH routerExternalReceived=8 routerExternalProbes=8 routerPeerPayloads=0 routerNativeReceived=5 routerToPeer=5 routerToNative=0 routerStopReason=1 endpoint=192.0.2.1:50000 token=123 payload=456").unwrap();
+        assert_eq!(sample.values.len(), 7);
+        let mut report = Report::new(&request());
+        report.observe(sample);
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            serialized["maxima"]["DIRECT_ROUTER_HEALTH.routerExternalProbes"],
+            8.0
+        );
+        assert!(serialized["performance"]["metrics"]["wireRtt"].is_null());
+        assert!(!serialized.to_string().contains("192.0.2.1"));
+        assert!(!serialized.to_string().contains("\"payload\""));
+        assert!(!serialized.to_string().contains("\"token\""));
     }
     #[test]
     fn audio_reports_keep_only_numeric_quality_counters() {

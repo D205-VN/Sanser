@@ -56,6 +56,28 @@ pub struct Snapshot {
     pub paths: Vec<PathSnapshot>,
     pub local_send_drops: u64,
     pub fec: crate::fec::Stats,
+    pub router: RouterStats,
+}
+
+/// Cumulative socket-boundary counters, not proof of native authentication,
+/// decoding or delivery beyond a successful local UDP send call.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterStats {
+    pub external_received: u64,
+    pub external_probes: u64,
+    pub peer_payloads: u64,
+    pub external_rejected: u64,
+    pub native_received: u64,
+    pub native_rejected: u64,
+    pub to_native: u64,
+    pub to_peer: u64,
+    pub to_native_drops: u64,
+    pub to_peer_drops: u64,
+    pub external_receive_errors: u64,
+    pub native_receive_errors: u64,
+    /// 0 running, 1 owner stopped/dropped, 2 external receive fault, 3 local receive fault.
+    pub stop_reason: u8,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -248,6 +270,7 @@ impl Monitor {
                 .collect(),
             local_send_drops: self.drops,
             fec: crate::fec::Stats::default(),
+            router: RouterStats::default(),
         }
     }
     fn transmit(&mut self, socket: &UdpSocket, address: SocketAddr, message: Message) {
@@ -627,9 +650,11 @@ pub async fn run(
     let mut report = Instant::now();
     let mut fec_route = monitor.config.active;
     let mut baseline_rtt: Option<f64> = None;
-    loop {
+    let mut router = RouterStats::default();
+    observe(monitor.snapshot(Instant::now()));
+    let result = loop {
         tokio::select! {
-            _=&mut stop=>return Ok(()),
+            _=&mut stop=>{router.stop_reason=1;break Ok(());},
             _=tick.tick()=> {
                 let now=Instant::now();monitor.tick(&external,now);
                 if fec_route!=monitor.config.active {fec.path_changed(now);fec_route=monitor.config.active;baseline_rtt=None;}
@@ -638,30 +663,63 @@ pub async fn run(
                     let minimum=baseline_rtt.get_or_insert(rtt);*minimum=minimum.min(rtt);
                     if rtt>*minimum+20.0_f64.max(*minimum*0.5) {fec.congested(now);}
                 }
-                if now.duration_since(report)>=Duration::from_secs(2) {snapshot.fec=fec.stats(now);observe(snapshot);report=now;}
+                if now.duration_since(report)>=Duration::from_secs(2) {snapshot.fec=fec.stats(now);snapshot.router=router;observe(snapshot);report=now;}
             },
             _=tokio::time::sleep(fec.next_tick(Instant::now()))=> {
                 let now=Instant::now();
                 for packet in fec.tick(now) {if external.try_send_to(&packet,monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}}
             },
             result=external.recv_from(&mut incoming)=> {
-                let (n,source)=match result { Ok(value)=>value,Err(error) if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset)=>continue,Err(error)=>return Err(error) };
+                let (n,source)=match result {
+                    Ok(value)=>value,
+                    Err(error)=>{
+                        router.external_receive_errors+=1;
+                        if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset) {continue;}
+                        router.stop_reason=2;break Err(error);
+                    }
+                };
                 let now=Instant::now();
+                router.external_received+=1;
+                let probe=incoming[..n].starts_with(MAGIC);
+                if probe {router.external_probes+=1;}
                 if monitor.receive(&external,&incoming[..n],source,now) {
                     // Originals reach native before optional recovery work.
-                    if !crate::fec::is_packet(&incoming[..n]) && local.try_send_to(&incoming[..n],engine).is_err() {monitor.drops+=1;fec.local_drop(now);}
+                    if !crate::fec::is_packet(&incoming[..n]) {
+                        router.peer_payloads+=1;
+                        if local.try_send_to(&incoming[..n],engine).is_err() {router.to_native_drops+=1;monitor.drops+=1;fec.local_drop(now);}
+                        else {router.to_native+=1;}
+                    }
                     let (_,recovered)=fec.receive(&incoming[..n],now);
-                    for packet in recovered {if local.try_send_to(&packet,engine).is_err() {monitor.drops+=1;fec.local_drop(now);}}
-                }
+                    for packet in recovered {if local.try_send_to(&packet,engine).is_err() {router.to_native_drops+=1;monitor.drops+=1;fec.local_drop(now);}else {router.to_native+=1;}}
+                }else if !probe {router.external_rejected+=1;}
             },
             result=local.recv_from(&mut outgoing)=> {
-                let (n,source)=match result { Ok(value)=>value,Err(error) if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset)=>continue,Err(error)=>return Err(error) };if source!=engine {continue;}
+                let (n,source)=match result {
+                    Ok(value)=>value,
+                    Err(error)=>{
+                        router.native_receive_errors+=1;
+                        if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset) {continue;}
+                        router.stop_reason=3;break Err(error);
+                    }
+                };
+                if source!=engine {router.native_rejected+=1;continue;}
+                router.native_received+=1;
                 let now=Instant::now();
-                if external.try_send_to(&outgoing[..n],monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}
-                else if let Some(parity)=fec.outgoing(&outgoing[..n],now) && external.try_send_to(&parity,monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}
+                if external.try_send_to(&outgoing[..n],monitor.config.active).is_err() {router.to_peer_drops+=1;monitor.drops+=1;fec.local_drop(now);}
+                else {
+                    router.to_peer+=1;
+                    if let Some(parity)=fec.outgoing(&outgoing[..n],now) && external.try_send_to(&parity,monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}
+                }
             },
         }
-    }
+    };
+    // Retain a final sample even if startup failed before the periodic report.
+    let now = Instant::now();
+    let mut snapshot = monitor.snapshot(now);
+    snapshot.fec = fec.stats(now);
+    snapshot.router = router;
+    observe(snapshot);
+    result
 }
 
 #[cfg(test)]
@@ -1213,6 +1271,8 @@ mod tests {
         let proxy = local.local_addr().unwrap();
         let address = external.local_addr().unwrap();
         let (stop, stopped) = oneshot::channel();
+        let samples = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&samples);
         let bridge = tokio::spawn(run(
             external,
             local,
@@ -1223,7 +1283,7 @@ mod tests {
                 true,
             ),
             stopped,
-            |_| {},
+            move |snapshot| observed.lock().unwrap().push(snapshot.router),
         ));
         peer.send_to(b"native-frame", address).await.unwrap();
         let mut buffer = [0; 128];
@@ -1257,5 +1317,84 @@ mod tests {
         }
         stop.send(()).unwrap();
         bridge.await.unwrap().unwrap();
+        let samples = samples.lock().unwrap();
+        assert_eq!(samples.first().unwrap().stop_reason, 0);
+        let final_sample = samples.last().unwrap();
+        assert_eq!(final_sample.stop_reason, 1);
+        assert_eq!(final_sample.peer_payloads, 1);
+        assert_eq!(final_sample.to_native, 1);
+        assert_eq!(final_sample.native_received, 1);
+        assert_eq!(final_sample.to_peer, 1);
+        assert_eq!(final_sample.to_native_drops + final_sample.to_peer_drops, 0);
+    }
+
+    #[tokio::test]
+    async fn router_distinguishes_probes_rejected_sources_and_missing_peer_payload() {
+        let external = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let address = external.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let engine = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let proxy = local.local_addr().unwrap();
+        let peer_address = peer.local_addr().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let (reports, mut samples) = tokio::sync::mpsc::unbounded_channel();
+        let bridge = tokio::spawn(run(
+            external,
+            local,
+            engine.local_addr().unwrap(),
+            config(peer_address, peer_address, true),
+            stopped,
+            move |snapshot| {
+                let _ = reports.send(snapshot.router);
+            },
+        ));
+        let remote = config(address, address, false);
+        let ping = encode(
+            &remote,
+            Message {
+                kind: Kind::Ping,
+                id: 7,
+                token: 0,
+                serial: 0,
+            },
+        );
+        peer.send_to(&ping, address).await.unwrap();
+        stranger.send_to(b"unverified-peer", address).await.unwrap();
+        stranger.send_to(b"unverified-engine", proxy).await.unwrap();
+        engine
+            .send_to(b"control-without-peer-media", proxy)
+            .await
+            .unwrap();
+        let sample = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let sample = samples.recv().await.unwrap();
+                if sample.external_received >= 2
+                    && sample.native_received == 1
+                    && sample.native_rejected == 1
+                {
+                    break sample;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(sample.external_probes, 1);
+        assert_eq!(sample.external_rejected, 1);
+        assert_eq!(sample.peer_payloads, 0);
+        assert_eq!(sample.to_native, 0);
+        assert_eq!(sample.to_peer, 1);
+        assert_eq!(sample.to_peer_drops, 0);
+        // Router accounting never grants the foreign local sender access.
+        let mut buffer = [0; 128];
+        assert!(engine.try_recv_from(&mut buffer).is_err());
+        stop.send(()).unwrap();
+        bridge.await.unwrap().unwrap();
+        let mut final_sample = None;
+        while let Ok(sample) = samples.try_recv() {
+            final_sample = Some(sample);
+        }
+        assert_eq!(final_sample.unwrap().stop_reason, 1);
     }
 }

@@ -115,6 +115,7 @@ impl Prepared {
                         let active=snapshot.paths.iter().find(|path|path.endpoint==snapshot.active_endpoint);
                         let line=format!("DIRECT_PATH_HEALTH pathCount={} pathSwitches={} pathSendDrops={} pathRttMs={} pathLossPercent={}",snapshot.paths.len(),snapshot.switches,snapshot.local_send_drops,active.and_then(|p|p.median_ms).unwrap_or(-1.0),active.map_or(100.0,|p|p.loss_percent));
                         if let Some(sample)=crate::connection_report::parse_sample(line.as_bytes()) { let _=sender.try_send(sample); }
+                        if let Some(sample)=router_sample(snapshot.router) {let _=sender.try_send(sample);}
                     }
                     let _=app.emit("direct-paths",serde_json::json!({"sessionId":session,"attemptId":attempt,"snapshot":snapshot}));
                 }).await;
@@ -129,10 +130,59 @@ impl Prepared {
     }
 }
 
+fn router_sample(stats: standby::RouterStats) -> Option<crate::connection_report::Sample> {
+    let line = format!(
+        "DIRECT_ROUTER_HEALTH routerExternalReceived={} routerExternalProbes={} routerPeerPayloads={} routerExternalRejected={} routerNativeReceived={} routerNativeRejected={} routerToNative={} routerToPeer={} routerToNativeDrops={} routerToPeerDrops={} routerExternalReceiveErrors={} routerNativeReceiveErrors={} routerStopReason={}",
+        stats.external_received,
+        stats.external_probes,
+        stats.peer_payloads,
+        stats.external_rejected,
+        stats.native_received,
+        stats.native_rejected,
+        stats.to_native,
+        stats.to_peer,
+        stats.to_native_drops,
+        stats.to_peer_drops,
+        stats.external_receive_errors,
+        stats.native_receive_errors,
+        stats.stop_reason,
+    );
+    crate::connection_report::parse_sample(line.as_bytes())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    #[test]
+    fn router_report_keeps_each_socket_boundary_distinct() {
+        let sample = router_sample(standby::RouterStats {
+            external_received: 7,
+            external_probes: 4,
+            peer_payloads: 2,
+            external_rejected: 1,
+            native_received: 5,
+            native_rejected: 3,
+            to_native: 1,
+            to_peer: 4,
+            to_native_drops: 1,
+            to_peer_drops: 1,
+            external_receive_errors: 2,
+            native_receive_errors: 3,
+            stop_reason: 2,
+        })
+        .unwrap();
+        let values = serde_json::to_value(sample).unwrap();
+        assert_eq!(values["source"], "DIRECT_ROUTER_HEALTH");
+        let values = values["values"].as_object().unwrap();
+        assert_eq!(values.len(), 13);
+        assert_eq!(values["routerExternalReceived"], 7.0);
+        assert_eq!(values["routerExternalProbes"], 4.0);
+        assert_eq!(values["routerPeerPayloads"], 2.0);
+        assert_eq!(values["routerToNative"], 1.0);
+        assert_eq!(values["routerToPeer"], 4.0);
+        assert_eq!(values["routerStopReason"], 2.0);
+    }
     #[tokio::test]
     async fn original_nat_binding_remains_reserved_and_native_peer_is_loopback() {
         for kind in [EngineKind::Client, EngineKind::Host] {
