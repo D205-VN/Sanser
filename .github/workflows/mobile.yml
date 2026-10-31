@@ -75,7 +75,11 @@ jobs:
             apps/mobile/ios/Native/iphonesimulator/libSanserMobile.a
             apps/mobile/ios/Flutter/*.xcconfig
             apps/mobile/ios/Runner.xcodeproj/project.pbxproj
+      - name: Package unsigned Simulator app
+        run: |
+          mkdir -p artifacts
+          ditto -c -k --keepParent apps/mobile/build/ios/iphonesimulator/Runner.app artifacts/Sanser-iOS-2.3.1-simulator-unsigned.zip
       - uses: actions/upload-artifact@v4
         with:
           name: sanser-mobile-ios-simulator-unsigned
-          path: apps/mobile/build/ios/iphonesimulator/Runner.app
+          path: artifacts/Sanser-iOS-2.3.1-simulator-unsigned.zip

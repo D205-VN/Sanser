@@ -118,7 +118,11 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 24),
                         TextButton(
-                          onPressed: () => showLicensePage(context: context, applicationName: 'Sanser', applicationVersion: mobileVersion),
+                          onPressed: () => showLicensePage(
+                            context: context,
+                            applicationName: 'Sanser',
+                            applicationVersion: mobileVersion,
+                          ),
                           child: const Text('Giấy phép phần mềm'),
                         ),
                         OutlinedButton.icon(
