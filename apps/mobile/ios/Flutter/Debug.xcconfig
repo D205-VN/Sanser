@@ -1,0 +1,4 @@
+#include "Generated.xcconfig"
+
+LIBRARY_SEARCH_PATHS = $(inherited) "$(PROJECT_DIR)/Native/$(PLATFORM_NAME)"
+OTHER_LDFLAGS = $(inherited) -lSanserMobile -lc++

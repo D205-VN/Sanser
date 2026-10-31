@@ -8,6 +8,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <bcrypt.h>
+#elif defined(__ANDROID__)
+#include "../mobile/android_crypto.h"
 #elif defined(__APPLE__)
 #include <CommonCrypto/CommonHMAC.h>
 #else
@@ -77,6 +79,12 @@ FullTag hmacSha256(const DirectionKey& key,
   destroy();
   if (status < 0) throw std::runtime_error("BCryptFinishHash(HMAC) failed.");
   return result;
+}
+#elif defined(__ANDROID__)
+FullTag hmacSha256(const DirectionKey& key,std::span<const std::uint8_t> first,std::span<const std::uint8_t> second) {
+  FullTag out{};
+  if(!sanser_android_hmac(key.data(),key.size(),first.data(),first.size(),second.data(),second.size(),out.data())) throw std::runtime_error("Android HMAC operation failed");
+  return out;
 }
 #else
 FullTag hmacSha256(const DirectionKey& key,

@@ -23,7 +23,11 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#if defined(__ANDROID__)
+#include "../mobile/android_crypto.h"
+#else
 #include <CommonCrypto/CommonCryptor.h>
+#endif
 #endif
 
 namespace sanser::desktop {
@@ -78,6 +82,10 @@ Bytes crypt(const snv2::DirectionKey& key, const std::uint8_t* iv, const Bytes& 
     std::snprintf(error, sizeof(error), "%s failed (NTSTATUS 0x%08lX)", stage, static_cast<unsigned long>(status));
     throw std::runtime_error(error);
   }
+#elif defined(__ANDROID__)
+  const auto encoded=sanser_android_aes(key.data(),iv,input.data(),input.size(),encrypt?1:0,out.data(),out.size());
+  if(encoded<0) throw std::runtime_error("Android AES operation failed");
+  const auto size=static_cast<std::size_t>(encoded);
 #else
   std::size_t size = 0;
   if (CCCrypt(encrypt ? kCCEncrypt : kCCDecrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding,

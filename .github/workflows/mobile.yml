@@ -1,0 +1,63 @@
+name: Mobile Flutter
+on:
+  push:
+    branches: [Version-2.0.0, main]
+    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/build-mobile-ios.sh', '.github/workflows/mobile.yml']
+  pull_request:
+    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/build-mobile-ios.sh', '.github/workflows/mobile.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install pinned Flutter
+        run: |
+          git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = abaf9c523780a608bd46686fd5e53740a07077f8
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - run: flutter pub get --enforce-lockfile
+        working-directory: apps/mobile
+      - run: dart format --output=none --set-exit-if-changed lib test
+        working-directory: apps/mobile
+      - run: flutter analyze
+        working-directory: apps/mobile
+      - run: flutter test
+        working-directory: apps/mobile
+      - run: flutter build apk --debug --target-platform android-arm64
+        working-directory: apps/mobile
+      - run: ./gradlew :app:testDebugUnitTest
+        working-directory: apps/mobile/android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sanser-mobile-android-preview-debug
+          path: apps/mobile/build/app/outputs/flutter-apk/app-debug.apk
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Flutter
+        run: |
+          git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          test "$(git -C "$RUNNER_TEMP/flutter" rev-parse HEAD)" = abaf9c523780a608bd46686fd5e53740a07077f8
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - run: flutter pub get --enforce-lockfile
+        working-directory: apps/mobile
+      - run: ./scripts/build-mobile-ios.sh iphonesimulator
+      - run: flutter build ios --simulator --debug --no-codesign
+        working-directory: apps/mobile
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sanser-mobile-ios-simulator-unsigned
+          path: apps/mobile/build/ios/iphonesimulator/Runner.app

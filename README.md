@@ -1,9 +1,9 @@
-# Sanser 2.2.26
+# Sanser 2.3.1
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.2.26
+Product:  Sanser 2.3.1
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,7 +20,7 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.2.26 includes one-encoder screen sharing for up to three view-only
+Sanser 2.3.1 includes one-encoder screen sharing for up to three view-only
 computers in the same account, common native diagnostics, bounded route reconnect,
 authenticated input-only reset after ACK loss, viewer-close Disconnect and
 reference-safe sharing dispatch. Relay recovery retains the real failure even
@@ -64,11 +64,11 @@ legacy video retains its partial frame for repair, and authenticated SNV2 tests
 verify video recovery and reliable key transitions under injected socket faults.
 The source baseline passed 39 Windows and 33 Mac native tests. Physical
 three-direction soak and headphone listening tests are still required.
-Version 2.2.26 coalesces Ultra Windows UDP pacing waits and wakes pending Mac
+Version 2.3.1 coalesces Ultra Windows UDP pacing waits and wakes pending Mac
 Metal draws on GPU completion. This targets Mac → Windows latency without
 changing Auto pacing or the authenticated transport. The source baseline passed
 40 Windows and 34 Mac native tests; real-device latency comparisons remain necessary.
-See [Release notes](docs/releases/v2.2.26.md),
+See [Release notes](docs/releases/v2.3.1.md),
 [stability validation and remaining work](docs/session-stability-2.2.14.md)
 and [implementation/validation progress](docs/multi-viewer-progress.md).
 Installers and signed updater artifacts are produced by the release workflow.

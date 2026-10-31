@@ -75,6 +75,23 @@ fn ensure_role(device: &crate::models::Device, role: &str) -> Result<(), AppErro
     }
 }
 
+// The initial Flutter client implements the existing authenticated WSS relay.
+// Do not launch a Direct/ICE handshake that it cannot complete yet. This is
+// per viewer: desktop viewers keep their chosen route in the same group.
+fn viewer_network_mode(mode: NetworkMode, platform: &str) -> Result<NetworkMode, AppError> {
+    let platform = platform.to_ascii_lowercase();
+    if platform.starts_with("android") || platform == "ios" || platform.starts_with("ios-") {
+        match mode {
+            NetworkMode::Auto | NetworkMode::Relay => Ok(NetworkMode::Relay),
+            _ => Err(AppError::Conflict(
+                "The mobile preview requires Auto or Relay sharing mode".into(),
+            )),
+        }
+    } else {
+        Ok(mode)
+    }
+}
+
 pub async fn list(
     State(state): State<AppState>,
     auth: AuthContext,
@@ -245,6 +262,11 @@ pub async fn respond(
         super::sessions::ensure_device_online(&state, &host)?;
         super::sessions::ensure_device_online(&state, &viewer)?;
     }
+    let network_mode = if request.accept {
+        viewer_network_mode(group.network_mode, &viewer.platform)?
+    } else {
+        group.network_mode
+    };
     let mut tx = state.pool.begin().await.map_err(AppError::from_db)?;
     let group_state = sqlx::query_scalar::<_, String>(
         "SELECT state FROM sharing_groups WHERE id=$1 AND user_id=$2 FOR UPDATE",
@@ -286,7 +308,7 @@ pub async fn respond(
         let session_id = Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO connection_sessions(id,user_id,requester_device_id,host_device_id,state,access_mode,network_mode,quality_profile,requested_codec,selected_transport,sharing_id,created_at,updated_at,accepted_at) VALUES($1,$2,$3,$4,'accepted','view-only',$5,$6,'h264','native',$7,$8,$8,$8)")
             .bind(&session_id).bind(&auth.user_id).bind(&viewer_id).bind(&group.host_device_id)
-            .bind(super::sessions::network_mode_str(group.network_mode)).bind(&group.quality_profile).bind(&sharing_id).bind(now)
+            .bind(super::sessions::network_mode_str(network_mode)).bind(&group.quality_profile).bind(&sharing_id).bind(now)
             .execute(&mut *tx).await.map_err(AppError::from_db)?;
         Some(session_id)
     } else {
@@ -467,6 +489,26 @@ async fn fetch(state: &AppState, user: &str, value: &str) -> Result<SharingGroup
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mobile_preview_uses_its_supported_transport_without_changing_desktop_routes() {
+        for mobile in ["Android", "android-35", "iOS", "ios-arm64"] {
+            assert_eq!(
+                viewer_network_mode(NetworkMode::Auto, mobile).unwrap(),
+                NetworkMode::Relay
+            );
+            assert!(viewer_network_mode(NetworkMode::DirectOnly, mobile).is_err());
+        }
+        for desktop in ["Windows", "macOS"] {
+            assert_eq!(
+                viewer_network_mode(NetworkMode::Auto, desktop).unwrap(),
+                NetworkMode::Auto
+            );
+            assert_eq!(
+                viewer_network_mode(NetworkMode::DirectOnly, desktop).unwrap(),
+                NetworkMode::DirectOnly
+            );
+        }
+    }
     #[test]
     fn bounded_capacity_and_explicit_consent() {
         assert!(limit(0).is_err());
