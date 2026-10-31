@@ -55,8 +55,26 @@ jobs:
       - run: flutter pub get --enforce-lockfile
         working-directory: apps/mobile
       - run: ./scripts/build-mobile-ios.sh iphonesimulator
-      - run: flutter build ios --simulator --debug --no-codesign
+      - name: Inspect native archive
+        run: |
+          file apps/mobile/ios/Native/iphonesimulator/libSanserMobile.a
+          nm -gU apps/mobile/ios/Native/iphonesimulator/libSanserMobile.a | grep sanser_mobile_
+      - name: Build iOS Simulator
         working-directory: apps/mobile
+        run: |
+          if ! flutter build ios --simulator --debug --no-codesign -v > "$RUNNER_TEMP/sanser-mobile-ios.log" 2>&1; then
+            tail -n 220 "$RUNNER_TEMP/sanser-mobile-ios.log"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ios-mobile-build-diagnostics
+          path: |
+            ${{ runner.temp }}/sanser-mobile-ios.log
+            apps/mobile/ios/Native/iphonesimulator/libSanserMobile.a
+            apps/mobile/ios/Flutter/*.xcconfig
+            apps/mobile/ios/Runner.xcodeproj/project.pbxproj
       - uses: actions/upload-artifact@v4
         with:
           name: sanser-mobile-ios-simulator-unsigned

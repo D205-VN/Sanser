@@ -1,7 +1,14 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+val releaseKey = Properties().apply {
+    val propertiesFile = rootProject.file("key.properties")
+    if (propertiesFile.exists()) propertiesFile.inputStream().use { load(it) }
 }
 
 android {
@@ -34,11 +41,20 @@ android {
         cmake { path = file("../../../../native/mobile/CMakeLists.txt"); version = "3.22.1" }
     }
 
+    signingConfigs {
+        if (releaseKey.isNotEmpty()) create("sanserRelease") {
+            storeFile = rootProject.file(releaseKey.getProperty("storeFile"))
+            storePassword = releaseKey.getProperty("storePassword")
+            keyAlias = releaseKey.getProperty("keyAlias")
+            keyPassword = releaseKey.getProperty("keyPassword")
+        }
+    }
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (releaseKey.isNotEmpty()) signingConfig = signingConfigs.getByName("sanserRelease")
+            // An absent release key produces an unsigned build, never a public
+            // update signed with a disposable debug certificate.
         }
     }
 }
