@@ -758,13 +758,13 @@ mod version_tests {
 
     #[test]
     fn minor_release_rollout_keeps_supported_old_clients_and_rejects_unverified_versions() {
-        for value in ["2.1.21", "2.1.22", "2.2.1", "2.2.999"] {
+        for value in ["2.1.21", "2.1.22", "2.2.1", "2.2.999", "2.3.0", "2.3.1"] {
             assert!(compatible_client_version(value), "{value}");
         }
         for value in [
             "",
             "2.0.8",
-            "2.3.0",
+            "2.4.0",
             "3.2.1",
             "2.2",
             "2.2.x",

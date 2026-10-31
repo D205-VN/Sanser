@@ -26,7 +26,7 @@ final class NativeMobileSession {
         guard let token=configuration["sessionToken"] as? String else {throw MobileError.invalidConfiguration}
         let viewer=configuration["viewerId"] as? String ?? ""
         client=endpoint.withCString{endpoint in token.withCString{token in viewer.withCString{viewer in
-            sanser_mobile_create(endpoint,0,token,configuration["inputEnabled"] as? Bool == true ? 1:0,configuration["sharingId"] != nil ? 1:0,viewer,callbacks)
+            sanser_mobile_create(endpoint,0,token,configuration["inputEnabled"] as? Bool == true ? 1:0,configuration["sharingId"] as? String != nil ? 1:0,viewer,callbacks)
         }}}
         guard client != nil else{throw MobileError.invalidConfiguration}
     }
