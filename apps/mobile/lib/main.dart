@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'src/api.dart';
 import 'src/controller.dart';
 import 'src/native_engine.dart';
@@ -6,6 +8,18 @@ import 'src/screens.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    for (final entry in const {
+      'Opus': 'opus.txt',
+      'Tink / OkHttp (Apache-2.0)': 'apache-2.0.txt',
+      'libsodium': 'libsodium.txt',
+      'swift-sodium': 'swift-sodium.txt',
+    }.entries) {
+      yield LicenseEntryWithLineBreaks([
+        entry.key,
+      ], await rootBundle.loadString('assets/licenses/${entry.value}'));
+    }
+  });
   runApp(
     SanserApp(
       controller: MobileController(SanserApi(DeviceSecrets()), NativeEngine()),
