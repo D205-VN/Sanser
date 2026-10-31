@@ -7,6 +7,35 @@ import 'package:sanser_mobile/src/api.dart';
 import 'widget_test.dart' show MemorySecrets;
 
 void main() {
+  test(
+    'logout waits for an in-flight secure-storage refresh write before deleting it',
+    () async {
+      final secrets = DelayedSecrets();
+      final api = SanserApi(
+        secrets,
+        client: MockClient(
+          (_) async =>
+              http.Response('{"accessToken":"a","refreshToken":"r"}', 200),
+        ),
+      )..useServer('https://server.example');
+      final login = api.login(
+        'a@example.com',
+        'secret',
+        deviceName: 'phone',
+        platform: 'Android',
+      );
+      await secrets.started.future;
+      final logout = api.logout();
+      secrets.release.complete();
+      await Future.wait([login, logout]);
+      expect(
+        await secrets.read('mobile.https://server.example.refresh'),
+        isNull,
+      );
+      await expectLater(api.accessToken(), throwsA(isA<ApiFailure>()));
+      api.close();
+    },
+  );
   test('HTTPS URL rejects credentials, query, insecure schemes', () {
     for (final url in [
       'http://example.com',
@@ -136,4 +165,16 @@ void main() {
       api.close();
     },
   );
+}
+
+class DelayedSecrets extends MemorySecrets {
+  final started = Completer<void>(), release = Completer<void>();
+  @override
+  Future<void> write(String key, String value) async {
+    if (key.endsWith('.refresh')) {
+      started.complete();
+      await release.future;
+    }
+    await super.write(key, value);
+  }
 }

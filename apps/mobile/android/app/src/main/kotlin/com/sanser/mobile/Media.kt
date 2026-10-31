@@ -60,17 +60,23 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
     private val closing = AtomicBoolean(false)
     private val needsKeyframe = AtomicBoolean(true)
     private var firstFrame = false
+    private var lastX=0;private var lastY=0
     init {
         setBackgroundColor(Color.BLACK);addView(surface, LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.MATCH_PARENT,Gravity.CENTER))
         surface.holder.addCallback(this)
         setOnTouchListener { _, event ->
+            if(event.actionMasked==MotionEvent.ACTION_CANCEL || event.pointerCount>1){client()?.input(4);return@setOnTouchListener true}
             if(width<=0 || height<=0)return@setOnTouchListener true
             val bounds = surface.layoutParams
             val left = (getWidth()-bounds.width)/2f;val top=(getHeight()-bounds.height)/2f
-            if(event.x !in left..left+bounds.width || event.y !in top..top+bounds.height) return@setOnTouchListener true
+            if(event.x !in left..left+bounds.width || event.y !in top..top+bounds.height){
+                if(event.actionMasked==MotionEvent.ACTION_UP)client()?.input(1,lastX,lastY,code=0,down=false)
+                return@setOnTouchListener true
+            }
             val x=((event.x-left)/bounds.width*65535).toInt().coerceIn(0,65535)
             val y=((event.y-top)/bounds.height*65535).toInt().coerceIn(0,65535)
             val native=client() ?: return@setOnTouchListener true
+            lastX=x;lastY=y
             native.input(0,x,y)
             when(event.actionMasked){
                 MotionEvent.ACTION_DOWN -> native.input(1,x,y,code=0,down=true)

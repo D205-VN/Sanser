@@ -57,6 +57,7 @@ class SanserApi {
   String? _access;
   String? _refresh;
   Future<bool>? _renewing;
+  Future<void> _secretWrites = Future.value();
   int _generation = 0;
   SanserApi(this.secrets, {http.Client? client})
     : client = client ?? http.Client();
@@ -69,6 +70,19 @@ class SanserApi {
   }
 
   String _key(String name) => 'mobile.${base.toString()}.$name';
+  Future<void> _refreshSecret(String key, String? value, {int? generation}) {
+    final operation = _secretWrites.catchError((Object _) {}).then((_) async {
+      if (generation != null && generation != _generation) return;
+      if (value == null) {
+        await secrets.delete(key);
+      } else {
+        await secrets.write(key, value);
+      }
+    });
+    _secretWrites = operation;
+    return operation;
+  }
+
   Future<void> loadServer(String fallback) async {
     final selected = await secrets.read('mobile.selected-server');
     useServer(selected ?? fallback);
@@ -93,7 +107,7 @@ class SanserApi {
       throw const ApiFailure(0, 'Máy chủ trả dữ liệu đăng nhập không hợp lệ.');
     }
     final key = _key('refresh');
-    await secrets.write(key, refresh);
+    await _refreshSecret(key, refresh, generation: generation);
     if (generation != _generation) return;
     _access = access;
     _refresh = refresh;
@@ -157,7 +171,7 @@ class SanserApi {
           (error.status == 401 || error.status == 403)) {
         _access = null;
         _refresh = null;
-        await secrets.delete(refreshKey);
+        await _refreshSecret(refreshKey, null);
       }
       return false;
     }
@@ -186,7 +200,7 @@ class SanserApi {
     } finally {
       _access = null;
       _refresh = null;
-      await secrets.delete(refreshKey);
+      await _refreshSecret(refreshKey, null);
     }
   }
 

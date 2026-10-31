@@ -10,6 +10,7 @@ final class MobileVideoView: UIView {
     var keyframe: (() -> Void)?
     var firstFrame: (() -> Void)?
     private var shown=false
+    private var lastX:UInt32=0,lastY:UInt32=0
     override init(frame:CGRect){super.init(frame:frame);backgroundColor = .black;display.videoGravity = .resizeAspect;isMultipleTouchEnabled=false}
     required init?(coder:NSCoder){fatalError("init(coder:) has not been implemented")}
     private func units(_ data:Data)->[Data]{
@@ -54,13 +55,14 @@ final class MobileVideoView: UIView {
         guard let point=touches.first?.location(in:self),let format=format else{return}
         let dimensions=CMVideoFormatDescriptionGetDimensions(format),scale=min(bounds.width/CGFloat(dimensions.width),bounds.height/CGFloat(dimensions.height))
         let w=CGFloat(dimensions.width)*scale,h=CGFloat(dimensions.height)*scale,left=(bounds.width-w)/2,top=(bounds.height-h)/2
-        guard point.x>=left,point.x<=left+w,point.y>=top,point.y<=top+h else{return}
-        input?(UInt32(max(0,min(65535,(point.x-left)/w*65535))),UInt32(max(0,min(65535,(point.y-top)/h*65535))),down)
+        guard point.x>=left,point.x<=left+w,point.y>=top,point.y<=top+h else{if down==false{input?(lastX,lastY,false)};return}
+        lastX=UInt32(max(0,min(65535,(point.x-left)/w*65535)));lastY=UInt32(max(0,min(65535,(point.y-top)/h*65535)))
+        input?(lastX,lastY,down)
     }
     override func touchesBegan(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:true)}
     override func touchesMoved(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:nil)}
     override func touchesEnded(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:false)}
-    override func touchesCancelled(_ touches:Set<UITouch>,with event:UIEvent?){input?(0,0,false)}
+    override func touchesCancelled(_ touches:Set<UITouch>,with event:UIEvent?){input?(lastX,lastY,false)}
     func reset(){display.flushAndRemoveImage();format=nil;sps=nil;pps=nil;shown=false}
 }
 final class MobileAudio {
