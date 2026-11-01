@@ -29,4 +29,7 @@ class NativeEngine {
   Future<void> key(int code, bool down) =>
       channel.invokeMethod<void>('key', {'code': code, 'down': down});
   Future<void> resetInput() => channel.invokeMethod<void>('resetInput');
+  Future<Json> p2p(Json request) async => Map<String, dynamic>.from(
+    await channel.invokeMapMethod<String, dynamic>('p2p', request) ?? {},
+  );
 }

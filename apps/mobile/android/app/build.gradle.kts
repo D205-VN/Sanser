@@ -27,6 +27,10 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 26
+        ndk {
+            abiFilters.clear()
+            abiFilters += "arm64-v8a"
+        }
         targetSdk = flutter.targetSdkVersion
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
@@ -67,6 +71,21 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+val buildMobileP2p by tasks.registering(Exec::class) {
+    workingDir(rootProject.file("../../.."))
+    commandLine("bash", "scripts/build-mobile-p2p.sh", "aarch64-linux-android")
+    val localSdk = Properties().apply {
+        val local = rootProject.file("local.properties")
+        if (local.exists()) local.inputStream().use { load(it) }
+    }.getProperty("sdk.dir")
+    if (localSdk != null) environment("ANDROID_HOME", localSdk)
+}
+tasks.configureEach {
+    if (name == "preBuild" || name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
+        dependsOn(buildMobileP2p)
+    }
 }
 
 dependencies {

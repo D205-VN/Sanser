@@ -1,4 +1,5 @@
 #pragma once
+#include "delay_rate_policy.h"
 #include "snv2.h"
 #include "snv2_auth.h"
 #include "tx_scheduler.h"
@@ -143,6 +144,11 @@ public:
   bool audioReady() const { return options_.audio && options_.host && peerAudio_ && !peerAudioMuted_ && ready_ && running_; }
   bool opusAudioReady() const { return audioReady() && peerAudioOpus_; }
   void requestKeyframe();
+  // Receiver ceiling and nominated RTT are optional backward-compatible hints.
+  void receiveVideoLimit(std::uint32_t bitrate,double baselineRttMs=0) {
+    receiveVideoLimit_=bitrate>=1000000 && bitrate<=50000000 ? bitrate:0;
+    receiveBaselineMs_=std::isfinite(baselineRttMs) && baselineRttMs>0 && baselineRttMs<=3000 ? baselineRttMs:0;
+  }
   std::function<void(Frame)> onFrame;
   std::function<void(Input)> onInput;
   std::function<void(AudioSamples)> onAudio;
@@ -211,7 +217,13 @@ private:
   std::atomic<std::uint64_t> videoQueueDrops_{0};
   std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0};
   std::atomic<std::uint64_t> offeredBytes_{0};
-  std::atomic<std::uint32_t> videoBudget_{0};
+  std::atomic<std::uint32_t> videoBudget_{0},receiveVideoLimit_{0};
+  std::atomic<double> receiveBaselineMs_{0};
+  std::uint32_t peerVideoLimit_=0;
+  std::uint64_t lastDelayFeedbackSequence_=0;
+  double minimumControlRtt_=0;
+  DelayRatePolicy delayRate_;
+  std::uint32_t videoCeiling() const { return peerVideoLimit_ ? std::min(options_.bitrate,peerVideoLimit_):options_.bitrate; }
   std::uint64_t receivedVideoDatagrams_=0, lastReportedBytes_=0, lastReportedLoss_=0, lastFeedbackDrops_=0;
   unsigned congestionWindows_=0, recoveryWindows_=0, busyWindows_=0;
   bool peerVideoProgress_=false;

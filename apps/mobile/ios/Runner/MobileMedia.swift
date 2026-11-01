@@ -1,52 +1,35 @@
 import UIKit
 import AVFoundation
 import CoreMedia
+import VideoToolbox
 
 final class MobileVideoView: UIView {
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
     private var display: AVSampleBufferDisplayLayer {layer as! AVSampleBufferDisplayLayer}
-    private var sps: Data?,pps: Data?,format: CMVideoFormatDescription?
+    private let decoder=MobileVideoDecoder()
+    private var format:CMVideoFormatDescription?
     var input: ((UInt32,UInt32,Bool?) -> Void)?
     var keyframe: (() -> Void)?
     var firstFrame: (() -> Void)?
     private var shown=false
     private var lastX:UInt32=0,lastY:UInt32=0
-    override init(frame:CGRect){super.init(frame:frame);backgroundColor = .black;display.videoGravity = .resizeAspect;isMultipleTouchEnabled=false}
-    required init?(coder:NSCoder){fatalError("init(coder:) has not been implemented")}
-    private func units(_ data:Data)->[Data]{
-        let bytes=Array(data);var result=[Data](),start:Int?,i=0
-        while i+3<=bytes.count {
-            let four=i+4<=bytes.count && bytes[i...i+3].elementsEqual([0,0,0,1])
-            let three=bytes[i...i+2].elementsEqual([0,0,1])
-            if four || three {
-                if let begin=start,i>begin{result.append(Data(bytes[begin..<i]))}
-                i+=four ? 4 : 3;start=i
-            }else{i+=1}
-        }
-        if let begin=start,begin<bytes.count{result.append(Data(bytes[begin...]))}
-        return result
+    override init(frame:CGRect){
+        super.init(frame:frame);backgroundColor = .black;display.videoGravity = .resizeAspect;isMultipleTouchEnabled=false
+        decoder.output={[weak self] image in self?.present(image)}
+        decoder.keyframe={[weak self] in DispatchQueue.main.async{[weak self] in self?.keyframe?()}}
     }
-    func frame(_ data:Data,width:Int,height:Int,key:Bool){
-        let nals=units(data);guard !nals.isEmpty else{return}
-        for nal in nals {
-            switch (nal.first ?? 0)&31 {case 7:if sps != nal{sps=nal;format=nil};case 8:if pps != nal{pps=nal;format=nil};default:break}
-        }
-        if display.status == .failed {display.flush();format=nil;keyframe?()}
-        if format==nil,let sps=sps,let pps=pps {
-            sps.withUnsafeBytes{s in pps.withUnsafeBytes{p in
-                let pointers=[s.bindMemory(to:UInt8.self).baseAddress!,p.bindMemory(to:UInt8.self).baseAddress!],sizes=[sps.count,pps.count]
-                _=CMVideoFormatDescriptionCreateFromH264ParameterSets(allocator:kCFAllocatorDefault,parameterSetCount:2,parameterSetPointers:pointers,parameterSetSizes:sizes,nalUnitHeaderLength:4,formatDescriptionOut:&format)
-            }}
-        }
-        guard let format=format,display.isReadyForMoreMediaData else {keyframe?();return}
-        var packet=Data()
-        for nal in nals {var size=UInt32(nal.count).bigEndian;withUnsafeBytes(of:&size){packet.append(contentsOf:$0)};packet.append(nal)}
-        var block:CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(allocator:kCFAllocatorDefault,memoryBlock:nil,blockLength:packet.count,blockAllocator:kCFAllocatorDefault,customBlockSource:nil,offsetToData:0,dataLength:packet.count,flags:0,blockBufferOut:&block)==kCMBlockBufferNoErr,let block=block else{return}
-        _=packet.withUnsafeBytes{CMBlockBufferReplaceDataBytes(with:$0.baseAddress!,blockBuffer:block,offsetIntoDestination:0,dataLength:packet.count)}
-        var sample:CMSampleBuffer?,size=packet.count
-        var timing=CMSampleTimingInfo(duration:.invalid,presentationTimeStamp:.invalid,decodeTimeStamp:.invalid)
-        guard CMSampleBufferCreateReady(allocator:kCFAllocatorDefault,dataBuffer:block,formatDescription:format,sampleCount:1,sampleTimingEntryCount:1,sampleTimingArray:&timing,sampleSizeEntryCount:1,sampleSizeArray:&size,sampleBufferOut:&sample)==noErr,let sample=sample else{return}
+    required init?(coder:NSCoder){fatalError("init(coder:) has not been implemented")}
+    func receiver()->(Data,Int,Int,Bool)->Void{
+        let stream=decoder.stream()
+        return {[weak decoder] data,_,_,key in decoder?.push(data,key:key,stream:stream)}
+    }
+    private func present(_ image:CVPixelBuffer){
+        if display.status == .failed{display.flush()}
+        // Dropping a decoded image cannot invalidate the H.264 reference chain.
+        guard display.isReadyForMoreMediaData else{return}
+        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator:kCFAllocatorDefault,imageBuffer:image,formatDescriptionOut:&format)==noErr,let format=format else{return}
+        var timing=CMSampleTimingInfo(duration:.invalid,presentationTimeStamp:.zero,decodeTimeStamp:.invalid),sample:CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(allocator:kCFAllocatorDefault,imageBuffer:image,formatDescription:format,sampleTiming:&timing,sampleBufferOut:&sample)==noErr,let sample=sample else{return}
         if let attachments=CMSampleBufferGetSampleAttachmentsArray(sample,createIfNecessary:true) as? [NSMutableDictionary],let attributes=attachments.first {attributes[kCMSampleAttachmentKey_DisplayImmediately]=true}
         display.enqueue(sample)
         if !shown && display.status != .failed {shown=true;firstFrame?()}
@@ -63,32 +46,64 @@ final class MobileVideoView: UIView {
     override func touchesMoved(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:nil)}
     override func touchesEnded(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:false)}
     override func touchesCancelled(_ touches:Set<UITouch>,with event:UIEvent?){input?(lastX,lastY,false)}
-    func reset(){display.flushAndRemoveImage();format=nil;sps=nil;pps=nil;shown=false}
+    func reset(){decoder.reset();display.flushAndRemoveImage();format=nil;shown=false}
+}
+// AVAudioSourceNode continuously pulls PCM at the audio device clock. A single
+// lock-free ring replaces 5ms scheduleBuffer calls and repeated engine restarts.
+private final class MobilePCM {
+    let pointer:OpaquePointer
+    init?(){guard let p=sanser_mobile_pcm_create() else{return nil};pointer=p}
+    deinit{sanser_mobile_pcm_destroy(pointer)}
 }
 final class MobileAudio {
     private let queue=DispatchQueue(label:"SanserAudio")
-    private var engine:AVAudioEngine?,player:AVAudioPlayerNode?
-    private var pending=0,closed=false
-    private var route: NSObjectProtocol?
-    init(){route=NotificationCenter.default.addObserver(forName:AVAudioSession.routeChangeNotification,object:nil,queue:nil){[weak self] _ in self?.queue.async{[weak self] in self?.reset()}}}
-    private func reset(){player?.stop();engine?.stop();player=nil;engine=nil;pending=0}
-    func push(_ samples:[Int16]){queue.async{[weak self] in
-        guard let self=self,!self.closed else{return}
-        do {
-            if self.engine==nil {
-                let session=AVAudioSession.sharedInstance();try session.setCategory(.playback,mode:.default);try session.setActive(true)
-                let engine=AVAudioEngine(),node=AVAudioPlayerNode()
-                let format=AVAudioFormat(standardFormatWithSampleRate:48000,channels:2)!
-                engine.attach(node);engine.connect(node,to:engine.mainMixerNode,format:format);try engine.start();node.play()
-                self.engine=engine;self.player=node
+    private var engine:AVAudioEngine?,source:AVAudioSourceNode?,pcm:MobilePCM?
+    private var closed=false
+    private var observers=[NSObjectProtocol]()
+    init(){
+        for name in [AVAudioSession.routeChangeNotification,AVAudioSession.mediaServicesWereResetNotification,AVAudioSession.interruptionNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName:name,object:nil,queue:nil){[weak self] _ in
+                self?.queue.async{[weak self] in self?.reset()}
+            })
+        }
+    }
+    private func reset(){
+        engine?.stop()
+        if let source=source{engine?.detach(source)}
+        source=nil;engine=nil;pcm=nil
+    }
+    private func start() throws {
+        let session=AVAudioSession.sharedInstance()
+        try session.setCategory(.playback,mode:.default)
+        try session.setPreferredSampleRate(48000)
+        try session.setPreferredIOBufferDuration(0.01)
+        try session.setActive(true)
+        guard let ring=MobilePCM(),let format=AVAudioFormat(standardFormatWithSampleRate:48000,channels:2) else{throw MobileError.socket}
+        let node=AVAudioSourceNode(format:format){_,_,count,list->OSStatus in
+            let buffers=UnsafeMutableAudioBufferListPointer(list)
+            guard buffers.count==2,let l=buffers[0].mData,let r=buffers[1].mData else{
+                for buffer in buffers{if let data=buffer.mData{memset(data,0,Int(buffer.mDataByteSize))}}
+                return noErr
             }
-            guard self.pending<12,let node=self.player,let format=AVAudioFormat(standardFormatWithSampleRate:48000,channels:2),let buffer=AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(samples.count/2)) else {self.reset();return}
-            buffer.frameLength=buffer.frameCapacity
-            for i in 0..<Int(buffer.frameLength){buffer.floatChannelData?[0][i]=Float(samples[i*2])/32768;buffer.floatChannelData?[1][i]=Float(samples[i*2+1])/32768}
-            self.pending+=1
-            node.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack){[weak self] _ in self?.queue.async{[weak self] in self?.pending=max(0,(self?.pending ?? 0)-1)}}
+            sanser_mobile_pcm_render(ring.pointer,l.assumingMemoryBound(to:Float.self),r.assumingMemoryBound(to:Float.self),Int(count))
+            return noErr
+        }
+        let engine=AVAudioEngine()
+        engine.attach(node);engine.connect(node,to:engine.mainMixerNode,format:format)
+        self.pcm=ring;self.source=node;self.engine=engine
+        try engine.start()
+    }
+    func push(_ samples:[Int16]){queue.async{[weak self] in
+        guard let self=self,!self.closed,!samples.isEmpty,samples.count%2==0 else{return}
+        do {
+            if self.engine==nil || self.engine?.isRunning==false{self.reset();try self.start()}
+            guard let pcm=self.pcm else{return}
+            samples.withUnsafeBufferPointer{sanser_mobile_pcm_push(pcm.pointer,$0.baseAddress,$0.count)}
         }catch{self.reset()}
     }}
-    func close(){queue.async{[weak self] in guard let self=self else{return};self.closed=true;self.reset();try? AVAudioSession.sharedInstance().setActive(false)}}
-    deinit{if let route=route{NotificationCenter.default.removeObserver(route)};engine?.stop()}
+    func close(){queue.async{[self] in
+        guard !closed else{return};closed=true;reset()
+        try? AVAudioSession.sharedInstance().setActive(false,options:.notifyOthersOnDeactivation)
+    }}
+    deinit{for observer in observers{NotificationCenter.default.removeObserver(observer)};engine?.stop()}
 }

@@ -8,15 +8,18 @@ class NativeClient(
 ) : AutoCloseable {
     companion object { init { System.loadLibrary("sanser_mobile") } }
     private var handle = 0L
-    private external fun create(endpoint: String, token: String, control: Boolean, sharing: Boolean, viewer: String): Long
+    private external fun create(endpoint: String, port: Int, token: String, control: Boolean, sharing: Boolean, viewer: String): Long
     private external fun destroy(handle: Long)
+    private external fun videoLimit(handle:Long,bitrate:Int,baseline:Double)
     private external fun input(handle: Long, kind: Int, x: Int, y: Int, code: Int, delta: Int, down: Boolean)
     private external fun mute(handle: Long, value: Boolean)
     private external fun keyframe(handle: Long)
     private external fun rtt(handle: Long): Double
-    @Synchronized fun start(endpoint: String, token: String, control: Boolean, sharing: Boolean, viewer: String) {
-        check(handle == 0L); handle = create(endpoint, token, control, sharing, viewer)
+    @Synchronized fun start(endpoint: String, token: String, control: Boolean, sharing: Boolean, viewer: String, port: Int = 0, bitrate:Int = 6000000, baseline:Double = 0.0) {
+        require(port in 0..65535)
+        check(handle == 0L); handle = create(endpoint, port, token, control, sharing, viewer)
         check(handle != 0L) { "Không thể khởi động engine SNV2." }
+        videoLimit(handle,bitrate,baseline)
     }
     @Synchronized fun input(kind: Int, x: Int = 0, y: Int = 0, code: Int = 0, delta: Int = 0, down: Boolean = false) {
         if (handle != 0L) input(handle, kind, x, y, code, delta, down)

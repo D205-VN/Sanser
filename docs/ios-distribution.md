@@ -1,6 +1,6 @@
 # Sanser on physical iPhones
 
-Verified on 2026-11-01. Sanser Mobile 2.3.1 is a Flutter preview client. Its current
+Verified on 2026-11-01. Sanser Mobile 2.3.2 is a Flutter preview client. Its current
 transport is WSS Relay; Direct/UDP Relay, mobile hosting and microphone/group
 voice are not implemented. A successful build does not establish connection,
 input, playback or latency correctness on a physical iPhone.
@@ -37,8 +37,8 @@ Sources: [Apple membership](https://developer.apple.com/programs/whats-included/
 
 ## Install the unsigned device preview with your own account
 
-1. Obtain **`Sanser-iOS-2.3.1-device-unsigned.ipa`**, plus its checksum. The existing
-   `Sanser-iOS-2.3.1-simulator-unsigned.zip` is only for the Mac's Simulator. Renaming
+1. Obtain **`Sanser-iOS-2.3.2-device-unsigned.ipa`**, plus its checksum. The existing
+   `Sanser-iOS-2.3.2-simulator-unsigned.zip` is only for the Mac's Simulator. Renaming
    it to `.ipa` does not turn its binaries into iPhone binaries.
 2. Install AltStore **Classic** using the official
    [Mac](https://faq.altstore.io/altstore-classic/how-to-install-altstore-macos) or
@@ -101,12 +101,12 @@ performance or compatibility with every signing tool/iOS release.
 
 - Published Simulator bundle: REA `inspect-plist` evidence
   `ev_c5e30709e4672d07b491283ad346edb74f66aefa6110b97bd2520ecf7a93a3f4`
-  observed `com.sanser.mobile`, 2.3.1/build 20301,
+  observed `com.sanser.mobile`, 2.3.2/build 20301,
   `CFBundleSupportedPlatforms=[iPhoneSimulator]`, minimum OS 15.0.
 - Physical iPhone build uses the same Flutter/native application source, compiled
   separately for `iphoneos` in release mode. REA `inspect-plist` evidence
   `ev_dfad4ce43628b2f6e862845e30ab4a88701232d0c466c9d0c38cfeb0ce1233dd`
-  observed `iPhoneOS`, `iphoneos`, version 2.3.1 and minimum OS 15.0.
+  observed `iPhoneOS`, `iphoneos`, version 2.3.2 and minimum OS 15.0.
   REA `inspect-signature` evidence
   `ev_9035e00fdd8aa0e1a6b74b7d770d011c67cdb8636bc39ae52623e817b193e5ba`
   found no signing team or signature on Runner. Its signature is deliberately

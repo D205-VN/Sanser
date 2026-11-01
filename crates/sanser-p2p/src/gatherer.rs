@@ -116,7 +116,10 @@ fn host_candidate(
         reason: format!("failed to compute candidate priority: {error}"),
     })?;
     let candidate = P2pCandidate {
-        id: format!("host-{clean_ip}-{port}"),
+        // Phones may expose the same address on several pdp_ip*/CLAT/VPN
+        // interfaces. Distinct metadata needs distinct IDs; CandidateSet can
+        // then deduplicate the endpoint using its normal priority rule.
+        id: format!("host-{clean_ip}-{port}-if{}", interface.index),
         candidate_type,
         address: interface.address,
         port,
@@ -600,6 +603,37 @@ pub async fn gather_candidates_on_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_addresses_repeated_on_phone_interfaces_do_not_abort_gathering() {
+        use crate::interface::{InterfaceKind, NetworkInterface};
+        let first = NetworkInterface {
+            name: "pdp_ip0".into(),
+            index: 7,
+            address: "100.64.1.2".parse().unwrap(),
+            kind: InterfaceKind::Cellular,
+            is_up: true,
+            cost: InterfaceCost::High,
+        };
+        let second = NetworkInterface {
+            name: "pdp_ip1".into(),
+            index: 9,
+            ..first.clone()
+        };
+        let a = host_candidate(&first, 50000).unwrap().unwrap();
+        let b = host_candidate(&second, 50000).unwrap().unwrap();
+        let mut set = CandidateSet::new(16).unwrap();
+        set.insert(a).unwrap();
+        assert!(
+            set.insert(b).is_ok(),
+            "duplicate local addresses must not be mistaken for conflicting remote candidate IDs"
+        );
+        assert_eq!(
+            set.len(),
+            1,
+            "one socket endpoint should still be deduplicated"
+        );
+    }
 
     #[test]
     fn router_candidates_keep_their_mapping_protocol_and_require_public_endpoints() {

@@ -75,12 +75,22 @@ fn ensure_role(device: &crate::models::Device, role: &str) -> Result<(), AppErro
     }
 }
 
-// The initial Flutter client implements the existing authenticated WSS relay.
-// Do not launch a Direct/ICE handshake that it cannot complete yet. This is
-// per viewer: desktop viewers keep their chosen route in the same group.
-fn viewer_network_mode(mode: NetworkMode, platform: &str) -> Result<NetworkMode, AppError> {
+// Keep the original mobile preview on its supported relay path. New mobile
+// versions use the shared Direct core; routing remains independent per viewer.
+fn viewer_network_mode(
+    mode: NetworkMode,
+    platform: &str,
+    version: &str,
+) -> Result<NetworkMode, AppError> {
     let platform = platform.to_ascii_lowercase();
-    if platform.starts_with("android") || platform == "ios" || platform.starts_with("ios-") {
+    let direct = version
+        .split('.')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .is_ok_and(|v| v.len() == 3 && (v[0], v[1], v[2]) >= (2, 3, 2));
+    if !direct
+        && (platform.starts_with("android") || platform == "ios" || platform.starts_with("ios-"))
+    {
         match mode {
             NetworkMode::Auto | NetworkMode::Relay => Ok(NetworkMode::Relay),
             _ => Err(AppError::Conflict(
@@ -263,7 +273,7 @@ pub async fn respond(
         super::sessions::ensure_device_online(&state, &viewer)?;
     }
     let network_mode = if request.accept {
-        viewer_network_mode(group.network_mode, &viewer.platform)?
+        viewer_network_mode(group.network_mode, &viewer.platform, &viewer.sanser_version)?
     } else {
         group.network_mode
     };
@@ -493,18 +503,28 @@ mod tests {
     fn mobile_preview_uses_its_supported_transport_without_changing_desktop_routes() {
         for mobile in ["Android", "android-35", "iOS", "ios-arm64"] {
             assert_eq!(
-                viewer_network_mode(NetworkMode::Auto, mobile).unwrap(),
+                viewer_network_mode(NetworkMode::Auto, mobile, "2.3.1").unwrap(),
                 NetworkMode::Relay
             );
-            assert!(viewer_network_mode(NetworkMode::DirectOnly, mobile).is_err());
+            assert!(viewer_network_mode(NetworkMode::DirectOnly, mobile, "2.3.1").is_err());
+        }
+        for mobile in ["Android", "iOS", "ios-arm64"] {
+            for mode in [
+                NetworkMode::Auto,
+                NetworkMode::DirectOnly,
+                NetworkMode::Relay,
+            ] {
+                assert_eq!(viewer_network_mode(mode, mobile, "2.3.2").unwrap(), mode);
+            }
+            assert!(viewer_network_mode(NetworkMode::DirectOnly, mobile, "invalid").is_err());
         }
         for desktop in ["Windows", "macOS"] {
             assert_eq!(
-                viewer_network_mode(NetworkMode::Auto, desktop).unwrap(),
+                viewer_network_mode(NetworkMode::Auto, desktop, "2.3.1").unwrap(),
                 NetworkMode::Auto
             );
             assert_eq!(
-                viewer_network_mode(NetworkMode::DirectOnly, desktop).unwrap(),
+                viewer_network_mode(NetworkMode::DirectOnly, desktop, "2.3.1").unwrap(),
                 NetworkMode::DirectOnly
             );
         }

@@ -15,10 +15,17 @@ for ios_arch in "${ios_archs[@]}"; do
     -DCMAKE_OSX_SYSROOT="$ios_sdk" -DCMAKE_OSX_ARCHITECTURES="$ios_arch" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_BUILD_TYPE=Release
   cmake --build "$build_dir" --parallel 4
+  rust_target=aarch64-apple-ios
+  if [[ "$ios_sdk" == iphonesimulator ]]; then
+    rust_target=aarch64-apple-ios-sim
+    if [[ "$ios_arch" == x86_64 ]]; then rust_target=x86_64-apple-ios; fi
+  fi
+  bash "$repo_dir/scripts/build-mobile-p2p.sh" "$rust_target"
   archive="$build_dir/libSanserMobile.a"
   xcrun libtool -static -o "$archive" \
     "$build_dir/libsanser_mobile.a" "$build_dir/libsanser-audio-codec.a" \
-    "$build_dir/protocol/libsanser-snv2.a" "$build_dir/_deps/sanser_opus-build/libopus.a"
+    "$build_dir/protocol/libsanser-snv2.a" "$build_dir/_deps/sanser_opus-build/libopus.a" \
+    "${SANSER_MOBILE_RUST_TARGET_DIR:-$repo_dir/apps/mobile/build/rust-p2p}/$rust_target/release/libsanser_mobile_p2p.a"
   archives+=("$archive")
 done
 mkdir -p "$repo_dir/apps/mobile/ios/Native/$ios_sdk"

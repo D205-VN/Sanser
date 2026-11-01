@@ -60,6 +60,17 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
     private val closing = AtomicBoolean(false)
     private val needsKeyframe = AtomicBoolean(true)
     private var firstFrame = false
+    private var lastKeyframeRequest = 0L
+    private var queuedFrames = 0
+    private var drainScheduled = false
+    private val drainTask = object : Runnable {
+        override fun run() {
+            drainScheduled=false
+            if(closing.get() || !attached)return
+            try { codec?.let { drain(it) }; scheduleDrain() }
+            catch(_:Exception){releaseCodec();requestKeyframe()}
+        }
+    }
     private var lastX=0;private var lastY=0
     init {
         setBackgroundColor(Color.BLACK);addView(surface, LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.MATCH_PARENT,Gravity.CENTER))
@@ -94,15 +105,29 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
     override fun surfaceCreated(holder: SurfaceHolder){attached=true;needsKeyframe.set(true);client()?.keyframe()}
     override fun surfaceChanged(holder: SurfaceHolder,format:Int,width:Int,height:Int){}
     override fun surfaceDestroyed(holder: SurfaceHolder){attached=false;decoder.post{releaseCodec()};client()?.input(4)}
+    fun resetStream(){
+        streamEpoch.incrementAndGet();needsKeyframe.set(true)
+        decoder.post{releaseCodec();firstFrame=false;lastKeyframeRequest=0}
+    }
+    private fun requestKeyframe(){
+        needsKeyframe.set(true)
+        val now=SystemClock.elapsedRealtime()
+        if(now-lastKeyframeRequest>=250){lastKeyframeRequest=now;client()?.keyframe()}
+    }
+    private fun scheduleDrain(){
+        if(!drainScheduled && queuedFrames>0 && codec!=null){drainScheduled=true;decoder.postDelayed(drainTask,2)}
+    }
     fun push(bytes:ByteArray,w:Int,h:Int,keyframe:Boolean){
         if(closing.get() || !attached || bytes.size>4*1024*1024 || w !in 16..8192 || h !in 16..8192)return
         // Do not overwrite dependent H.264 frames and then feed broken references.
-        if(pending.get()>=3){streamEpoch.incrementAndGet();needsKeyframe.set(true);decoder.post{client()?.keyframe()};return}
+        if(pending.get()>=6){streamEpoch.incrementAndGet();needsKeyframe.set(true);decoder.post{requestKeyframe()};return}
         val epoch = streamEpoch.get()
+        val arrived=SystemClock.elapsedRealtime()
         pending.incrementAndGet()
         decoder.post {
             try {
                 if(!attached || closing.get() || epoch!=streamEpoch.get())return@post
+                if(SystemClock.elapsedRealtime()-arrived>80){requestKeyframe();return@post}
                 if(needsKeyframe.get() && !keyframe)return@post
                 if(codec==null || width!=w || height!=h){
                     releaseCodec();width=w;height=h
@@ -119,18 +144,34 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
                 val current=codec ?: return@post
                 drain(current)
                 val index=current.dequeueInputBuffer(2000)
-                if(index<0){needsKeyframe.set(true);client()?.keyframe();return@post}
+                if(index<0){requestKeyframe();return@post}
                 val buffer=current.getInputBuffer(index) ?: return@post
                 if(buffer.capacity()<bytes.size)throw IllegalArgumentException("Encoded frame too large")
                 buffer.clear();buffer.put(bytes);current.queueInputBuffer(index,0,bytes.size,SystemClock.elapsedRealtimeNanos()/1000,0)
+                queuedFrames++
                 if(keyframe && epoch==streamEpoch.get())needsKeyframe.set(false)
                 drain(current)
-                decoder.postDelayed({try{codec?.let{drain(it)}}catch(_:Exception){needsKeyframe.set(true)}},2)
-            }catch(_:Exception){releaseCodec();needsKeyframe.set(true);client()?.keyframe()}
+                scheduleDrain()
+            }catch(_:Exception){releaseCodec();requestKeyframe()}
             finally {pending.decrementAndGet()}
         }
     }
-    private fun drain(current:MediaCodec){val info=MediaCodec.BufferInfo();var count=0;while(count++<8){val index=current.dequeueOutputBuffer(info,0);if(index<0)return;current.releaseOutputBuffer(index,true)}}
-    private fun releaseCodec(){try{codec?.stop()}catch(_:Exception){};try{codec?.release()}catch(_:Exception){};codec=null}
+    private fun drain(current:MediaCodec){
+        val info=MediaCodec.BufferInfo();var newest = -1
+        try {
+            for(attempt in 0 until 16){
+                val index=current.dequeueOutputBuffer(info,0)
+                if(index==MediaCodec.INFO_OUTPUT_FORMAT_CHANGED)continue
+                if(index<0)break
+                queuedFrames=maxOf(0,queuedFrames-1)
+                if(newest>=0)current.releaseOutputBuffer(newest,false)
+                newest=index
+            }
+        }finally{
+            // All references were decoded; only the newest image enters Surface.
+            if(newest>=0)current.releaseOutputBuffer(newest,System.nanoTime())
+        }
+    }
+    private fun releaseCodec(){decoder.removeCallbacks(drainTask);drainScheduled=false;queuedFrames=0;try{codec?.stop()}catch(_:Exception){};try{codec?.release()}catch(_:Exception){};codec=null}
     override fun close(){if(closing.getAndSet(true))return;attached=false;surface.holder.removeCallback(this);decoder.post{releaseCodec();decoderThread.quitSafely()}}
 }

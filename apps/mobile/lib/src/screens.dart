@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'api.dart';
 import 'controller.dart';
 import 'keyboard.dart';
+import 'floating_controls.dart';
+import 'settings.dart';
 
 class SanserHome extends StatefulWidget {
   final MobileController controller;
@@ -62,7 +65,12 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
             children: [
               if (c.error != null) ErrorNote(c.error!),
               Text(
-                ['Máy tính của bạn', 'Lời mời chia sẻ', 'Tài khoản'][tab],
+                [
+                  'Máy tính của bạn',
+                  'Lời mời chia sẻ',
+                  'Cài đặt',
+                  'Tài khoản',
+                ][tab],
                 style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                   fontWeight: FontWeight.w700,
                 ),
@@ -72,6 +80,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                 [
                   'Kết nối và mang máy tính theo bên mình.',
                   'Xem màn hình được chia sẻ với bạn.',
+                  'Điều chỉnh trải nghiệm trên điện thoại.',
                   'Sanser trên điện thoại của bạn.',
                 ][tab],
                 style: const TextStyle(color: Colors.white60),
@@ -95,7 +104,8 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                 ],
               ],
               if (tab == 1) ..._invitations(),
-              if (tab == 2) ...[
+              if (tab == 2) MobileSettings(controller: c),
+              if (tab == 3) ...[
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.all(22),
@@ -113,7 +123,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.1 • Flutter',
+                          'Sanser 2.3.2 • Flutter',
                           style: TextStyle(color: Colors.white54),
                         ),
                         const SizedBox(height: 24),
@@ -154,6 +164,10 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
             NavigationDestination(
               icon: Icon(Icons.screen_share_outlined),
               label: 'Chia sẻ',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.settings_outlined),
+              label: 'Cài đặt',
             ),
             NavigationDestination(
               icon: Icon(Icons.person_outline_rounded),
@@ -569,6 +583,45 @@ class RemoteSession extends StatefulWidget {
 }
 
 class _RemoteSessionState extends State<RemoteSession> {
+  bool? _landscape;
+  @override
+  void initState() {
+    super.initState();
+    _orientation();
+  }
+
+  @override
+  void didUpdateWidget(covariant RemoteSession oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _orientation();
+  }
+
+  void _orientation() {
+    final value = c.preferences.autoLandscape;
+    if (value == _landscape) return;
+    _landscape = value;
+    unawaited(
+      SystemChrome.setPreferredOrientations(
+        value
+            ? [
+                DeviceOrientation.landscapeLeft,
+                DeviceOrientation.landscapeRight,
+              ]
+            : [],
+      ).catchError((Object _) {}),
+    );
+  }
+
+  @override
+  void dispose() {
+    unawaited(
+      SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+      ]).catchError((Object _) {}),
+    );
+    super.dispose();
+  }
+
   Future<void> _keyboard() async {
     final text = TextEditingController();
     await showModalBottomSheet<void>(
@@ -622,8 +675,114 @@ class _RemoteSessionState extends State<RemoteSession> {
     text.dispose();
   }
 
-  bool expanded = false;
   MobileController get c => widget.controller;
+  Future<void> _key(int code) async {
+    try {
+      await c.engine.key(code, true);
+      await c.engine.key(code, false);
+    } catch (_) {
+      await c.engine.resetInput().catchError((Object _) {});
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Không gửi được phím. Kiểm tra kết nối.'),
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _controls(bool viewOnly) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text(
+        viewOnly ? 'Chỉ xem' : 'Điều khiển',
+        style: const TextStyle(color: Color(0xff78dfc0)),
+      ),
+      const SizedBox(height: 6),
+      Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        children: [
+          IconButton(
+            tooltip: c.sound ? 'Tắt âm thanh' : 'Bật âm thanh',
+            onPressed: () => c.setSound(!c.sound),
+            icon: Icon(
+              c.sound ? Icons.volume_up_outlined : Icons.volume_off_outlined,
+            ),
+          ),
+          if (!viewOnly)
+            IconButton(
+              tooltip: 'Bàn phím',
+              onPressed: _keyboard,
+              icon: const Icon(Icons.keyboard_outlined),
+            ),
+          IconButton(
+            tooltip: 'Cài đặt phiên',
+            onPressed: () => showMobileSettings(context, c),
+            icon: const Icon(Icons.settings_outlined),
+          ),
+          IconButton(
+            tooltip: 'Ngắt kết nối',
+            onPressed: () => c.disconnect(),
+            icon: const Icon(
+              Icons.stop_circle_outlined,
+              color: Color(0xffffa4ad),
+            ),
+          ),
+        ],
+      ),
+      if (c.preferences.showLatency)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text(
+            '${c.selectedTransport == 'direct' ? 'Direct UDP' : 'Relay'} • ${c.telemetry['rttMs'] is num ? '${(c.telemetry['rttMs'] as num).toStringAsFixed(1)} ms' : 'Đang đo RTT'}',
+            style: const TextStyle(color: Colors.white54, fontSize: 12),
+          ),
+        ),
+      if (c.routeNotice != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text(
+            c.routeNotice!,
+            style: const TextStyle(color: Colors.amberAccent, fontSize: 12),
+          ),
+        ),
+      if (!viewOnly)
+        Wrap(
+          spacing: 6,
+          children: [
+            for (final item in const [
+              (41, 'Esc'),
+              (43, 'Tab'),
+              (40, 'Enter'),
+              (42, '⌫'),
+            ])
+              OutlinedButton(
+                onPressed: () => _key(item.$1),
+                child: Text(item.$2),
+              ),
+          ],
+        ),
+      if (c.active?['sharingId'] != null && c.capabilities['voice'] == true)
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            IconButton(
+              tooltip: c.voiceJoined ? 'Rời voice' : 'Tham gia voice',
+              onPressed: () => c.setVoice(joined: !c.voiceJoined, mic: false),
+              icon: Icon(c.voiceJoined ? Icons.headset_mic : Icons.headset_off),
+            ),
+            IconButton(
+              tooltip: c.microphone ? 'Tắt mic' : 'Bật mic',
+              onPressed: !c.voiceJoined
+                  ? null
+                  : () => c.setVoice(mic: !c.microphone),
+              icon: Icon(c.microphone ? Icons.mic : Icons.mic_off),
+            ),
+          ],
+        ),
+    ],
+  );
   @override
   Widget build(BuildContext context) {
     final viewOnly = c.active?['accessMode'] == 'view-only';
@@ -667,165 +826,21 @@ class _RemoteSessionState extends State<RemoteSession> {
                         const SizedBox(height: 16),
                         ErrorNote(c.error!),
                       ],
-                    ],
-                  ),
-                ),
-              ),
-            SafeArea(
-              child: Align(
-                alignment: Alignment.topRight,
-                child: Container(
-                  margin: const EdgeInsets.all(12),
-                  padding: const EdgeInsets.all(6),
-                  constraints: const BoxConstraints(maxWidth: 360),
-                  decoration: BoxDecoration(
-                    color: const Color(0xf2191f2c),
-                    borderRadius: BorderRadius.circular(22),
-                    border: Border.all(color: Colors.white12),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SizedBox(width: 8),
-                          Icon(
-                            viewOnly
-                                ? Icons.visibility_outlined
-                                : Icons.touch_app_outlined,
-                            color: const Color(0xff78dfc0),
-                          ),
-                          const SizedBox(width: 10),
-                          Flexible(
-                            child: Text(
-                              viewOnly ? 'Chỉ xem' : 'Điều khiển',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: c.sound ? 'Tắt âm thanh' : 'Bật âm thanh',
-                            onPressed: () => c.setSound(!c.sound),
-                            icon: Icon(
-                              c.sound
-                                  ? Icons.volume_up_outlined
-                                  : Icons.volume_off_outlined,
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'Tùy chọn',
-                            onPressed: () =>
-                                setState(() => expanded = !expanded),
-                            icon: Icon(
-                              expanded
-                                  ? Icons.expand_less_rounded
-                                  : Icons.expand_more_rounded,
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'Ngắt kết nối',
-                            onPressed: () => c.disconnect(),
-                            icon: const Icon(
-                              Icons.stop_circle_outlined,
-                              color: Color(0xffffa4ad),
-                            ),
-                          ),
-                        ],
+                      const SizedBox(height: 12),
+                      TextButton(
+                        onPressed: () => c.disconnect(),
+                        child: const Text('Hủy kết nối'),
                       ),
-                      if (expanded) ...[
-                        const Divider(height: 1),
-                        Padding(
-                          padding: const EdgeInsets.all(10),
-                          child: Column(
-                            children: [
-                              Text(
-                                'Relay • ${c.telemetry['rttMs'] is num ? '${(c.telemetry['rttMs'] as num).toStringAsFixed(1)} ms' : 'Đang đo RTT'}',
-                                style: const TextStyle(
-                                  color: Colors.white54,
-                                  fontSize: 12,
-                                ),
-                              ),
-                              if (!viewOnly)
-                                TextButton.icon(
-                                  onPressed: _keyboard,
-                                  icon: const Icon(Icons.keyboard_outlined),
-                                  label: const Text('Bàn phím'),
-                                ),
-                              if (!viewOnly)
-                                Wrap(
-                                  spacing: 6,
-                                  children: [
-                                    for (final item in const [
-                                      (41, 'Esc'),
-                                      (43, 'Tab'),
-                                      (40, 'Enter'),
-                                      (42, '⌫'),
-                                    ])
-                                      OutlinedButton(
-                                        onPressed: () async {
-                                          await c.engine.key(item.$1, true);
-                                          await c.engine.key(item.$1, false);
-                                        },
-                                        child: Text(item.$2),
-                                      ),
-                                  ],
-                                ),
-                              if (c.active?['sharingId'] != null &&
-                                  c.capabilities['voice'] == true)
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    IconButton(
-                                      tooltip: c.voiceJoined
-                                          ? 'Rời voice'
-                                          : 'Tham gia voice',
-                                      onPressed: () => c.setVoice(
-                                        joined: !c.voiceJoined,
-                                        mic: false,
-                                      ),
-                                      icon: Icon(
-                                        c.voiceJoined
-                                            ? Icons.headset_mic
-                                            : Icons.headset_off,
-                                      ),
-                                    ),
-                                    IconButton(
-                                      tooltip: c.microphone
-                                          ? 'Tắt mic'
-                                          : 'Bật mic',
-                                      onPressed: !c.voiceJoined
-                                          ? null
-                                          : () =>
-                                                c.setVoice(mic: !c.microphone),
-                                      icon: Icon(
-                                        c.microphone
-                                            ? Icons.mic
-                                            : Icons.mic_off,
-                                      ),
-                                    ),
-                                    IconButton(
-                                      tooltip: 'Tắt/bật voice',
-                                      onPressed: !c.voiceJoined
-                                          ? null
-                                          : () => c.setVoice(deaf: !c.deafened),
-                                      icon: Icon(
-                                        c.deafened
-                                            ? Icons.hearing_disabled
-                                            : Icons.hearing,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                            ],
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                 ),
               ),
+            FloatingSessionControls(
+              initiallyCompact: c.preferences.compactControls,
+              icon: viewOnly
+                  ? Icons.visibility_outlined
+                  : Icons.touch_app_outlined,
+              content: _controls(viewOnly),
             ),
           ],
         ),

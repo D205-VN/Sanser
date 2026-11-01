@@ -5,6 +5,12 @@
 struct SanserMobileClient {
   std::unique_ptr<sanser::desktop::Peer> peer;
   SanserMobileCallbacks callbacks;
+  ~SanserMobileClient() {
+    // Peer::loop invokes onStopped while stop() joins its worker. Do this while
+    // peer is still owned: unique_ptr destruction can clear its pointer before
+    // invoking Peer::~Peer, so reading self->peer in that callback would crash.
+    if(peer) peer->stop();
+  }
 };
 extern "C" SanserMobileClient *sanser_mobile_create(const char *endpoint,uint16_t port,const char *token,int control,int sharing,const char *viewer,SanserMobileCallbacks callbacks) {
   if(!endpoint || !token || !callbacks.video) return nullptr;
@@ -16,6 +22,7 @@ extern "C" SanserMobileClient *sanser_mobile_create(const char *endpoint,uint16_
     o.width=1920; o.height=1080; o.fps=60; o.bitrate=12000000;
     result->callbacks=callbacks;
     result->peer=std::make_unique<sanser::desktop::Peer>(o);
+    result->peer->receiveVideoLimit(6000000);
     auto *self=result.get();
     result->peer->onFrame=[self](sanser::desktop::Frame frame) {
       self->callbacks.video(self->callbacks.context,frame.data.data(),frame.data.size(),frame.width,frame.height,frame.keyframe?1:0);
@@ -27,6 +34,7 @@ extern "C" SanserMobileClient *sanser_mobile_create(const char *endpoint,uint16_
     return result.release();
   } catch(...) {return nullptr;}
 }
+extern "C" void sanser_mobile_video_limit(SanserMobileClient *c,uint32_t bitrate,double baseline){if(c)c->peer->receiveVideoLimit(bitrate,baseline);}
 extern "C" int sanser_mobile_start(SanserMobileClient *c) {if(!c)return 0;try {c->peer->start();return 1;}catch(...){return 0;}}
 extern "C" void sanser_mobile_destroy(SanserMobileClient *c) {delete c;}
 extern "C" int sanser_mobile_running(SanserMobileClient *c) {return c && c->peer->running();}

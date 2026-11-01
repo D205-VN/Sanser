@@ -23,6 +23,7 @@
 		A30200000000000000000002 /* MobileEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30100000000000000000002 /* MobileEngine.swift */; };
 		A30300000000000000000001 /* Clibsodium in Frameworks */ = {isa = PBXBuildFile; productRef = A30300000000000000000002 /* Clibsodium */; };
 		A30400000000000000000001 /* libSanserMobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A30400000000000000000002 /* libSanserMobile.a */; };
+		A30200000000000000000003 /* MobileVideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30100000000000000000003 /* MobileVideoDecoder.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -78,6 +79,7 @@
 		C1B5907B0EA44319E4A6AD82 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		DECDF5BD19C7AFD4E911453B /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
 		FEBE9A221D84DDB868C9C6D8 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
+		A30100000000000000000003 /* MobileVideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileVideoDecoder.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -165,6 +167,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				A30100000000000000000002 /* MobileEngine.swift */,
 				A30100000000000000000001 /* MobileMedia.swift */,
+				A30100000000000000000003 /* MobileVideoDecoder.swift */,
 				A30100000000000000000000 /* MobileRelay.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
@@ -335,7 +338,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" embed_and_thin";
+			shellScript = "/bin/bash \"$PROJECT_DIR/Flutter/sanser_xcode_backend.sh\" embed_and_thin";
 		};
 		6FF6FF49B49B4C3EA2FBBF06 /* [CP] Embed Pods Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -367,7 +370,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" build";
+			shellScript = "/bin/bash \"$PROJECT_DIR/Flutter/sanser_xcode_backend.sh\" build";
 		};
 		F2EA26F089B1265456D5276E /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -409,6 +412,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				A30200000000000000000002 /* MobileEngine.swift in Sources */,
 				A30200000000000000000001 /* MobileMedia.swift in Sources */,
+				A30200000000000000000003 /* MobileVideoDecoder.swift in Sources */,
 				A30200000000000000000000 /* MobileRelay.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,

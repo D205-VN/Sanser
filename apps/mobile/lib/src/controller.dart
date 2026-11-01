@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'api.dart';
 import 'native_engine.dart';
+import 'preferences.dart';
+import 'direct_connection.dart';
 
 enum SessionPhase { idle, approval, connecting, streaming, failed }
 
@@ -21,6 +24,14 @@ class MobileController extends ChangeNotifier {
   bool voiceJoined = false, microphone = false, deafened = false;
   SessionPhase phase = SessionPhase.idle;
   Json telemetry = {};
+  MobilePreferences preferences = const MobilePreferences();
+  Future<void> _preferenceWrites = Future.value();
+  Future<void>? _disconnecting;
+  DirectConnection? _direct;
+  String selectedTransport = 'relay';
+  String? routeNotice;
+  Json connectionDiagnostics = {};
+  bool _disposed = false;
   Timer? _timer;
   StreamSubscription<Json>? _events;
   bool _refreshing = false;
@@ -30,13 +41,23 @@ class MobileController extends ChangeNotifier {
       defaultTargetPlatform == TargetPlatform.iOS ? 'iOS' : 'Android';
   Future<void> initialize() async {
     try {
+      final raw = await api.secrets.read('mobile.preferences');
+      if (raw != null) {
+        preferences = MobilePreferences.fromJson(
+          Map<String, dynamic>.from(jsonDecode(raw) as Map),
+        );
+      }
+    } catch (_) {
+      /* Invalid/old preferences fall back to safe defaults. */
+    }
+    try {
       capabilities = await engine.capabilities();
       _events = engine.updates.listen(
         _nativeEvent,
         onError: (Object e) {
           error = 'Mất kết nối engine native.';
           phase = SessionPhase.failed;
-          notifyListeners();
+          unawaited(disconnect(keepError: true));
         },
       );
     } on MissingPluginException {
@@ -152,8 +173,8 @@ class MobileController extends ChangeNotifier {
           'closed',
           'failed',
         ].contains(session['status'] ?? session['state'])) {
-          phase = SessionPhase.failed;
           error = 'Máy tính đã từ chối hoặc phiên đã kết thúc.';
+          await disconnect(keepError: true);
         }
       }
     } catch (e) {
@@ -171,20 +192,27 @@ class MobileController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    if (preferences.networkMode == 'direct' && capabilities['direct'] != true) {
+      error =
+          'Bản build này chưa có Direct. Cập nhật ứng dụng hoặc chọn Relay.';
+      notifyListeners();
+      return;
+    }
     final generation = ++_generation;
     busy = true;
     error = null;
+    sound = preferences.soundOnConnect;
     notifyListeners();
     try {
-      // First mobile transport is the existing authenticated WSS relay. Do not
-      // advertise a successful Direct probe or fabricate low latency metrics.
       final result = await api.request(
         '/api/v2/sessions',
         method: 'POST',
         body: {
           'hostDeviceId': device['id'],
           'requesterDeviceId': deviceId,
-          'networkMode': 'relay',
+          'networkMode': capabilities['direct'] == true
+              ? preferences.networkMode
+              : 'relay',
           'qualityProfile': 'balanced',
           'requestedCodec': 'h264',
           'accessMode': viewOnly ? 'view-only' : 'control',
@@ -204,53 +232,108 @@ class MobileController extends ChangeNotifier {
       }
     } catch (e) {
       if (generation == _generation) {
-        phase = SessionPhase.failed;
         error = e.toString();
+        await disconnect(keepError: true);
       }
     } finally {
-      busy = false;
+      if (generation == _generation) busy = false;
       notifyListeners();
     }
   }
 
   Future<void> _start(Json session, int generation) async {
-    phase = SessionPhase.connecting;
-    notifyListeners();
-    final id = session['id'];
-    final ready = await api.request(
-      '/api/v2/sessions/$id/native-ready',
-      method: 'POST',
-      body: {'deviceId': deviceId},
-    );
-    if (generation != _generation) return;
-    active = {...session, ...ready};
-    final credentials = await api.request(
-      '/api/v2/sessions/$id/credentials?deviceId=$deviceId',
-    );
-    if (generation != _generation) return;
-    if (credentials['wireProtocol'] != 'snv2') {
-      throw const ApiFailure(
-        0,
-        'Máy tính cần hỗ trợ giao thức SNV2 để kết nối mobile.',
+    try {
+      phase = SessionPhase.connecting;
+      notifyListeners();
+      final id = session['id'];
+      final ready = await api.request(
+        '/api/v2/sessions/$id/native-ready',
+        method: 'POST',
+        body: {'deviceId': deviceId},
       );
+      if (generation != _generation) return;
+      active = {...session, ...ready};
+      final credentials = await api.request(
+        '/api/v2/sessions/$id/credentials?deviceId=$deviceId',
+      );
+      if (generation != _generation) return;
+      if (credentials['wireProtocol'] != 'snv2') {
+        throw const ApiFailure(
+          0,
+          'Máy tính cần hỗ trợ giao thức SNV2 để kết nối mobile.',
+        );
+      }
+      final accessToken = await api.accessToken();
+      if (generation != _generation) return;
+      final mode =
+          session['networkMode'] as String? ??
+          (capabilities['direct'] == true ? preferences.networkMode : 'relay');
+      Json route = {'transport': 'relay'};
+      routeNotice = null;
+      connectionDiagnostics = {};
+      if (mode != 'relay') {
+        if (capabilities['direct'] != true) {
+          if (mode == 'direct') {
+            throw const ApiFailure(0, 'Bản build này chưa hỗ trợ Direct.');
+          }
+        } else {
+          final direct = DirectConnection(engine);
+          _direct = direct;
+          try {
+            route = await direct.connect(
+              api: api,
+              sessionId: id as String,
+              deviceId: deviceId,
+              peerDeviceId: credentials['peerDeviceId'] as String,
+              sessionToken: credentials['sessionToken'] as String,
+              accessToken: accessToken,
+              readyAt: active?['requesterReadyAt'],
+            );
+            connectionDiagnostics = direct.diagnostics;
+          } catch (_) {
+            connectionDiagnostics = direct.diagnostics;
+            final reason = direct.failureReason;
+            await direct.cancel();
+            if (generation != _generation) return;
+            _direct = null;
+            if (mode == 'direct') {
+              throw ApiFailure(0, 'Không thiết lập được Direct. $reason');
+            }
+            routeNotice = 'Đã chuyển sang Relay. $reason';
+          }
+        }
+      }
+      if (generation != _generation) return;
+      selectedTransport = route['transport'] as String;
+      notifyListeners();
+      await engine.connect({
+        'serverUrl': api.base.toString(),
+        'sessionId': id,
+        'deviceId': deviceId,
+        'peerDeviceId': credentials['peerDeviceId'],
+        'accessToken': accessToken,
+        'sessionToken': credentials['sessionToken'],
+        'inputEnabled': credentials['accessMode'] != 'view-only',
+        'sharingId': session['sharingId'],
+        'viewerId': session['sharingViewerId'] ?? '',
+        'audioMuted': !sound,
+        'videoBitrateMbps': preferences.videoBitrateMbps,
+        'baselineRttMs': (route['probe'] as Map?)?['medianMs'] ?? 0.0,
+        'transport': selectedTransport,
+        'endpoint': route['endpoint'],
+        'localPort': route['localPort'] ?? 0,
+      });
+    } catch (e) {
+      if (generation == _generation) {
+        error = e.toString();
+        await disconnect(keepError: true);
+      }
     }
-    final accessToken = await api.accessToken();
-    if (generation != _generation) return;
-    await engine.connect({
-      'serverUrl': api.base.toString(),
-      'sessionId': id,
-      'deviceId': deviceId,
-      'peerDeviceId': credentials['peerDeviceId'],
-      'accessToken': accessToken,
-      'sessionToken': credentials['sessionToken'],
-      'inputEnabled': credentials['accessMode'] != 'view-only',
-      'sharingId': session['sharingId'],
-      'viewerId': session['sharingViewerId'] ?? '',
-    });
   }
 
   Future<void> respond(Json group, Json member, bool accept) async {
-    if (active != null) return;
+    if (active != null || busy) return;
+    final generation = ++_generation;
     busy = true;
     error = null;
     notifyListeners();
@@ -260,7 +343,9 @@ class MobileController extends ChangeNotifier {
         method: 'POST',
         body: {'viewerDeviceId': deviceId, 'accept': accept},
       );
+      if (generation != _generation) return;
       if (accept) {
+        sound = preferences.soundOnConnect;
         final members = updated['members'] as List? ?? [];
         final joined = members
             .whereType<Json>()
@@ -269,19 +354,24 @@ class MobileController extends ChangeNotifier {
         final session = await api.request(
           '/api/v2/sessions/${joined['sessionId']}',
         );
+        if (generation != _generation) return;
         active = {
           ...session,
+          'networkMode':
+              session['networkMode'] ?? group['networkMode'] ?? 'auto',
           'sharingId': group['id'],
           'sharingViewerId': member['id'],
         };
-        await _start(active!, ++_generation);
+        await _start(active!, generation);
       }
       await refresh();
     } catch (e) {
-      phase = SessionPhase.failed;
-      error = e.toString();
+      if (generation == _generation) {
+        error = e.toString();
+        await disconnect(keepError: true);
+      }
     } finally {
-      busy = false;
+      if (generation == _generation) busy = false;
       notifyListeners();
     }
   }
@@ -326,19 +416,38 @@ class MobileController extends ChangeNotifier {
   }
 
   Future<void> disconnect({bool keepError = false}) async {
+    if (_disconnecting != null) return _disconnecting;
+    final completion = Completer<void>();
+    _disconnecting = completion.future;
+    try {
+      await _disconnect(keepError: keepError);
+    } finally {
+      _disconnecting = null;
+      completion.complete();
+    }
+  }
+
+  Future<void> _disconnect({required bool keepError}) async {
     final old = active;
+    final direct = _direct;
+    _direct = null;
+    if (direct != null && !direct.active) unawaited(direct.cancel());
     final generation = ++_generation;
     busy = true;
     active = null;
+    phase = keepError ? SessionPhase.failed : SessionPhase.idle;
+    if (!keepError) error = null;
     voiceJoined = false;
     microphone = false;
     deafened = false;
     telemetry = {};
+    notifyListeners();
     try {
       await engine.disconnect();
     } catch (_) {
       /* server cleanup must still run */
     }
+    await direct?.cancel();
     try {
       if (old != null) {
         await api.request(
@@ -347,7 +456,7 @@ class MobileController extends ChangeNotifier {
         );
       }
     } catch (e) {
-      error = e.toString();
+      error ??= e.toString();
     }
     if (generation != _generation) return;
     busy = false;
@@ -359,9 +468,28 @@ class MobileController extends ChangeNotifier {
   }
 
   Future<void> setSound(bool value) async {
-    await engine.mute(!value);
-    sound = value;
+    try {
+      await engine.mute(!value);
+      sound = value;
+    } catch (e) {
+      error = e.toString();
+    }
     notifyListeners();
+  }
+
+  Future<void> setPreferences(MobilePreferences value) async {
+    preferences = value;
+    notifyListeners();
+    final encoded = jsonEncode(value.toJson());
+    _preferenceWrites = _preferenceWrites
+        .catchError((Object _) {})
+        .then((_) => api.secrets.write('mobile.preferences', encoded));
+    try {
+      await _preferenceWrites;
+    } catch (_) {
+      error = 'Không lưu được cài đặt. Vui lòng thử lại.';
+      notifyListeners();
+    }
   }
 
   Future<void> setVoice({bool? joined, bool? mic, bool? deaf}) async {
@@ -408,7 +536,13 @@ class MobileController extends ChangeNotifier {
   }
 
   @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
+
+  @override
   void dispose() {
+    _disposed = true;
     _timer?.cancel();
     _events?.cancel();
     api.close();

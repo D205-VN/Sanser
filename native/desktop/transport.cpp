@@ -463,7 +463,7 @@ void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
   Clock::time_point deadline;
   {
     std::lock_guard sendLock(sendMutex_);
-    deadline=Clock::now()+videoSendBudget(bytes.size()+tx_.queuedVideoBytes(),options_.bitrate,options_.ultraLowLatency);
+    deadline=Clock::now()+videoSendBudget(bytes.size()+tx_.queuedVideoBytes(),videoBudget_.load(),options_.ultraLowLatency);
   }
   for (std::size_t i=0; i<count && running_; ++i) {
     sendVideoFragment(frame,id,i,false,deadline);
@@ -625,11 +625,11 @@ void Peer::process(const Bytes& bytes) {
     { std::lock_guard lock(audioMutex_); audioSequence_=0; if(audioEncoder_) audioEncoder_->reset(); }
     controlProbe_.reset(); for(auto& window:replay_) window=ReplayWindow{};
     reassembler_=Reassembler{options_.bitrate,options_.ultraLowLatency}; lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
-    controlAppRtt_=-1; inputRttUs_=inputRttSamples_=0;
+    controlAppRtt_=-1; minimumControlRtt_=0; inputRttUs_=inputRttSamples_=0;
     if(options_.host) {
       { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
       { std::lock_guard lock(feedbackMutex_); feedback_={}; }
-      busyWindows_=congestionWindows_=recoveryWindows_=0;
+      busyWindows_=congestionWindows_=recoveryWindows_=0;peerVideoLimit_=0;lastDelayFeedbackSequence_=0;videoBudget_=options_.bitrate;delayRate_=DelayRatePolicy{};
     }
     if(inputWorker_) inputWorker_->submit(Input{});
   }
@@ -682,6 +682,28 @@ void Peer::process(const Bytes& bytes) {
       return;
     }
   }
+  if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive &&
+     b.size()==8 && std::memcmp(b.data(),"SVB1",4)==0) {
+    const auto limit=r32(b.data()+4);
+    if(limit>=1000000 && limit<=50000000 && limit!=peerVideoLimit_) {
+      peerVideoLimit_=limit;
+      // Start below the ceiling and probe upward using real delivery feedback.
+      videoBudget_=std::min({videoBudget_.load(),videoCeiling(),4000000U});
+    }
+    return;
+  }
+  if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback &&
+     b.size()==12 && std::memcmp(b.data(),"SVL1",4)==0) {
+    if(h.sequence<=lastDelayFeedbackSequence_) return;
+    lastDelayFeedbackSequence_=h.sequence;
+    const auto now=Clock::now();
+    const double rtt=r32(b.data()+4)/1000.0,baseline=r32(b.data()+8)/1000.0;
+    if(const auto target=delayRate_.observe(rtt,baseline,videoBudget_.load(),videoCeiling(),now)) {
+      videoBudget_=*target;recoveryWindows_=0;
+      if(std::getenv("SANSER_TELEMETRY")) { std::ostringstream line;line<<"SNV2_RATE_CONTROL rttMs="<<rtt<<" baselineMs="<<baseline<<" targetBps="<<*target;writeTelemetry(line); }
+    }
+    return;
+  }
   // Optional authenticated control RTT on the SAME media transport. Old peers
   // ignore this keepalive extension; no response means unknown, never zero.
   if(h.packetType==snv2::PacketType::Keepalive && h.streamId==0 && b.size()==12) {
@@ -692,6 +714,12 @@ void Peer::process(const Bytes& bytes) {
       std::uint64_t id=0; for(std::size_t i=4;i<12;++i) id=(id<<8)|b[i];
       if(const auto rtt=controlProbe_.received(id,Clock::now())) {
         controlAppRtt_=*rtt;
+        minimumControlRtt_=minimumControlRtt_>0 ? std::min(minimumControlRtt_,*rtt):*rtt;
+        const auto nominated=receiveBaselineMs_.load();
+        const auto baseline=nominated>0 ? std::min(nominated,minimumControlRtt_):minimumControlRtt_;
+        Bytes delay{'S','V','L','1'};u32(delay,static_cast<std::uint32_t>(std::clamp(*rtt*1000.0,1.0,3000000.0)));
+        u32(delay,static_cast<std::uint32_t>(std::clamp(baseline*1000.0,1.0,3000000.0)));
+        transmit(snv2::PacketType::NetworkFeedback,delay);
         if(std::getenv("SANSER_TELEMETRY")) { std::ostringstream line; line<<"SNV2_CONTROL_TIMING appRttMs="<<*rtt; writeTelemetry(line); }
       }
       return;
@@ -778,14 +806,14 @@ void Peer::process(const Bytes& bytes) {
           target=std::min(target,static_cast<std::uint32_t>(deliveredBps*0.8));
         }
         const auto previous=videoBudget_.load();
-        videoBudget_=std::max(std::min(options_.bitrate,5000000U),target);
+        videoBudget_=std::clamp(target,std::min(videoCeiling(),1000000U),videoCeiling());
         if(deliveryStalled && videoBudget_<previous && onKeyframe) onKeyframe();
         congestionWindows_=0;
       }
     } else {
       congestionWindows_=0;
-      if(busy && ++recoveryWindows_>=10) {
-        videoBudget_=std::min(options_.bitrate,videoBudget_.load()+std::max(500000U,videoBudget_.load()/20));
+      if(busy && !delayRate_.recovering(Clock::now()) && ++recoveryWindows_>=10) {
+        videoBudget_=std::min(videoCeiling(),videoBudget_.load()+std::max(200000U,videoBudget_.load()/20));
         recoveryWindows_=0;
       }
     }
@@ -892,16 +920,16 @@ void Peer::acknowledgeInput() {
 }
 void Peer::sendLoop() {
   auto creditAt=Clock::now();
-  constexpr double maxBurstBytes=8*1500;
+  constexpr double maxBurstBytes=2*1500;
   double credit=maxBurstBytes;
   // Bitrate describes encoded video. Budget framing overhead separately.
-  const double bytesPerSecond=static_cast<double>(options_.bitrate)*1.2/8.0;
   try {
     while(running_) {
       std::optional<TxScheduler::Packet> packet;
       {
         std::unique_lock lock(sendMutex_);
         const auto now=Clock::now();
+        const double bytesPerSecond=static_cast<double>(std::max(1000000U,videoBudget_.load()))*1.2/8.0;
         credit=std::min(maxBurstBytes, credit+std::chrono::duration<double>(now-creditAt).count()*bytesPerSecond);
         creditAt=now;
         const auto videoBytes=tx_.nextVideoBytes();
@@ -990,7 +1018,7 @@ void Peer::loop() {
         if(command=="audio-muted\t1" || command=="audio-muted\t0") setAudioMuted(command.back()=='1');
       }
       const auto now=Clock::now();
-      if(!options_.host && ready_ && now-lastControlProbe>=std::chrono::seconds(1)) {
+      if(!options_.host && ready_ && now-lastControlProbe>=std::chrono::milliseconds(250)) {
         const auto id=controlProbe_.sent(now); Bytes probe{'S','R','Q','1'};
         for(int i=7;i>=0;--i) probe.push_back(static_cast<std::uint8_t>(id>>(i*8)));
         transmit(snv2::PacketType::Keepalive,probe); lastControlProbe=now;
@@ -1009,6 +1037,10 @@ void Peer::loop() {
         lastInputLog=now;
       }
       if(now-lastHello>std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 500)) {
+        if(!options_.host && receiveVideoLimit_) {
+          Bytes limit{'S','V','B','1'};u32(limit,receiveVideoLimit_.load());
+          transmit(snv2::PacketType::Keepalive,limit);
+        }
         if(options_.groupVoice) {
           transmit(snv2::PacketType::Keepalive,Bytes{'S','V','C','1',static_cast<std::uint8_t>(voiceJoined_.load()),static_cast<std::uint8_t>(voiceMic_.load()),static_cast<std::uint8_t>(voiceDeaf_.load())});
           if(options_.host && options_.voiceSlot>0 && options_.voiceSlot<voice::maxSpeakers)

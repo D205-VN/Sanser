@@ -1,5 +1,6 @@
 #include <jni.h>
 #include "client.h"
+#include "p2p.h"
 #include "android_crypto.h"
 #include <memory>
 #include <mutex>
@@ -54,11 +55,11 @@ extern "C" int sanser_android_aes(const uint8_t key[32],const uint8_t iv[16],con
   int n=-1;if(!e.e->ExceptionCheck() && result){auto length=e.e->GetArrayLength(result);if(static_cast<size_t>(length)<=capacity){n=length;e.e->GetByteArrayRegion(result,0,length,reinterpret_cast<jbyte*>(out));}}
   if(e.e->ExceptionCheck())e.e->ExceptionClear();e.e->PopLocalFrame(nullptr);return n;
 }
-extern "C" JNIEXPORT jlong JNICALL Java_com_sanser_mobile_NativeClient_create(JNIEnv *e,jobject owner,jstring endpoint,jstring token,jboolean control,jboolean sharing,jstring viewer){
+extern "C" JNIEXPORT jlong JNICALL Java_com_sanser_mobile_NativeClient_create(JNIEnv *e,jobject owner,jstring endpoint,jint port,jstring token,jboolean control,jboolean sharing,jstring viewer){
   auto h=std::make_unique<Handle>();h->owner=e->NewGlobalRef(owner);auto cls=e->GetObjectClass(owner);
   h->video=e->GetMethodID(cls,"onVideo","([BIIZ)V");h->audio=e->GetMethodID(cls,"onAudio","([S)V");h->stopped=e->GetMethodID(cls,"onStopped","(I)V");
   const char *p=e->GetStringUTFChars(endpoint,nullptr),*t=e->GetStringUTFChars(token,nullptr),*v=e->GetStringUTFChars(viewer,nullptr);
-  h->client=sanser_mobile_create(p,0,t,control,sharing,v,{h.get(),video,audio,stopped});
+  h->client=sanser_mobile_create(p,static_cast<uint16_t>(port),t,control,sharing,v,{h.get(),video,audio,stopped});
   e->ReleaseStringUTFChars(endpoint,p);e->ReleaseStringUTFChars(token,t);e->ReleaseStringUTFChars(viewer,v);e->DeleteLocalRef(cls);
   if(!h->client || !sanser_mobile_start(h->client))return 0;
   return reinterpret_cast<jlong>(h.release());
@@ -68,3 +69,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_input(JNIE
 extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_mute(JNIEnv*,jobject,jlong handle,jboolean value){if(auto *h=reinterpret_cast<Handle*>(handle))sanser_mobile_mute(h->client,value);}
 extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_keyframe(JNIEnv*,jobject,jlong handle){if(auto *h=reinterpret_cast<Handle*>(handle))sanser_mobile_keyframe(h->client);}
 extern "C" JNIEXPORT jdouble JNICALL Java_com_sanser_mobile_NativeClient_rtt(JNIEnv*,jobject,jlong handle){auto *h=reinterpret_cast<Handle*>(handle);return h?sanser_mobile_rtt(h->client):-1;}
+
+extern "C" JNIEXPORT jstring JNICALL Java_com_sanser_mobile_MobileP2p_request(JNIEnv *env,jobject,jstring request){
+  if(!request)return nullptr;
+  const char *text=env->GetStringUTFChars(request,nullptr);if(!text)return nullptr;
+  char *reply=sanser_mobile_p2p_request(text);env->ReleaseStringUTFChars(request,text);
+  if(!reply)return nullptr;
+  auto result=env->NewStringUTF(reply);sanser_mobile_p2p_free(reply);return result;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_videoLimit(JNIEnv*,jobject,jlong handle,jint bitrate,jdouble baseline){if(auto *h=reinterpret_cast<Handle*>(handle))sanser_mobile_video_limit(h->client,static_cast<uint32_t>(bitrate),baseline);}

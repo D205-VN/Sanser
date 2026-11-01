@@ -1,0 +1,19 @@
+[package]
+name = "sanser-mobile-p2p"
+description = "Mobile C ABI for the shared authenticated Sanser P2P engine"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+sanser-p2p = { path = "../sanser-p2p" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["net"] }
+uuid.workspace = true
+zeroize.workspace = true

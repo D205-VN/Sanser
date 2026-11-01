@@ -2,9 +2,9 @@ name: Mobile Flutter
 on:
   push:
     branches: [Version-2.0.0, main]
-    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/*mobile-ios*', '.github/workflows/mobile.yml']
+    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/*mobile-ios*', 'scripts/build-mobile-p2p.sh', 'crates/sanser-mobile-p2p/**', 'crates/sanser-p2p/**', 'Cargo.lock', '.github/workflows/mobile.yml']
   pull_request:
-    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/*mobile-ios*', '.github/workflows/mobile.yml']
+    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/*mobile-ios*', 'scripts/build-mobile-p2p.sh', 'crates/sanser-mobile-p2p/**', 'crates/sanser-p2p/**', 'Cargo.lock', '.github/workflows/mobile.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -21,6 +21,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-linux-android
+      - name: Check mobile Direct interoperability and cancellation
+        run: |
+          cargo test --locked -p sanser-mobile-p2p
+          cargo clippy --locked -p sanser-mobile-p2p --all-targets -- -D warnings
       - name: Install pinned Flutter
         run: |
           git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
@@ -51,6 +58,9 @@ jobs:
         sdk: [iphonesimulator, iphoneos]
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
       - name: Install pinned Flutter
         run: |
           git clone --depth 1 --branch 3.47.7 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
@@ -60,6 +70,9 @@ jobs:
         working-directory: apps/mobile
       - if: matrix.sdk == 'iphonesimulator'
         run: ./scripts/build-mobile-ios.sh iphonesimulator
+      - name: Verify newest-image presentation with real H.264
+        if: matrix.sdk == 'iphoneos'
+        run: bash scripts/test-mobile-video-ios.sh
       - name: Inspect native archive
         if: matrix.sdk == 'iphonesimulator'
         run: |
@@ -86,12 +99,12 @@ jobs:
         if: matrix.sdk == 'iphonesimulator'
         run: |
           mkdir -p artifacts
-          ditto -c -k --keepParent apps/mobile/build/ios/iphonesimulator/Runner.app artifacts/Sanser-iOS-2.3.1-simulator-unsigned.zip
+          ditto -c -k --keepParent apps/mobile/build/ios/iphonesimulator/Runner.app artifacts/Sanser-iOS-2.3.2-simulator-unsigned.zip
       - uses: actions/upload-artifact@v4
         if: matrix.sdk == 'iphonesimulator'
         with:
           name: sanser-mobile-ios-simulator-unsigned
-          path: artifacts/Sanser-iOS-2.3.1-simulator-unsigned.zip
+          path: artifacts/Sanser-iOS-2.3.2-simulator-unsigned.zip
       - name: Build release iPhone IPA for recipient re-signing
         if: matrix.sdk == 'iphoneos'
         env:
@@ -102,6 +115,6 @@ jobs:
         with:
           name: sanser-mobile-ios-device-unsigned
           path: |
-            artifacts/mobile-2.3.1/*.ipa
-            artifacts/mobile-2.3.1/*.ipa.sha256
-            artifacts/mobile-2.3.1/*.ipa.json
+            artifacts/mobile-2.3.2/*.ipa
+            artifacts/mobile-2.3.2/*.ipa.sha256
+            artifacts/mobile-2.3.2/*.ipa.json

@@ -9,10 +9,10 @@ if [[ ! -d "$DEVELOPER_DIR/Platforms/iPhoneOS.platform" ]]; then
   echo 'Set DEVELOPER_DIR to the full Xcode.app/Contents/Developer directory.' >&2
   exit 2
 fi
-output_dir="${1:-$repo_dir/artifacts/mobile-2.3.1}"
+output_dir="${1:-$repo_dir/artifacts/mobile-2.3.2}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
-ipa="$output_dir/Sanser-iOS-2.3.1-device-unsigned.ipa"
+ipa="$output_dir/Sanser-iOS-2.3.2-device-unsigned.ipa"
 if [[ -e "$ipa" ]]; then echo "Already exists: $ipa" >&2; exit 2; fi
 bash "$repo_dir/scripts/build-mobile-ios.sh" iphoneos
 
@@ -30,6 +30,7 @@ mkdir -p "$work_dir/apps/mobile/ios/Native/iphoneos"
 cp "$repo_dir/apps/mobile/ios/Native/iphoneos/libSanserMobile.a" \
   "$work_dir/apps/mobile/ios/Native/iphoneos/"
 cp "$repo_dir/native/mobile/client.h" "$work_dir/native/mobile/"
+cp "$repo_dir/native/mobile/p2p.h" "$work_dir/native/mobile/"
 
 # hooks_runner intentionally strips DEVELOPER_DIR from its environment, but keeps
 # PATH. A scoped wrapper selects the same Xcode without changing xcode-select.
