@@ -24,6 +24,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-linux-android
+          components: clippy,rustfmt
       - name: Check mobile Direct interoperability and cancellation
         run: |
           cargo test --locked -p sanser-mobile-p2p
