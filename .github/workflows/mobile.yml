@@ -2,9 +2,9 @@ name: Mobile Flutter
 on:
   push:
     branches: [Version-2.0.0, main]
-    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/build-mobile-ios.sh', '.github/workflows/mobile.yml']
+    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/*mobile-ios*', '.github/workflows/mobile.yml']
   pull_request:
-    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/build-mobile-ios.sh', '.github/workflows/mobile.yml']
+    paths: ['apps/mobile/**', 'native/mobile/**', 'native/desktop/**', 'native/protocol/**', 'native/common/**', 'scripts/*mobile-ios*', '.github/workflows/mobile.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -45,6 +45,10 @@ jobs:
   ios:
     runs-on: macos-15
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [iphonesimulator, iphoneos]
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Flutter
@@ -54,12 +58,15 @@ jobs:
           echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
       - run: flutter pub get --enforce-lockfile
         working-directory: apps/mobile
-      - run: ./scripts/build-mobile-ios.sh iphonesimulator
+      - if: matrix.sdk == 'iphonesimulator'
+        run: ./scripts/build-mobile-ios.sh iphonesimulator
       - name: Inspect native archive
+        if: matrix.sdk == 'iphonesimulator'
         run: |
           file apps/mobile/ios/Native/iphonesimulator/libSanserMobile.a
           nm -gU apps/mobile/ios/Native/iphonesimulator/libSanserMobile.a | grep sanser_mobile_
       - name: Build iOS Simulator
+        if: matrix.sdk == 'iphonesimulator'
         working-directory: apps/mobile
         run: |
           if ! flutter build ios --simulator --debug --no-codesign -v > "$RUNNER_TEMP/sanser-mobile-ios.log" 2>&1; then
@@ -69,17 +76,32 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: ios-mobile-build-diagnostics
+          name: ios-mobile-build-diagnostics-${{ matrix.sdk }}
           path: |
             ${{ runner.temp }}/sanser-mobile-ios.log
             apps/mobile/ios/Native/iphonesimulator/libSanserMobile.a
             apps/mobile/ios/Flutter/*.xcconfig
             apps/mobile/ios/Runner.xcodeproj/project.pbxproj
       - name: Package unsigned Simulator app
+        if: matrix.sdk == 'iphonesimulator'
         run: |
           mkdir -p artifacts
           ditto -c -k --keepParent apps/mobile/build/ios/iphonesimulator/Runner.app artifacts/Sanser-iOS-2.3.1-simulator-unsigned.zip
       - uses: actions/upload-artifact@v4
+        if: matrix.sdk == 'iphonesimulator'
         with:
           name: sanser-mobile-ios-simulator-unsigned
           path: artifacts/Sanser-iOS-2.3.1-simulator-unsigned.zip
+      - name: Build release iPhone IPA for recipient re-signing
+        if: matrix.sdk == 'iphoneos'
+        env:
+          FLUTTER_BIN: ${{ runner.temp }}/flutter/bin/flutter
+        run: bash scripts/build-mobile-ios-device.sh
+      - uses: actions/upload-artifact@v4
+        if: matrix.sdk == 'iphoneos'
+        with:
+          name: sanser-mobile-ios-device-unsigned
+          path: |
+            artifacts/mobile-2.3.1/*.ipa
+            artifacts/mobile-2.3.1/*.ipa.sha256
+            artifacts/mobile-2.3.1/*.ipa.json

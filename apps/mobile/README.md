@@ -54,13 +54,30 @@ cd apps/mobile
 flutter build ios --simulator --debug --no-codesign
 ```
 
-A physical iPhone build uses `./scripts/build-mobile-ios.sh iphoneos` and an Apple
-signing team configured locally. No personal team is committed. Without a paid
-Apple Developer membership, TestFlight/App Store distribution is unavailable.
+A physical iPhone release for recipient re-signing can be built without a team:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+FLUTTER_BIN=/absolute/path/to/flutter/bin/flutter \
+bash scripts/build-mobile-ios-device.sh
+```
+
+Run this from the repository root. The script stages iOS sources in a temporary
+directory (avoiding cloud-folder Finder metadata), builds release/AOT, and writes
+`artifacts/mobile-2.3.1/Sanser-iOS-2.3.1-device-unsigned.ipa`, a SHA-256 checksum and
+a validation report. It rejects Simulator binaries and personal provisioning
+profiles. No team, certificate or Apple password is needed to produce this file.
+The IPA **must be re-signed by its recipient** before installing on a real iPhone.
+It is not a TestFlight/App Store submission or a universal tap-to-install IPA.
+
+See [iPhone installation and distribution](../../docs/ios-distribution.md) for
+AltStore/SideStore, free-account limits, Xcode deployment and the official
+TestFlight/App Store route. No personal team is committed.
 
 The `Mobile Flutter` GitHub workflow checks Dart, builds Android, runs independent
-SNR1 crypto fixtures and builds an unsigned iOS Simulator app. Simulator artifacts
-are not installable iPhone IPA files.
+SNR1 crypto fixtures, builds an unsigned iOS Simulator app and separately builds
+a release iPhone IPA for recipient re-signing. Simulator artifacts are not
+installable iPhone IPA files.
 
 ## Native checks
 
