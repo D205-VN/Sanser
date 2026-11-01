@@ -3,9 +3,14 @@ import UIKit
 
 final class NativeMobileSession {
     private let lock=NSLock()
+    private let videoLock=NSLock()
     private var client:OpaquePointer?
     private let initiallyMuted:Bool
-    var video:((Data,Int,Int,Bool)->Void)?
+    private var videoCallback:((Data,Int,Int,Bool)->Void)?
+    var video:((Data,Int,Int,Bool)->Void)?{
+        get{videoLock.lock();defer{videoLock.unlock()};return videoCallback}
+        set{videoLock.lock();videoCallback=newValue;videoLock.unlock()}
+    }
     var audio:(([Int16])->Void)?
     var stopped:((UInt32)->Void)?
     init(endpoint:String,configuration:[String:Any]) throws {
@@ -56,10 +61,14 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
     func onListen(withArguments arguments:Any?,eventSink events:@escaping FlutterEventSink)->FlutterError?{sink=events;return nil}
     func onCancel(withArguments arguments:Any?)->FlutterError?{sink=nil;return nil}
     func create(withFrame frame:CGRect,viewIdentifier viewId:Int64,arguments args:Any?)->FlutterPlatformView{
+        video?.reset()
         let native=MobileVideoView(frame:frame);video=native
         native.input={[weak self] x,y,down in self?.session?.input(kind:0,x:x,y:y);if let down=down{self?.session?.input(kind:1,x:x,y:y,down:down)}}
         native.keyframe={[weak self] in self?.session?.keyframe()}
         native.firstFrame={[weak self] in guard let self=self else{return};self.rendered=true;self.timeout?.invalidate();self.emit("frame")}
+        // Flutter may create/replace the platform view after media has started.
+        // Attach it atomically and ask for a fresh reference chain.
+        session?.video=native.receiver();session?.keyframe()
         return VideoPlatform(native)
     }
     func createArgsCodec()->FlutterMessageCodec & NSObjectProtocol {FlutterStandardMessageCodec.sharedInstance()}
