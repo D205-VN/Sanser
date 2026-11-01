@@ -1012,12 +1012,12 @@ mod tests {
     fn sharing_and_transport_health_retain_only_numeric_failure_evidence() {
         let rate=parse_sample(b"SNV2_RATE_CONTROL rttMs=199 baselineMs=10 targetBps=1000000 token=123 endpoint=private").unwrap();
         assert_eq!(rate.values["baselineMs"], 10.0);
-        assert_eq!(rate.values["targetBps"], 1000000.0);
+        assert_eq!(rate.values["targetBps"], 1_000_000.0);
         assert!(!rate.values.contains_key("token"));
         assert!(!rate.values.contains_key("endpoint"));
         let paced=parse_sample(b"SNV2_TRANSPORT_HEALTH repairUnsentIgnored=96 videoBudgetBps=2000000 peerVideoLimitBps=6000000 frameContent=123").unwrap();
         assert_eq!(paced.values["repairUnsentIgnored"], 96.0);
-        assert_eq!(paced.values["videoBudgetBps"], 2000000.0);
+        assert_eq!(paced.values["videoBudgetBps"], 2_000_000.0);
         assert!(!paced.values.contains_key("frameContent"));
         let io=parse_sample(b"SNUDP_IO_HEALTH sendTransientErrors=3 receiveTransientErrors=2 socketError=10055 endpoint=private token=123").unwrap();
         assert_eq!(io.values.len(), 2);

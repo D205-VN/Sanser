@@ -34,3 +34,25 @@ repair resumes the reference chain. The original lossless reproduction queued
 from kernel/receiver scheduling is allowed by the regression; it must never
 turn into a block of premature repairs. Real phone/WAN smoothness still needs
 measurement; these results do not claim the user's reported lag is fully fixed.
+
+## Alternating RTT bursts
+
+The user subsequently described 14/17/21 ms samples interspersed with 88/100 ms
+spikes, with both picture and audio stuttering. Fresh local Direct host reports
+still showed substantial repairs and sender queue drops after the first host
+preview. They do not contain receiver audio-underflow counts, so they cannot
+establish whether every audible glitch has the same cause.
+
+`DelayRatePolicy` previously reset its elevated counter on every healthy sample.
+The deterministic sequence 14, 88, 17, 100 ms at 250 ms intervals therefore never
+reduced bitrate. The new regression fails on the previous policy. The policy now
+retains elevated samples for one second: two recent peaks can trigger backoff
+even if the queue briefly drained between them. A lone spike remains ignored;
+old peaks expire, cuts retain a 500 ms cooldown, and an elevated sample extends
+the three-second recovery hold. FPS is not changed and the displayed RTT is not
+artificially smoothed.
+
+The real authenticated UDP rate-control fixture also alternates immediate and
+100 ms delayed pongs, verifies the encoder/wire budget falls, and checks video
+and reliable input still arrive. This validates feedback behavior, not physical
+Wi-Fi/4G stability or end-to-end display/audio latency.
