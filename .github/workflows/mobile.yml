@@ -46,6 +46,15 @@ jobs:
         working-directory: apps/mobile
       - run: ./gradlew :app:testDebugUnitTest
         working-directory: apps/mobile/android
+      - name: Build unsigned Release APK for local signing
+        working-directory: apps/mobile
+        run: |
+          test ! -e android/key.properties
+          flutter build apk --release --target-platform android-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sanser-mobile-android-release-unsigned
+          path: apps/mobile/build/app/outputs/apk/release/*.apk
       - uses: actions/upload-artifact@v4
         with:
           name: sanser-mobile-android-preview-debug
