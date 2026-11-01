@@ -81,6 +81,7 @@ private:
 class Reassembler {
 public:
   explicit Reassembler(std::uint32_t bitrate=20000000,bool ultra=false):bitrate_(bitrate),ultra_(ultra) {}
+  void wireBitrate(std::uint32_t bitrate) { bitrate_=bitrate; }
   std::optional<Frame> push(const snv2::Header& header, const Bytes& payload);
   // Drain dependent pictures in order after a delayed reference is repaired.
   std::optional<Frame> take();
@@ -170,13 +171,14 @@ private:
   void logHealth();
   void transmit(snv2::PacketType type, const Bytes& payload, std::uint32_t stream = 0,
                 std::uint64_t frame = 0, std::uint16_t flags = 0, bool reliable = false,
-                Clock::time_point deadline = {});
+                Clock::time_point deadline = {},std::shared_ptr<std::atomic<std::uint32_t>> originalSent = {});
   void datagram(const Bytes& bytes);
   void process(const Bytes& bytes);
   void deliverVideo(std::optional<Frame> frame = {});
   void queueVideoRepair(const Bytes& bytes);
   void serviceVideoRepairs();
-  void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline = {});
+  void announceVideoRate();
+  void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline = {},std::shared_ptr<std::atomic<std::uint32_t>> originalSent = {});
   Options options_;
   DatagramIo io_;
   std::atomic<std::uint64_t> sendTransientErrors_{0},receiveTransientErrors_{0};
@@ -215,15 +217,16 @@ private:
   mutable std::mutex feedbackMutex_;
   VideoFeedback feedback_{};
   std::atomic<std::uint64_t> videoQueueDrops_{0};
-  std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0};
+  std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0},repairUnsentIgnored_{0};
   std::atomic<std::uint64_t> offeredBytes_{0};
   std::atomic<std::uint32_t> videoBudget_{0},receiveVideoLimit_{0};
   std::atomic<double> receiveBaselineMs_{0};
-  std::uint32_t peerVideoLimit_=0;
+  std::atomic<std::uint32_t> peerVideoLimit_{0};
+  std::uint64_t lastVideoRateSequence_=0;
   std::uint64_t lastDelayFeedbackSequence_=0;
   double minimumControlRtt_=0;
   DelayRatePolicy delayRate_;
-  std::uint32_t videoCeiling() const { return peerVideoLimit_ ? std::min(options_.bitrate,peerVideoLimit_):options_.bitrate; }
+  std::uint32_t videoCeiling() const { const auto limit=peerVideoLimit_.load();return limit ? std::min(options_.bitrate,limit):options_.bitrate; }
   std::uint64_t receivedVideoDatagrams_=0, lastReportedBytes_=0, lastReportedLoss_=0, lastFeedbackDrops_=0;
   unsigned congestionWindows_=0, recoveryWindows_=0, busyWindows_=0;
   bool peerVideoProgress_=false;
@@ -253,7 +256,7 @@ private:
   std::mutex keyframeRequestMutex_;
   std::map<std::uint64_t, Input> receivedInputs_;
   Reassembler reassembler_;
-  struct CachedVideo { std::shared_ptr<const PreparedFrame> frame; Clock::time_point sent; std::deque<std::uint16_t> repair; Clock::time_point lastRequest{}; };
+  struct CachedVideo { std::shared_ptr<const PreparedFrame> frame; Clock::time_point sent; std::deque<std::uint16_t> repair; Clock::time_point lastRequest{}; std::shared_ptr<std::atomic<std::uint32_t>> originalSent; };
   std::map<std::uint64_t,CachedVideo> videoCache_;
   std::size_t videoCacheBytes_=0;
   Clock::time_point lastReceived_ = Clock::now(), lastKeyframe_{};

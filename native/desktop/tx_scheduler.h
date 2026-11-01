@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <deque>
 #include <optional>
+#include <atomic>
+#include <memory>
 #include <vector>
 
 namespace sanser::desktop {
@@ -22,6 +24,8 @@ public:
     std::chrono::steady_clock::time_point deadline{};
     std::uint64_t inputSequence = 0;
     bool input = false;
+    std::shared_ptr<std::atomic<std::uint32_t>> originalSent;
+    std::uint32_t originalOrdinal=0;
   };
   bool push(Lane lane, Packet packet) {
     packet.repair=lane==Repair;

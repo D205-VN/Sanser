@@ -410,7 +410,7 @@ void Peer::datagram(const Bytes& b) {
   }
   throw std::runtime_error("UDP send failed, socket error "+std::to_string(result.error));
 }
-void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable,Clock::time_point deadline) {
+void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable,Clock::time_point deadline,std::shared_ptr<std::atomic<std::uint32_t>> originalSent) {
   const auto queuedAt=Clock::now(); // Include sender mutex/encryption time in application input latency.
   std::lock_guard lock(sendMutex_);
   if(!options_.host && inputSuspended_ && (type==snv2::PacketType::Keyboard || type==snv2::PacketType::MouseMove)) return;
@@ -425,6 +425,9 @@ void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream
   TxScheduler::Packet queued{b,queuedAt,frame,false,false,deadline};
   queued.inputSequence=reliable ? h.sequence : 0;
   queued.input=reliable || type==snv2::PacketType::MouseMove;
+  if(originalSent && type==snv2::PacketType::Video && !(flags&snv2::kFlagRetransmitted) && body.size()>=8) {
+    queued.originalSent=std::move(originalSent);queued.originalOrdinal=r16(body.data())+1;
+  }
   if (type == snv2::PacketType::MouseMove) tx_.latestInput(std::move(queued));
   else if (!tx_.push(lane, std::move(queued))) {
     if (lane == TxScheduler::Video) { tx_.clearRealtimeVideo(); outgoingNeedsKeyframe_ = true; ++videoQueueDrops_; }
@@ -455,7 +458,8 @@ void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
   const auto id=++frame_;
   offeredBytes_+=bytes.size();
   videoCacheBytes_+=bytes.size();
-  videoCache_.emplace(id,CachedVideo{std::move(prepared),Clock::now(),{}, {}});
+  const auto originalSent=std::make_shared<std::atomic<std::uint32_t>>(0);
+  videoCache_.emplace(id,CachedVideo{std::move(prepared),Clock::now(),{}, {},originalSent});
   while(videoCache_.size()>64 || videoCacheBytes_>8*1024*1024) {
     videoCacheBytes_-=videoCache_.begin()->second.frame->payload.size(); videoCache_.erase(videoCache_.begin());
   }
@@ -466,7 +470,7 @@ void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
     deadline=Clock::now()+videoSendBudget(bytes.size()+tx_.queuedVideoBytes(),peerVideoLimit_ ? videoBudget_.load():options_.bitrate,options_.ultraLowLatency);
   }
   for (std::size_t i=0; i<count && running_; ++i) {
-    sendVideoFragment(frame,id,i,false,deadline);
+    sendVideoFragment(frame,id,i,false,deadline,originalSent);
     if (outgoingNeedsKeyframe_) { if (onKeyframe) onKeyframe(); break; }
   }
 }
@@ -484,12 +488,12 @@ Peer::VideoFeedback Peer::videoFeedback() const {
   std::lock_guard lock(feedbackMutex_);
   auto result=feedback_; result.sentFrame=frame_.load(); return result;
 }
-void Peer::sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline) {
+void Peer::sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline,std::shared_ptr<std::atomic<std::uint32_t>> originalSent) {
   const auto count=(frame.payload.size()+chunkSize-1)/chunkSize;
   Bytes fragment; u16(fragment,static_cast<std::uint16_t>(index)); u16(fragment,static_cast<std::uint16_t>(count)); u32(fragment,static_cast<std::uint32_t>(frame.payload.size()));
   const auto offset=index*chunkSize;
   fragment.insert(fragment.end(),frame.payload.begin()+static_cast<std::ptrdiff_t>(offset),frame.payload.begin()+static_cast<std::ptrdiff_t>(std::min(offset+chunkSize,frame.payload.size())));
-  transmit(snv2::PacketType::Video,fragment,1,id,static_cast<std::uint16_t>((frame.keyframe ? snv2::kFlagKeyFrame : 0) | (repair ? snv2::kFlagRetransmitted : 0)),false,deadline);
+  transmit(snv2::PacketType::Video,fragment,1,id,static_cast<std::uint16_t>((frame.keyframe ? snv2::kFlagKeyFrame : 0) | (repair ? snv2::kFlagRetransmitted : 0)),false,deadline,std::move(originalSent));
 }
 void Peer::queueVideoRepair(const Bytes& bytes) {
   if(bytes.size()<16 || std::memcmp(bytes.data(),"SVN1",4)!=0) return;
@@ -512,7 +516,13 @@ void Peer::queueVideoRepair(const Bytes& bytes) {
       }
       if(cached.repair.size()+requested.size()>64) return;
       cached.lastRequest=Clock::now();
-      for(auto index:requested) if(std::find(cached.repair.begin(),cached.repair.end(),index)==cached.repair.end()) cached.repair.push_back(index);
+      const auto sent=cached.originalSent->load(std::memory_order_acquire);
+      for(auto index:requested) {
+        // A receiver may still use the pre-adaptation serialization estimate.
+        // Never let an early NACK duplicate data waiting in our own pacer.
+        if(index>=sent){++repairUnsentIgnored_;continue;}
+        if(std::find(cached.repair.begin(),cached.repair.end(),index)==cached.repair.end())cached.repair.push_back(index);
+      }
     }
   }
   if(missing) { ++repairCacheMisses_; if(onKeyframe) onKeyframe(); }
@@ -534,6 +544,11 @@ void Peer::serviceVideoRepairs() {
     }
     ++it;
   }
+}
+void Peer::announceVideoRate() {
+  if(!options_.host || !peerVideoLimit_)return;
+  Bytes rate{'S','V','R','1'};u32(rate,std::min(videoBudget_.load(),videoCeiling()));
+  transmit(snv2::PacketType::Keepalive,rate);
 }
 
 void Peer::input(const Input& input) {
@@ -624,7 +639,9 @@ void Peer::process(const Bytes& bytes) {
     if(onAudioReset) onAudioReset();
     { std::lock_guard lock(audioMutex_); audioSequence_=0; if(audioEncoder_) audioEncoder_->reset(); }
     controlProbe_.reset(); for(auto& window:replay_) window=ReplayWindow{};
-    reassembler_=Reassembler{options_.bitrate,options_.ultraLowLatency}; lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
+    const auto receiveLimit=receiveVideoLimit_.load();
+    reassembler_=Reassembler{receiveLimit ? std::min({options_.bitrate,receiveLimit,4000000U}):options_.bitrate,options_.ultraLowLatency};
+    lastVideoRateSequence_=0;lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
     controlAppRtt_=-1; minimumControlRtt_=0; inputRttUs_=inputRttSamples_=0;
     if(options_.host) {
       { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
@@ -689,6 +706,15 @@ void Peer::process(const Bytes& bytes) {
       peerVideoLimit_=limit;
       // Start below the ceiling and probe upward using real delivery feedback.
       videoBudget_=std::min({videoBudget_.load(),videoCeiling(),4000000U});
+      announceVideoRate();
+    }
+    return;
+  }
+  if(!options_.host && receiveVideoLimit_ && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive &&
+     b.size()==8 && std::memcmp(b.data(),"SVR1",4)==0) {
+    const auto rate=r32(b.data()+4);
+    if(rate>=1000000 && rate<=receiveVideoLimit_ && h.sequence>lastVideoRateSequence_) {
+      lastVideoRateSequence_=h.sequence;reassembler_.wireBitrate(rate);
     }
     return;
   }
@@ -699,7 +725,7 @@ void Peer::process(const Bytes& bytes) {
     const auto now=Clock::now();
     const double rtt=r32(b.data()+4)/1000.0,baseline=r32(b.data()+8)/1000.0;
     if(const auto target=delayRate_.observe(rtt,baseline,videoBudget_.load(),videoCeiling(),now)) {
-      videoBudget_=*target;recoveryWindows_=0;
+      videoBudget_=*target;recoveryWindows_=0;announceVideoRate();
       if(std::getenv("SANSER_TELEMETRY")) { std::ostringstream line;line<<"SNV2_RATE_CONTROL rttMs="<<rtt<<" baselineMs="<<baseline<<" targetBps="<<*target;writeTelemetry(line); }
     }
     return;
@@ -819,7 +845,7 @@ void Peer::process(const Bytes& bytes) {
         recoveryWindows_=0;
       }
     }
-    return;
+    announceVideoRate();return;
   }
   // Optional host input timings. Older clients read its large prefix as an
   // impossible ACK and ignore it; the existing 8/16-byte ACK wire format stays.
@@ -965,6 +991,7 @@ void Peer::sendLoop() {
         }
       }
       datagram(packet->bytes);
+      if(packet->originalSent)packet->originalSent->store(packet->originalOrdinal,std::memory_order_release);
       if (packet->frame) {
         credit-=static_cast<double>(packet->bytes.size());
       }
@@ -997,6 +1024,7 @@ void Peer::logHealth() {
     <<" videoDatagrams="<<videoDatagrams_<<" completed="<<completedFrames_
     <<" keyframeWaitDropped="<<keyframeWaitDropped_<<" nackSent="<<nackSent_
     <<" repaired="<<repairedDatagrams_.load()<<" repairCacheMisses="<<repairCacheMisses_.load()
+    <<" repairUnsentIgnored="<<repairUnsentIgnored_.load()<<" videoBudgetBps="<<videoBudget_.load()<<" peerVideoLimitBps="<<peerVideoLimit_.load()
     <<" sendQueueDrops="<<videoQueueDrops_.load()<<" pending="<<pending<<" stopReason="<<stopReason_.load()
     <<" sendTransientErrors="<<sendTransientErrors_.load()<<" receiveTransientErrors="<<receiveTransientErrors_.load(); writeTelemetry(line);
   if(inputRttSamples_ || work.samples || sendSamples) {
@@ -1042,6 +1070,7 @@ void Peer::loop() {
         lastInputLog=now;
       }
       if(now-lastHello>std::chrono::milliseconds(options_.ultraLowLatency ? 100 : 500)) {
+        announceVideoRate();
         if(!options_.host && receiveVideoLimit_) {
           Bytes limit{'S','V','B','1'};u32(limit,receiveVideoLimit_.load());
           transmit(snv2::PacketType::Keepalive,limit);
