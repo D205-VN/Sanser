@@ -125,7 +125,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.2 • Flutter',
+                          'Sanser 2.3.3 • Flutter',
                           style: TextStyle(color: Colors.white54),
                         ),
                         const SizedBox(height: 24),

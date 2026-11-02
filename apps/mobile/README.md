@@ -1,4 +1,4 @@
-# Sanser Mobile — Flutter 2.3.2 preview
+# Sanser Mobile — Flutter 2.3.3 preview
 
 Flutter/Dart provides the Android and iOS interface. A native C++ adapter reuses
 Sanser's authenticated SNV2 transport, input delivery, frame reassembly and Opus
@@ -85,7 +85,7 @@ bash scripts/build-mobile-ios-device.sh
 
 Run this from the repository root. The script stages iOS sources in a temporary
 directory (avoiding cloud-folder Finder metadata), builds release/AOT, and writes
-`artifacts/mobile-2.3.2/Sanser-iOS-2.3.2-device-unsigned.ipa`, a SHA-256 checksum and
+`artifacts/mobile-2.3.3/Sanser-iOS-2.3.3-device-unsigned.ipa`, a SHA-256 checksum and
 a validation report. It rejects Simulator binaries and personal provisioning
 profiles. No team, certificate or Apple password is needed to produce this file.
 The IPA **must be re-signed by its recipient** before installing on a real iPhone.

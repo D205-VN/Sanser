@@ -9,10 +9,10 @@ if [[ ! -d "$DEVELOPER_DIR/Platforms/iPhoneOS.platform" ]]; then
   echo 'Set DEVELOPER_DIR to the full Xcode.app/Contents/Developer directory.' >&2
   exit 2
 fi
-output_dir="${1:-$repo_dir/artifacts/mobile-2.3.2}"
+output_dir="${1:-$repo_dir/artifacts/mobile-2.3.3}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
-ipa="$output_dir/Sanser-iOS-2.3.2-device-unsigned.ipa"
+ipa="$output_dir/Sanser-iOS-2.3.3-device-unsigned.ipa"
 if [[ -e "$ipa" ]]; then echo "Already exists: $ipa" >&2; exit 2; fi
 bash "$repo_dir/scripts/build-mobile-ios.sh" iphoneos
 
