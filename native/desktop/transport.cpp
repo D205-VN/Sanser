@@ -1,6 +1,7 @@
 #include "udp_io_policy.h"
 #include "telemetry.h"
 #include "transport.h"
+#include "media_thread.h"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -951,6 +952,7 @@ void Peer::acknowledgeInput() {
   transmit(snv2::PacketType::NetworkFeedback,ack);
 }
 void Peer::sendLoop() {
+  (void)sanser::prioritizeMediaThread();
   auto creditAt=Clock::now();
   double credit=8*1500;
   // Bitrate describes encoded video. Budget framing overhead separately.
@@ -1053,6 +1055,7 @@ void Peer::logHealth() {
   }
 }
 void Peer::loop() {
+  (void)sanser::prioritizeMediaThread();
   auto lastHello=Clock::time_point{};
   auto lastControlProbe=Clock::time_point{};
   auto lastInputLog=Clock::now(); std::uint64_t lastInputCount=0;

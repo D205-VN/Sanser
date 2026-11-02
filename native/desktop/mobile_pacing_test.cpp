@@ -65,6 +65,7 @@ int main(){try{
   const auto started=waitFor([&]{return pictures>=1 && keys==2;});
   if(!started)std::cerr<<"startup pictures="<<pictures<<" keys="<<keys<<" queueDrops="<<host->videoQueueDrops()<<" repairs="<<host->repairedDatagrams()<<" delayedPackets="<<delayedPackets<<" actualSenderDelayMs="<<senderDelayUs.load()/1000.0<<'\n';
   check(started,"paced IDR or priority input stalled");
+  std::cout<<"loaded sender: packets="<<delayedPackets<<" actualSenderDelayMs="<<senderDelayUs.load()/1000.0<<'\n';
   originalDelayMs=0;
   check(waitFor([&]{return host->acceptsCapture();}),"source must resume after the IDR drains");
   host->video({Bytes(2000,0x41),1920,1080,false});

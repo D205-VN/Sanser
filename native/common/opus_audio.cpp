@@ -1,4 +1,5 @@
 #include "opus_audio.h"
+#include "media_thread.h"
 #include <opus.h>
 #include <algorithm>
 #include <cmath>
@@ -107,6 +108,7 @@ void ReceiveWorker::reset(std::uint64_t generation) { std::lock_guard lock(mutex
 void ReceiveWorker::clear() { std::lock_guard lock(mutex_); jitter_.reset(); }
 Stats ReceiveWorker::stats() const { std::lock_guard lock(mutex_); return jitter_.stats(); }
 void ReceiveWorker::run() {
+  (void)sanser::prioritizeMediaThread();
   std::unique_lock lock(mutex_);
   while(!stopped_) {
     auto decoded=jitter_.poll();

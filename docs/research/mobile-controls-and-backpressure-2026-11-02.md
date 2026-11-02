@@ -36,6 +36,21 @@ agree. P-picture and
 legacy desktop limits remain unchanged. This extends an expiry deadline, **not**
 a mandatory presentation buffer; a complete picture is still delivered at once.
 
+A subsequent macOS CI run measured 48 injected 6 ms sleeps taking 1500 ms in
+total (about31 ms per datagram), despite the source's requested pacing. The
+native send/receive and Opus workers had no explicit QoS. They now request
+interactive QoS on Apple at thread entry; iOS session/audio queues also declare
+their purpose. This avoids inheriting utility/background scheduling from their
+creator. A worker test starts at background QoS, applies the media policy, and
+verifies the requested interactive class. Other platforms retain their current
+thread policy. Apple documents QoS as affecting scheduling and timer latency:
+https://developer.apple.com/library/archive/documentation/Performance/Conceptual/EnergyGuide-iOS/PrioritizeWorkWithQoS.html
+
+The CI measurement is direct evidence of a scheduling problem in the test
+environment, not proof that the user's phone has the identical cause. The
+loaded-sender regression prints actual wait time to compare subsequent runs;
+physical phone/audio tests remain required.
+
 ## Phone-specific controls
 
 - Direct touch: tap, drag, long-press right click; two fingers zoom/pan.

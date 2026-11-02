@@ -52,7 +52,7 @@ final class NativeMobileSession {
     deinit{sanser_mobile_destroy(client)}
 }
 final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlatformViewFactory {
-    private let work=DispatchQueue(label:"SanserSession")
+    private let work=DispatchQueue(label:"SanserSession",qos:.userInitiated)
     private var session:NativeMobileSession?,relay:MobileRelay?,audio:MobileAudio?
     private weak var video:MobileVideoView?
     private var sink:FlutterEventSink?,sessionID:String?,generation=0,rendered=false

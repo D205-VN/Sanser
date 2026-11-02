@@ -76,7 +76,7 @@ private final class MobilePCM {
     deinit{sanser_mobile_pcm_destroy(pointer)}
 }
 final class MobileAudio {
-    private let queue=DispatchQueue(label:"SanserAudio")
+    private let queue=DispatchQueue(label:"SanserAudio",qos:.userInteractive)
     private var engine:AVAudioEngine?,source:AVAudioSourceNode?,pcm:MobilePCM?
     private var closed=false
     private var observers=[NSObjectProtocol]()
