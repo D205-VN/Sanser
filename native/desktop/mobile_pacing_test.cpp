@@ -13,15 +13,17 @@
 using namespace sanser::desktop;
 namespace {
 std::atomic<bool> loseNextOriginal{false};
-std::atomic<unsigned> originalDelayMs{0};
+std::atomic<unsigned> originalStallMs{0},stallAtPacket{24},originalPackets{0};
 std::atomic<std::uint64_t> delayedPackets{0},senderDelayUs{0};
 DatagramIo::Result sendWithLoss(std::intptr_t socket,const std::uint8_t* data,std::size_t size){
   const auto packet=sanser::snv2::decodePacket({data,size});
   if(packet && packet.header.packetType==sanser::snv2::PacketType::Video &&
-     !(packet.header.flags&sanser::snv2::kFlagRetransmitted) && originalDelayMs) {
-    const auto began=Clock::now();++delayedPackets;
-    std::this_thread::sleep_for(std::chrono::milliseconds(originalDelayMs.load()));
-    senderDelayUs+=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count();
+     !(packet.header.flags&sanser::snv2::kFlagRetransmitted) && ++originalPackets==stallAtPacket) {
+    if(const auto stall=originalStallMs.exchange(0)) {
+      const auto began=Clock::now();++delayedPackets;
+      std::this_thread::sleep_for(std::chrono::milliseconds(stall));
+      senderDelayUs+=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count();
+    }
   }
   if(packet && packet.header.packetType==sanser::snv2::PacketType::Video &&
      !(packet.header.flags&sanser::snv2::kFlagRetransmitted) && loseNextOriginal.exchange(false))
@@ -58,15 +60,17 @@ int main(){try{
   check(waitFor([&]{return host->ready() && client->controlRoundTripMs().has_value() && host->recommendedBitrate()<=2000000;}),"mobile bitrate negotiation failed");
   // Lossless UDP. The IDR takes ~440 ms at the negotiated wire rate, rather
   // than the ~73 ms predicted by the client's old 12 Mbps reassembly setting.
-  originalDelayMs=6; // Loaded sender: serialization can exceed the 500ms desktop cap.
+  // A bounded scheduling interruption, not a per-packet sleep whose cumulative
+  // duration is unbounded by CI timer coalescing. Expiry beyond the hard bound
+  // is tested separately below and MUST still drop/recover.
+  originalStallMs=300;
   host->video({Bytes(128*1024,0x65),1920,1080,true});
   check(!host->acceptsCapture(),"source must stop encoding more references behind a large paced IDR");
   client->input({Input::Key,0,0,4,0,true});client->input({Input::Key,0,0,4,0,false});
   const auto started=waitFor([&]{return pictures>=1 && keys==2;});
   if(!started)std::cerr<<"startup pictures="<<pictures<<" keys="<<keys<<" queueDrops="<<host->videoQueueDrops()<<" repairs="<<host->repairedDatagrams()<<" delayedPackets="<<delayedPackets<<" actualSenderDelayMs="<<senderDelayUs.load()/1000.0<<'\n';
   check(started,"paced IDR or priority input stalled");
-  std::cout<<"loaded sender: packets="<<delayedPackets<<" actualSenderDelayMs="<<senderDelayUs.load()/1000.0<<'\n';
-  originalDelayMs=0;
+  std::cout<<"loaded sender: stalledPackets="<<delayedPackets<<" actualSenderDelayMs="<<senderDelayUs.load()/1000.0<<'\n';
   check(waitFor([&]{return host->acceptsCapture();}),"source must resume after the IDR drains");
   host->video({Bytes(2000,0x41),1920,1080,false});
   check(waitFor([&]{return pictures>=2;}),"video did not continue after paced IDR");
@@ -93,6 +97,13 @@ int main(){try{
   check(waitFor([&]{return pictures>=3+admitted;}),"backpressure broke the encoded reference chain");
   check(host->videoQueueDrops()==0,"source overload must not become an IDR/drop loop");
   std::cout<<"overloaded source: admitted="<<admitted<<" supersededRaw="<<skipped<<" encodedQueueDrops="<<host->videoQueueDrops()<<'\n';
+  const auto beforeExpiry=pictures.load();
+  originalPackets=0;stallAtPacket=1;originalStallMs=1700;
+  host->video({Bytes(8000,0x65),1920,1080,true});
+  check(waitFor([&]{return host->videoQueueDrops()>0;}),"expired IDR must not accumulate unlimited latency");
+  host->video({Bytes(2000,0x65),1920,1080,true});
+  check(waitFor([&]{return pictures>beforeExpiry;}),"a fresh IDR must recover after a genuine expiry");
+  std::cout<<"Expired IDR discarded; fresh independent picture resumed video\n";
   std::cout<<"Real fragment loss still repairs and resumes dependent pictures\n";
   return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

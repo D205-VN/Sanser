@@ -51,6 +51,15 @@ environment, not proof that the user's phone has the identical cause. The
 loaded-sender regression prints actual wait time to compare subsequent runs;
 physical phone/audio tests remain required.
 
+QoS reduced the injected per-packet waits in the next CI run, but the accumulated
+injected work still exceeded the explicit 1.5-second expiry. Dropping that IDR
+was correct; requiring unlimited accumulation would contradict the latency cap.
+The final regression therefore separates a single 300 ms scheduling interruption
+(the IDR must complete) from a 1700 ms interruption (the stale IDR must expire,
+then a fresh independent picture must resume the stream). These are actual
+socket tests; only the injection is synthetic. No further production deadline
+increase was made to accommodate arbitrarily slow CI sleeps.
+
 ## Phone-specific controls
 
 - Direct touch: tap, drag, long-press right click; two fingers zoom/pan.
