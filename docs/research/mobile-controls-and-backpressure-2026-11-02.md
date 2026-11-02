@@ -26,6 +26,16 @@ verifies capture resumes, then offers 8 KiB pictures every 16 ms. It checks that
 raw capture admission applies backpressure, every admitted reference is received,
 and no encoded video queue is discarded. Genuine fragment loss remains repairable.
 
+CI then caught an initial-IDR failure on a loaded Mac runner. A deterministic
+6 ms delay per original datagram reproduced it locally: zero complete pictures,
+both priority keys delivered, one sender queue discard. The fixed desktop
+500 ms expiry bound was too close to a 128 KiB IDR's 2 Mbps serialization time.
+Explicit mobile IDRs now get a 1.5-second expiry bound, allowing their real
+serialization and scheduling overhead; receiver expiry and bounded repair cache
+agree. P-picture and
+legacy desktop limits remain unchanged. This extends an expiry deadline, **not**
+a mandatory presentation buffer; a complete picture is still delivered at once.
+
 ## Phone-specific controls
 
 - Direct touch: tap, drag, long-press right click; two fingers zoom/pan.

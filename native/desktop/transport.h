@@ -61,7 +61,7 @@ struct PreparedFrame { Bytes payload; bool keyframe = false; };
 PreparedFrame prepareFrame(Frame frame);
 // Serialization is work, not a fixed jitter buffer. Large IDRs need enough
 // time to pass through the configured pacer before they can be declared stale.
-std::chrono::milliseconds videoSendBudget(std::size_t bytes,std::uint32_t bitrate,bool ultra);
+std::chrono::milliseconds videoSendBudget(std::size_t bytes,std::uint32_t bitrate,bool ultra,bool mobileKeyframe=false);
 class PacketCodec {
 public:
   PacketCodec(const std::string& token, bool host);
@@ -80,7 +80,7 @@ private:
 };
 class Reassembler {
 public:
-  explicit Reassembler(std::uint32_t bitrate=20000000,bool ultra=false):bitrate_(bitrate),ultra_(ultra) {}
+  explicit Reassembler(std::uint32_t bitrate=20000000,bool ultra=false,bool mobile=false):bitrate_(bitrate),ultra_(ultra),mobile_(mobile) {}
   void wireBitrate(std::uint32_t bitrate) { bitrate_=bitrate; }
   std::optional<Frame> push(const snv2::Header& header, const Bytes& payload);
   // Drain dependent pictures in order after a delayed reference is repaired.
@@ -98,6 +98,7 @@ private:
   struct Partial { Bytes data; std::vector<bool> seen; std::uint16_t received = 0; Clock::time_point started; bool keyframe = false; Clock::time_point lastRepair{}; unsigned repairAttempts=0; std::size_t highestSeen=0; };
   std::uint32_t bitrate_;
   bool ultra_;
+  bool mobile_;
   std::map<std::uint64_t, Partial> frames_;
   std::size_t bufferedBytes_=0;
   std::uint64_t lastFrame_ = 0;

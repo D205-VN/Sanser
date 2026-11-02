@@ -239,10 +239,14 @@ bool ReplayWindow::accept(std::uint64_t sequence) {
   if (offset >= seen_.size() || seen_[static_cast<std::size_t>(offset)]) return false;
   seen_.set(static_cast<std::size_t>(offset)); return true;
 }
-std::chrono::milliseconds videoSendBudget(std::size_t bytes,std::uint32_t bitrate,bool ultra) {
+std::chrono::milliseconds videoSendBudget(std::size_t bytes,std::uint32_t bitrate,bool ultra,bool mobileKeyframe) {
   // 1.2 is the same wire-overhead allowance used by sendLoop. Include already
   // queued video when admitting a frame, but never permit a multi-second queue.
   const auto serialization=static_cast<std::int64_t>(std::ceil(static_cast<double>(bytes)*8000.0/(std::max(1U,bitrate)*1.2)));
+  // A narrowly paced IDR can take longer than the normal desktop queue cap.
+  // This is an expiry bound, never a playout delay. Raw capture admission
+  // prevents dependent pictures building up behind it on mobile hosts.
+  if(mobileKeyframe) return std::chrono::milliseconds(1500);
   return std::chrono::milliseconds(std::clamp<std::int64_t>(serialization+(ultra ? 40 : 100),ultra ? 40 : 100,500));
 }
 std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b) {
@@ -253,7 +257,7 @@ std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b) {
   if (b.size()-8 != std::min(chunkSize, size-offset)) return std::nullopt;
   const auto now = Clock::now();
   for (auto i = frames_.begin(); i != frames_.end();) {
-    if (now-i->second.started > videoSendBudget(i->second.data.size(),bitrate_,ultra_)+std::chrono::milliseconds(350)) {
+    if (now-i->second.started > videoSendBudget(i->second.data.size(),bitrate_,ultra_,mobile_ && i->second.keyframe)+std::chrono::milliseconds(350)) {
       lostFragments_+=i->second.seen.size()-i->second.received; haveReference_=false;
       bufferedBytes_-=i->second.data.size(); i=frames_.erase(i);
     } else ++i;
@@ -307,7 +311,7 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
   std::vector<Repair> result; expired=false;
   for(auto it=frames_.begin();it!=frames_.end();) {
     auto& partial=it->second;
-    if(now-partial.started>videoSendBudget(partial.data.size(),bitrate_,ultra_)+std::chrono::milliseconds(350)) { expired=true; haveReference_=false; lostFragments_+=partial.seen.size()-partial.received; bufferedBytes_-=partial.data.size(); it=frames_.erase(it); continue; }
+    if(now-partial.started>videoSendBudget(partial.data.size(),bitrate_,ultra_,mobile_ && partial.keyframe)+std::chrono::milliseconds(350)) { expired=true; haveReference_=false; lostFragments_+=partial.seen.size()-partial.received; bufferedBytes_-=partial.data.size(); it=frames_.erase(it); continue; }
     if(partial.received==partial.seen.size()) { ++it; continue; }
     // A missing tail may still be in the sender's pacer. Do not NACK packets
     // that have not been sent yet; interior holes can be repaired immediately.
@@ -467,7 +471,7 @@ void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
   Clock::time_point deadline;
   {
     std::lock_guard sendLock(sendMutex_);
-    deadline=Clock::now()+videoSendBudget(bytes.size()+tx_.queuedVideoBytes(),peerVideoLimit_ ? videoBudget_.load():options_.bitrate,options_.ultraLowLatency);
+    deadline=Clock::now()+videoSendBudget(bytes.size()+tx_.queuedVideoBytes(),peerVideoLimit_ ? videoBudget_.load():options_.bitrate,options_.ultraLowLatency,peerVideoLimit_ && frame.keyframe);
   }
   for (std::size_t i=0; i<count && running_; ++i) {
     sendVideoFragment(frame,id,i,false,deadline,originalSent);
@@ -504,7 +508,7 @@ void Peer::queueVideoRepair(const Bytes& bytes) {
   {
     std::lock_guard lock(videoMutex_);
     const auto found=videoCache_.find(id);
-    if(found==videoCache_.end() || Clock::now()-found->second.sent>std::chrono::seconds(1)) missing=true;
+    if(found==videoCache_.end() || Clock::now()-found->second.sent>std::chrono::seconds(peerVideoLimit_ && found->second.frame->keyframe ? 2:1)) missing=true;
     else {
       auto& cached=found->second;
       if(Clock::now()-cached.lastRequest<std::chrono::milliseconds(10)) return;
@@ -534,7 +538,7 @@ void Peer::serviceVideoRepairs() {
   if(!lock.owns_lock()) return;
   unsigned budget=8;
   for(auto it=videoCache_.begin();it!=videoCache_.end();) {
-    if(Clock::now()-it->second.sent>std::chrono::seconds(1)) {
+    if(Clock::now()-it->second.sent>std::chrono::seconds(peerVideoLimit_ && it->second.frame->keyframe ? 2:1)) {
       videoCacheBytes_-=it->second.frame->payload.size(); it=videoCache_.erase(it); continue;
     }
     auto& cached=it->second;
@@ -640,7 +644,7 @@ void Peer::process(const Bytes& bytes) {
     { std::lock_guard lock(audioMutex_); audioSequence_=0; if(audioEncoder_) audioEncoder_->reset(); }
     controlProbe_.reset(); for(auto& window:replay_) window=ReplayWindow{};
     const auto receiveLimit=receiveVideoLimit_.load();
-    reassembler_=Reassembler{receiveLimit ? std::min({options_.bitrate,receiveLimit,4000000U}):options_.bitrate,options_.ultraLowLatency};
+    reassembler_=Reassembler{receiveLimit ? std::min({options_.bitrate,receiveLimit,4000000U}):options_.bitrate,options_.ultraLowLatency,receiveLimit!=0};
     lastVideoRateSequence_=0;lastReportedBytes_=lastReportedLoss_=0; needKeyframe_=true; lastVideo_=0; lastMouse_=0; deliveredInput_=0; receivedInputs_.clear();
     controlAppRtt_=-1; minimumControlRtt_=0; inputRttUs_=inputRttSamples_=0;
     if(options_.host) {

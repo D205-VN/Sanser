@@ -31,6 +31,7 @@ int main() {
     }
     require(videoSendBudget(256*1024,20000000,true)>std::chrono::milliseconds(100),"large IDR budget includes its own serialization");
     require(videoSendBudget(8*1024*1024,1000000,true)==std::chrono::milliseconds(500),"pacing cannot create a multi-second video queue");
+    require(videoSendBudget(128*1024,2000000,false,true)==std::chrono::milliseconds(1500),"mobile IDR expiry must tolerate paced serialization and a loaded sender");
     require(scheduler.push(TxScheduler::Video, {Bytes(1024, 1), now, 1}), "queue video");
     require(scheduler.push(TxScheduler::Audio, {{2}, now, 0}), "queue audio separately");
     scheduler.latestInput({{3}, now, 0}); scheduler.latestInput({{4}, now, 0});

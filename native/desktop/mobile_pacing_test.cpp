@@ -13,8 +13,16 @@
 using namespace sanser::desktop;
 namespace {
 std::atomic<bool> loseNextOriginal{false};
+std::atomic<unsigned> originalDelayMs{0};
+std::atomic<std::uint64_t> delayedPackets{0},senderDelayUs{0};
 DatagramIo::Result sendWithLoss(std::intptr_t socket,const std::uint8_t* data,std::size_t size){
   const auto packet=sanser::snv2::decodePacket({data,size});
+  if(packet && packet.header.packetType==sanser::snv2::PacketType::Video &&
+     !(packet.header.flags&sanser::snv2::kFlagRetransmitted) && originalDelayMs) {
+    const auto began=Clock::now();++delayedPackets;
+    std::this_thread::sleep_for(std::chrono::milliseconds(originalDelayMs.load()));
+    senderDelayUs+=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count();
+  }
   if(packet && packet.header.packetType==sanser::snv2::PacketType::Video &&
      !(packet.header.flags&sanser::snv2::kFlagRetransmitted) && loseNextOriginal.exchange(false))
     return {static_cast<std::ptrdiff_t>(size),0};
@@ -50,10 +58,14 @@ int main(){try{
   check(waitFor([&]{return host->ready() && client->controlRoundTripMs().has_value() && host->recommendedBitrate()<=2000000;}),"mobile bitrate negotiation failed");
   // Lossless UDP. The IDR takes ~440 ms at the negotiated wire rate, rather
   // than the ~73 ms predicted by the client's old 12 Mbps reassembly setting.
+  originalDelayMs=6; // Loaded sender: serialization can exceed the 500ms desktop cap.
   host->video({Bytes(128*1024,0x65),1920,1080,true});
   check(!host->acceptsCapture(),"source must stop encoding more references behind a large paced IDR");
   client->input({Input::Key,0,0,4,0,true});client->input({Input::Key,0,0,4,0,false});
-  check(waitFor([&]{return pictures>=1 && keys==2;}),"paced IDR or priority input stalled");
+  const auto started=waitFor([&]{return pictures>=1 && keys==2;});
+  if(!started)std::cerr<<"startup pictures="<<pictures<<" keys="<<keys<<" queueDrops="<<host->videoQueueDrops()<<" repairs="<<host->repairedDatagrams()<<" delayedPackets="<<delayedPackets<<" actualSenderDelayMs="<<senderDelayUs.load()/1000.0<<'\n';
+  check(started,"paced IDR or priority input stalled");
+  originalDelayMs=0;
   check(waitFor([&]{return host->acceptsCapture();}),"source must resume after the IDR drains");
   host->video({Bytes(2000,0x41),1920,1080,false});
   check(waitFor([&]{return pictures>=2;}),"video did not continue after paced IDR");
