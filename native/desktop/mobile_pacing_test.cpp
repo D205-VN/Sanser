@@ -89,10 +89,15 @@ int main(){try{
   unsigned admitted=0,skipped=0;
   const auto until=Clock::now()+std::chrono::seconds(1);
   while(Clock::now()<until) {
-    if(host->acceptsCapture()){host->video({Bytes(8000,0x43),1920,1080,false});++admitted;}
-    else ++skipped;
+    // A burst keeps this an overload test even when the producer's requested
+    // 16ms sleep coalesces to 32ms on CI (a single 8KiB frame would then fit).
+    for(unsigned raw=0;raw<4;++raw) {
+      if(host->acceptsCapture()){host->video({Bytes(8000,0x43),1920,1080,false});++admitted;}
+      else ++skipped;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
   }
+  std::cout<<"source admission: admitted="<<admitted<<" supersededRaw="<<skipped<<'\n';
   check(admitted>10 && skipped>0,"fixture must exercise source backpressure and resumed capture");
   check(waitFor([&]{return pictures>=3+admitted;}),"backpressure broke the encoded reference chain");
   check(host->videoQueueDrops()==0,"source overload must not become an IDR/drop loop");

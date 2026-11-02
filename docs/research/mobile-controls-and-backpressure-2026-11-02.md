@@ -22,7 +22,9 @@ not a promise of constant 60 FPS on an insufficient link. It can temporarily
 reduce captured FPS instead of causing repeated reference loss and IDR requests.
 
 The real UDP mobile pacing regression negotiates 2 Mbps, sends a 128 KiB IDR,
-verifies capture resumes, then offers 8 KiB pictures every 16 ms. It checks that
+verifies capture resumes, then offers four 8 KiB raw-picture candidates per
+producer wake. A burst preserves overload even when CI coalesces the producer's
+requested 16 ms sleep to 32 ms. It checks that
 raw capture admission applies backpressure, every admitted reference is received,
 and no encoded video queue is discarded. Genuine fragment loss remains repairable.
 
