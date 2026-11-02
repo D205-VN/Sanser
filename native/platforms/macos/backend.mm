@@ -46,8 +46,8 @@ struct CapturedFrame {
 };
 class Encoder {
 public:
-  Encoder(const Options& options,Peer& peer) : Encoder(options,[&peer] { return peer.ready(); },[&peer](Frame frame) { peer.video(frame); }) {}
-  Encoder(const Options& options,HostOutput& output) : Encoder(options,[&output] { return output.ready(); },[&output](Frame frame) { output.video(std::move(frame)); }) {}
+  Encoder(const Options& options,Peer& peer) : Encoder(options,[&peer] { return peer.acceptsCapture(); },[&peer](Frame frame) { peer.video(frame); }) {}
+  Encoder(const Options& options,HostOutput& output) : Encoder(options,[&output] { return output.acceptsCapture(); },[&output](Frame frame) { output.video(std::move(frame)); }) {}
   Encoder(const Options& options,std::function<bool()> ready,std::function<void(Frame)> publish)
       : options_(options),ready_(std::move(ready)),publish_(std::move(publish)) {
     requireStatus(VTCompressionSessionCreate(nullptr,options.width,options.height,kCMVideoCodecType_H264,nullptr,nullptr,nullptr,output,this,&session_),"Create H.264 encoder");
@@ -75,15 +75,18 @@ public:
     lastPixels_=CVPixelBufferRetain(pixels);
     if(CMTimeCompare(time,lastTime_)<=0) time=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
     lastTime_=time;
-    if(ready_()) { ++captured_; frames_->submit(CapturedFrame(pixels,time)); }
+    pendingRefresh_=true;
+    if(ready_()) { pendingRefresh_=false; ++captured_; frames_->submit(CapturedFrame(pixels,time)); }
   }
   void refresh() {
     std::lock_guard lock(encodeMutex_);
     if(!lastPixels_ || !ready_()) return;
     lastTime_=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
-    ++captured_; frames_->submit(CapturedFrame(lastPixels_,lastTime_));
+    pendingRefresh_=false;++captured_; frames_->submit(CapturedFrame(lastPixels_,lastTime_));
   }
+  void refreshPending() { if(pendingRefresh_ && ready_()) refresh(); }
   void submit(const CapturedFrame& frame) {
+    if(!ready_()) {pendingRefresh_=true;return;}
     const auto began=Clock::now();
     queueUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(began-frame.captured).count());
     ++submitted_;
@@ -145,7 +148,7 @@ private:
   std::mutex sessionMutex_;
   std::unique_ptr<LatestFrameWorker<CapturedFrame>> frames_;
   std::atomic<std::uint64_t> captured_{0},submitted_{0},completed_{0},encoderDropped_{0},queueUs_{0},encodeAndPublishUs_{0};
-  std::atomic<bool> force_{true},failed_{false},retry_{false};
+  std::atomic<bool> force_{true},failed_{false},retry_{false},pendingRefresh_{false};
 };
 class Decoder {
 public:
@@ -695,6 +698,7 @@ int runMac(bool host,int argc,char** argv) {
           if(target!=bitrate && encoder.setBitrate(target)) bitrate=target;
           const bool retry=encoder.takeRetryRequest();
           if(peer.takeKeyframeRequest() || retry) { encoder.keyframe(); encoder.refresh(); }
+          encoder.refreshPending();
           if(Clock::now()-lastProgress>=std::chrono::seconds(1)) { encoder.logProgress(); lastProgress=Clock::now(); }
           [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
         }

@@ -24,6 +24,17 @@ class MobileController extends ChangeNotifier {
   bool voiceJoined = false, microphone = false, deafened = false;
   SessionPhase phase = SessionPhase.idle;
   Json telemetry = {};
+  final Stopwatch _diagnosticClock = Stopwatch()..start();
+  final List<Json> _diagnosticSamples = [];
+  int? _lastVideoFrames, _lastVideoAt;
+  Json diagnosticReport() => {
+    'schemaVersion': 1,
+    'version': mobileVersion,
+    'platform': platform,
+    'transport': selectedTransport,
+    'videoBitrateMbps': preferences.videoBitrateMbps,
+    'samples': List<Json>.from(_diagnosticSamples),
+  };
   MobilePreferences preferences = const MobilePreferences();
   Future<void> _preferenceWrites = Future.value();
   Future<void>? _disconnecting;
@@ -243,6 +254,10 @@ class MobileController extends ChangeNotifier {
 
   Future<void> _start(Json session, int generation) async {
     try {
+      _diagnosticSamples.clear();
+      _lastVideoAt = null;
+      _lastVideoFrames = null;
+      _diagnosticClock.reset();
       phase = SessionPhase.connecting;
       notifyListeners();
       final id = session['id'];
@@ -379,7 +394,48 @@ class MobileController extends ChangeNotifier {
   void _nativeEvent(Json event) {
     final current = active;
     if (current == null || event['sessionId'] != current['id']) return;
-    telemetry = event;
+    final frames = event['videoFrames'];
+    if (frames is num) {
+      final now = _diagnosticClock.elapsedMilliseconds;
+      if (_lastVideoFrames != null &&
+          _lastVideoAt != null &&
+          now - _lastVideoAt! >= 250 &&
+          frames >= _lastVideoFrames!) {
+        event = {
+          ...event,
+          'videoFps':
+              (frames - _lastVideoFrames!) * 1000 / (now - _lastVideoAt!),
+        };
+      }
+      // Dimension-only events do not advance the one-second sampling clock.
+      if (_lastVideoAt == null || now - _lastVideoAt! >= 250) {
+        _lastVideoFrames = frames.toInt();
+        _lastVideoAt = now;
+      }
+    }
+    if (event['rttMs'] is num) {
+      final sample = <String, dynamic>{
+        'atMs': _diagnosticClock.elapsedMilliseconds,
+      };
+      for (final key in [
+        'rttMs',
+        'videoFps',
+        'videoPackets',
+        'videoFrames',
+        'nackRequests',
+        'lostFragments',
+        'referenceDrops',
+        'audioDecoded',
+        'audioConcealed',
+        'audioLate',
+      ]) {
+        final value = event[key];
+        if (value is num && value.isFinite) sample[key] = value;
+      }
+      _diagnosticSamples.add(sample);
+      if (_diagnosticSamples.length > 120) _diagnosticSamples.removeAt(0);
+    }
+    telemetry = {...telemetry, ...event};
     switch (event['state']) {
       case 'frame':
         if (phase != SessionPhase.streaming && current['sharingId'] != null) {

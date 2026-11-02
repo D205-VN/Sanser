@@ -29,6 +29,30 @@ class NativeEngine {
   Future<void> key(int code, bool down) =>
       channel.invokeMethod<void>('key', {'code': code, 'down': down});
   Future<void> resetInput() => channel.invokeMethod<void>('resetInput');
+  Future<void> remoteInput(
+    String sessionId,
+    int kind, {
+    int x = 0,
+    int y = 0,
+    int code = 0,
+    int delta = 0,
+    bool down = false,
+  }) => channel.invokeMethod<void>('input', {
+    'sessionId': sessionId,
+    'kind': kind,
+    'x': x,
+    'y': y,
+    'code': code,
+    'delta': delta,
+    'down': down,
+  });
+  Future<void> viewport(String sessionId, double scale, double x, double y) =>
+      channel.invokeMethod<void>('viewport', {
+        'sessionId': sessionId,
+        'scale': scale,
+        'x': x,
+        'y': y,
+      });
   Future<Json> p2p(Json request) async => Map<String, dynamic>.from(
     await channel.invokeMapMethod<String, dynamic>('p2p', request) ?? {},
   );

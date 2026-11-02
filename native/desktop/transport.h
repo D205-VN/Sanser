@@ -118,6 +118,17 @@ public:
   bool running() const { return running_.load(); }
   unsigned stopReason() const { return stopReason_.load(); }
   bool ready() const { return ready_.load(); }
+  // Called before encoding RAW captures. Never discard encoded references to
+  // make space: a negotiated mobile receiver can instead skip superseded raw
+  // captures while an IDR or transient wire backlog drains.
+  bool acceptsCapture() {
+    if(!ready_ || !running_ || videoPaused_) return false;
+    if(!peerVideoLimit_) return true;
+    std::lock_guard lock(sendMutex_);
+    const auto queued=tx_.queuedVideoBytes();
+    const auto budget=std::max(1000000U,videoBudget_.load());
+    return static_cast<double>(queued)*8000.0/(budget*1.2)<=std::max(20.0,2000.0/std::max(1U,options_.fps));
+  }
   bool inputAvailable() const { return options_.input && !inputSuspended_.load() && !remoteCapturePaused_.load(); }
   bool capturePaused() const { return remoteCapturePaused_.load(); }
   void setCapturePaused(bool paused);
@@ -164,7 +175,14 @@ public:
   struct SocketStats { std::uint64_t sendTransientErrors,receiveTransientErrors; };
   SocketStats socketStats() const { return {sendTransientErrors_.load(),receiveTransientErrors_.load()}; }
   std::uint32_t recommendedBitrate() const { return videoBudget_.load(); }
+  struct ReceiveHealth {
+    std::uint64_t videoPackets=0,videoFrames=0,nackRequests=0,lostFragments=0,referenceDrops=0;
+    std::uint64_t audioDecoded=0,audioConcealed=0,audioLate=0;
+  };
+  ReceiveHealth receiveHealth() const {std::lock_guard lock(healthMutex_);return receiveHealth_;}
 private:
+  mutable std::mutex healthMutex_;
+  ReceiveHealth receiveHealth_{};
   void loop();
   void sendLoop();
   void acknowledgeInput();

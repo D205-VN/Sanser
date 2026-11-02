@@ -21,6 +21,12 @@ void sanser_mobile_destroy(SanserMobileClient *client);
 int sanser_mobile_running(SanserMobileClient *client);
 int sanser_mobile_ready(SanserMobileClient *client);
 double sanser_mobile_rtt(SanserMobileClient *client);
+typedef struct {
+  uint64_t video_packets,video_frames,nack_requests,lost_fragments,reference_drops;
+  uint64_t audio_decoded,audio_concealed,audio_late;
+} SanserMobileStats;
+// Latest one-second native snapshot; numeric counters only, no payload/IDs.
+void sanser_mobile_stats(SanserMobileClient *client,SanserMobileStats *stats);
 void sanser_mobile_input(SanserMobileClient *client,unsigned kind,unsigned x,unsigned y,unsigned code,int delta,int down);
 void sanser_mobile_mute(SanserMobileClient *client,int muted);
 void sanser_mobile_keyframe(SanserMobileClient *client);

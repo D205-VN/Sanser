@@ -25,6 +25,7 @@ class MainActivity : FlutterActivity() {
     private var sink: EventChannel.EventSink? = null
     private var sessionId: String? = null
     private var frameShown = false
+    private var videoWidth=0;private var videoHeight=0
     private var startup: Runnable? = null
     private var channels: MethodChannel? = null
     private var events: EventChannel? = null
@@ -97,6 +98,19 @@ class MainActivity : FlutterActivity() {
                     "mute" -> {client?.mute(call.argument<Boolean>("muted")==true);result.success(null)}
                     "key" -> {client?.input(2,code=call.argument<Int>("code")?:0,down=call.argument<Boolean>("down")==true);result.success(null)}
                     "resetInput" -> {client?.input(4);result.success(null)}
+                    "input" -> {
+                        if(sessionId!=null && call.argument<String>("sessionId")==sessionId){
+                            val kind=call.argument<Int>("kind") ?: 4
+                            if(kind in 0..4)client?.input(kind,call.argument<Int>("x")?:0,call.argument<Int>("y")?:0,
+                                call.argument<Int>("code")?:0,call.argument<Int>("delta")?:0,call.argument<Boolean>("down")==true)
+                        }
+                        result.success(null)
+                    }
+                    "viewport" -> {
+                        if(sessionId!=null && call.argument<String>("sessionId")==sessionId)
+                            video?.viewport((call.argument<Number>("scale")?:1).toFloat(),(call.argument<Number>("x")?:0).toFloat(),(call.argument<Number>("y")?:0).toFloat())
+                        result.success(null)
+                    }
                     "voice" -> result.error("voice_unavailable","Voice mobile chưa sẵn sàng trong bản preview.",null)
                     else -> result.notImplemented()
                 }
@@ -106,7 +120,13 @@ class MainActivity : FlutterActivity() {
     private fun startClient(endpoint:String,configuration:Map<String,Any?>,epoch:Long){
         if(epoch!=generation.get())return
         val output=PcmOutput();audio=output
-        val native=NativeClient({bytes,w,h,key->if(epoch==generation.get())video?.push(bytes,w,h,key)},
+        var previousWidth=0;var previousHeight=0
+        val native=NativeClient({bytes,w,h,key->if(epoch==generation.get()){
+            video?.push(bytes,w,h,key)
+            if(previousWidth!=w || previousHeight!=h){previousWidth=w;previousHeight=h;main.post{
+                if(epoch==generation.get()){videoWidth=w;videoHeight=h;emit("dimensions")}
+            }}
+        }},
             {samples->if(epoch==generation.get())output.push(samples)},
             {reason->main.post{if(epoch==generation.get())fail("Engine native đã dừng ($reason).")}})
         client=native
@@ -114,7 +134,7 @@ class MainActivity : FlutterActivity() {
         native.mute(configuration["audioMuted"]==true)
         main.post { if(epoch==generation.get()){emit("connected");poll(epoch)} }
     }
-    private fun emit(state:String,message:String?=null,rtt:Double?=null){val id=sessionId?:return;sink?.success(mapOf("sessionId" to id,"state" to state,"message" to message,"rttMs" to rtt))}
+    private fun emit(state:String,message:String?=null,rtt:Double?=null){val id=sessionId?:return;sink?.success(mapOf("sessionId" to id,"state" to state,"message" to message,"rttMs" to rtt,"videoWidth" to videoWidth,"videoHeight" to videoHeight)+(client?.stats()?:emptyMap()))}
     private fun poll(epoch:Long){
         main.postDelayed({if(epoch==generation.get() && sessionId!=null){val rtt=client?.rtt();emit(if(frameShown)"frame" else "connecting",rtt=rtt?.takeIf{it>=0});poll(epoch)}},1000)
     }

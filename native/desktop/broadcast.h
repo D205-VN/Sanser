@@ -77,6 +77,7 @@ public:
   void stop();
   bool ready() const;
   bool running() const;
+  bool acceptsCapture() const;
   void video(Frame frame);
   void audio(const AudioSamples& samples);
   void setCapturePaused(bool paused);

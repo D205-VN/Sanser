@@ -71,30 +71,20 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
             catch(_:Exception){releaseCodec();requestKeyframe()}
         }
     }
-    private var lastX=0;private var lastY=0
+    private var zoom=1f;private var panX=0f;private var panY=0f
+    fun viewport(scale:Float,x:Float,y:Float){
+        if(!scale.isFinite() || !x.isFinite() || !y.isFinite())return
+        zoom=scale.coerceIn(1f,3f);val limit=(zoom-1)/2
+        panX=x.coerceIn(-limit,limit);panY=y.coerceIn(-limit,limit)
+        surface.scaleX=zoom;surface.scaleY=zoom
+        surface.translationX=panX*getWidth();surface.translationY=panY*getHeight()
+    }
     init {
         setBackgroundColor(Color.BLACK);addView(surface, LayoutParams(LayoutParams.MATCH_PARENT,LayoutParams.MATCH_PARENT,Gravity.CENTER))
         surface.holder.addCallback(this)
-        setOnTouchListener { _, event ->
-            if(event.actionMasked==MotionEvent.ACTION_CANCEL || event.pointerCount>1){client()?.input(4);return@setOnTouchListener true}
-            if(width<=0 || height<=0)return@setOnTouchListener true
-            val bounds = surface.layoutParams
-            val left = (getWidth()-bounds.width)/2f;val top=(getHeight()-bounds.height)/2f
-            if(event.x !in left..left+bounds.width || event.y !in top..top+bounds.height){
-                if(event.actionMasked==MotionEvent.ACTION_UP)client()?.input(1,lastX,lastY,code=0,down=false)
-                return@setOnTouchListener true
-            }
-            val x=((event.x-left)/bounds.width*65535).toInt().coerceIn(0,65535)
-            val y=((event.y-top)/bounds.height*65535).toInt().coerceIn(0,65535)
-            val native=client() ?: return@setOnTouchListener true
-            lastX=x;lastY=y
-            native.input(0,x,y)
-            when(event.actionMasked){
-                MotionEvent.ACTION_DOWN -> native.input(1,x,y,code=0,down=true)
-                MotionEvent.ACTION_UP,MotionEvent.ACTION_CANCEL -> native.input(1,x,y,code=0,down=false)
-            }
-            true
-        }
+        // Flutter owns the mobile gesture surface and session-fenced inputs.
+        // The native surface only presents video; do not inject a second click.
+        setOnTouchListener { _, _ -> false }
     }
     override fun onSizeChanged(w:Int,h:Int,oldw:Int,oldh:Int){super.onSizeChanged(w,h,oldw,oldh);fit()}
     private fun fit(){

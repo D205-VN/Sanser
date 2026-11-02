@@ -51,8 +51,10 @@ int main(){try{
   // Lossless UDP. The IDR takes ~440 ms at the negotiated wire rate, rather
   // than the ~73 ms predicted by the client's old 12 Mbps reassembly setting.
   host->video({Bytes(128*1024,0x65),1920,1080,true});
+  check(!host->acceptsCapture(),"source must stop encoding more references behind a large paced IDR");
   client->input({Input::Key,0,0,4,0,true});client->input({Input::Key,0,0,4,0,false});
   check(waitFor([&]{return pictures>=1 && keys==2;}),"paced IDR or priority input stalled");
+  check(waitFor([&]{return host->acceptsCapture();}),"source must resume after the IDR drains");
   host->video({Bytes(2000,0x41),1920,1080,false});
   check(waitFor([&]{return pictures>=2;}),"video did not continue after paced IDR");
   std::cout<<"lossless paced IDR: repair datagrams="<<host->repairedDatagrams()<<" queue drops="<<host->videoQueueDrops()<<'\n';
@@ -65,6 +67,19 @@ int main(){try{
   host->video({Bytes(8000,0x42),1920,1080,false});
   check(waitFor([&]{return pictures>=3;}),"genuinely lost original was not repaired");
   check(host->repairedDatagrams()>beforeLoss,"repair was disabled instead of rejecting premature NACKs");
+  // A source briefly exceeds the path's rate. Skip RAW captures before encode,
+  // never drop an already encoded P-reference and then demand repeated IDRs.
+  unsigned admitted=0,skipped=0;
+  const auto until=Clock::now()+std::chrono::seconds(1);
+  while(Clock::now()<until) {
+    if(host->acceptsCapture()){host->video({Bytes(8000,0x43),1920,1080,false});++admitted;}
+    else ++skipped;
+    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+  }
+  check(admitted>10 && skipped>0,"fixture must exercise source backpressure and resumed capture");
+  check(waitFor([&]{return pictures>=3+admitted;}),"backpressure broke the encoded reference chain");
+  check(host->videoQueueDrops()==0,"source overload must not become an IDR/drop loop");
+  std::cout<<"overloaded source: admitted="<<admitted<<" supersededRaw="<<skipped<<" encodedQueueDrops="<<host->videoQueueDrops()<<'\n';
   std::cout<<"Real fragment loss still repairs and resumes dependent pictures\n";
   return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

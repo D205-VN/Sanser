@@ -40,6 +40,12 @@ extern "C" void sanser_mobile_destroy(SanserMobileClient *c) {delete c;}
 extern "C" int sanser_mobile_running(SanserMobileClient *c) {return c && c->peer->running();}
 extern "C" int sanser_mobile_ready(SanserMobileClient *c) {return c && c->peer->ready();}
 extern "C" double sanser_mobile_rtt(SanserMobileClient *c) {return c?c->peer->controlRoundTripMs().value_or(-1.0):-1.0;}
+extern "C" void sanser_mobile_stats(SanserMobileClient *c,SanserMobileStats *stats) {
+  if(!stats)return;
+  if(!c){*stats={};return;}
+  const auto s=c->peer->receiveHealth();
+  *stats={s.videoPackets,s.videoFrames,s.nackRequests,s.lostFragments,s.referenceDrops,s.audioDecoded,s.audioConcealed,s.audioLate};
+}
 extern "C" void sanser_mobile_input(SanserMobileClient *c,unsigned kind,unsigned x,unsigned y,unsigned code,int delta,int down) {
   if(!c || kind>sanser::desktop::Input::Reset || x>65535 || y>65535 || code>65535 || delta<-32768 || delta>32767)return;
   sanser::desktop::Input input;input.kind=static_cast<sanser::desktop::Input::Kind>(kind);input.x=static_cast<uint16_t>(x);input.y=static_cast<uint16_t>(y);input.code=static_cast<uint16_t>(code);input.delta=static_cast<int16_t>(delta);input.down=down!=0;c->peer->input(input);

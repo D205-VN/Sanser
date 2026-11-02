@@ -509,7 +509,7 @@ int runWindows(bool host,int argc,char** argv) {
       const auto target=peer.bitrate();
       if(target!=bitrate && encoder->setBitrate(target)) bitrate=target;
       force=peer.takeKeyframeRequest() || force;
-      if(peer.ready()) {
+      if(peer.ready() && peer.acceptsCapture()) {
         FrameBgra frame;
         const bool captured=display.captureFrame(frame, options.ultraLowLatency ? 2 : 16);
         if(display.recovering()) {

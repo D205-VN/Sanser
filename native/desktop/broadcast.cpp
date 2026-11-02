@@ -313,6 +313,7 @@ void HostOutput::start() {
 }
 void HostOutput::stop() { if(broadcast_) broadcast_->stop(); else single_->stop(); }
 bool HostOutput::ready() const { return broadcast_ ? broadcast_->ready() : single_->ready(); }
+bool HostOutput::acceptsCapture() const { return broadcast_ ? broadcast_->ready() : single_->acceptsCapture(); }
 bool HostOutput::running() const { return !nativeStopRequested() && (broadcast_ ? broadcast_->running() : single_->running()); }
 void HostOutput::video(Frame frame) { if(broadcast_) broadcast_->publish(std::move(frame)); else single_->video(frame); }
 void HostOutput::audio(const AudioSamples& samples) { if(broadcast_) broadcast_->audio(samples); else single_->audio(samples); }

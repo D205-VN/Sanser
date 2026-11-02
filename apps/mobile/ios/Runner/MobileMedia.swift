@@ -4,8 +4,11 @@ import CoreMedia
 import VideoToolbox
 
 final class MobileVideoView: UIView {
-    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
-    private var display: AVSampleBufferDisplayLayer {layer as! AVSampleBufferDisplayLayer}
+    private let display=AVSampleBufferDisplayLayer()
+    var externalTouch=false
+    var dimensions:((Int,Int)->Void)?
+    private var videoWidth=0,videoHeight=0
+    private var zoom:CGFloat=1,panX:CGFloat=0,panY:CGFloat=0
     private let decoder=MobileVideoDecoder()
     private var format:CMVideoFormatDescription?
     var input: ((UInt32,UInt32,Bool?) -> Void)?
@@ -14,16 +17,32 @@ final class MobileVideoView: UIView {
     private var shown=false
     private var lastX:UInt32=0,lastY:UInt32=0
     override init(frame:CGRect){
-        super.init(frame:frame);backgroundColor = .black;display.videoGravity = .resizeAspect;isMultipleTouchEnabled=false
+        super.init(frame:frame);backgroundColor = .black;clipsToBounds=true;display.videoGravity = .resizeAspect;isMultipleTouchEnabled=false
+        layer.addSublayer(display)
         decoder.output={[weak self] image in self?.present(image)}
         decoder.keyframe={[weak self] in DispatchQueue.main.async{[weak self] in self?.keyframe?()}}
     }
     required init?(coder:NSCoder){fatalError("init(coder:) has not been implemented")}
+    override func layoutSubviews(){super.layoutSubviews();layoutVideo()}
+    func viewport(_ scale:Double,_ x:Double,_ y:Double){
+        guard scale.isFinite,x.isFinite,y.isFinite else{return}
+        zoom=CGFloat(max(1,min(3,scale)))
+        let limit=(zoom-1)/2
+        panX=max(-limit,min(limit,CGFloat(x)));panY=max(-limit,min(limit,CGFloat(y)));layoutVideo()
+    }
+    private func layoutVideo(){
+        CATransaction.begin();CATransaction.setDisableActions(true)
+        display.setAffineTransform(.identity);display.frame=bounds
+        display.setAffineTransform(CGAffineTransform(translationX:panX*bounds.width,y:panY*bounds.height).scaledBy(x:zoom,y:zoom))
+        CATransaction.commit()
+    }
     func receiver()->(Data,Int,Int,Bool)->Void{
         let stream=decoder.stream()
         return {[weak decoder] data,_,_,key in decoder?.push(data,key:key,stream:stream)}
     }
     private func present(_ image:CVPixelBuffer){
+        let width=CVPixelBufferGetWidth(image),height=CVPixelBufferGetHeight(image)
+        if width != videoWidth || height != videoHeight {videoWidth=width;videoHeight=height;dimensions?(width,height)}
         if display.status == .failed{display.flush()}
         // Dropping a decoded image cannot invalidate the H.264 reference chain.
         guard display.isReadyForMoreMediaData else{return}
@@ -35,6 +54,7 @@ final class MobileVideoView: UIView {
         if !shown && display.status != .failed {shown=true;firstFrame?()}
     }
     private func touch(_ touches:Set<UITouch>,down:Bool?){
+        guard !externalTouch else{return}
         guard let point=touches.first?.location(in:self),let format=format else{return}
         let dimensions=CMVideoFormatDescriptionGetDimensions(format),scale=min(bounds.width/CGFloat(dimensions.width),bounds.height/CGFloat(dimensions.height))
         let w=CGFloat(dimensions.width)*scale,h=CGFloat(dimensions.height)*scale,left=(bounds.width-w)/2,top=(bounds.height-h)/2

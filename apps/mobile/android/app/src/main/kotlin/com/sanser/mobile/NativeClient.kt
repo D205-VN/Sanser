@@ -15,6 +15,7 @@ class NativeClient(
     private external fun mute(handle: Long, value: Boolean)
     private external fun keyframe(handle: Long)
     private external fun rtt(handle: Long): Double
+    private external fun stats(handle:Long):LongArray
     @Synchronized fun start(endpoint: String, token: String, control: Boolean, sharing: Boolean, viewer: String, port: Int = 0, bitrate:Int = 6000000, baseline:Double = 0.0) {
         require(port in 0..65535)
         check(handle == 0L); handle = create(endpoint, port, token, control, sharing, viewer)
@@ -27,6 +28,11 @@ class NativeClient(
     @Synchronized fun mute(value: Boolean) { if (handle != 0L) mute(handle, value) }
     @Synchronized fun keyframe() { if (handle != 0L) keyframe(handle) }
     @Synchronized fun rtt(): Double = if (handle == 0L) -1.0 else rtt(handle)
+    @Synchronized fun stats():Map<String,Long> {
+        if(handle==0L)return emptyMap()
+        val values=stats(handle);val names=listOf("videoPackets","videoFrames","nackRequests","lostFragments","referenceDrops","audioDecoded","audioConcealed","audioLate")
+        return names.mapIndexed{index,name->name to values[index]}.toMap()
+    }
     @Synchronized override fun close() { val old = handle; handle = 0L; if (old != 0L) destroy(old) }
     // Called from native workers; these methods never acquire the handle lock.
     fun onVideo(bytes: ByteArray, width: Int, height: Int, keyframe: Boolean) = video(bytes, width, height, keyframe)

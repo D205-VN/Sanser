@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'dart:convert';
 import 'controller.dart';
 
 Future<void> showMobileSettings(
@@ -167,9 +169,50 @@ class MobileSettings extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            initialValue: p.pointerMode,
+            decoration: const InputDecoration(
+              labelText: 'Thao tác cảm ứng mặc định',
+            ),
+            items: const [
+              DropdownMenuItem(value: 'direct', child: Text('Chạm trực tiếp')),
+              DropdownMenuItem(
+                value: 'touchpad',
+                child: Text('Touchpad · rê chuột'),
+              ),
+            ],
+            onChanged: (mode) {
+              if (mode != null) {
+                controller.setPreferences(p.copyWith(pointerMode: mode));
+              }
+            },
+          ),
+          const SizedBox(height: 16),
           const Text(
             'Cài đặt được lưu trên điện thoại này.',
             style: TextStyle(color: Colors.white54),
+          ),
+          TextButton.icon(
+            icon: const Icon(Icons.content_copy_rounded),
+            label: const Text('Sao chép chẩn đoán phiên'),
+            onPressed: () async {
+              await Clipboard.setData(
+                ClipboardData(
+                  text: const JsonEncoder.withIndent(
+                    '  ',
+                  ).convert(controller.diagnosticReport()),
+                ),
+              );
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Đã sao chép số đo mạng, video và âm thanh. Không kèm khóa phiên.',
+                    ),
+                  ),
+                );
+              }
+            },
           ),
         ],
       );

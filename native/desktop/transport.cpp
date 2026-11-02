@@ -999,6 +999,15 @@ void Peer::sendLoop() {
   } catch (const std::exception& error) { std::cerr<<"SNV2_SEND_ERROR "<<error.what()<<std::endl; stopReason_=5; running_=false; }
 }
 void Peer::logHealth() {
+  // Numeric snapshot for mobile diagnostics even when stdout tracing is off.
+  // Update on the receive worker; callers never read reassembler state across
+  // threads or block a realtime audio callback.
+  const auto audioStats=audioReceiver_ ? audioReceiver_->stats():sanser::audio::Stats{};
+  {
+    std::lock_guard lock(healthMutex_);
+    receiveHealth_={videoDatagrams_,completedFrames_,nackSent_,reassembler_.lostFragments(),keyframeWaitDropped_,
+      audioStats.decoded,audioStats.concealed,audioStats.late};
+  }
   if(!std::getenv("SANSER_TELEMETRY")) return;
   if(audioReceiver_ || opusTxPackets_) {
     const auto stats=audioReceiver_ ? audioReceiver_->stats() : sanser::audio::Stats{};

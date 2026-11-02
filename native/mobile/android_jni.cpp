@@ -69,6 +69,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_input(JNIE
 extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_mute(JNIEnv*,jobject,jlong handle,jboolean value){if(auto *h=reinterpret_cast<Handle*>(handle))sanser_mobile_mute(h->client,value);}
 extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_keyframe(JNIEnv*,jobject,jlong handle){if(auto *h=reinterpret_cast<Handle*>(handle))sanser_mobile_keyframe(h->client);}
 extern "C" JNIEXPORT jdouble JNICALL Java_com_sanser_mobile_NativeClient_rtt(JNIEnv*,jobject,jlong handle){auto *h=reinterpret_cast<Handle*>(handle);return h?sanser_mobile_rtt(h->client):-1;}
+extern "C" JNIEXPORT jlongArray JNICALL Java_com_sanser_mobile_NativeClient_stats(JNIEnv *e,jobject,jlong handle){
+  auto *h=reinterpret_cast<Handle*>(handle);SanserMobileStats s{};sanser_mobile_stats(h ? h->client:nullptr,&s);
+  const jlong values[]={static_cast<jlong>(s.video_packets),static_cast<jlong>(s.video_frames),static_cast<jlong>(s.nack_requests),
+    static_cast<jlong>(s.lost_fragments),static_cast<jlong>(s.reference_drops),static_cast<jlong>(s.audio_decoded),static_cast<jlong>(s.audio_concealed),static_cast<jlong>(s.audio_late)};
+  auto result=e->NewLongArray(8);if(result)e->SetLongArrayRegion(result,0,8,values);return result;
+}
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_sanser_mobile_MobileP2p_request(JNIEnv *env,jobject,jstring request){
   if(!request)return nullptr;

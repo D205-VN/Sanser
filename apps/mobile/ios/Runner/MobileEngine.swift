@@ -39,10 +39,15 @@ final class NativeMobileSession {
         sanser_mobile_video_limit(client,UInt32(clamping:(configuration["videoBitrateMbps"] as? Int ?? 6)*1000000),(configuration["baselineRttMs"] as? NSNumber)?.doubleValue ?? 0)
     }
     func start() throws {lock.lock();defer{lock.unlock()};guard sanser_mobile_start(client) != 0 else{throw MobileError.socket};sanser_mobile_mute(client,initiallyMuted ? 1:0)}
-    func input(kind:UInt32,x:UInt32=0,y:UInt32=0,code:UInt32=0,down:Bool=false){lock.lock();defer{lock.unlock()};sanser_mobile_input(client,kind,x,y,code,0,down ? 1:0)}
+    func input(kind:UInt32,x:UInt32=0,y:UInt32=0,code:UInt32=0,delta:Int32=0,down:Bool=false){lock.lock();defer{lock.unlock()};sanser_mobile_input(client,kind,x,y,code,delta,down ? 1:0)}
     func mute(_ value:Bool){lock.lock();defer{lock.unlock()};sanser_mobile_mute(client,value ? 1:0)}
     func keyframe(){lock.lock();defer{lock.unlock()};sanser_mobile_keyframe(client)}
     func rtt()->Double{lock.lock();defer{lock.unlock()};return sanser_mobile_rtt(client)}
+    func stats()->[String:UInt64]{
+        lock.lock();defer{lock.unlock()};var s=SanserMobileStats();sanser_mobile_stats(client,&s)
+        return ["videoPackets":s.video_packets,"videoFrames":s.video_frames,"nackRequests":s.nack_requests,"lostFragments":s.lost_fragments,
+            "referenceDrops":s.reference_drops,"audioDecoded":s.audio_decoded,"audioConcealed":s.audio_concealed,"audioLate":s.audio_late]
+    }
     func close(){lock.lock();defer{lock.unlock()};sanser_mobile_input(client,4,0,0,0,0,0);sanser_mobile_destroy(client);client=nil}
     deinit{sanser_mobile_destroy(client)}
 }
@@ -62,7 +67,11 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
     func onCancel(withArguments arguments:Any?)->FlutterError?{sink=nil;return nil}
     func create(withFrame frame:CGRect,viewIdentifier viewId:Int64,arguments args:Any?)->FlutterPlatformView{
         video?.reset()
-        let native=MobileVideoView(frame:frame);video=native
+        let native=MobileVideoView(frame:frame);video=native;native.externalTouch=true
+        native.dimensions={[weak self] width,height in
+            guard let self=self,let id=self.sessionID else{return}
+            self.sink?(["sessionId":id,"state":"dimensions","videoWidth":width,"videoHeight":height])
+        }
         native.input={[weak self] x,y,down in self?.session?.input(kind:0,x:x,y:y);if let down=down{self?.session?.input(kind:1,x:x,y:y,down:down)}}
         native.keyframe={[weak self] in self?.session?.keyframe()}
         native.firstFrame={[weak self] in guard let self=self else{return};self.rendered=true;self.timeout?.invalidate();self.emit("frame")}
@@ -105,6 +114,16 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
         case "disconnect":disconnect{result(nil)}
         case "mute":session?.mute(args["muted"] as? Bool == true);result(nil)
         case "resetInput":session?.input(kind:4);result(nil)
+        case "input":
+            guard args["sessionId"] as? String == sessionID,sessionID != nil,
+                  let kind=args["kind"] as? Int,(0...4).contains(kind) else{return result(nil)}
+            session?.input(kind:UInt32(kind),x:UInt32(clamping:args["x"] as? Int ?? 0),
+                y:UInt32(clamping:args["y"] as? Int ?? 0),code:UInt32(clamping:args["code"] as? Int ?? 0),
+                delta:Int32(clamping:args["delta"] as? Int ?? 0),down:args["down"] as? Bool == true);result(nil)
+        case "viewport":
+            guard args["sessionId"] as? String == sessionID,sessionID != nil else{return result(nil)}
+            video?.viewport((args["scale"] as? NSNumber)?.doubleValue ?? 1,
+                (args["x"] as? NSNumber)?.doubleValue ?? 0,(args["y"] as? NSNumber)?.doubleValue ?? 0);result(nil)
         case "key":session?.input(kind:2,code:UInt32(clamping:args["code"] as? Int ?? 0),down:args["down"] as? Bool == true);result(nil)
         case "voice":result(FlutterError(code:"voice_unavailable",message:"Voice mobile chưa sẵn sàng trong bản preview.",details:nil))
         default:result(FlutterMethodNotImplemented)
@@ -133,7 +152,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             self.work.async{[weak self] in do{try native.start()}catch{DispatchQueue.main.async{if self?.generation==epoch{self?.fail("Không thể bắt đầu engine native.")}}}}
         }catch{self.fail("Không thể mở engine native.")}
     }
-    private func emit(_ state:String,message:String?=nil,rtt:Double?=nil){guard let id=sessionID else{return};var data:[String:Any]=["sessionId":id,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};sink?(data)}
+    private func emit(_ state:String,message:String?=nil,rtt:Double?=nil){guard let id=sessionID else{return};var data:[String:Any]=["sessionId":id,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};if let stats=session?.stats(){for(key,value) in stats{data[key]=value}};sink?(data)}
     private func fail(_ message:String){emit("stopped",message:message);disconnect()}
     private func disconnect(_ completion:(()->Void)?=nil){
         generation+=1;timer?.invalidate();timer=nil;timeout?.invalidate();timeout=nil;sessionID=nil

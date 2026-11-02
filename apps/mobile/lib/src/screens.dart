@@ -7,6 +7,8 @@ import 'controller.dart';
 import 'keyboard.dart';
 import 'floating_controls.dart';
 import 'settings.dart';
+import 'mobile_input.dart';
+import 'touch_surface.dart';
 
 class SanserHome extends StatefulWidget {
   final MobileController controller;
@@ -582,11 +584,26 @@ class RemoteSession extends StatefulWidget {
   State<RemoteSession> createState() => _RemoteSessionState();
 }
 
-class _RemoteSessionState extends State<RemoteSession> {
+class _RemoteSessionState extends State<RemoteSession>
+    with WidgetsBindingObserver {
   bool? _landscape;
+  late final MobileInput input;
+  late TouchMode mode;
+  bool gameControls = false;
+  int resetZoom = 0;
+  final Set<int> modifiers = {};
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    input = MobileInput(
+      c.engine,
+      c.active?['id'] as String? ?? '',
+      enabled: c.active?['accessMode'] != 'view-only',
+    );
+    mode = c.preferences.pointerMode == 'touchpad'
+        ? TouchMode.touchpad
+        : TouchMode.direct;
     _orientation();
   }
 
@@ -614,6 +631,8 @@ class _RemoteSessionState extends State<RemoteSession> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    input.dispose();
     unawaited(
       SystemChrome.setPreferredOrientations([
         DeviceOrientation.portraitUp,
@@ -622,51 +641,118 @@ class _RemoteSessionState extends State<RemoteSession> {
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed && modifiers.isNotEmpty) {
+      setState(() => modifiers.clear());
+    }
+  }
+
   Future<void> _keyboard() async {
+    await input.releaseAll();
+    if (!mounted) return;
+    setState(() => modifiers.clear());
     final text = TextEditingController();
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (sheet) => Padding(
-        padding: EdgeInsets.fromLTRB(
-          20,
-          24,
-          20,
-          MediaQuery.viewInsetsOf(sheet).bottom + 24,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Bàn phím từ xa',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: text,
-              autofocus: true,
-              maxLength: 256,
-              decoration: const InputDecoration(
-                labelText: 'Chữ Latin không dấu, số và ký hiệu',
+      builder: (sheet) => SingleChildScrollView(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            24,
+            20,
+            MediaQuery.viewInsetsOf(sheet).bottom + 24,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Bàn phím từ xa',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
               ),
-            ),
-            const SizedBox(height: 12),
-            FilledButton(
-              onPressed: () async {
-                try {
-                  await sendText(c.engine, text.text);
-                  if (sheet.mounted) Navigator.pop(sheet);
-                } catch (error) {
-                  if (sheet.mounted) {
-                    ScaffoldMessenger.of(
-                      sheet,
-                    ).showSnackBar(SnackBar(content: Text(error.toString())));
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final key in const [
+                    (41, 'Esc'),
+                    (43, 'Tab'),
+                    (40, 'Enter'),
+                    (42, '⌫'),
+                    (82, '↑'),
+                    (81, '↓'),
+                    (80, '←'),
+                    (79, '→'),
+                  ])
+                    OutlinedButton(
+                      onPressed: () => input.tapKey(key.$1),
+                      child: Text(key.$2),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (var key = 58; key <= 69; key++)
+                    OutlinedButton(
+                      onPressed: () => input.tapKey(key),
+                      child: Text('F${key - 57}'),
+                    ),
+                  for (final chord in const [
+                    (224, 6, 'Ctrl+C'),
+                    (224, 25, 'Ctrl+V'),
+                    (227, 6, '⌘C'),
+                    (227, 25, '⌘V'),
+                  ])
+                    OutlinedButton(
+                      onPressed: () async {
+                        final owner = Object();
+                        try {
+                          await input.hold(chord.$1, true, owner);
+                          await input.tapKey(chord.$2);
+                        } finally {
+                          await input.hold(chord.$1, false, owner);
+                        }
+                      },
+                      child: Text(chord.$3),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: text,
+                autofocus: true,
+                maxLength: 256,
+                decoration: const InputDecoration(
+                  labelText: 'Chữ Latin không dấu, số và ký hiệu',
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton(
+                onPressed: () async {
+                  try {
+                    await sendText(
+                      c.engine,
+                      text.text,
+                      sessionId: input.sessionId,
+                    );
+                    if (sheet.mounted) Navigator.pop(sheet);
+                  } catch (error) {
+                    if (sheet.mounted) {
+                      ScaffoldMessenger.of(
+                        sheet,
+                      ).showSnackBar(SnackBar(content: Text(error.toString())));
+                    }
                   }
-                }
-              },
-              child: const Text('Gửi'),
-            ),
-          ],
+                },
+                child: const Text('Gửi'),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -676,10 +762,16 @@ class _RemoteSessionState extends State<RemoteSession> {
   }
 
   MobileController get c => widget.controller;
+  Size get videoSize {
+    final w = c.telemetry['videoWidth'], h = c.telemetry['videoHeight'];
+    return w is num && h is num && w > 0 && h > 0
+        ? Size(w.toDouble(), h.toDouble())
+        : const Size(1920, 1080);
+  }
+
   Future<void> _key(int code) async {
     try {
-      await c.engine.key(code, true);
-      await c.engine.key(code, false);
+      await input.tapKey(code);
     } catch (_) {
       await c.engine.resetInput().catchError((Object _) {});
       if (mounted) {
@@ -700,6 +792,51 @@ class _RemoteSessionState extends State<RemoteSession> {
         style: const TextStyle(color: Color(0xff78dfc0)),
       ),
       const SizedBox(height: 6),
+      SegmentedButton<TouchMode>(
+        showSelectedIcon: false,
+        segments: const [
+          ButtonSegment(
+            value: TouchMode.direct,
+            icon: Icon(Icons.touch_app_outlined),
+            tooltip: 'Chạm trực tiếp',
+          ),
+          ButtonSegment(
+            value: TouchMode.touchpad,
+            icon: Icon(Icons.mouse_outlined),
+            tooltip: 'Touchpad',
+          ),
+          ButtonSegment(
+            value: TouchMode.pan,
+            icon: Icon(Icons.zoom_in_map_rounded),
+            tooltip: 'Phóng to và di chuyển hình',
+          ),
+        ],
+        selected: {mode},
+        onSelectionChanged: (selection) {
+          setState(() {
+            mode = selection.single;
+            modifiers.clear();
+          });
+          unawaited(input.releaseAll());
+          if (mode != TouchMode.pan) {
+            unawaited(
+              c.setPreferences(c.preferences.copyWith(pointerMode: mode.name)),
+            );
+          }
+        },
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Text(
+          mode == TouchMode.touchpad
+              ? 'Rê 1 ngón · cuộn 2 ngón · giữ để nhấp phải'
+              : mode == TouchMode.pan
+              ? 'Chụm 2 ngón để zoom · kéo để di chuyển hình'
+              : 'Chạm để nhấp · kéo để di chuyển · giữ để nhấp phải',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 11, color: Colors.white60),
+        ),
+      ),
       Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
@@ -747,6 +884,11 @@ class _RemoteSessionState extends State<RemoteSession> {
             style: const TextStyle(color: Colors.amberAccent, fontSize: 12),
           ),
         ),
+      if (c.telemetry['videoFps'] is num)
+        Text(
+          'Nhận ${(c.telemetry['videoFps'] as num).toStringAsFixed(0)} fps · NACK ${c.telemetry['nackRequests'] ?? 0} · Bù âm ${c.telemetry['audioConcealed'] ?? 0}',
+          style: const TextStyle(fontSize: 11, color: Colors.white60),
+        ),
       if (!viewOnly)
         Wrap(
           spacing: 6,
@@ -762,6 +904,64 @@ class _RemoteSessionState extends State<RemoteSession> {
                 child: Text(item.$2),
               ),
           ],
+        ),
+      Wrap(
+        spacing: 4,
+        children: [
+          TextButton.icon(
+            onPressed: () => setState(() => resetZoom++),
+            icon: const Icon(Icons.center_focus_strong, size: 18),
+            label: const Text('Vừa khung'),
+          ),
+          if (!viewOnly)
+            TextButton.icon(
+              onPressed: () {
+                unawaited(input.releaseAll());
+                setState(() {
+                  gameControls = !gameControls;
+                  modifiers.clear();
+                });
+              },
+              icon: Icon(
+                gameControls
+                    ? Icons.sports_esports
+                    : Icons.sports_esports_outlined,
+                size: 18,
+              ),
+              label: const Text('Phím game'),
+            ),
+        ],
+      ),
+      if (!viewOnly)
+        Wrap(
+          spacing: 4,
+          children: [
+            for (final key in const [
+              (224, 'Ctrl'),
+              (225, 'Shift'),
+              (226, 'Alt'),
+              (227, '⌘/Win'),
+            ])
+              FilterChip(
+                label: Text(key.$2),
+                selected: modifiers.contains(key.$1),
+                onSelected: (down) {
+                  setState(() {
+                    if (down) {
+                      modifiers.add(key.$1);
+                    } else {
+                      modifiers.remove(key.$1);
+                    }
+                  });
+                  unawaited(input.hold(key.$1, down, 'modifier'));
+                },
+              ),
+          ],
+        ),
+      if (gameControls)
+        const Text(
+          'WASD + phím bàn phím · không phải tay cầm Xbox',
+          style: TextStyle(color: Colors.white54, fontSize: 11),
         ),
       if (c.active?['sharingId'] != null && c.capabilities['voice'] == true)
         Row(
@@ -796,12 +996,25 @@ class _RemoteSessionState extends State<RemoteSession> {
         body: Stack(
           children: [
             Positioned.fill(
-              child: defaultTargetPlatform == TargetPlatform.android
-                  ? const AndroidView(viewType: 'com.sanser.mobile/video')
-                  : defaultTargetPlatform == TargetPlatform.iOS
-                  ? const UiKitView(viewType: 'com.sanser.mobile/video')
-                  : const SizedBox.shrink(),
+              child: IgnorePointer(
+                child: defaultTargetPlatform == TargetPlatform.android
+                    ? const AndroidView(viewType: 'com.sanser.mobile/video')
+                    : defaultTargetPlatform == TargetPlatform.iOS
+                    ? const UiKitView(viewType: 'com.sanser.mobile/video')
+                    : const SizedBox.shrink(),
+              ),
             ),
+            if (c.phase == SessionPhase.streaming)
+              Positioned.fill(
+                child: MobileTouchSurface(
+                  input: input,
+                  mode: mode,
+                  resetZoom: resetZoom,
+                  videoSize: videoSize,
+                ),
+              ),
+            if (gameControls && !viewOnly && c.phase == SessionPhase.streaming)
+              Positioned.fill(child: MobileGameControls(input: input)),
             if (c.phase != SessionPhase.streaming)
               Center(
                 child: Container(

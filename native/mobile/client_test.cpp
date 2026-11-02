@@ -36,6 +36,9 @@ int main(){try{
     const auto before=results.frames.load();host->video(Frame{Bytes(5000,42),1280,720,true});
     require(waitFor([&]{return results.frames>before;}),"fragmented video did not reach C callback");
     require(waitFor([&]{return sanser_mobile_rtt(client.get())>=0;}),"unmeasured RTT");
+    require(waitFor([&]{SanserMobileStats stats{};sanser_mobile_stats(client.get(),&stats);return stats.video_frames>0 && stats.video_packets>0;}),"mobile numeric receive snapshot did not update without stdout tracing");
+    SanserMobileStats empty{1,1,1,1,1,1,1,1};sanser_mobile_stats(nullptr,&empty);
+    require(empty.video_frames==0 && empty.audio_decoded==0,"disconnected diagnostics must be empty");
     const auto stoppedBefore=results.stopped.load();
     client.reset();require(results.stopped==stoppedBefore+1,"stopped callback was not joined safely during destruction");
     require(waitFor([&]{return !host->running();}),"client close did not disconnect desktop");host->stop();

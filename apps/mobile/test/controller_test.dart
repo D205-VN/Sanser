@@ -87,6 +87,45 @@ void main() {
     c.dispose();
     await native.events.close();
   });
+  test(
+    'numeric mobile diagnostics keep dimensions and exclude credentials',
+    () async {
+      final native = TestEngine(), c = await connected(native);
+      native.events.add({
+        'sessionId': 'session',
+        'state': 'dimensions',
+        'videoWidth': 1600,
+        'videoHeight': 1000,
+      });
+      native.events.add({
+        'sessionId': 'session',
+        'state': 'frame',
+        'rttMs': 88.0,
+        'videoFrames': 14,
+        'audioConcealed': 3,
+        'token': 'secret',
+        'endpoint': 'private-address',
+        'pcm': 'private-audio',
+      });
+      expect(c.telemetry['videoWidth'], 1600);
+      final encoded = jsonEncode(c.diagnosticReport());
+      expect(encoded, contains('audioConcealed'));
+      expect(encoded, contains('88.0'));
+      for (final secret in [
+        'secret',
+        'private-address',
+        'private-audio',
+        'sessionId',
+        'token',
+      ]) {
+        expect(encoded, isNot(contains(secret)));
+      }
+      await c.disconnect();
+      expect(c.diagnosticReport()['samples'], isNotEmpty);
+      c.dispose();
+      await native.events.close();
+    },
+  );
   test('forced Direct failure never silently starts Relay', () async {
     final native = TestEngine()..direct = true;
     final c = await connected(native, mode: 'direct');

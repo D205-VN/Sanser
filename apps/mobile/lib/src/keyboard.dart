@@ -51,20 +51,27 @@ import 'native_engine.dart';
   return null;
 }
 
-Future<void> sendText(NativeEngine engine, String text) async {
+Future<void> sendText(
+  NativeEngine engine,
+  String text, {
+  String? sessionId,
+}) async {
   if (text.length > 256 || text.split('').any((c) => hidFor(c) == null)) {
     throw ArgumentError(
       'Bàn phím mobile hiện hỗ trợ chữ Latin không dấu, số và ký hiệu ASCII.',
     );
   }
+  Future<void> key(int code, bool down) => sessionId == null
+      ? engine.key(code, down)
+      : engine.remoteInput(sessionId, 2, code: code, down: down);
   for (final character in text.split('')) {
     final mapping = hidFor(character)!;
     try {
-      if (mapping.$2) await engine.key(225, true);
-      await engine.key(mapping.$1, true);
-      await engine.key(mapping.$1, false);
+      if (mapping.$2) await key(225, true);
+      await key(mapping.$1, true);
+      await key(mapping.$1, false);
     } finally {
-      if (mapping.$2) await engine.key(225, false);
+      if (mapping.$2) await key(225, false);
     }
   }
 }

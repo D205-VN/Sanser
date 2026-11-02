@@ -2,10 +2,12 @@ import 'api.dart';
 
 class MobilePreferences {
   final String networkMode;
+  final String pointerMode;
   final int videoBitrateMbps;
   final bool autoLandscape, soundOnConnect, compactControls, showLatency;
   const MobilePreferences({
     this.networkMode = 'auto',
+    this.pointerMode = 'direct',
     this.videoBitrateMbps = 6,
     this.autoLandscape = true,
     this.soundOnConnect = true,
@@ -13,6 +15,9 @@ class MobilePreferences {
     this.showLatency = true,
   });
   factory MobilePreferences.fromJson(Json json) => MobilePreferences(
+    pointerMode: ['direct', 'touchpad'].contains(json['pointerMode'])
+        ? json['pointerMode']
+        : 'direct',
     videoBitrateMbps: [2, 4, 6, 8, 12].contains(json['videoBitrateMbps'])
         ? json['videoBitrateMbps']
         : 6,
@@ -30,6 +35,7 @@ class MobilePreferences {
   );
   MobilePreferences copyWith({
     String? networkMode,
+    String? pointerMode,
     int? videoBitrateMbps,
     bool? autoLandscape,
     bool? soundOnConnect,
@@ -37,6 +43,7 @@ class MobilePreferences {
     bool? showLatency,
   }) => MobilePreferences(
     networkMode: networkMode ?? this.networkMode,
+    pointerMode: pointerMode ?? this.pointerMode,
     videoBitrateMbps: videoBitrateMbps ?? this.videoBitrateMbps,
     autoLandscape: autoLandscape ?? this.autoLandscape,
     soundOnConnect: soundOnConnect ?? this.soundOnConnect,
@@ -45,6 +52,7 @@ class MobilePreferences {
   );
   Json toJson() => {
     'networkMode': networkMode,
+    'pointerMode': pointerMode,
     'videoBitrateMbps': videoBitrateMbps,
     'autoLandscape': autoLandscape,
     'soundOnConnect': soundOnConnect,
