@@ -217,6 +217,7 @@ public:
   struct ReceiveHealth {
     std::uint64_t videoPackets=0,videoFrames=0,nackRequests=0,lostFragments=0,referenceDrops=0;
     std::uint64_t audioDecoded=0,audioConcealed=0,audioLate=0;
+    std::uint64_t sampleTimeMs=0;
   };
   ReceiveHealth receiveHealth() const {std::lock_guard lock(healthMutex_);return receiveHealth_;}
 private:

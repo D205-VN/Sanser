@@ -1189,14 +1189,14 @@ class _RemoteSessionState extends State<RemoteSession>
           Text(
             !streamReady
                 ? 'Đang chọn đường truyền…'
-                : '${c.selectedTransport == 'direct' ? 'Direct UDP' : 'Relay'} • ${c.telemetry['rttMs'] is num ? '${(c.telemetry['rttMs'] as num).toStringAsFixed(1)} ms' : 'Đang đo RTT'}',
+                : '${c.networkLabel.isEmpty ? '' : '${c.networkLabel} · '}${c.selectedTransport == 'direct' ? 'Direct UDP' : 'Relay'} • ${c.telemetry['rttMs'] is num ? '${(c.telemetry['rttMs'] as num).toStringAsFixed(1)} ms' : 'Đang đo RTT'}',
             style: const TextStyle(color: SanserTokens.textSoft, fontSize: 12),
           ),
           if (c.telemetry['videoFps'] is num)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                'Nhận ${(c.telemetry['videoFps'] as num).toStringAsFixed(0)} fps · NACK ${c.telemetry['nackRequests'] ?? 0} · Bù âm ${c.telemetry['audioConcealed'] ?? 0}',
+                'Nhận ${(c.telemetry['videoFps'] as num).toStringAsFixed(0)} fps · NACK ${((c.telemetry['nackRequestsPerSecond'] as num?) ?? 0).toStringAsFixed(0)}/s · Bù âm ${((c.telemetry['audioConcealedPerSecond'] as num?) ?? 0).toStringAsFixed(0)} gói/s',
                 style: const TextStyle(fontSize: 11, color: SanserTokens.muted),
               ),
             ),

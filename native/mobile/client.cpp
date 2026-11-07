@@ -57,7 +57,7 @@ extern "C" void sanser_mobile_stats(SanserMobileClient *c,SanserMobileStats *sta
   if(!stats)return;
   if(!c){*stats={};return;}
   const auto s=c->peer->receiveHealth();
-  *stats={s.videoPackets,s.videoFrames,s.nackRequests,s.lostFragments,s.referenceDrops,s.audioDecoded,s.audioConcealed,s.audioLate};
+  *stats={s.videoPackets,s.videoFrames,s.nackRequests,s.lostFragments,s.referenceDrops,s.audioDecoded,s.audioConcealed,s.audioLate,s.sampleTimeMs};
 }
 extern "C" void sanser_mobile_input(SanserMobileClient *c,unsigned kind,unsigned x,unsigned y,unsigned code,int delta,int down) {
   if(!c || kind>sanser::desktop::Input::Reset || x>65535 || y>65535 || code>65535 || delta<-32768 || delta>32767)return;

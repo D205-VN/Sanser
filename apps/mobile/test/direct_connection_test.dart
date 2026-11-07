@@ -12,7 +12,8 @@ import 'widget_test.dart' show MemorySecrets;
 class ProbeEngine extends NativeEngine {
   final operations = <String>[];
   Completer<Json>? gather;
-  bool stunSucceeded = true, rejectCheck = false;
+  bool stunSucceeded = true, portMappingSucceeded = false, rejectCheck = false;
+  Json probe = {};
   @override
   Future<Json> p2p(Json request) async {
     final operation = request['operation'] as String;
@@ -21,12 +22,22 @@ class ProbeEngine extends NativeEngine {
       throw StateError('UDP check failed');
     }
     return switch (operation) {
+      'diagnostics' => {'probe': probe},
       'gather' =>
         gather == null
             ? {
                 'stunSucceeded': stunSucceeded,
+                'portMappingSucceeded': portMappingSucceeded,
+                'gatewayAvailable': true,
                 'candidates': [
-                  {'id': 'local'},
+                  {
+                    'id': 'local',
+                    'type': portMappingSucceeded
+                        ? 'portMapped'
+                        : stunSucceeded
+                        ? 'serverReflexive'
+                        : 'host',
+                  },
                 ],
               }
             : await gather!.future,
@@ -100,6 +111,48 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 1));
     }
     expect(condition(), isTrue);
+  }
+
+  for (final (probe, reason) in <(Json, String)>[
+    ({'candidatePairs': 0}, 'cặp địa chỉ IPv4'),
+    ({'sent': 12, 'received': 0}, 'Đã gửi 12 gói'),
+    ({'sent': 0, 'sendErrors': 3}, 'chưa gửi được'),
+    ({'received': 3, 'matchingIdentity': 0}, 'Có UDP đến'),
+    (
+      {'matchingIdentity': 3, 'matchingPair': 0},
+      'cặp địa chỉ của hai máy chưa khớp',
+    ),
+    ({'verifiedPairs': 1}, 'chưa hoàn tất chọn đường'),
+  ]) {
+    test('probe failure reason: $reason', () async {
+      final engine = ProbeEngine()
+        ..rejectCheck = true
+        ..probe = {...probe, 'token': 'secret', 'endpoint': 'private-address'};
+      final socket = SignalSocket();
+      final route = DirectConnection(engine, open: (_, _) async => socket);
+      final failed = expectLater(connect(route), throwsStateError);
+      await until(() => socket.sent.isNotEmpty);
+      for (final type in ['p2p.candidates', 'p2p.candidatesAck']) {
+        socket.incoming.add(
+          jsonEncode({
+            'sessionId': 'session',
+            'senderDeviceId': 'desktop',
+            'type': type,
+            'payload': {
+              'generation': 1700000000,
+              'candidates': [
+                {'id': 'remote'},
+              ],
+            },
+          }),
+        );
+      }
+      await failed;
+      expect(route.failureReason, contains(reason));
+      expect(jsonEncode(route.diagnostics), isNot(contains('secret')));
+      expect(jsonEncode(route.diagnostics), isNot(contains('private-address')));
+      await route.cancel();
+    });
   }
 
   test(
@@ -203,10 +256,15 @@ void main() {
     expect(route.failureReason, contains('Chưa nhận được địa chỉ Direct'));
     await route.cancel();
   });
-  for (final stun in [true, false]) {
-    test('UDP failure distinguishes STUN result: $stun', () async {
+  for (final (stun, mapping) in [
+    (true, false),
+    (false, false),
+    (false, true),
+  ]) {
+    test('UDP failure distinguishes STUN $stun and mapping $mapping', () async {
       final engine = ProbeEngine()
         ..stunSucceeded = stun
+        ..portMappingSucceeded = mapping
         ..rejectCheck = true;
       final socket = SignalSocket();
       final route = DirectConnection(engine, open: (_, _) async => socket);
@@ -221,7 +279,7 @@ void main() {
             'payload': {
               'generation': 1700000000,
               'candidates': [
-                {'id': 'remote'},
+                {'id': 'remote', 'type': 'serverReflexive'},
               ],
             },
           }),
@@ -230,9 +288,21 @@ void main() {
       await failure;
       expect(route.diagnostics, containsPair('stage', 'check'));
       expect(route.diagnostics, containsPair('stunSucceeded', stun));
+      expect(route.diagnostics, containsPair('portMappingSucceeded', mapping));
+      expect(route.diagnostics, containsPair('gatewayAvailable', true));
+      expect(
+        route.diagnostics,
+        containsPair('localPublicCandidates', stun || mapping ? 1 : 0),
+      );
       expect(
         route.failureReason,
-        contains(stun ? 'Đã trao đổi địa chỉ' : 'STUN'),
+        contains(
+          stun
+              ? 'Đã trao đổi địa chỉ'
+              : mapping
+              ? 'Đã mở ánh xạ cổng'
+              : 'STUN',
+        ),
       );
       await route.cancel();
     });

@@ -145,6 +145,13 @@ const FIELDS: &[&str] = &[
     "opusErrors",
     "opusFreshnessResets",
     "audioSendDrops",
+    "audioReceiveIdleMs",
+    "audioValidIdleMs",
+    "outputGain",
+    "outputMeterPeak",
+    "outputGainRestores",
+    "completedDuplicateFragments",
+    "staleVideoFragments",
     "sendTransientErrors",
     "receiveTransientErrors",
     "repairUnsentIgnored",
@@ -887,6 +894,14 @@ mod tests {
         assert!(!serialized.to_string().contains("\"token\""));
     }
     #[test]
+    fn video_completion_retirement_reports_only_numeric_evidence() {
+        let sample=parse_sample(b"SNU1_STATS completed=30 completedDuplicateFragments=48 staleVideoFragments=2 token=789 device=123").unwrap();
+        assert_eq!(sample.values["completedDuplicateFragments"], 48.0);
+        assert_eq!(sample.values["staleVideoFragments"], 2.0);
+        assert!(!sample.values.contains_key("token"));
+        assert!(!sample.values.contains_key("device"));
+    }
+    #[test]
     fn audio_reports_keep_only_numeric_quality_counters() {
         let sample = parse_sample(b"SNV2_AUDIO_HEALTH opusDecoded=200 opusPlc=3 opusLate=2 opusErrors=0 opusTxBytes=16000 token=123 samples=456").unwrap();
         assert_eq!(sample.values.len(), 5);
@@ -912,6 +927,11 @@ mod tests {
         assert_eq!(recovery.values["audioSendDrops"], 1.0);
         assert_eq!(recovery.values["outputConverterErrors"], 4.0);
         assert_eq!(recovery.values["outputClockStalls"], 1.0);
+        let idle=parse_sample(b"SNA1_AUDIO_STATS datagrams=0 audioReceiveIdleMs=3200 audioValidIdleMs=4200 device=123 token=789").unwrap();
+        assert_eq!(idle.values["audioReceiveIdleMs"], 3200.0);
+        assert_eq!(idle.values["audioValidIdleMs"], 4200.0);
+        assert!(!idle.values.contains_key("device"));
+        assert!(!idle.values.contains_key("token"));
     }
     #[test]
     fn live_recovery_evidence_is_bound_to_the_report_session_without_raw_content() {

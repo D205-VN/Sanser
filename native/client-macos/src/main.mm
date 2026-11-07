@@ -1,6 +1,7 @@
 #include "udp_io_policy.h"
 #include "engine.h"
 #include "latency_policy.h"
+#include "legacy_video_repair.h"
 #include "control_timing.h"
 #include "input_retry.h"
 #include "udp_echo.h"
@@ -2835,8 +2836,39 @@ bool sendKeyframeRequest(const std::string& reason,
   return sent;
 }
 
+std::string videoNackPayload(const std::string& reason,
+                             const std::vector<std::uint64_t>& packetIds,
+                             const std::vector<sanser::video::FragmentRange>& ranges,
+                             std::uint64_t sequence) {
+  std::ostringstream out;
+  out << "{\"type\":\"video-nack\""
+      << ",\"sequence\":" << sequence
+      << ",\"reason\":\"" << jsonEscape(reason.c_str()) << "\""
+      << ",\"packetIds\":[";
+  const auto count = std::min(packetIds.size(), sanser::video::maxNackPackets);
+  for (std::size_t i = 0; i < count; ++i) {
+    if (i > 0) out << ",";
+    out << packetIds[i];
+  }
+  out << "],\"missingRanges\":[";
+  bool first = true;
+  std::size_t written = 0;
+  const auto& boundedRanges = ranges.size() <= sanser::video::maxNackRanges
+    ? ranges : std::vector<sanser::video::FragmentRange>{};
+  for (const auto& range : boundedRanges) {
+    if (std::find(packetIds.begin(), packetIds.begin() + count, range.packetId) == packetIds.begin() + count) continue;
+    if (++written > sanser::video::maxNackRanges) break;
+    if (!first) out << ",";
+    first = false;
+    out << range.packetId << "," << range.first << "," << range.last;
+  }
+  out << "],\"sentSteadyMicros\":" << steadyMicros() << "}";
+  return out.str();
+}
+
 bool sendVideoNackRequest(const std::string& reason,
-                          const std::vector<std::uint64_t>& packetIds) {
+                          const std::vector<std::uint64_t>& packetIds,
+                          const std::vector<sanser::video::FragmentRange>& ranges) {
   if (packetIds.empty()) return false;
 
   static std::mutex mutex;
@@ -2855,23 +2887,14 @@ bool sendVideoNackRequest(const std::string& reason,
     sequence = ++requestSequence;
   }
 
-  std::ostringstream out;
-  out << "{\"type\":\"video-nack\""
-      << ",\"sequence\":" << sequence
-      << ",\"reason\":\"" << jsonEscape(reason.c_str()) << "\""
-      << ",\"packetIds\":[";
-  const std::size_t count = std::min<std::size_t>(packetIds.size(), 96);
-  for (std::size_t i = 0; i < count; ++i) {
-    if (i > 0) out << ",";
-    out << packetIds[i];
-  }
-  out << "],\"sentSteadyMicros\":" << steadyMicros()
-      << "}";
-  const bool sent = sendNativeInputJson(out.str());
+  const auto payload = videoNackPayload(reason, packetIds, ranges, sequence);
+  const auto count = std::min(packetIds.size(), sanser::video::maxNackPackets);
+  const bool sent = sendNativeInputJson(payload);
   std::cout << "SNU1_NACK_TX sequence=" << sequence
             << " reason=" << reason
             << " sent=" << boolText(sent)
             << " packetIds=" << count
+            << " missingRanges=" << ranges.size()
             << " first=" << packetIds.front()
             << "\n";
   return sent;
@@ -4309,6 +4332,8 @@ struct UdpVideoStats {
   std::uint64_t rekeyGraceCompletedPackets = 0;
   std::uint64_t epochResetAssemblies = 0;
   std::uint64_t duplicateFragments = 0;
+  std::uint64_t completedDuplicateFragments = 0;
+  std::uint64_t staleVideoFragments = 0;
   std::vector<std::uint64_t> nackPacketIds;
   std::vector<std::uint64_t> newNackPacketIds;
 };
@@ -4352,6 +4377,26 @@ struct UdpPacketAssembly {
 
 class UdpVideoReassembler {
 public:
+  std::vector<sanser::video::FragmentRange> missingRanges(
+      const std::vector<std::uint64_t>& packetIds) const {
+    std::vector<sanser::video::FragmentRange> ranges;
+    for (const auto id : packetIds) {
+      // Newest epoch wins if the short rekey grace still contains this ID.
+      for (auto it = assemblies_.rbegin(); it != assemblies_.rend(); ++it) {
+        if (it->first.packetId != id) continue;
+        const auto& assembly = it->second;
+        const auto high = highestPacketIdByEpoch_.find(it->first.mediaEpoch);
+        const bool later = high != highestPacketIdByEpoch_.end() && high->second > id;
+        const bool inFlight = !later && !assembly.lastFragmentSeen &&
+          std::chrono::steady_clock::now() - assembly.lastFragmentAt < std::chrono::milliseconds(6);
+        const auto count = inFlight ? std::min(assembly.received.size(),
+          static_cast<std::size_t>(assembly.highestFragment) + 1) : assembly.received.size();
+        sanser::video::appendMissingRanges(id, std::span(assembly.received).first(count), ranges);
+        break;
+      }
+    }
+    return ranges;
+  }
   void resetForMediaGeneration(std::uint64_t generation, UdpVideoStats& stats) {
     observeMediaGeneration(generation, stats);
   }
@@ -4493,6 +4538,12 @@ public:
                   authenticatedHeader.authSeq);
     }
 
+    // A whole-frame repair can finish a partial frame before its remaining
+    // retransmitted fragments arrive. Authenticate/replay-check first, then
+    // retire those fragments instead of allocating a phantom assembly or
+    // emitting the same complete frame into arrival timing a second time.
+    const UdpAssemblyKey assemblyKey{fragmentMediaEpoch, header.packetId};
+    if(retireCompletedFragment(assemblyKey,stats)) return false;
     prune(stats);
     auto highestIt = highestPacketIdByEpoch_.find(fragmentMediaEpoch);
     const bool hasHighestPacketId = highestIt != highestPacketIdByEpoch_.end();
@@ -4511,7 +4562,6 @@ public:
     if (header.flags & 4u) {
       stats.retransmitFragments += 1;
     }
-    const UdpAssemblyKey assemblyKey{fragmentMediaEpoch, header.packetId};
     const auto existingAssembly = assemblies_.find(assemblyKey);
     const bool needsAllocation = existingAssembly == assemblies_.end() ||
       existingAssembly->second.data.size() != header.packetSize ||
@@ -4582,6 +4632,7 @@ public:
       if (completedRekeyGrace) {
         stats.rekeyGraceCompletedPackets += 1;
       }
+      rememberCompleted(assemblyKey);
       assemblies_.erase(assemblyKey);
       stats.completedPackets += 1;
       return true;
@@ -4596,6 +4647,33 @@ public:
   }
 
 private:
+  struct CompletionWindow {
+    static constexpr std::size_t capacity=512;
+    std::array<std::uint64_t,capacity> packetIds{};
+    std::uint64_t highest=0;
+  };
+  bool retireCompletedFragment(const UdpAssemblyKey& key,UdpVideoStats& stats) const {
+    if(!key.packetId) return false;
+    const auto found=completed_.find(key.mediaEpoch);
+    if(found==completed_.end()) return false;
+    const auto& window=found->second;
+    if(window.highest>=CompletionWindow::capacity && key.packetId<=window.highest-CompletionWindow::capacity) {
+      ++stats.staleVideoFragments;return true;
+    }
+    if(window.packetIds[key.packetId%CompletionWindow::capacity]==key.packetId) {
+      ++stats.duplicateFragments;++stats.completedDuplicateFragments;return true;
+    }
+    return false;
+  }
+  void rememberCompleted(const UdpAssemblyKey& key) {
+    if(!key.packetId) return;
+    auto& window=completed_[key.mediaEpoch];
+    window.highest=std::max(window.highest,key.packetId);
+    window.packetIds[key.packetId%CompletionWindow::capacity]=key.packetId;
+    // Current/previous authenticated epoch only; old key slots already have
+    // their own short cryptographic grace deadline. No unbounded history.
+    while(completed_.size()>2) completed_.erase(completed_.begin());
+  }
   void observeMediaGeneration(std::uint64_t generation, UdpVideoStats& stats) {
     if (!hasMediaGeneration_) {
       mediaGeneration_ = generation;
@@ -4610,6 +4688,7 @@ private:
       stats.droppedAssemblies += dropped;
     }
     assemblies_.clear();
+    completed_.clear();
     highestPacketIdByEpoch_.clear();
     stats.newNackPacketIds.clear();
     stats.nackPacketIds.clear();
@@ -4649,6 +4728,7 @@ private:
   }
 
   std::map<UdpAssemblyKey, UdpPacketAssembly> assemblies_;
+  std::map<std::uint64_t,CompletionWindow> completed_;
   std::map<std::uint64_t, std::uint64_t> highestPacketIdByEpoch_;
   std::uint64_t mediaGeneration_ = 0;
   bool hasMediaGeneration_ = false;
@@ -4702,7 +4782,7 @@ public:
     }
   }
 
-  bool maybeSend(const std::string& reason) {
+  bool maybeSend(const std::string& reason, const UdpVideoReassembler& reassembler) {
     if (pending_.empty()) return false;
     const auto now = std::chrono::steady_clock::now();
     std::vector<std::uint64_t> packetIds;
@@ -4717,7 +4797,7 @@ public:
       }
     }
     if (packetIds.empty()) return false;
-    if (!sendVideoNackRequest(reason, packetIds)) return false;
+    if (!sendVideoNackRequest(reason, packetIds, reassembler.missingRanges(packetIds))) return false;
 
     const auto sentAt = std::chrono::steady_clock::now();
     for (std::uint64_t packetId : packetIds) {
@@ -4792,7 +4872,7 @@ private:
   std::uint64_t mediaGeneration_ = 0;
   bool hasMediaGeneration_ = false;
   static constexpr std::size_t maxPendingPackets_ = 256;
-  static constexpr std::size_t maxBatchPackets_ = 96;
+  static constexpr std::size_t maxBatchPackets_ = sanser::video::maxNackPackets;
   static constexpr std::uint32_t maxRetries_ = 4;
 };
 
@@ -5172,17 +5252,21 @@ struct AudioQueueFunctions {
   decltype(&AudioQueueGetProperty) getProperty=AudioQueueGetProperty;
   decltype(&AudioQueueSetProperty) setProperty=AudioQueueSetProperty;
   decltype(&AudioQueueSetParameter) setParameter=AudioQueueSetParameter;
+  decltype(&AudioQueueGetParameter) getParameter=AudioQueueGetParameter;
   decltype(&AudioQueueDeviceGetCurrentTime) deviceTime=AudioQueueDeviceGetCurrentTime;
   AudioOutputRoute (*route)(const std::string&)=audioOutputRoute;
+  std::string (*deviceUid)(AudioDeviceID)=+[](AudioDeviceID device) {
+    return audioObjectString(device,kAudioDevicePropertyDeviceUID);
+  };
   std::chrono::steady_clock::time_point (*now)()=+[] { return std::chrono::steady_clock::now(); };
 };
 
 class AudioQueuePcmPlayer {
 public:
-  explicit AudioQueuePcmPlayer(AudioOutputSettings settings = {},AudioQueueFunctions functions = {})
+  explicit AudioQueuePcmPlayer(AudioOutputSettings settings = {},AudioQueueFunctions functions = {},bool continuous=false)
     : functions_(functions),outputDeviceUid_(std::move(settings.deviceUid)),
       volume_(std::clamp(settings.volume, 0.0, 1.0)),
-      muted_(settings.muted) {}
+      muted_(settings.muted),continuous_(continuous) {}
 
   ~AudioQueuePcmPlayer() {
     AudioQueueRef oldQueue = nullptr;
@@ -5240,6 +5324,62 @@ public:
     if (!queue_ || requiresRecovery_ || sampleRate_ != sampleRate || channels_ != channels || maxBufferBytes_ < payloadSize) {
       configureLocked(lock, sampleRate, channels, payloadSize);
     }
+    if(continuous_) {
+      if(functions_.now()-lastProgress_>=std::chrono::milliseconds(250)) {
+        ++outputRecoveries_;
+        configureLocked(lock,sampleRate,channels,payloadSize);
+      }
+      const auto samples=static_cast<std::size_t>(frameCount)*channels;
+      if(samples>ring_.size()-ringCount_) { ++queueDrops_; ringGap_=true; return false; }
+      for(std::size_t i=0;i<samples;++i) {
+        float value=0;std::memcpy(&value,payload+i*sizeof(float),sizeof(value));
+        if(!std::isfinite(value)) value=0;
+        ring_[(ringRead_+ringCount_+i)%ring_.size()]=static_cast<std::int16_t>(
+          std::clamp(std::lround(std::clamp(value,-1.0F,1.0F)*32768.0F),-32768L,32767L));
+      }
+      ringCount_+=samples;
+      const auto queue=queue_;
+      auto initial=std::move(freeBuffers_);freeBuffers_.clear();
+      const bool checkRunning=!initial.empty() || functions_.now()-lastRunningCheck_>=std::chrono::milliseconds(100);
+      if(checkRunning) lastRunningCheck_=functions_.now();
+      lock.unlock();
+      // Prime both fixed 10ms buffers once. Completion keeps them circulating,
+      // including silence during network gaps; OS output never relies on the
+      // next UDP payload arriving to keep its render cycle alive.
+      for(auto* buffer:initial) renderContinuous(queue,buffer);
+      if(checkRunning) {
+        UInt32 running=0,size=sizeof(running);
+        const auto query=functions_.getProperty(queue,kAudioQueueProperty_IsRunning,&running,&size);
+        UInt32 converterError=0;size=sizeof(converterError);
+        const auto converterQuery=functions_.getProperty(queue,kAudioQueueProperty_ConverterError,&converterError,&size);
+        Float32 actualGain=0;
+        const auto gainQuery=functions_.getParameter(queue,kAudioQueueParam_Volume,&actualGain);
+        const Float32 expectedGain=muted_ ? 0.0F : static_cast<Float32>(volume_);
+        if(gainQuery==noErr && std::isfinite(actualGain) && std::abs(actualGain-expectedGain)>0.001F) {
+          const auto restored=functions_.setParameter(queue,kAudioQueueParam_Volume,expectedGain);
+          std::lock_guard stateLock(mutex_);
+          if(restored!=noErr) outputFailureLocked(restored); else ++outputGainRestores_;
+        }
+        std::array<AudioQueueLevelMeterState,8> levels{};size=static_cast<UInt32>(channels*sizeof(levels[0]));
+        const auto meterQuery=functions_.getProperty(queue,kAudioQueueProperty_CurrentLevelMeter,levels.data(),&size);
+        {
+          std::lock_guard stateLock(mutex_);
+          outputGain_=gainQuery==noErr && std::isfinite(actualGain) ? actualGain : -1;
+          outputMeterPeak_=-1;
+          if(meterQuery==noErr) for(unsigned i=0;i<channels;++i)
+            if(std::isfinite(levels[i].mPeakPower)) outputMeterPeak_=std::max(outputMeterPeak_,levels[i].mPeakPower);
+        }
+        if(converterQuery==noErr && converterError) {
+          std::lock_guard stateLock(mutex_);++outputConverterErrors_;
+          outputFailureLocked(static_cast<OSStatus>(converterError));
+        } else if(query!=noErr || !running) {
+          const auto status=functions_.start(queue,nullptr);
+          std::lock_guard stateLock(mutex_);
+          if(status!=noErr) outputFailureLocked(status); else ++outputStarts_;
+        }
+      }
+      return true;
+    }
     // Keep jitter buffering in software. Do not drain it into 48 variable-size
     // hardware buffers or drop each next packet merely because output is busy.
     if (!available_.wait_for(lock, std::chrono::milliseconds(25), [&] {
@@ -5255,10 +5395,19 @@ public:
     const bool drained=budget_.empty();
     AudioQueueBufferRef buffer = freeBuffers_.front();
     freeBuffers_.pop_front();
-    std::memcpy(buffer->mAudioData, payload, payloadSize);
-    outputContinuity_.floats(static_cast<std::uint8_t*>(buffer->mAudioData),frameCount,channels,sampleRate,outputGap_);
+    // Keep float PCM at the decode boundary, but hand Core Audio PCM16 like
+    // the shared macOS player. This avoids the legacy float-output converter
+    // path while preserving the wire format, sample rate and queue budget.
+    outputScratch_.resize(static_cast<std::size_t>(frameCount)*channels);
+    std::memcpy(outputScratch_.data(),payload,outputScratch_.size()*sizeof(float));
+    outputContinuity_.process(outputScratch_.data(),frameCount,channels,sampleRate,outputGap_);
+    auto* output=static_cast<std::int16_t*>(buffer->mAudioData);
+    for(std::size_t i=0;i<outputScratch_.size();++i) {
+      const float sample=std::isfinite(outputScratch_[i]) ? std::clamp(outputScratch_[i],-1.0F,1.0F) : 0.0F;
+      output[i]=static_cast<std::int16_t>(std::clamp(std::lround(sample*32768.0F),-32768L,32767L));
+    }
     outputGap_=false;
-    buffer->mAudioDataByteSize = payloadSize;
+    buffer->mAudioDataByteSize = static_cast<UInt32>(outputScratch_.size()*sizeof(std::int16_t));
     // Retire exactly what was admitted, independently of any driver changes to
     // the mutable byte-size field on a returned buffer.
     buffer->mUserData=reinterpret_cast<void*>(static_cast<std::uintptr_t>(frameCount));
@@ -5313,10 +5462,12 @@ public:
   struct Stats {
     std::uint64_t submittedFrames,completedFrames,queuedFrames,starts,recoveries,errors,drops,signalFrames,routeChanges,converterErrors,clockStalls;
     OSStatus lastError;
+    float gain,meterPeak;
+    std::uint64_t gainRestores;
   };
   Stats stats() {
     std::lock_guard lock(mutex_);
-    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames(),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,outputRouteChanges_,outputConverterErrors_,outputClockStalls_,lastOutputError_};
+    return {outputSubmittedFrames_,outputCompletedFrames_,budget_.queuedFrames()+(channels_ ? ringCount_/channels_ : 0),outputStarts_,outputRecoveries_,outputErrors_,queueDrops_,outputSignalFrames_,outputRouteChanges_,outputConverterErrors_,outputClockStalls_,lastOutputError_,outputGain_,outputMeterPeak_,outputGainRestores_};
   }
 
   std::uint64_t takeQueueDrops() {
@@ -5327,7 +5478,7 @@ public:
   }
   bool hasQueuedAudio() {
     std::lock_guard<std::mutex> lock(mutex_);
-    return !budget_.empty();
+    return !budget_.empty() || ringCount_!=0;
   }
 
 private:
@@ -5383,28 +5534,34 @@ private:
     lock.unlock();
     disposeQueue(oldQueue);
     lock.lock();
+    ringRead_=ringCount_=0;ringGap_=true;ringSilent_=true;
+    renderContinuity_=sanser::AudioContinuity{};
+    const auto ringFrames=std::max<std::size_t>(sampleRate/50,requiredBytes/(channels*sizeof(float)));
+    ring_.assign(continuous_ ? ringFrames*channels : 0,0);
 
     AudioStreamBasicDescription description{};
     description.mSampleRate = static_cast<Float64>(sampleRate);
     description.mFormatID = kAudioFormatLinearPCM;
-    description.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-    description.mBytesPerPacket = static_cast<UInt32>(channels * sizeof(float));
+    description.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    description.mBytesPerPacket = static_cast<UInt32>(channels * sizeof(std::int16_t));
     description.mFramesPerPacket = 1;
-    description.mBytesPerFrame = static_cast<UInt32>(channels * sizeof(float));
+    description.mBytesPerFrame = static_cast<UInt32>(channels * sizeof(std::int16_t));
     description.mChannelsPerFrame = channels;
-    description.mBitsPerChannel = 32;
+    description.mBitsPerChannel = 16;
 
     try {
       AudioQueueRef createdQueue = createOutputQueue(description, false);
       queue_ = createdQueue;
       sampleRate_ = sampleRate;
       channels_ = channels;
-      maxBufferBytes_ = std::max<std::uint32_t>(requiredBytes, 4096);
+      maxBufferBytes_ = std::max<std::uint32_t>({requiredBytes,4096,
+        continuous_ ? static_cast<std::uint32_t>(sampleRate/100*channels*sizeof(std::int16_t)) : 0});
 
-      constexpr int bufferCount = 48;
+      const int bufferCount = continuous_ ? 2 : 48;
       for (int i = 0; i < bufferCount; ++i) {
         AudioQueueBufferRef buffer = nullptr;
         checkStatus(functions_.allocate(queue_, maxBufferBytes_, &buffer), "AudioQueueAllocateBuffer");
+        buffer->mUserData=nullptr;
         freeBuffers_.push_back(buffer);
       }
     } catch(...) {
@@ -5416,6 +5573,8 @@ private:
     // device-dependent, and a later underrun must be allowed to restart.
     std::cout << "SNA1_AUDIO_PLAYBACK sampleRate=" << sampleRate_
               << " channels=" << channels_
+              << " format=pcm16"
+              << " mode=" << (continuous_ ? "continuous-callback" : "packet-enqueue")
               << " buffers=" << freeBuffers_.size()
               << " bufferBytes=" << maxBufferBytes_
               << " device=\"" << (activeOutputDeviceUid_.empty() ? "default" : activeOutputDeviceUid_) << "\""
@@ -5433,16 +5592,17 @@ private:
 
     activeOutputDeviceUid_ = "";
     deviceFallback_ = false;
-    if (!forceDefault && !outputDeviceUid_.empty()) {
+    const auto resolvedUid=outputDeviceUid_.empty() ? functions_.deviceUid(outputRoute_.device) : outputDeviceUid_;
+    if (!forceDefault && !resolvedUid.empty()) {
       CFStringRef uid = CFStringCreateWithCString(kCFAllocatorDefault,
-                                                  outputDeviceUid_.c_str(),
+                                                  resolvedUid.c_str(),
                                                   kCFStringEncodingUTF8);
       const OSStatus deviceStatus = uid
         ? functions_.setProperty(createdQueue, kAudioQueueProperty_CurrentDevice, &uid, sizeof(uid))
         : paramErr;
       if (uid) CFRelease(uid);
       if (deviceStatus == noErr) {
-        activeOutputDeviceUid_ = outputDeviceUid_;
+        activeOutputDeviceUid_ = resolvedUid;
       } else {
         std::cerr << "SNA1_AUDIO_DEVICE_FALLBACK requested=\"" << outputDeviceUid_
                   << "\" status=" << deviceStatus
@@ -5460,10 +5620,13 @@ private:
     if (volumeStatus != noErr) {
       std::cerr << "SNA1_AUDIO_VOLUME warning status=" << volumeStatus << "\n";
     }
+    const UInt32 meterEnabled=1;
+    (void)functions_.setProperty(createdQueue,kAudioQueueProperty_EnableLevelMetering,&meterEnabled,sizeof(meterEnabled));
     return createdQueue;
   }
 
   void recycle(AudioQueueRef queue,AudioQueueBufferRef buffer) {
+    if(continuous_) { renderContinuous(queue,buffer);return; }
     std::lock_guard<std::mutex> lock(mutex_);
     if (queue_!=queue || !queue_) return;
     if (channels_) {
@@ -5474,6 +5637,41 @@ private:
     lastProgress_=functions_.now();
     freeBuffers_.push_back(buffer);
     available_.notify_one();
+  }
+
+  void renderContinuous(AudioQueueRef queue,AudioQueueBufferRef buffer) {
+    // Storage is allocated at configuration, never in the callback. Core Audio
+    // calls remain outside mutex_, including a synchronous stop/dispose.
+    std::unique_lock lock(mutex_);
+    if(queue_!=queue || !queue_ || !channels_) return;
+    const auto completed=static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(buffer->mUserData));
+    budget_.completed(completed);outputCompletedFrames_+=completed;
+    buffer->mUserData=nullptr;lastProgress_=functions_.now();
+    const auto frames=sampleRate_/100;
+    const auto count=static_cast<std::size_t>(frames)*channels_;
+    const auto realCount=std::min(count,ringCount_);
+    auto* output=static_cast<std::int16_t*>(buffer->mAudioData);
+    for(std::size_t i=0;i<realCount;++i) output[i]=ring_[(ringRead_+i)%ring_.size()];
+    ringRead_=(ringRead_+realCount)%ring_.size();ringCount_-=realCount;
+    const auto realFrames=static_cast<std::uint32_t>(realCount/channels_);
+    if(realFrames) renderContinuity_.process(output,realFrames,channels_,sampleRate_,ringSilent_ || ringGap_);
+    std::fill(output+realCount,output+count,0);
+    if(realFrames<frames) renderContinuity_.process(output+realCount,frames-realFrames,channels_,sampleRate_,true);
+    ringSilent_=realFrames<frames;ringGap_=false;
+    bool signal=false;
+    for(std::size_t i=0;i<realCount;++i) if(std::abs(static_cast<int>(output[i]))>3) { signal=true;break; }
+    buffer->mAudioDataByteSize=static_cast<UInt32>(count*sizeof(std::int16_t));
+    buffer->mUserData=reinterpret_cast<void*>(static_cast<std::uintptr_t>(realFrames));
+    budget_.submitted(realFrames);outputSubmittedFrames_+=realFrames;
+    if(signal) outputSignalFrames_+=realFrames;
+    lock.unlock();
+    const auto status=functions_.enqueue(queue,buffer,0,nullptr);
+    if(status!=noErr) {
+      lock.lock();
+      if(queue_!=queue) return;
+      budget_.completed(realFrames);buffer->mUserData=nullptr;
+      ++queueDrops_;outputFailureLocked(status);
+    }
   }
 
   AudioQueueFunctions functions_;
@@ -5500,12 +5698,19 @@ private:
   std::chrono::steady_clock::time_point lastRouteCheck_{};
   AudioOutputRoute outputRoute_;
   sanser::AudioContinuity outputContinuity_;
+  std::vector<float> outputScratch_;
   bool outputGap_=true;
   std::string outputDeviceUid_;
   std::string activeOutputDeviceUid_;
   double volume_ = 1.0;
   bool muted_ = false;
   bool deviceFallback_ = false;
+  bool continuous_=false,ringGap_=true,ringSilent_=true;
+  float outputGain_=-1,outputMeterPeak_=-1;
+  std::uint64_t outputGainRestores_=0;
+  std::vector<std::int16_t> ring_;
+  std::size_t ringRead_=0,ringCount_=0;
+  sanser::AudioContinuity renderContinuity_;
 };
 
 class AudioJitterBuffer {
@@ -6105,6 +6310,10 @@ public:
     bool empty() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.empty();
+    }
+    bool stopped() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return stopped_;
     }
 };
 
@@ -7505,14 +7714,116 @@ void listenUdpAudio(std::uint16_t audioPort,
       UdpAudioStats stats;
       UdpPeerLock audioPeerLock("SNA1");
       auto statsStartedAt = std::chrono::steady_clock::now();
+      auto lastDatagramAt=statsStartedAt,lastValidAt=statsStartedAt;
+      // Report independently of successful decode. Otherwise every rejected
+      // packet (or a stopped sender) hides its own failure behind a continue.
+      const auto reportStats=[&] {
+        const auto statsNow = std::chrono::steady_clock::now();
+        const double statsSeconds = std::chrono::duration<double>(statsNow - statsStartedAt).count();
+        if (statsSeconds >= 1.0) {
+          const AudioJitterStats jitterStats = receivingOpus ? opusJitter.takeStats() : jitter.takeStats();
+          const auto opusStats=opusReceiver.stats();
+          const auto outputStats=player->stats();
+          const double avgAgeMs = jitterStats.ageSamples > 0
+            ? jitterStats.ageSumMs / static_cast<double>(jitterStats.ageSamples)
+            : -1.0;
+          const double avgAvLeadMs = jitterStats.avLeadSamples > 0
+            ? jitterStats.avLeadSumMs / static_cast<double>(jitterStats.avLeadSamples)
+            : 0.0;
+          const double avgDriftRatio = jitterStats.driftSamples > 0
+            ? jitterStats.driftRatioSum / static_cast<double>(jitterStats.driftSamples)
+            : 1.0;
+          std::ostringstream line;
+          line << std::fixed << std::setprecision(1)
+               << "SNA1_AUDIO_STATS datagrams=" << stats.datagrams
+               << " audioReceiveIdleMs=" << std::chrono::duration_cast<std::chrono::milliseconds>(statsNow-lastDatagramAt).count()
+               << " audioValidIdleMs=" << std::chrono::duration_cast<std::chrono::milliseconds>(statsNow-lastValidAt).count()
+               << " opusDecoded=" << opusStats.decoded << " opusPlc=" << opusStats.concealed
+               << " opusLate=" << opusStats.late << " opusReordered=" << opusStats.reordered << " opusDropped=" << opusStats.dropped << " opusErrors=" << opusStats.errors
+               << " opusFreshnessResets=" << opusStats.freshnessResets
+               << " played=" << jitterStats.submittedPackets
+               << " frames=" << jitterStats.submittedFrames
+               << " outputSubmittedFrames=" << outputStats.submittedFrames
+               << " outputCompletedFrames=" << outputStats.completedFrames
+               << " outputSignalFrames=" << outputStats.signalFrames
+               << " outputQueuedFrames=" << outputStats.queuedFrames
+               << " outputStarts=" << outputStats.starts
+               << " outputRecoveries=" << outputStats.recoveries
+               << " outputRouteChanges=" << outputStats.routeChanges
+               << " outputConverterErrors=" << outputStats.converterErrors
+               << " outputClockStalls=" << outputStats.clockStalls
+               << " outputErrors=" << outputStats.errors
+               << " outputQueueDrops=" << outputStats.drops
+               << " outputLastError=" << outputStats.lastError
+               << std::setprecision(5)
+               << " outputGain=" << outputStats.gain
+               << " outputMeterPeak=" << outputStats.meterPeak
+               << " outputGainRestores=" << outputStats.gainRestores
+               << std::setprecision(1)
+               << " lost=" << jitterStats.lostPackets
+               << " reorder=" << jitterStats.reorderedPackets
+               << " dup=" << jitterStats.duplicatePackets
+               << " stale=" << jitterStats.staleDrops
+               << " lateDrop=" << jitterStats.latencyDrops
+               << " underflow=" << jitterStats.underflows
+               << " queueDrop=" << jitterStats.queueDrops
+               << " resets=" << jitterStats.resets
+               << " generationResets=" << jitterStats.generationResets
+               << " epochSequenceResets=" << jitterStats.epochSequenceResets
+               << " avHold=" << jitterStats.avHoldDecisions
+               << " avDrop=" << jitterStats.avSyncDrops
+               << " avClockMiss=" << jitterStats.avClockMisses
+               << " malformed=" << stats.malformed
+               << " auth=" << stats.authDatagrams
+               << " pcm16=" << stats.pcm16Datagrams
+               << " authRejected=" << stats.authRejected
+               << " replayRejected=" << stats.replayRejected
+               << " peerRejected=" << stats.peerRejected
+               << " rekeyGrace=" << stats.rekeyGrace
+               << " rekeyGraceAccepted=" << stats.rekeyGraceAccepted
+               << " epochStaleDrop=" << jitterStats.epochStaleDrops
+               << " epochGracePlayed=" << jitterStats.epochGraceSubmitted
+               << " bufferMs=" << jitterStats.bufferMs
+               << " queued=" << jitterStats.queuedPackets;
+          if (jitterStats.avLeadSamples > 0) {
+            line << " avLeadMs=" << avgAvLeadMs
+                 << " avMinMs=" << jitterStats.avLeadMinMs
+                 << " avMaxMs=" << jitterStats.avLeadMaxMs;
+          } else {
+            line << " avLeadMs=-- avMinMs=-- avMaxMs=--";
+          }
+          if (jitterStats.driftSamples > 0) {
+            line << std::setprecision(2)
+                 << " driftPct=" << ((avgDriftRatio - 1.0) * 100.0)
+                 << " driftMinPct=" << ((jitterStats.driftRatioMin - 1.0) * 100.0)
+                 << " driftMaxPct=" << ((jitterStats.driftRatioMax - 1.0) * 100.0)
+                 << std::setprecision(1)
+                 << " driftFrames=" << jitterStats.driftFrameDelta;
+          } else {
+            line << " driftPct=-- driftMinPct=-- driftMaxPct=-- driftFrames=0";
+          }
+          if (avgAgeMs >= 0.0) {
+            line << " avgAgeMs=" << avgAgeMs
+                 << " maxAgeMs=" << jitterStats.ageMaxMs;
+          } else {
+            line << " avgAgeMs=-- maxAgeMs=--";
+          }
+          std::cerr << line.str() << "\n";
+
+          stats = {};
+          statsStartedAt = statsNow;
+        }
+      };
       while (true) {
+        reportStats();
         std::vector<std::uint8_t> queuePacket;
         ssize_t received = 0;
         UdpEndpoint peerAddress{};
         peerAddress.length = sizeof(peerAddress.address);
         if (useQueue) {
-          if (!gAudioUdpQueue.pop(queuePacket)) {
-            break;
+          if (!gAudioUdpQueue.pop_with_timeout(queuePacket,std::chrono::milliseconds(200))) {
+            if(gAudioUdpQueue.stopped()) break;
+            continue;
           }
           if (queuePacket.size() > datagramBuffer.size()) {
             continue;
@@ -7520,6 +7831,10 @@ void listenUdpAudio(std::uint16_t audioPort,
           std::memcpy(datagramBuffer.data(), queuePacket.data(), queuePacket.size());
           received = static_cast<ssize_t>(queuePacket.size());
         } else {
+          pollfd descriptor{server.get(),POLLIN,0};
+          const int ready=poll(&descriptor,1,200);
+          if(ready==0) continue;
+          if(ready<0) { if(errno==EINTR) continue; throw std::runtime_error("SNA1 UDP poll failed."); }
           received = recvfrom(server.get(),
                               datagramBuffer.data(),
                               datagramBuffer.size(),
@@ -7541,6 +7856,7 @@ void listenUdpAudio(std::uint16_t audioPort,
           continue;
         }
         stats.datagrams += 1;
+        lastDatagramAt=std::chrono::steady_clock::now();
         std::uint8_t* data = datagramBuffer.data();
         const std::size_t size = static_cast<std::size_t>(received);
         if (size < sizeof(AudioPacketHeader)) {
@@ -7646,6 +7962,7 @@ void listenUdpAudio(std::uint16_t audioPort,
           }
         }
 
+        lastValidAt=std::chrono::steady_clock::now();
         const auto* payload = data + headerSize;
         if(opusMediaGeneration!=mediaGeneration) {
           opusMediaGeneration=mediaGeneration; opusEpoch=UINT64_MAX; receivingOpus=false;
@@ -7690,94 +8007,7 @@ void listenUdpAudio(std::uint16_t audioPort,
         jitter.push(std::move(packet));
         }
 
-        const auto statsNow = std::chrono::steady_clock::now();
-        const double statsSeconds = std::chrono::duration<double>(statsNow - statsStartedAt).count();
-        if (statsSeconds >= 1.0) {
-          const AudioJitterStats jitterStats = receivingOpus ? opusJitter.takeStats() : jitter.takeStats();
-          const auto opusStats=opusReceiver.stats();
-          const auto outputStats=player->stats();
-          const double avgAgeMs = jitterStats.ageSamples > 0
-            ? jitterStats.ageSumMs / static_cast<double>(jitterStats.ageSamples)
-            : -1.0;
-          const double avgAvLeadMs = jitterStats.avLeadSamples > 0
-            ? jitterStats.avLeadSumMs / static_cast<double>(jitterStats.avLeadSamples)
-            : 0.0;
-          const double avgDriftRatio = jitterStats.driftSamples > 0
-            ? jitterStats.driftRatioSum / static_cast<double>(jitterStats.driftSamples)
-            : 1.0;
-          std::ostringstream line;
-          line << std::fixed << std::setprecision(1)
-               << "SNA1_AUDIO_STATS datagrams=" << stats.datagrams
-               << " opusDecoded=" << opusStats.decoded << " opusPlc=" << opusStats.concealed
-               << " opusLate=" << opusStats.late << " opusReordered=" << opusStats.reordered << " opusDropped=" << opusStats.dropped << " opusErrors=" << opusStats.errors
-               << " opusFreshnessResets=" << opusStats.freshnessResets
-               << " played=" << jitterStats.submittedPackets
-               << " frames=" << jitterStats.submittedFrames
-               << " outputSubmittedFrames=" << outputStats.submittedFrames
-               << " outputCompletedFrames=" << outputStats.completedFrames
-               << " outputSignalFrames=" << outputStats.signalFrames
-               << " outputQueuedFrames=" << outputStats.queuedFrames
-               << " outputStarts=" << outputStats.starts
-               << " outputRecoveries=" << outputStats.recoveries
-               << " outputRouteChanges=" << outputStats.routeChanges
-               << " outputConverterErrors=" << outputStats.converterErrors
-               << " outputClockStalls=" << outputStats.clockStalls
-               << " outputErrors=" << outputStats.errors
-               << " outputQueueDrops=" << outputStats.drops
-               << " outputLastError=" << outputStats.lastError
-               << " lost=" << jitterStats.lostPackets
-               << " reorder=" << jitterStats.reorderedPackets
-               << " dup=" << jitterStats.duplicatePackets
-               << " stale=" << jitterStats.staleDrops
-               << " lateDrop=" << jitterStats.latencyDrops
-               << " underflow=" << jitterStats.underflows
-               << " queueDrop=" << jitterStats.queueDrops
-               << " resets=" << jitterStats.resets
-               << " generationResets=" << jitterStats.generationResets
-               << " epochSequenceResets=" << jitterStats.epochSequenceResets
-               << " avHold=" << jitterStats.avHoldDecisions
-               << " avDrop=" << jitterStats.avSyncDrops
-               << " avClockMiss=" << jitterStats.avClockMisses
-               << " malformed=" << stats.malformed
-               << " auth=" << stats.authDatagrams
-               << " pcm16=" << stats.pcm16Datagrams
-               << " authRejected=" << stats.authRejected
-               << " replayRejected=" << stats.replayRejected
-               << " peerRejected=" << stats.peerRejected
-               << " rekeyGrace=" << stats.rekeyGrace
-               << " rekeyGraceAccepted=" << stats.rekeyGraceAccepted
-               << " epochStaleDrop=" << jitterStats.epochStaleDrops
-               << " epochGracePlayed=" << jitterStats.epochGraceSubmitted
-               << " bufferMs=" << jitterStats.bufferMs
-               << " queued=" << jitterStats.queuedPackets;
-          if (jitterStats.avLeadSamples > 0) {
-            line << " avLeadMs=" << avgAvLeadMs
-                 << " avMinMs=" << jitterStats.avLeadMinMs
-                 << " avMaxMs=" << jitterStats.avLeadMaxMs;
-          } else {
-            line << " avLeadMs=-- avMinMs=-- avMaxMs=--";
-          }
-          if (jitterStats.driftSamples > 0) {
-            line << std::setprecision(2)
-                 << " driftPct=" << ((avgDriftRatio - 1.0) * 100.0)
-                 << " driftMinPct=" << ((jitterStats.driftRatioMin - 1.0) * 100.0)
-                 << " driftMaxPct=" << ((jitterStats.driftRatioMax - 1.0) * 100.0)
-                 << std::setprecision(1)
-                 << " driftFrames=" << jitterStats.driftFrameDelta;
-          } else {
-            line << " driftPct=-- driftMinPct=-- driftMaxPct=-- driftFrames=0";
-          }
-          if (avgAgeMs >= 0.0) {
-            line << " avgAgeMs=" << avgAgeMs
-                 << " maxAgeMs=" << jitterStats.ageMaxMs;
-          } else {
-            line << " avgAgeMs=-- maxAgeMs=--";
-          }
-          std::cout << line.str() << "\n";
 
-          stats = {};
-          statsStartedAt = statsNow;
-        }
       }
     } catch (const std::exception& error) {
       std::cerr << "SNA1 audio listener error: " << error.what() << "\n";
@@ -8379,7 +8609,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
         if (completedPacketId != 0) {
           nackController.markRecovered(completedPacketId);
         }
-        nackController.maybeSend("udp-loss");
+        nackController.maybeSend("udp-loss", reassembler);
         nackController.maybeRequestKeyframe(summary.lastSequence, decoder.decodeErrors());
 
         if (completedPacket) {
@@ -8561,7 +8791,7 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
           const ControlRttWindow controlRtt = takeControlRttWindow();
           const double repairLossPct = packetLossPercent(nackWindow.sentPackets + nackWindow.timedOutPackets,
                                                          udpStats.completedPackets);
-          std::cout << "SNU1_STATS datagrams=" << udpStats.datagrams
+          std::cerr << "SNU1_STATS datagrams=" << udpStats.datagrams
                     << " incomplete=" << reassembler.incompletePackets()
                     << " missingFragments=" << reassembler.missingFragments()
                     << " fragments=" << udpStats.fragments
@@ -8578,6 +8808,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                     << " rekeyGraceCompleted=" << udpStats.rekeyGraceCompletedPackets
                     << " epochResetAssemblies=" << udpStats.epochResetAssemblies
                     << " duplicateFragments=" << udpStats.duplicateFragments
+                    << " completedDuplicateFragments=" << udpStats.completedDuplicateFragments
+                    << " staleVideoFragments=" << udpStats.staleVideoFragments
                     << " nackPackets=" << udpStats.nackPacketIds.size()
                     << " nackPending=" << nackController.pendingCount()
                     << " nackSent=" << nackWindow.sentPackets
@@ -8615,6 +8847,8 @@ void decodeUdpStreamToRenderer(std::uint16_t port,
                          << ",\"rekeyGraceCompleted\":" << udpStats.rekeyGraceCompletedPackets
                          << ",\"epochResetAssemblies\":" << udpStats.epochResetAssemblies
                          << ",\"duplicateFragments\":" << udpStats.duplicateFragments
+                         << ",\"completedDuplicateFragments\":" << udpStats.completedDuplicateFragments
+                         << ",\"staleVideoFragments\":" << udpStats.staleVideoFragments
                          << ",\"nackPackets\":" << udpStats.nackPacketIds.size()
                          << ",\"nackPending\":" << nackController.pendingCount()
                          << ",\"nackSent\":" << nackWindow.sentPackets
@@ -8828,7 +9062,7 @@ int runVideoRenderTcp(std::uint16_t port,
     auto avSyncClock = std::make_shared<AvSyncClock>();
 
     startAudioListener(audioSettings,udpVideo,controlPort,audioPort,[&] {
-      auto audioPlayer = std::make_shared<AudioQueuePcmPlayer>(audioSettings);
+      auto audioPlayer = std::make_shared<AudioQueuePcmPlayer>(audioSettings,AudioQueueFunctions{},true);
       std::thread audioWorker([audioPort, audioJitterMs, audioPlayer, avSyncClock]() {
         listenUdpAudio(audioPort, audioJitterMs, audioPlayer, avSyncClock);
       });

@@ -10,11 +10,13 @@
 #include "sanser_version.h"
 #include "wheel_delta.h"
 #include "latency_policy.h"
+#include "legacy_video_repair.h"
 #include "pacing_group.h"
 #include "control_timing.h"
 #include "stream_adaptation_policy.h"
 #include "opus_audio.h"
 #include "audio_route_watch.h"
+#include "audio_capture_recovery.h"
 #include "audio_playout.h"
 #include "legacy_host_shortcut.h"
 
@@ -378,6 +380,7 @@ struct VideoNackSnapshot {
   std::uint64_t requestedAtMicros = 0;
   std::string reason;
   std::vector<std::uint64_t> packetIds;
+  std::vector<sanser::video::FragmentRange> missingRanges;
 };
 
 std::deque<VideoNackSnapshot> gVideoNackQueue;
@@ -452,7 +455,8 @@ bool takeNextVideoNack(VideoNackSnapshot& snapshot) {
 
 void requestVideoRetransmit(const std::string& reason,
                             std::uint64_t clientSequence,
-                            std::vector<std::uint64_t> packetIds) {
+                            std::vector<std::uint64_t> packetIds,
+                            std::vector<sanser::video::FragmentRange> missingRanges = {}) {
   if (packetIds.empty()) return;
   if (packetIds.size() > 128) packetIds.resize(128);
 
@@ -468,10 +472,14 @@ void requestVideoRetransmit(const std::string& reason,
     snapshot.requestedAtMicros = unixMicros();
     snapshot.reason = reason.empty() ? "client" : reason;
     snapshot.packetIds = std::move(packetIds);
+    snapshot.missingRanges = std::move(missingRanges);
     if (gVideoNackQueue.size() < kMaxQueuedVideoNacks) {
       gVideoNackQueue.push_back(snapshot);
     } else {
       VideoNackSnapshot& pending = gVideoNackQueue.back();
+      // Requests being coalesced may disagree about which holes remain. Keep
+      // the bounded legacy fallback rather than silently lose a hole list.
+      pending.missingRanges.clear();
       coalescedIntoSequence = pending.sequence;
       for (const std::uint64_t packetId : snapshot.packetIds) {
         if (std::find(pending.packetIds.begin(), pending.packetIds.end(), packetId) != pending.packetIds.end()) {
@@ -492,6 +500,7 @@ void requestVideoRetransmit(const std::string& reason,
             << " clientSequence=" << snapshot.clientSequence
             << " reason=" << snapshot.reason
             << " packetIds=" << snapshot.packetIds.size()
+            << " missingRanges=" << snapshot.missingRanges.size()
             << " first=" << snapshot.packetIds.front()
             << " queueDepth=" << queueDepth
             << " coalescedInto=" << coalescedIntoSequence
@@ -1301,28 +1310,24 @@ std::vector<std::uint64_t> jsonUint64ArrayValue(const std::string& json,
   std::vector<std::uint64_t> values;
   std::size_t offset = findJsonValue(json, key);
   if (offset == std::string::npos || offset >= json.size() || json[offset] != '[') return values;
-  ++offset;
-
-  while (offset < json.size() && values.size() < maxValues) {
-    offset = skipJsonWhitespace(json, offset);
-    if (offset >= json.size() || json[offset] == ']') break;
-    if (json[offset] == ',') {
-      ++offset;
-      continue;
-    }
-    if (json[offset] < '0' || json[offset] > '9') break;
+  offset = skipJsonWhitespace(json, offset + 1);
+  if (offset < json.size() && json[offset] == ']') return values;
+  while (offset < json.size()) {
+    if (values.size() >= maxValues || json[offset] < '0' || json[offset] > '9') return {};
     std::size_t end = offset;
-    while (end < json.size() && json[end] >= '0' && json[end] <= '9') {
-      ++end;
-    }
+    while (end < json.size() && json[end] >= '0' && json[end] <= '9') ++end;
+    // Match JSON integer syntax; do not accept prefixes/truncated hints.
+    if (end > offset + 1 && json[offset] == '0') return {};
     try {
       values.push_back(static_cast<std::uint64_t>(std::stoull(json.substr(offset, end - offset))));
-    } catch (...) {
-      break;
-    }
-    offset = end;
+    } catch (...) { return {}; }
+    offset = skipJsonWhitespace(json, end);
+    if (offset >= json.size()) return {};
+    if (json[offset] == ']') return values;
+    if (json[offset] != ',') return {};
+    offset = skipJsonWhitespace(json, offset + 1);
   }
-  return values;
+  return {};
 }
 
 bool jsonBoolValue(const std::string& json, const char* key, bool fallback = false) {
@@ -3394,9 +3399,11 @@ int handleControlPayload(const std::string& json,bool allowHostShortcuts=false) 
                     jsonUint64Value(json, "decodeErrors"));
     return 0;
   } else if (type == "video-nack") {
+    const auto packetIds = jsonUint64ArrayValue(json, "packetIds");
+    const auto flatRanges = jsonUint64ArrayValue(json, "missingRanges", sanser::video::maxNackRanges * 3);
     requestVideoRetransmit(jsonStringValue(json, "reason", "client"),
-                           jsonUint64Value(json, "sequence"),
-                           jsonUint64ArrayValue(json, "packetIds"));
+                           jsonUint64Value(json, "sequence"), packetIds,
+                           sanser::video::decodeMissingRanges(flatRanges, packetIds));
     return 0;
   }
   return 0;
@@ -5416,32 +5423,25 @@ private:
       requireHr(coinit, "CoInitializeEx");
 
       UdpAudioClient audioClient(endpoint_, mediaCrypto_);
-      ComPtr<IMMDeviceEnumerator> enumerator;
-      requireHr(CoCreateInstance(__uuidof(MMDeviceEnumerator),
+      sanser::audio::captureWithRecovery(running_,[&] {
+        ComPtr<IMMDeviceEnumerator> enumerator;
+        requireHr(CoCreateInstance(__uuidof(MMDeviceEnumerator),
                                  nullptr,
                                  CLSCTX_ALL,
                                  __uuidof(IMMDeviceEnumerator),
                                  reinterpret_cast<void**>(enumerator.GetAddressOf())),
-                "CoCreateInstance(MMDeviceEnumerator)");
-
-      std::uint32_t restartAttempt = 0;
-      while (running_) {
-        try {
-          runCaptureSession(audioClient, enumerator.Get());
-          restartAttempt = 0;
-        } catch (const WasapiRestartError& error) {
-          if (!running_) break;
-          restartAttempt += 1;
-          const std::uint32_t delayMs = std::min<std::uint32_t>(2000, 150 * restartAttempt);
-          std::cerr << "SNA1_AUDIO_RESTART attempt=" << restartAttempt
-                    << " delayMs=" << delayMs
-                    << " reason=\"" << error.what() << "\"\n";
-          const auto wakeAt = std::chrono::steady_clock::now() + std::chrono::milliseconds(delayMs);
+                  "CoCreateInstance(MMDeviceEnumerator)");
+        runCaptureSession(audioClient, enumerator.Get());
+      },[&](std::chrono::milliseconds delay) {
+          const auto wakeAt = std::chrono::steady_clock::now() + delay;
           while (running_ && std::chrono::steady_clock::now() < wakeAt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
           }
-        }
-      }
+      },[](const std::exception& error,unsigned attempt,std::chrono::milliseconds delay) {
+        std::cerr << "SNA1_AUDIO_RESTART attempt=" << attempt
+                  << " delayMs=" << delay.count()
+                  << " reason=\"" << error.what() << "\"\n";
+      });
     } catch (const std::exception& error) {
       std::cerr << "SNA1_AUDIO_CAPTURE error: " << error.what() << "\n";
     }
@@ -6026,7 +6026,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	    std::uint64_t packetId = 0;
 	    std::uint64_t nackSequence = 0;
 	    std::uint64_t mediaGeneration = 0;
-	    std::uint32_t nextFragment = 0;
+	    sanser::video::RepairCursor repair;
 	    std::chrono::steady_clock::time_point queuedAt;
 	  };
 	  std::deque<PendingUdpRetransmit> pendingUdpRetransmits;
@@ -6104,7 +6104,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	          packetId,
 	          receivedNack.sequence,
 	          mediaGeneration,
-	          0,
+	          sanser::video::RepairCursor(packetId, receivedNack.missingRanges),
 	          originallyQueuedAt
 	        });
 	        queuedNackPackets += 1;
@@ -6142,8 +6142,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	        maxRetransmitFragmentsPerChunk);
 	      const auto result = udpClient->resendPacketChunk(pending.packetId,
 	                                                       pending.mediaGeneration,
-	                                                       pending.nextFragment,
-	                                                       chunkFragments,
+	                                                       pending.repair.first(),
+	                                                       pending.repair.chunkSize(chunkFragments),
 	                                                       remainingBudget);
 	      if (!result.cacheHit) {
 	        cacheMisses += 1;
@@ -6151,8 +6151,8 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
 	      }
 	      retransmittedFragments += result.fragmentsSent;
 	      retransmitFragmentBudget -= std::min(retransmitFragmentBudget, result.fragmentsSent);
-	      pending.nextFragment = result.nextFragment;
-	      if (result.complete) {
+	      pending.repair.advance(result.fragmentsSent, result.complete);
+	      if (pending.repair.complete()) {
 	        retransmittedPackets += 1;
 	      } else if (result.fragmentsSent > 0) {
 	        pendingUdpRetransmits.push_back(std::move(pending));
@@ -7466,6 +7466,76 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   return 0;
 }
 
+#ifdef SANSER_AUDIO_TEST
+void testLegacyVideoFragmentRepair() {
+  WinsockRuntime runtime;
+  const auto require=[](bool ok,const char* message) { if(!ok) throw std::runtime_error(message); };
+  // Exercise the actual JSON/control handler, cached host packetizer and repair
+  // cursor without opening a capture/encoder/device or changing real input.
+  const std::string nack=R"({"type":"video-nack","packetIds":[1],"missingRanges":[1,198,199,1,150,150]})";
+  handleControlPayload(nack);
+  VideoNackSnapshot request;
+  require(takeNextVideoNack(request) && request.packetIds.size()==1 && request.missingRanges.size()==2,
+          "Fragment NACK did not reach the production host queue");
+  for(const auto malformed:{"[1,2,]","[1 2 3]","[1,2","[1,2,3.5]","[01,2,3]","[1,2,18446744073709551616]"})
+    require(jsonUint64ArrayValue(std::string("{\"missingRanges\":")+malformed+"}","missingRanges").empty(),
+            "Malformed NACK was accepted as a partial hint");
+  static std::vector<std::vector<std::uint8_t>> sent;
+  static bool refuseNext=false;
+  sent.clear();
+  auto crypto=std::make_shared<MediaCryptoState>(std::string(48,'s'));
+  crypto->rotateForNonce("synthetic-selective-video-repair");
+  UdpVideoClient sender("127.0.0.1:9",20000000,false,crypto,0,{},
+    +[](SOCKET,const char* data,int length,int)->int {
+      if(refuseNext) { refuseNext=false; WSASetLastError(WSAEWOULDBLOCK); return SOCKET_ERROR; }
+      sent.emplace_back(reinterpret_cast<const std::uint8_t*>(data),reinterpret_cast<const std::uint8_t*>(data)+length);
+      return length;
+    });
+  const std::vector<std::uint8_t> frame(200*1152,0x6a);
+  require(sender.sendPacket(frame)==200 && sent.size()==200,"Synthetic host frame was not packetized");
+  sent.clear();
+  sanser::video::RepairCursor repair(1,request.missingRanges);
+  refuseNext=true;
+  auto result=sender.resendPacketChunk(1,sender.retransmitGeneration(),repair.first(),repair.chunkSize(6),std::chrono::microseconds(2200));
+  repair.advance(result.fragmentsSent,result.complete);
+  require(result.cacheHit && result.fragmentsSent==0 && repair.first()==150 && !repair.complete(),
+          "Would-block consumed a selective repair fragment");
+  while(!repair.complete()) {
+    result=sender.resendPacketChunk(1,sender.retransmitGeneration(),repair.first(),repair.chunkSize(6),std::chrono::microseconds(2200));
+    require(result.cacheHit && result.fragmentsSent>0,"Selective repair stalled in the actual host cache");
+    repair.advance(result.fragmentsSent,result.complete);
+  }
+  require(sent.size()==3,"Host resent received fragments instead of the three holes");
+  const std::array<unsigned,3> expected{150,198,199};
+  std::uint64_t lastAuth=200;
+  const auto state=crypto->snapshot();
+  for(std::size_t i=0;i<sent.size();++i) {
+    auto& bytes=sent[i];
+    UdpVideoAuthenticatedFragmentHeader header{};std::memcpy(&header,bytes.data(),sizeof(header));
+    require(header.packetId==1 && header.fragmentIndex==expected[i] && header.fragmentCount==200 &&
+            (header.flags&4) && header.authEpoch==state.epoch && header.authSeq>lastAuth,
+            "Selective repair changed IDs, lost repair flags or reused authentication sequence");
+    lastAuth=header.authSeq;
+    std::memset(bytes.data()+offsetof(UdpVideoAuthenticatedFragmentHeader,authTag),0,kUdpAuthTagHexSize);
+    require(std::string(header.authTag,kUdpAuthTagHexSize)==udpDatagramMacHex(state.videoAuthKey,"video",bytes.data(),bytes.size()),
+            "Selective repair authentication failed");
+    chacha20Xor(bytes.data()+sizeof(header),header.payloadSize,state.videoCryptoKey,"video",header.authSeq);
+    require(std::all_of(bytes.begin()+sizeof(header),bytes.end(),[](auto byte) { return byte==0x6a; }),
+            "Selective repair damaged encoded payload");
+  }
+  // Generation changes must still invalidate the retransmit cache.
+  const auto generation=sender.retransmitGeneration();
+  crypto->rotateForNonce("synthetic-selective-video-next-generation");
+  require(!sender.resendPacketChunk(1,generation,150,1,std::chrono::microseconds(2200)).cacheHit,
+          "Selective repair crossed a media generation");
+  for(unsigned i=0;i<65;++i) requestVideoRetransmit("synthetic-queue-cap",i,{1},{{1,1,1}});
+  require(gVideoNackQueue.size()==kMaxQueuedVideoNacks && gVideoNackQueue.back().missingRanges.empty(),
+          "Coalesced requests retained an incomplete selective hint");
+  gVideoNackQueue.clear();
+  std::cout<<"Host fragment repair: production NACK parsing, selective encrypted datagrams, would-block, epoch and overload fallback passed\n";
+}
+#endif
+
 int main(int argc, char** argv) {
   try {
 #ifdef SANSER_UAC_TEST
@@ -7533,6 +7603,7 @@ int main(int argc, char** argv) {
   }
 #endif
 #ifdef SANSER_AUDIO_TEST
+    if(argc==2 && std::string_view(argv[1])=="--test-video-repair") { testLegacyVideoFragmentRepair(); return 0; }
     if(argc==2 && std::string_view(argv[1])=="--test-audio-wire") {
       WinsockRuntime runtime;
       struct SocketStop { SOCKET fd=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP); ~SocketStop() { if(fd!=INVALID_SOCKET) closesocket(fd); } } listener;

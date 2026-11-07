@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_host_windows VERSION 2.3.4 LANGUAGES CXX)
+project(sanser_host_windows VERSION 2.3.5 LANGUAGES CXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -33,12 +33,18 @@ target_compile_definitions(sanser-host-windows PRIVATE
 target_include_directories(sanser-host-windows PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
 if(BUILD_TESTING)
+  add_executable(sanser-legacy-video-repair-test ../common/legacy_video_repair_test.cpp)
+  add_test(NAME sanser-legacy-video-repair-test COMMAND sanser-legacy-video-repair-test)
+  add_executable(sanser-audio-capture-recovery-test ../common/audio_capture_recovery_test.cpp)
+  add_test(NAME sanser-audio-capture-recovery-test COMMAND sanser-audio-capture-recovery-test)
   add_executable(sanser-legacy-host-shortcut-test ../common/legacy_host_shortcut_test.cpp)
   add_test(NAME sanser-legacy-host-shortcut-test COMMAND sanser-legacy-host-shortcut-test)
   target_sources(sanser-host-windows PRIVATE ../windows-uac/input_test.cpp)
   target_compile_definitions(sanser-host-windows PRIVATE SANSER_UAC_TEST=1)
   target_compile_definitions(sanser-host-windows PRIVATE SANSER_AUDIO_TEST=1)
   add_test(NAME sanser-windows-opus-wire-test COMMAND sanser-host-windows --test-audio-wire)
+  add_test(NAME sanser-windows-video-repair-test COMMAND sanser-host-windows --test-video-repair)
+  set_tests_properties(sanser-windows-video-repair-test PROPERTIES TIMEOUT 10)
   add_executable(sanser-audio-route-watch-test ../common/audio_route_watch_test.cpp)
   add_test(NAME sanser-audio-route-watch-test COMMAND sanser-audio-route-watch-test)
   add_test(NAME sanser-windows-legacy-input-test COMMAND sanser-host-windows --test-input-dispatch)

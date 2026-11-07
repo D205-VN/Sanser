@@ -391,7 +391,10 @@ Peer::Peer(const Options& o,DatagramIo io) : options_(o), io_(io), codec_(o.toke
   timeval timeout{0,2000}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
   setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
 #endif
-  int buffer = 4*1024*1024; setsockopt(fd,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&buffer),sizeof(buffer));
+  // Darwin/iOS can reject a receive-buffer request above the kernel limit.
+  // Retry bounded sizes rather than silently retaining a tiny default buffer.
+  for(int buffer : {4*1024*1024,1024*1024,512*1024,256*1024,128*1024,64*1024})
+    if(setsockopt(fd,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&buffer),sizeof(buffer))==0) break;
   } catch(...) {
     if(socket_!=-1) closeSocket(static_cast<Socket>(socket_));
     socket_=-1;
@@ -1264,7 +1267,8 @@ void Peer::logHealth() {
   {
     std::lock_guard lock(healthMutex_);
     receiveHealth_={videoDatagrams_,completedFrames_,nackSent_,reassembler_.lostFragments(),keyframeWaitDropped_,
-      audioStats.decoded,audioStats.concealed,audioStats.late};
+      audioStats.decoded,audioStats.concealed,audioStats.late,
+      static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count())};
   }
   if(!std::getenv("SANSER_TELEMETRY")) return;
   if(audioReceiver_ || opusTxPackets_) {
@@ -1463,7 +1467,7 @@ void Peer::loop() {
           // Reuse the observed ACK delivery bound, not a cross-machine clock.
           // The first NACK remains prompt; avoid spending all three retries
           // before one WAN repair could possibly make a round trip.
-          repairRetry=inputDelivery_.repairRetry();
+          repairRetry=inputDelivery_.repairRetry(controlAppRtt_.load());
         }
         for(const auto& repair:reassembler_.repairs(expired,Clock::now(),repairRetry)) {
           Bytes request{'S','V','N','1'};

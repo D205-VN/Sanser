@@ -16,14 +16,44 @@ class DirectConnection {
   bool active = false;
   String _stage = 'prepare';
   bool? _stunSucceeded;
+  bool? _portMappingSucceeded, _gatewayAvailable;
+  int _localPublicCandidates = 0;
+  int _remotePublicCandidates = 0;
   int _localCandidates = 0, _remoteCandidates = 0;
   bool _acknowledged = false;
+  Json _probe = {};
+  void _probeDetails(Object? raw) {
+    if (raw is! Map) return;
+    _probe = {
+      for (final key in [
+        'candidatePairs',
+        'sent',
+        'sendErrors',
+        'received',
+        'authenticated',
+        'matchingIdentity',
+        'matchingPair',
+        'validResponses',
+        'verifiedPairs',
+        'nominations',
+        'selected',
+        'timedOut',
+      ])
+        if (raw[key] is num || raw[key] is bool) key: raw[key],
+    };
+  }
+
   Json get diagnostics => {
     'stage': _stage,
     'stunSucceeded': _stunSucceeded,
+    'portMappingSucceeded': _portMappingSucceeded,
+    'gatewayAvailable': _gatewayAvailable,
+    'localPublicCandidates': _localPublicCandidates,
+    'remotePublicCandidates': _remotePublicCandidates,
     'localCandidates': _localCandidates,
     'remoteCandidates': _remoteCandidates,
     'peerAcknowledged': _acknowledged,
+    'probe': Map<String, dynamic>.from(_probe),
   };
   // Deliberately avoid raw exception text: socket errors can contain the
   // signaling URL or auth information. Report measured progress instead.
@@ -35,8 +65,30 @@ class DirectConnection {
     'signaling' when !_acknowledged =>
       'Máy tính chưa xác nhận địa chỉ Direct của điện thoại.',
     'signaling' => 'Trao đổi thông tin Direct chưa hoàn tất.',
+    'check' when _probe['candidatePairs'] == 0 =>
+      'Hai máy chưa có cặp địa chỉ IPv4 tương thích để kiểm tra Direct.',
+    'check' when (_probe['verifiedPairs'] as num? ?? 0) > 0 =>
+      'UDP đã xác minh hai chiều nhưng hai máy chưa hoàn tất chọn đường Direct.',
+    'check'
+        when (_probe['matchingIdentity'] as num? ?? 0) > 0 &&
+            (_probe['matchingPair'] as num? ?? 0) == 0 =>
+      'Đã nhận gói kiểm tra hợp lệ nhưng thông tin cặp địa chỉ của hai máy chưa khớp.',
+    'check'
+        when (_probe['sent'] as num? ?? 0) == 0 &&
+            (_probe['sendErrors'] as num? ?? 0) > 0 =>
+      'Điện thoại chưa gửi được gói UDP kiểm tra ra mạng.',
+    'check'
+        when (_probe['sent'] as num? ?? 0) > 0 &&
+            (_probe['received'] as num? ?? 0) == 0 =>
+      'Đã gửi ${_probe['sent']} gói kiểm tra nhưng chưa nhận được UDP trả về từ máy tính.',
+    'check'
+        when (_probe['received'] as num? ?? 0) > 0 &&
+            (_probe['matchingIdentity'] as num? ?? 0) == 0 =>
+      'Có UDP đến nhưng chưa nhận được gói kiểm tra hợp lệ của phiên này.',
+    'check' when _stunSucceeded == false && _portMappingSucceeded == true =>
+      'Đã mở ánh xạ cổng trên router nhưng chưa xác minh được đường UDP tới máy tính.',
     'check' when _stunSucceeded == false =>
-      'Chưa xác minh được đường UDP; điện thoại chưa lấy được địa chỉ public qua STUN.',
+      'Chưa xác minh được đường UDP; STUN và ánh xạ cổng chưa cung cấp được địa chỉ public dùng được.',
     'check' =>
       'Đã trao đổi địa chỉ nhưng chưa xác minh được đường UDP giữa hai máy.',
     'activate' => 'Đã xác minh Direct nhưng chưa mở được cầu nối tới engine.',
@@ -116,12 +168,26 @@ class DirectConnection {
       'stunServers': stun,
     });
     _stunSucceeded = gathered['stunSucceeded'] as bool?;
+    _portMappingSucceeded = gathered['portMappingSucceeded'] as bool?;
+    _gatewayAvailable = gathered['gatewayAvailable'] as bool?;
     if (_cancelled) {
       await cancel();
       throw const ApiFailure(0, 'Đã hủy kết nối Direct.');
     }
     final candidates = gathered['candidates'] as List? ?? [];
     _localCandidates = candidates.length;
+    _localPublicCandidates = candidates
+        .where(
+          (candidate) =>
+              candidate is Map &&
+              [
+                'serverReflexive',
+                'portMapped',
+                'manual',
+                'ipv6Global',
+              ].contains(candidate['type']),
+        )
+        .length;
     if (candidates.isEmpty) {
       throw const ApiFailure(
         0,
@@ -215,6 +281,7 @@ class DirectConnection {
           'sessionToken': sessionToken,
           'remoteCandidates': remote,
         });
+        _probeDetails(selected['checkDiagnostics']);
         if (_cancelled || result.isCompleted) return;
         _stage = 'activate';
         final bridge = await engine.p2p({
@@ -226,6 +293,16 @@ class DirectConnection {
         _stage = 'active';
         result.complete({...selected, ...bridge});
       } catch (error) {
+        if (_stage == 'check' && !_cancelled) {
+          try {
+            final details = await engine
+                .p2p({'operation': 'diagnostics', 'attemptId': attemptId})
+                .timeout(const Duration(seconds: 1));
+            _probeDetails(details['probe']);
+          } catch (_) {
+            /* Older native engines may not expose probe counters. */
+          }
+        }
         fail(error);
       }
     }
@@ -264,6 +341,18 @@ class DirectConnection {
             }
             remote ??= incoming;
             _remoteCandidates = remote!.length;
+            _remotePublicCandidates = remote!
+                .where(
+                  (candidate) =>
+                      candidate is Map &&
+                      [
+                        'serverReflexive',
+                        'portMapped',
+                        'manual',
+                        'ipv6Global',
+                      ].contains(candidate['type']),
+                )
+                .length;
             send('p2p.candidatesAck', {'generation': generation});
             send('p2p.gatheringComplete', {'generation': generation});
           } else if ([

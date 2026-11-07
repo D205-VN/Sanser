@@ -19,6 +19,9 @@ struct FakeAudioOutput {
   OSStatus enqueueError=noErr,startError=noErr;
   unsigned starts=0;
   AudioOutputRoute route{1,1,48000};
+  AudioStreamBasicDescription format{};
+  std::string boundUid;
+  Float32 gain=1;
   FakeAudioOutput() { active=this; }
   ~FakeAudioOutput() { active=nullptr; }
   Queue& current() { return *queues.back(); }
@@ -32,7 +35,8 @@ struct FakeAudioOutput {
   }
   AudioQueueFunctions functions() {
     AudioQueueFunctions api;
-    api.create=+[](const AudioStreamBasicDescription*,AudioQueueOutputCallback callback,void* context,CFRunLoopRef,CFStringRef,UInt32,AudioQueueRef* output)->OSStatus {
+    api.create=+[](const AudioStreamBasicDescription* format,AudioQueueOutputCallback callback,void* context,CFRunLoopRef,CFStringRef,UInt32,AudioQueueRef* output)->OSStatus {
+      active->format=*format;
       auto queue=std::make_unique<Queue>(); queue->callback=callback; queue->context=context;
       *output=reinterpret_cast<AudioQueueRef>(queue.get()); active->queues.push_back(std::move(queue)); return noErr;
     };
@@ -70,8 +74,12 @@ struct FakeAudioOutput {
       else return paramErr;
       return noErr;
     };
-    api.setProperty=+[](AudioQueueRef,AudioQueuePropertyID,const void*,UInt32)->OSStatus { return noErr; };
-    api.setParameter=+[](AudioQueueRef,AudioQueueParameterID,AudioQueueParameterValue)->OSStatus { return noErr; };
+    api.setProperty=+[](AudioQueueRef,AudioQueuePropertyID property,const void* data,UInt32)->OSStatus {
+      if(property==kAudioQueueProperty_CurrentDevice) active->boundUid=cfStringToUtf8(*static_cast<const CFStringRef*>(data));
+      return noErr;
+    };
+    api.setParameter=+[](AudioQueueRef,AudioQueueParameterID,AudioQueueParameterValue value)->OSStatus { active->gain=value;return noErr; };
+    api.getParameter=+[](AudioQueueRef,AudioQueueParameterID,AudioQueueParameterValue* value)->OSStatus { *value=active->gain;return noErr; };
     api.now=+[] { return active->time; };
     api.deviceTime=+[](AudioQueueRef,AudioTimeStamp* stamp)->OSStatus {
       if(!active->clockSupported) return paramErr;
@@ -81,9 +89,58 @@ struct FakeAudioOutput {
       return noErr;
     };
     api.route=+[](const std::string&) { return active->route; };
+    api.deviceUid=+[](AudioDeviceID device) { return "test-output-"+std::to_string(device); };
     return api;
   }
 };
+
+void testContinuousAudioOutput() {
+  FakeAudioOutput device;
+  AudioQueuePcmPlayer player({},device.functions(),true);
+  std::array<float,480> pcm{};pcm.fill(0.25F);
+  const auto submit=[&] { return player.submit(48000,2,reinterpret_cast<const std::uint8_t*>(pcm.data()),sizeof(pcm),240); };
+  // Three virtual minutes, including two seconds without any network audio.
+  // Device callbacks keep exactly two buffers alive, and sound resumes without
+  // a new device, queue start, headphone change, or capture restart.
+  for(unsigned tick=0;tick<36000;++tick) {
+    const bool networkGap=tick>=12000 && tick<12400;
+    if(!networkGap) requireLatency(submit(),"Continuous output dropped an uncongested PCM block");
+    if(tick%2==1) device.complete();
+    if(!device.queues.empty()) requireLatency(device.current().pending.size()==2,"Output ran out of hardware buffers during a network gap");
+    device.time+=std::chrono::milliseconds(5);
+  }
+  const auto initial=player.stats();
+  requireLatency(device.boundUid=="test-output-1" && device.starts==1 && device.queues.size()==1 && initial.errors==0 && initial.drops==0 &&
+    initial.signalFrames>48000*170 && initial.queuedFrames<=1920,
+    "Long continuous output silently restarted, stopped consuming signal or accumulated a backlog");
+  device.current().running=false;
+  device.time+=std::chrono::milliseconds(100);
+  requireLatency(submit() && device.current().running && device.starts==2,"Stopped continuous output was not restarted");
+  device.complete();
+  // Fill the software ring while a failed device returns no callbacks. Its
+  // capacity guard must not bypass the stalled-callback recovery check.
+  for(unsigned i=0;i<80;++i) { (void)submit();device.time+=std::chrono::milliseconds(5); }
+  requireLatency(device.queues.size()>=2 && player.stats().recoveries>=1,
+    "A full PCM ring hid a stopped render callback forever");
+  device.complete();
+  const auto before=device.queues.size();
+  ++device.route.source;device.time+=std::chrono::milliseconds(300);
+  requireLatency(submit() && device.queues.size()==before+1 && device.current().pending.size()==2,
+    "Headphone/speaker change did not re-prime the continuous output");
+  device.complete();
+  device.current().converterError=static_cast<UInt32>(paramErr);device.time+=std::chrono::milliseconds(100);
+  (void)submit();
+  requireLatency(player.stats().converterErrors==1,"Continuous output hid an internal converter failure");
+  device.time+=std::chrono::milliseconds(300);
+  requireLatency(submit() && device.current().converterError==0,"Continuous converter error did not recover");
+  device.complete();
+  device.route.device=2;device.route.rate=44100;device.time+=std::chrono::milliseconds(300);
+  requireLatency(submit() && device.boundUid=="test-output-2" && device.current().pending.size()==2,
+    "Continuous output remained attached to the previous physical device");
+  device.complete();device.gain=0;device.time+=std::chrono::milliseconds(100);
+  requireLatency(submit() && device.gain==1 && player.stats().gainRestores==1,
+    "The player failed to restore its configured gain after an unintended queue-local mute");
+}
 
 void testAudioOutputRecovery() {
   FakeAudioOutput device;
@@ -95,6 +152,10 @@ void testAudioOutputRecovery() {
   const auto submit=[&] { return player.submit(48000,2,reinterpret_cast<const std::uint8_t*>(pcm.data()),sizeof(pcm),240); };
   for(unsigned i=0;i<600;++i) {
     requireLatency(submit(),"Synthetic playback failed before the three-second stop");
+    requireLatency(device.format.mBitsPerChannel==16 && device.format.mBytesPerFrame==4 &&
+      (device.format.mFormatFlags&kAudioFormatFlagIsSignedInteger) &&
+      device.current().pending.front()->mAudioDataByteSize==960,
+      "The output device must receive stereo PCM16, not float payload bytes");
     requireLatency(device.current().running,"Audio output was not started after enqueue");
     device.complete(); device.time+=std::chrono::milliseconds(5);
   }
@@ -135,8 +196,8 @@ void testAudioOutputRecovery() {
     device.time+=std::chrono::milliseconds(5);
     requireLatency(submit(),"Audio stopped during a forty-second route-switch run");
     if(player.stats().routeChanges>previousChanges) {
-      const auto* pcm=static_cast<const float*>(device.current().pending.front()->mAudioData);
-      requireLatency(std::abs(pcm[0])<0.01F && std::abs(pcm[478]-0.25F)<0.0001F,
+      const auto* pcm=static_cast<const std::int16_t*>(device.current().pending.front()->mAudioData);
+      requireLatency(std::abs(static_cast<int>(pcm[0]))<328 && std::abs(static_cast<int>(pcm[478])-8192)<=1,
         "A new output route must ramp in without clipping continuous speech");
     }
     device.complete();
@@ -215,4 +276,13 @@ void testAudioOutputRecovery() {
   }
   requireLatency(device.queues.size()==healthyQueues && player.stats().clockStalls==1,
     "An invalid sample timestamp caused a false output recovery");
+  device.complete();
+  std::array<float,6> extremes{1.0F,-1.0F,std::numeric_limits<float>::quiet_NaN(),
+    std::numeric_limits<float>::infinity(),0.25F,-0.25F};
+  requireLatency(player.submit(48000,2,reinterpret_cast<const std::uint8_t*>(extremes.data()),sizeof(extremes),3),
+    "Output conversion rejected a valid PCM block");
+  const auto* converted=static_cast<const std::int16_t*>(device.current().pending.back()->mAudioData);
+  requireLatency(converted[0]==32767 && converted[1]==-32768 && converted[2]==0 && converted[3]==0 &&
+    converted[4]==8192 && converted[5]==-8192,
+    "PCM16 output conversion must saturate, sanitize invalid floats and preserve channel order");
 }

@@ -88,7 +88,7 @@ final class NativeMobileSession {
     func stats()->[String:UInt64]{
         lock.lock();defer{lock.unlock()};var s=SanserMobileStats();sanser_mobile_stats(client,&s)
         return ["videoPackets":s.video_packets,"videoFrames":s.video_frames,"nackRequests":s.nack_requests,"lostFragments":s.lost_fragments,
-            "referenceDrops":s.reference_drops,"audioDecoded":s.audio_decoded,"audioConcealed":s.audio_concealed,"audioLate":s.audio_late]
+            "referenceDrops":s.reference_drops,"audioDecoded":s.audio_decoded,"audioConcealed":s.audio_concealed,"audioLate":s.audio_late,"sampleTimeMs":s.sample_time_ms]
     }
     func fileRequest(_ args:[String:Any]) throws->[String:Any]{
         lock.lock();let handle=files;lock.unlock()
@@ -121,6 +121,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
     private var sink:FlutterEventSink?,sessionID:String?,generation=0,rendered=false
     private var engineAttempt=0,networkRevision=0
     private var networkMonitor:NWPathMonitor?,networkFingerprint:String?
+    private var directGatewayIPv4:String?
     private let gamepad=MobileGamepadCapture()
     private var gamepadCapture=0,inputAllowed=false
     private var gamepadHighest=0
@@ -143,18 +144,32 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             let interfaces=path.availableInterfaces.filter{path.usesInterfaceType($0.type)}.map{"\($0.type):\($0.index)"}.sorted().joined(separator:",")
             // Endpoint/interface details stay native; only change/reachability
             // and a local sequence counter cross Flutter.
-            let signature="\(path.status)|\(interfaces)|\(path.gateways)"
+            let signature="\(path.status)|\(interfaces)|\(path.gateways)|\(path.supportsIPv4)|\(path.supportsIPv6)"
             let available=path.status == .satisfied
+            let wifi=path.usesInterfaceType(.wifi),cellular=path.usesInterfaceType(.cellular)
+            let kind = !available ? "offline" : wifi && cellular ? "mixed" : wifi ? "wifi" : cellular ? "cellular" : path.usesInterfaceType(.wiredEthernet) ? "ethernet" : "other"
+            let supportsIPv4=path.supportsIPv4,supportsIPv6=path.supportsIPv6
+            var gatewayIPv4:String?
+            if available && (path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)) {
+                for endpoint in path.gateways {
+                    if case let .hostPort(host,_) = endpoint,case let .ipv4(address) = host {
+                        gatewayIPv4=address.rawValue.map{String($0)}.joined(separator:".");break
+                    }
+                }
+            }
+            let selectedGateway=gatewayIPv4
             DispatchQueue.main.async{[weak self,weak monitor] in
                 guard let self=self,let monitor=monitor,self.networkMonitor === monitor else{return}
+                self.directGatewayIPv4=selectedGateway
                 guard self.networkFingerprint != signature else{return}
                 let changed=self.networkFingerprint != nil;self.networkFingerprint=signature;self.networkRevision+=1
-                self.sink?(["state":"network","networkAvailable":available,"networkChanged":changed,"networkRevision":self.networkRevision])
+                self.sink?(["state":"network","networkAvailable":available,"networkChanged":changed,"networkRevision":self.networkRevision,
+                    "networkKind":kind,"supportsIPv4":supportsIPv4,"supportsIPv6":supportsIPv6])
             }
         }
         monitor.start(queue:DispatchQueue(label:"SanserNetworkPath",qos:.utility));return nil
     }
-    func onCancel(withArguments arguments:Any?)->FlutterError?{stopController();session?.input(kind:4);networkMonitor?.cancel();networkMonitor=nil;networkFingerprint=nil;sink=nil;return nil}
+    func onCancel(withArguments arguments:Any?)->FlutterError?{stopController();session?.input(kind:4);networkMonitor?.cancel();networkMonitor=nil;networkFingerprint=nil;directGatewayIPv4=nil;sink=nil;return nil}
     func create(withFrame frame:CGRect,viewIdentifier viewId:Int64,arguments args:Any?)->FlutterPlatformView{
         video?.reset()
         let native=MobileVideoView(frame:frame);video=native;native.externalTouch=true
@@ -195,8 +210,14 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
                 result(nil)
             }catch{disconnect();result(FlutterError(code:"connection",message:"Không thể bắt đầu phiên mobile.",details:nil))}
         case "p2p":
+            // Gateway comes from the current OS path, never signaling/user input.
+            // Keep endpoint details native and enable unicast PCP/NAT-PMP on Wi-Fi.
+            var nativeArgs=args
+            nativeArgs.removeValue(forKey:"gatewayIpv4")
+            if args["operation"] as? String == "gather",let gateway=directGatewayIPv4 {nativeArgs["gatewayIpv4"]=gateway}
+            let request=nativeArgs
             let operation={
-                do{let reply=try Self.p2p(args);DispatchQueue.main.async{result(reply)}}
+                do{let reply=try Self.p2p(request);DispatchQueue.main.async{result(reply)}}
                 catch{DispatchQueue.main.async{result(FlutterError(code:"direct",message:error.localizedDescription,details:nil))}}
             }
             // Cancellation must never wait behind the connectivity check it cancels.

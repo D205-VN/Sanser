@@ -34,6 +34,7 @@ mod scoring;
 mod security;
 mod selection;
 mod signaling;
+mod socket_buffers;
 pub mod standby;
 mod state;
 pub mod stun;
@@ -52,7 +53,8 @@ pub use connectivity::{
 };
 pub use error::P2pError;
 pub use gatherer::{
-    GathererConfig, GatheringEvent, GatheringResult, gather_candidates, gather_candidates_on_socket,
+    GathererConfig, GatheringEvent, GatheringResult, gather_candidates,
+    gather_candidates_on_socket, gather_candidates_on_socket_with_gateway,
 };
 pub use interface::{
     InterfaceCost, InterfaceFilter, InterfaceKind, InterfaceRejectReason, NetworkInterface,
@@ -68,8 +70,8 @@ pub use migration::{
 };
 pub use nomination::{Nomination, NominationPolicy};
 pub use punch::{
-    ConnectivitySelection, ProbeStatistics, PunchAttempt, PunchState, check_connectivity,
-    check_connectivity_measured,
+    ConnectivitySelection, ProbeDiagnostics, ProbeStatistics, PunchAttempt, PunchState,
+    check_connectivity, check_connectivity_measured, check_connectivity_measured_observed,
 };
 pub use recovery::{
     RecoveryAction, RecoveryCause, RecoveryEvidence, RecoveryPlan, plan_route_recovery,

@@ -2,9 +2,12 @@
 //! implementations. No mobile-specific authentication or NAT protocol is invented.
 #![deny(unsafe_op_in_unsafe_fn)]
 mod files;
+#[cfg(test)]
+use sanser_p2p::check_connectivity_measured;
 use sanser_p2p::{
-    CandidatePair, GathererConfig, P2pCandidate, PairState, check_connectivity_measured,
-    gather_candidates_on_socket, make_pair_id, pair_priority, select_signaling_candidates, standby,
+    CandidatePair, GathererConfig, P2pCandidate, PairState, ProbeDiagnostics,
+    check_connectivity_measured_observed, gather_candidates_on_socket_with_gateway, make_pair_id,
+    pair_priority, select_signaling_candidates, standby,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -41,6 +44,10 @@ enum Request {
         session_id: Uuid,
         generation: u32,
         stun_servers: Vec<String>,
+        #[serde(default)]
+        gateway_ipv4: Option<std::net::Ipv4Addr>,
+        #[serde(default = "default_port_mapping")]
+        port_mapping_enabled: bool,
     },
     Check {
         attempt_id: Uuid,
@@ -55,6 +62,9 @@ enum Request {
     Close {
         attempt_id: Uuid,
     },
+    Diagnostics {
+        attempt_id: Uuid,
+    },
 }
 struct State {
     candidates: Vec<P2pCandidate>,
@@ -62,6 +72,7 @@ struct State {
     selected: Option<standby::Config>,
     stop: Option<oneshot::Sender<()>>,
     active: bool,
+    probe: Option<ProbeDiagnostics>,
 }
 struct Route {
     session: Uuid,
@@ -75,6 +86,9 @@ struct Manager {
     routes: Mutex<HashMap<Uuid, Arc<Route>>>,
 }
 static MANAGER: OnceLock<Manager> = OnceLock::new();
+fn default_port_mapping() -> bool {
+    true
+}
 fn manager() -> &'static Manager {
     MANAGER.get_or_init(|| Manager {
         runtime: Builder::new_multi_thread()
@@ -159,11 +173,18 @@ impl Manager {
     fn request(&self, request: Request) -> Result<Value, String> {
         match request {
             Request::Close { attempt_id } => self.close(attempt_id),
+            Request::Diagnostics { attempt_id } => {
+                let route = self.route(attempt_id)?;
+                let state = lock(&route.state)?;
+                Ok(json!({"probe":state.probe}))
+            }
             Request::Gather {
                 attempt_id,
                 session_id,
                 generation,
                 stun_servers,
+                gateway_ipv4,
+                port_mapping_enabled,
             } => {
                 if generation == 0
                     || stun_servers.len() > 3
@@ -192,6 +213,7 @@ impl Manager {
                         selected: None,
                         stop: None,
                         active: false,
+                        probe: None,
                     }),
                 });
                 {
@@ -204,10 +226,10 @@ impl Manager {
                 let result=self.runtime.block_on(async {
                     let (tx,mut rx)=mpsc::channel(32);
                     let drain=tokio::spawn(async move {while rx.recv().await.is_some(){}});
-                    let config=GathererConfig{stun_servers,total_timeout:Duration::from_secs(3),port_mapping_enabled:false,ipv6_enabled:false,generation};
+                    let config=GathererConfig{stun_servers,total_timeout:Duration::from_secs(3),port_mapping_enabled,ipv6_enabled:false,generation};
                     let gathered=tokio::select! {
                         _=route.cancel.notified()=>Err("Direct cancelled".to_owned()),
-                        result=gather_candidates_on_socket(config,&route.socket,tx)=>result.map_err(|error|format!("Unable to gather Direct candidates ({})",gather_error_key(&error))),
+                        result=gather_candidates_on_socket_with_gateway(config,&route.socket,tx,gateway_ipv4)=>result.map_err(|error|format!("Unable to gather Direct candidates ({})",gather_error_key(&error))),
                     };
                     drain.abort();gathered
                 });
@@ -219,7 +241,10 @@ impl Manager {
                             return Err("No Direct candidates available".into());
                         }
                         lock(&route.state)?.candidates = candidates.clone();
-                        Ok(json!({"candidates":candidates,"stunSucceeded":result.stun_succeeded}))
+                        Ok(
+                            json!({"candidates":candidates,"stunSucceeded":result.stun_succeeded,
+                            "portMappingSucceeded":result.port_mapping_succeeded,"gatewayAvailable":gateway_ipv4.is_some()}),
+                        )
                     }
                     Err(error) => {
                         self.close(attempt_id)?;
@@ -264,18 +289,24 @@ impl Manager {
                     return Err("Direct cancelled".into());
                 }
                 let mut pairs = pairs(&local, &remote_candidates);
+                lock(&route.state)?.probe = Some(ProbeDiagnostics {
+                    candidate_pairs: pairs.len(),
+                    ..ProbeDiagnostics::default()
+                });
                 if pairs.is_empty() {
                     return Err("No compatible Direct candidates".into());
                 }
                 let key = Zeroizing::new(probe_key(route.session, &credential));
+                let observed = route.clone();
                 let selected=self.runtime.block_on(async{tokio::select! {
                     _=route.cancel.notified()=>Err("Direct cancelled".to_owned()),
-                    result=check_connectivity_measured(&route.socket,&mut pairs,route.session,hash_device(device_id),hash_device(peer_device_id),&*key,false,Duration::from_secs(15))=>result.map_err(|_|"No verified Direct route".to_owned()),
+                    result=check_connectivity_measured_observed(&route.socket,&mut pairs,route.session,hash_device(device_id),hash_device(peer_device_id),&*key,false,Duration::from_secs(15),move |probe|{if let Ok(mut state)=observed.state.lock(){state.probe=Some(probe);}})=>result.map_err(|_|"No verified Direct route".to_owned()),
                 }})?;
                 if route.cancelled.load(Ordering::Acquire) {
                     return Err("Direct cancelled".into());
                 }
-                let response = json!({"transport":"direct","probe":selected.probe,"remoteEndpoint":selected.pair.remote,"reason":selected.reason});
+                let check = lock(&route.state)?.probe.clone();
+                let response = json!({"transport":"direct","probe":selected.probe,"checkDiagnostics":check,"remoteEndpoint":selected.pair.remote,"reason":selected.reason});
                 lock(&route.state)?.selected = Some(standby::Config {
                     session: route.session,
                     local_device: hash_device(device_id),
@@ -358,6 +389,28 @@ pub unsafe extern "C" fn sanser_mobile_p2p_free(pointer: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_gather_enables_mapping_and_accepts_a_native_gateway_hint() {
+        let base = json!({"operation":"gather", "attemptId":Uuid::new_v4(),
+            "sessionId":Uuid::new_v4(),"generation":1,"stunServers":[]});
+        let request: Request = serde_json::from_value(base.clone()).unwrap();
+        assert!(matches!(
+            request,
+            Request::Gather {
+                port_mapping_enabled: true,
+                gateway_ipv4: None,
+                ..
+            }
+        ));
+        let mut hinted = base;
+        hinted["gatewayIpv4"] = json!("192.168.1.1");
+        let request: Request = serde_json::from_value(hinted.clone()).unwrap();
+        assert!(
+            matches!(request, Request::Gather { gateway_ipv4:Some(ip),.. } if ip == std::net::Ipv4Addr::new(192,168,1,1))
+        );
+        hinted["gatewayIpv4"] = json!("router.example.test");
+        assert!(serde_json::from_value::<Request>(hinted).is_err());
+    }
     fn test_manager() -> Arc<Manager> {
         Arc::new(Manager {
             runtime: Builder::new_multi_thread()
@@ -375,6 +428,8 @@ mod tests {
                 session_id: session,
                 generation: 1,
                 stun_servers: vec![],
+                gateway_ipv4: None,
+                port_mapping_enabled: false,
             })
             .unwrap();
         serde_json::from_value(value["candidates"].clone()).unwrap()
@@ -437,6 +492,13 @@ mod tests {
             })
             .unwrap();
         assert_eq!(selected["transport"], "direct");
+        assert_eq!(selected["checkDiagnostics"]["selected"], true);
+        assert!(
+            selected["checkDiagnostics"]["verifiedPairs"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         let (host, desktop) = m.runtime.block_on(desktop).unwrap();
         assert_eq!(desktop.pair.remote.port(), reserved);
         assert_eq!(route.socket.local_addr().unwrap().port(), reserved);
@@ -517,7 +579,9 @@ mod tests {
                 attempt_id: id,
                 session_id: Uuid::new_v4(),
                 generation: 0,
-                stun_servers: vec![]
+                stun_servers: vec![],
+                gateway_ipv4: None,
+                port_mapping_enabled: false,
             })
             .is_err()
         );

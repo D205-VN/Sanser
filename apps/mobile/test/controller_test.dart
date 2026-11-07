@@ -42,6 +42,49 @@ class TestEngine extends NativeEngine {
 }
 
 void main() {
+  test(
+    'restored login uses canonical registration for heartbeat and session',
+    () async {
+      const canonical = '6b02e0b1-8b6d-44df-b3c1-428dc78ca7c6';
+      final secrets = MemorySecrets();
+      secrets.values['mobile.https://sanser.onrender.com.refresh'] = 'saved';
+      final used = <String>[];
+      final native = TestEngine();
+      final api = SanserApi(
+        secrets,
+        client: MockClient((request) async {
+          final path = request.url.path;
+          if (path == '/api/v2/devices/heartbeat' ||
+              path == '/api/v2/sessions') {
+            final body = jsonDecode(request.body) as Json;
+            used.add((body['deviceId'] ?? body['requesterDeviceId']) as String);
+          }
+          final result = switch (path) {
+            '/api/v2/auth/refresh' => {'accessToken': 'a', 'refreshToken': 'r'},
+            '/api/v2/account' => {
+              'id': 'account-A',
+              'email': 'phone@example.test',
+            },
+            '/api/v2/devices/register' => {'id': canonical},
+            '/api/v2/devices' || '/api/v2/sharing' => {'items': []},
+            '/api/v2/sessions' => {'id': 'session', 'state': 'requested'},
+            _ => <String, dynamic>{},
+          };
+          return http.Response(jsonEncode(result), 200);
+        }),
+      );
+      final c = MobileController(api, native);
+      await c.initialize();
+      expect(c.error, isNull);
+      expect(c.deviceId, canonical);
+      await c.connect({'id': 'host'});
+      expect(used, [canonical, canonical]);
+      await c.disconnect();
+      c.dispose();
+      await native.events.close();
+    },
+  );
+
   Future<MobileController> connected(
     TestEngine native, {
     String mode = 'auto',
@@ -87,6 +130,40 @@ void main() {
     c.dispose();
     await native.events.close();
   });
+  test(
+    'native sample clock prevents false FPS drops and reports loss rates',
+    () async {
+      final native = TestEngine(), c = await connected(native);
+      void sample(int time, int frames, int nack, int concealed) {
+        native.events.add({
+          'sessionId': 'session',
+          'state': 'frame',
+          'sampleTimeMs': time,
+          'videoFrames': frames,
+          'nackRequests': nack,
+          'audioConcealed': concealed,
+        });
+      }
+
+      sample(1000, 30, 812, 3100);
+      sample(2000, 60, 822, 3120);
+      expect(c.telemetry['videoFps'], 30);
+      expect(c.telemetry['nackRequestsPerSecond'], 10);
+      expect(c.telemetry['audioConcealedPerSecond'], 20);
+      // Flutter can poll the same one-second snapshot twice. It is not a stall.
+      sample(2000, 60, 822, 3120);
+      expect(c.telemetry['videoFps'], 30);
+      expect(c.telemetry['nackRequestsPerSecond'], 10);
+      // A genuinely newer native snapshot without progress must still show 0.
+      sample(3000, 60, 822, 3120);
+      expect(c.telemetry['videoFps'], 0);
+      expect(c.telemetry['nackRequestsPerSecond'], 0);
+      expect(c.telemetry['audioConcealedPerSecond'], 0);
+      await c.disconnect();
+      c.dispose();
+      await native.events.close();
+    },
+  );
   test(
     'numeric mobile diagnostics keep dimensions and exclude credentials',
     () async {

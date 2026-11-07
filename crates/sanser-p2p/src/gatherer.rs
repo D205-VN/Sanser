@@ -400,6 +400,24 @@ pub async fn gather_candidates_on_socket(
     socket: &UdpSocket,
     tx: mpsc::Sender<GatheringEvent>,
 ) -> Result<GatheringResult, P2pError> {
+    gather_candidates_on_socket_with_gateway(config, socket, tx, None).await
+}
+
+/// Accept a native OS default-gateway hint for sandboxed mobile clients.
+/// Never infer a router from an interface subnet or from remote candidates.
+pub async fn gather_candidates_on_socket_with_gateway(
+    config: GathererConfig,
+    socket: &UdpSocket,
+    tx: mpsc::Sender<GatheringEvent>,
+    gateway: Option<std::net::Ipv4Addr>,
+) -> Result<GatheringResult, P2pError> {
+    if gateway.is_some_and(|ip| {
+        ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() || ip.is_broadcast()
+    }) {
+        return Err(P2pError::Internal {
+            reason: "invalid native default gateway".into(),
+        });
+    }
     if config.generation == 0 {
         return Err(P2pError::Internal {
             reason: "candidate generation must be non-zero".into(),
@@ -477,7 +495,9 @@ pub async fn gather_candidates_on_socket(
     };
 
     let upnp_mapping = async {
-        if !config.port_mapping_enabled || !socket_is_ipv4 {
+        // Normal iOS builds use unicast PCP/NAT-PMP below, without relying on
+        // multicast discovery or a desktop route command.
+        if cfg!(target_os = "ios") || !config.port_mapping_enabled || !socket_is_ipv4 {
             return None;
         }
         let search_options = igd_next::SearchOptions {
@@ -508,9 +528,17 @@ pub async fn gather_candidates_on_socket(
         use crate::mapping::{
             MappingConfig, PortMapper, default_gateway, nat_pmp::NatPmpMapper, pcp::PcpMapper,
         };
+        let default = if config.port_mapping_enabled && socket_is_ipv4 {
+            match gateway {
+                Some(ip) => Some(ip),
+                None => default_gateway().await,
+            }
+        } else {
+            None
+        };
         if config.port_mapping_enabled
             && socket_is_ipv4
-            && let Some(gateway) = default_gateway().await
+            && let Some(gateway) = default
         {
             let config = MappingConfig {
                 requested_port: local.port(),
@@ -603,6 +631,24 @@ pub async fn gather_candidates_on_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_gateway_hint_rejects_non_router_targets_before_gathering() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        for gateway in ["0.0.0.0", "127.0.0.1", "224.0.0.1", "255.255.255.255"] {
+            let (tx, _rx) = mpsc::channel(32);
+            let result = gather_candidates_on_socket_with_gateway(
+                GathererConfig::default(),
+                &socket,
+                tx,
+                Some(gateway.parse().unwrap()),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(P2pError::Internal { reason }) if reason == "invalid native default gateway")
+            );
+        }
+    }
 
     #[test]
     fn host_addresses_repeated_on_phone_interfaces_do_not_abort_gathering() {

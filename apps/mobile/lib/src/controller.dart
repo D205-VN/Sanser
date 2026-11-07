@@ -35,15 +35,27 @@ class MobileController extends ChangeNotifier {
   bool voiceJoined = false, microphone = false, deafened = false;
   SessionPhase phase = SessionPhase.idle;
   Json telemetry = {};
+  Json networkDetails = {};
+  String get networkLabel => switch (networkDetails['networkKind']) {
+    'wifi' => 'Wi‑Fi',
+    'cellular' => 'Di động',
+    'mixed' => 'Wi‑Fi/Di động',
+    'ethernet' => 'Ethernet',
+    'offline' => 'Mất mạng',
+    _ => '',
+  };
   final Stopwatch _diagnosticClock = Stopwatch()..start();
   final List<Json> _diagnosticSamples = [];
   int? _lastVideoFrames, _lastVideoAt;
+  Json _lastMediaCounters = {};
   Json diagnosticReport() => {
     'schemaVersion': 1,
     'version': mobileVersion,
     'platform': platform,
     'transport': selectedTransport,
     'videoBitrateMbps': preferences.videoBitrateMbps,
+    'direct': Map<String, dynamic>.from(connectionDiagnostics),
+    'network': Map<String, dynamic>.from(networkDetails),
     'samples': List<Json>.from(_diagnosticSamples),
     'recovery': {'networkChanges': _pathRevision, 'attempts': recoveryAttempts},
   };
@@ -141,14 +153,10 @@ class MobileController extends ChangeNotifier {
   }
 
   Future<void> _signedIn() async {
-    account = await api.request('/api/v2/account');
-    deviceId = await api.identity('client-device');
+    final signedInAccount = await api.request('/api/v2/account');
     if (capabilities['available'] == true) {
-      await api.request(
-        '/api/v2/devices/register',
-        method: 'POST',
-        body: {
-          'id': deviceId,
+      deviceId = await api.registerClientDevice(
+        {
           'computerId': await api.identity('computer'),
           'deviceRole': 'client',
           'crossPlatform': true,
@@ -164,8 +172,12 @@ class MobileController extends ChangeNotifier {
           'audio': true,
           'gamepad': false,
         },
+        accountId:
+            (signedInAccount['id'] ?? signedInAccount['email']) as String? ??
+            '',
       );
     }
+    account = signedInAccount;
     await refresh();
     _timer?.cancel();
     _timer = Timer.periodic(
@@ -293,6 +305,7 @@ class MobileController extends ChangeNotifier {
       }
       _lastVideoAt = null;
       _lastVideoFrames = null;
+      _lastMediaCounters = {};
       phase = pathRevision == null
           ? SessionPhase.connecting
           : SessionPhase.reconnecting;
@@ -451,7 +464,12 @@ class MobileController extends ChangeNotifier {
     }
     final frames = event['videoFrames'];
     if (frames is num) {
-      final now = _diagnosticClock.elapsedMilliseconds;
+      // Native health is sampled independently of Flutter's event timer.
+      // Repeated snapshots must not become artificial 0/120 FPS oscillations.
+      final nativeTime = event['sampleTimeMs'];
+      final now = nativeTime is num && nativeTime > 0
+          ? nativeTime.toInt()
+          : _diagnosticClock.elapsedMilliseconds;
       if (_lastVideoFrames != null &&
           _lastVideoAt != null &&
           now - _lastVideoAt! >= 250 &&
@@ -461,11 +479,19 @@ class MobileController extends ChangeNotifier {
           'videoFps':
               (frames - _lastVideoFrames!) * 1000 / (now - _lastVideoAt!),
         };
+        for (final key in ['nackRequests', 'audioConcealed', 'audioLate']) {
+          final current = event[key], previous = _lastMediaCounters[key];
+          if (current is num && previous is num && current >= previous) {
+            event['${key}PerSecond'] =
+                (current - previous) * 1000 / (now - _lastVideoAt!);
+          }
+        }
       }
       // Dimension-only events do not advance the one-second sampling clock.
       if (_lastVideoAt == null || now - _lastVideoAt! >= 250) {
         _lastVideoFrames = frames.toInt();
         _lastVideoAt = now;
+        _lastMediaCounters = Map<String, dynamic>.from(event);
       }
     }
     if (event['rttMs'] is num) {
@@ -483,6 +509,9 @@ class MobileController extends ChangeNotifier {
         'audioDecoded',
         'audioConcealed',
         'audioLate',
+        'nackRequestsPerSecond',
+        'audioConcealedPerSecond',
+        'audioLatePerSecond',
       ]) {
         final value = event[key];
         if (value is num && value.isFinite) sample[key] = value;
@@ -558,6 +587,21 @@ class MobileController extends ChangeNotifier {
     }
     final revision = event['networkRevision'];
     if (revision is! int || revision <= 0) return;
+    if (revision < _networkRevision) return;
+    if ([
+      'wifi',
+      'cellular',
+      'mixed',
+      'ethernet',
+      'offline',
+      'other',
+    ].contains(event['networkKind'])) {
+      networkDetails = {
+        'networkKind': event['networkKind'],
+        for (final key in ['supportsIPv4', 'supportsIPv6'])
+          if (event[key] is bool) key: event[key],
+      };
+    }
     if (event['networkChanged'] != true) {
       _networkRevision = revision;
       _networkAvailable = event['networkAvailable'] as bool;

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sanser_mobile/src/api.dart';
@@ -157,6 +158,38 @@ class RecoveryFixture {
 }
 
 void main() {
+  test(
+    'network labels are typed, contain no SSID and ignore old path samples',
+    () async {
+      final f = RecoveryFixture();
+      await f.open();
+      f.native.events.add({
+        'state': 'network',
+        'networkRevision': 10,
+        'networkAvailable': true,
+        'networkChanged': false,
+        'networkKind': 'wifi',
+        'supportsIPv4': true,
+        'supportsIPv6': false,
+        'ssid': 'private-name',
+      });
+      expect(f.c.networkLabel, 'Wi‑Fi');
+      expect(f.c.networkDetails['supportsIPv4'], true);
+      expect(
+        jsonEncode(f.c.diagnosticReport()),
+        isNot(contains('private-name')),
+      );
+      f.native.events.add({
+        'state': 'network',
+        'networkRevision': 9,
+        'networkAvailable': true,
+        'networkChanged': false,
+        'networkKind': 'cellular',
+      });
+      expect(f.c.networkLabel, 'Wi‑Fi');
+      await f.close();
+    },
+  );
   testWidgets(
     'network baseline/duplicate notifications do not restart a healthy stream',
     (tester) async {

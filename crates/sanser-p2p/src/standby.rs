@@ -64,6 +64,10 @@ pub struct Snapshot {
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouterStats {
+    pub external_receive_buffer_bytes: u64,
+    pub external_send_buffer_bytes: u64,
+    pub local_receive_buffer_bytes: u64,
+    pub local_send_buffer_bytes: u64,
     pub external_received: u64,
     pub external_probes: u64,
     pub peer_payloads: u64,
@@ -650,8 +654,20 @@ pub async fn run(
     let mut report = Instant::now();
     let mut fec_route = monitor.config.active;
     let mut baseline_rtt: Option<f64> = None;
-    let mut router = RouterStats::default();
-    observe(monitor.snapshot(Instant::now()));
+    let (external_receive_buffer_bytes, external_send_buffer_bytes) =
+        crate::socket_buffers::configure(&external);
+    let (local_receive_buffer_bytes, local_send_buffer_bytes) =
+        crate::socket_buffers::configure(&local);
+    let mut router = RouterStats {
+        external_receive_buffer_bytes,
+        external_send_buffer_bytes,
+        local_receive_buffer_bytes,
+        local_send_buffer_bytes,
+        ..RouterStats::default()
+    };
+    let mut initial = monitor.snapshot(Instant::now());
+    initial.router = router;
+    observe(initial);
     let result = loop {
         tokio::select! {
             _=&mut stop=>{router.stop_reason=1;break Ok(());},

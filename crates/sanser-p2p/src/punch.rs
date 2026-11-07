@@ -81,6 +81,42 @@ pub struct ConnectivitySelection {
     pub reason: &'static str,
 }
 
+/// Local probe counters only: no addresses, keys, payloads or remote clocks.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeDiagnostics {
+    pub candidate_pairs: usize,
+    pub sent: u64,
+    pub send_errors: u64,
+    pub received: u64,
+    pub authenticated: u64,
+    pub matching_identity: u64,
+    pub matching_pair: u64,
+    pub valid_responses: u64,
+    pub verified_pairs: u64,
+    pub nominations: u64,
+    pub selected: bool,
+    pub timed_out: bool,
+}
+struct ProbeTrace<F: Fn(ProbeDiagnostics)> {
+    stats: ProbeDiagnostics,
+    observe: F,
+}
+impl<F: Fn(ProbeDiagnostics)> ProbeTrace<F> {
+    fn sent(&mut self, ok: bool) {
+        if ok {
+            self.stats.sent += 1;
+        } else {
+            self.stats.send_errors += 1;
+        }
+    }
+}
+impl<F: Fn(ProbeDiagnostics)> Drop for ProbeTrace<F> {
+    fn drop(&mut self) {
+        (self.observe)(self.stats.clone());
+    }
+}
+
 #[derive(Default)]
 struct ProbeMeasurements {
     pending: HashMap<u32, (Instant, u64, bool)>,
@@ -241,6 +277,40 @@ pub async fn check_connectivity_measured(
     controlling: bool,
     timeout: Duration,
 ) -> Result<ConnectivitySelection, P2pError> {
+    check_connectivity_measured_observed(
+        socket,
+        pairs,
+        session_id,
+        local_device_hash,
+        peer_device_hash,
+        hmac_key,
+        controlling,
+        timeout,
+        |_| {},
+    )
+    .await
+}
+
+/// Same authenticated checker, retaining evidence on success, timeout or cancel.
+pub async fn check_connectivity_measured_observed(
+    socket: &UdpSocket,
+    pairs: &mut [CandidatePair],
+    session_id: uuid::Uuid,
+    local_device_hash: u64,
+    peer_device_hash: u64,
+    hmac_key: &[u8],
+    controlling: bool,
+    timeout: Duration,
+    observe: impl Fn(ProbeDiagnostics) + Send,
+) -> Result<ConnectivitySelection, P2pError> {
+    let mut trace = ProbeTrace {
+        stats: ProbeDiagnostics {
+            candidate_pairs: pairs.len(),
+            ..ProbeDiagnostics::default()
+        },
+        observe,
+    };
+    crate::socket_buffers::configure(socket);
     const NOMINATION_TRANSACTION_ID: u32 = u32::MAX;
     const NOMINATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
     const CONTROLLED_LINGER: Duration = Duration::from_millis(300);
@@ -289,6 +359,7 @@ pub async fn check_connectivity_measured(
     loop {
         let elapsed = start_time.elapsed();
         if elapsed >= timeout {
+            trace.stats.timed_out = true;
             break;
         }
 
@@ -300,6 +371,7 @@ pub async fn check_connectivity_measured(
                     let pair = &mut pairs[pair_idx];
                     pair.state = PairState::Nominated;
                     attempts[pair_idx].state = PunchState::Succeeded;
+                    trace.stats.selected=true;
                     return Ok(selected_result(pair,
                         selected_probe.or_else(|| measurements[pair_idx].statistics(Instant::now())), controlling));
                 }
@@ -331,7 +403,7 @@ pub async fn check_connectivity_measured(
                                 | if commit_acknowledged { PROBE_FINAL_BIT } else { 0 },
                         };
                         if let Ok(packet) = build_probe_packet(&fields, hmac_key) {
-                            let _ = socket.send_to(&packet, pair.remote).await;
+                            trace.sent(socket.send_to(&packet, pair.remote).await.is_ok());
                         }
                         last_nomination_sent = Some(now);
                     }
@@ -382,7 +454,9 @@ pub async fn check_connectivity_measured(
                                     attempt.probes_sent += 1;
                                     let sent = Instant::now();
                                     measurement.last_sent = Some(sent);
-                                    if socket.send_to(&packet, pair.remote).await.is_ok() {
+                                    let sent_ok=socket.send_to(&packet, pair.remote).await.is_ok();
+                                    trace.sent(sent_ok);
+                                    if sent_ok {
                                         if measurement.pending.len() < 128 {
                                             measurement.pending.insert(fields.transaction_id, (sent, fields.timestamp, verified));
                                         }
@@ -399,11 +473,15 @@ pub async fn check_connectivity_measured(
             }
             recv_res = socket.recv_from(&mut buf) => {
                 if let Ok((n, from)) = recv_res {
+                    trace.stats.received+=1;
                     // Try to parse as an authenticated probe
                     if let Ok(parsed) = parse_probe_packet(&buf[..n], hmac_key) {
+                        trace.stats.authenticated+=1;
                         if parsed.session_id == session_id && parsed.sender_device_hash == peer_device_hash {
+                            trace.stats.matching_identity+=1;
                             // Find the corresponding pair
                             if let Some(&pair_idx) = pair_map.get(&parsed.pair_hash) {
+                                trace.stats.matching_pair+=1;
                                 let pair = &mut pairs[pair_idx];
                                 let attempt = &mut attempts[pair_idx];
 
@@ -432,6 +510,7 @@ pub async fn check_connectivity_measured(
                                 let is_final = parsed.nonce & PROBE_FINAL_BIT != 0;
 
                                 if is_nomination {
+                                    trace.stats.nominations+=1;
                                     if parsed.transaction_id != NOMINATION_TRANSACTION_ID {
                                         continue;
                                     }
@@ -440,6 +519,7 @@ pub async fn check_connectivity_measured(
                                             if is_final && commit_acknowledged {
                                                 pair.state = PairState::Nominated;
                                                 attempt.state = PunchState::Succeeded;
+                                                trace.stats.selected=true;
                                                 return Ok(selected_result(pair,
                                                     selected_probe.or_else(|| measurements[pair_idx].statistics(Instant::now())), controlling));
                                             }
@@ -468,7 +548,7 @@ pub async fn check_connectivity_measured(
                                             // the selected socket alive long enough
                                             // for the other peer to commit too.
                                             for _ in 0..5 {
-                                                let _ = socket.send_to(&packet, from).await;
+                                                trace.sent(socket.send_to(&packet, from).await.is_ok());
                                                 tokio::task::yield_now().await;
                                             }
                                         }
@@ -499,12 +579,13 @@ pub async fn check_connectivity_measured(
                                         nonce: parsed.nonce | PROBE_RESPONSE_BIT,
                                     };
                                     if let Ok(packet) = build_probe_packet(&fields, hmac_key) {
-                                        let _ = socket.send_to(&packet, from).await;
+                                        trace.sent(socket.send_to(&packet, from).await.is_ok());
                                     }
                                 } else {
                                     let Some(rtt) = measurements[pair_idx].response(
                                         parsed.transaction_id, parsed.timestamp, Instant::now()) else { continue; };
                                     local_verified.insert(pair.pair_id.clone(), true);
+                                    trace.stats.valid_responses+=1;
                                     attempt.rtt_ms = Some(rtt);
                                 }
 
@@ -516,6 +597,7 @@ pub async fn check_connectivity_measured(
                                 {
                                     pair.state = PairState::Succeeded;
                                     attempt.state = PunchState::Succeeded;
+                                    if measurements[pair_idx].verified_at.is_none() { trace.stats.verified_pairs+=1; }
                                     measurements[pair_idx].verified_at.get_or_insert_with(Instant::now);
                                     if controlling && selection_deadline.is_none() {
                                         // Leave time for nomination/commit/final and controlled linger.
@@ -540,6 +622,78 @@ pub async fn check_connectivity_measured(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_checks_distinguish_silence_bad_auth_and_pair_mismatch() {
+        use std::sync::{Arc, Mutex};
+        for mode in 0..3 {
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let session = uuid::Uuid::new_v4();
+            let key = [7_u8; 32];
+            let remote = peer.local_addr().unwrap();
+            let responder = tokio::spawn(async move {
+                let mut buffer = [0; 1024];
+                while let Ok((n, source)) = peer.recv_from(&mut buffer).await {
+                    if mode == 0 {
+                        continue;
+                    }
+                    let mut fields = parse_probe_packet(&buffer[..n], &key).unwrap();
+                    fields.sender_device_hash = 2;
+                    fields.nonce |= PROBE_RESPONSE_BIT;
+                    if mode == 2 {
+                        fields.pair_hash ^= 1;
+                    }
+                    let signature = if mode == 1 { [8_u8; 32] } else { key };
+                    let packet = build_probe_packet(&fields, &signature).unwrap();
+                    peer.send_to(&packet, source).await.unwrap();
+                }
+            });
+            let mut pairs = [CandidatePair {
+                pair_id: "diagnostic-pair".into(),
+                local: client.local_addr().unwrap(),
+                remote,
+                local_candidate_id: "client".into(),
+                remote_candidate_id: "peer".into(),
+                priority: 1,
+                state: PairState::Waiting,
+            }];
+            let observed = Arc::new(Mutex::new(None));
+            let output = observed.clone();
+            let result = check_connectivity_measured_observed(
+                &client,
+                &mut pairs,
+                session,
+                1,
+                2,
+                &key,
+                false,
+                Duration::from_millis(200),
+                move |probe| {
+                    *output.lock().unwrap() = Some(probe);
+                },
+            )
+            .await;
+            responder.abort();
+            assert!(result.is_err());
+            let report = observed.lock().unwrap().clone().unwrap();
+            assert!(report.sent > 0 && report.timed_out && !report.selected);
+            assert_eq!(report.candidate_pairs, 1);
+            if mode == 0 {
+                assert_eq!(report.received, 0);
+            } else {
+                assert!(report.received > 0);
+            }
+            if mode == 1 {
+                assert_eq!(report.authenticated, 0);
+            }
+            if mode == 2 {
+                assert!(report.matching_identity > 0);
+                assert_eq!(report.matching_pair, 0);
+            }
+            assert_eq!(report.verified_pairs, 0);
+        }
+    }
 
     fn measured(rtts: &[f64]) -> ProbeMeasurements {
         ProbeMeasurements {

@@ -154,6 +154,12 @@ jobs:
           path: ${{ runner.temp }}/sanser-voice-panel/*.png
           if-no-files-found: error
       - run: ./build/host-windows/cross-platform/Release/sanser-client-windows.exe --capabilities-json
+      - name: Preserve the tested Windows host for two-machine regression checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-native-host-tested
+          path: build/host-windows/Release/sanser-host-windows.exe
+          if-no-files-found: error
 
   windows-relay:
     runs-on: windows-latest

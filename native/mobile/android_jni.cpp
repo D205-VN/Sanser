@@ -123,8 +123,9 @@ extern "C" JNIEXPORT jdouble JNICALL Java_com_sanser_mobile_NativeClient_rtt(JNI
 extern "C" JNIEXPORT jlongArray JNICALL Java_com_sanser_mobile_NativeClient_stats(JNIEnv *e,jobject,jlong handle){
   auto *h=reinterpret_cast<Handle*>(handle);SanserMobileStats s{};sanser_mobile_stats(h ? h->client:nullptr,&s);
   const jlong values[]={static_cast<jlong>(s.video_packets),static_cast<jlong>(s.video_frames),static_cast<jlong>(s.nack_requests),
-    static_cast<jlong>(s.lost_fragments),static_cast<jlong>(s.reference_drops),static_cast<jlong>(s.audio_decoded),static_cast<jlong>(s.audio_concealed),static_cast<jlong>(s.audio_late)};
-  auto result=e->NewLongArray(8);if(result)e->SetLongArrayRegion(result,0,8,values);return result;
+    static_cast<jlong>(s.lost_fragments),static_cast<jlong>(s.reference_drops),static_cast<jlong>(s.audio_decoded),static_cast<jlong>(s.audio_concealed),static_cast<jlong>(s.audio_late),static_cast<jlong>(s.sample_time_ms)};
+  constexpr auto count=static_cast<jsize>(sizeof(values)/sizeof(values[0]));
+  auto result=e->NewLongArray(count);if(result)e->SetLongArrayRegion(result,0,count,values);return result;
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_sanser_mobile_MobileP2p_request(JNIEnv *env,jobject,jstring request){

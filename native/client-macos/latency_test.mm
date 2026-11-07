@@ -24,6 +24,7 @@ void requireLatency(bool value, const char* message) {
   if (!value) throw std::runtime_error(message);
 }
 #include "audio_output_test.h"
+#include "video_repair_test.h"
 SnvPacket testPacket(std::uint64_t sequence, bool keyframe = false) {
   SnvPacket packet;
   packet.sequence = sequence;
@@ -78,11 +79,46 @@ void testEarlyVideoRepair() {
   requireLatency(bytes==std::vector<std::uint8_t>({0,1,2,3,4,5,6,7,8,9}) && stats.droppedAssemblies==0,
     "Recovered interior gap must retain every original fragment");
 }
+void testAudioReceiveHealth() {
+  FakeAudioOutput device;
+  auto player=std::make_shared<AudioQueuePcmPlayer>(AudioOutputSettings{},device.functions());
+  std::ostringstream log;
+  const auto token=gExpectedSessionToken;
+  gExpectedSessionToken=std::string(48,'s');
+  auto* previous=std::cout.rdbuf(log.rdbuf());
+  auto* previousError=std::cerr.rdbuf(log.rdbuf());
+  std::thread receiver([&] { listenUdpAudio(0,0,player,nullptr); });
+  // A rejected unauthenticated packet must not suppress all later reports.
+  AudioPacketHeader header{};
+  std::vector<std::uint8_t> bytes(sizeof(header));
+  std::memcpy(bytes.data(),&header,sizeof(header));
+  gAudioUdpQueue.push(std::move(bytes));
+  std::this_thread::sleep_for(std::chrono::milliseconds(1250));
+  gAudioUdpQueue.stop();receiver.join();
+  std::cout.rdbuf(previous);std::cerr.rdbuf(previousError);gExpectedSessionToken=token;
+  const auto output=log.str();
+  requireLatency(output.find("SNA1_AUDIO_STATS datagrams=1")!=std::string::npos &&
+    output.find("authRejected=1")!=std::string::npos &&
+    output.find("audioReceiveIdleMs=")!=std::string::npos &&
+    output.find("audioValidIdleMs=")!=std::string::npos,
+    "Rejected/absent audio must still publish receiver health and stop cleanly");
+  requireLatency(device.queues.empty(),"Rejected audio opened a real output queue");
+}
 int main(int argc,char** argv) {
   @autoreleasepool {
     try {
+      if(argc==2 && std::string_view(argv[1])=="--video-repair-only") {
+        testCompletedVideoRepairDedup();testEarlyVideoRepair();
+        std::cout<<"Video repair: completed-frame retransmits, bounded retirement and generation reset passed\n";
+        return 0;
+      }
+      if(argc==2 && std::string_view(argv[1])=="--audio-receive-health-only") {
+        testAudioReceiveHealth();
+        std::cout<<"Audio receiver: rejected packets, idle reporting and clean stop passed\n";
+        return 0;
+      }
       if(argc==2 && std::string_view(argv[1])=="--media-recovery-only") {
-        testAudioOutputRecovery(); testEarlyVideoRepair();
+        testAudioOutputRecovery(); testContinuousAudioOutput(); testEarlyVideoRepair();
         std::cout<<"Media recovery: forty-second fake AudioQueue, route changes, output stalls and early video repair passed\n";
         return 0;
       }
@@ -94,6 +130,7 @@ int main(int argc,char** argv) {
       requireLatency(hostHelperFailureText({true,1,7,8,2147942405ULL}).find("2147942405")!=std::string::npos,"Capture HRESULT bits must survive the client status text");
       sanser::desktop::testMacRemoteView();
       testAudioOutputRecovery();
+      testContinuousAudioOutput();
       testEarlyVideoRepair();
       {
         // Run the production launcher decision with a fake start callback;

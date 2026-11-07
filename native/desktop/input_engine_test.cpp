@@ -110,6 +110,13 @@ void testRetryAndAckQueue() {
   check(sanser::inputRetryDelay(10,0,2)==milliseconds(34),"input retry backs off after a lost ACK");
   check(sanser::inputRetryDelay(5000,0,100)==milliseconds(1000),"retry backoff remains bounded");
   check(sanser::inputRetryDelay(std::numeric_limits<double>::quiet_NaN())==milliseconds(40),"invalid RTT cannot become zero retry");
+  InputDeliveryPolicy viewer;
+  check(viewer.repairRetry()==milliseconds(100),"unknown RTT retains conservative repair retry");
+  check(viewer.repairRetry(21)==milliseconds(37),"pointer-only/view-only repair must use control RTT without a keyboard ACK");
+  check(viewer.repairRetry(100)==milliseconds(155),"WAN repair must retain a full RTT and headroom");
+  check(viewer.repairRetry(1)==milliseconds(20),"repair retry floor prevents storms");
+  check(viewer.repairRetry(3000)==milliseconds(200),"repair retry remains bounded");
+  check(viewer.repairRetry(std::numeric_limits<double>::quiet_NaN())==milliseconds(100),"invalid control timing must not become a fast retry");
   InputDeliveryPolicy policy; policy.acknowledged(milliseconds(10)); const auto stable=policy.retry(true,1);
   policy.acknowledged(milliseconds(60)); check(policy.retry(true,1)>stable,"input RTT estimator tracks variation");
   TxScheduler tx; const auto now=Clock::now();

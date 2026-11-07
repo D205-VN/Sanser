@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cmath>
 #include "input_retry.h"
 
 namespace sanser::desktop {
@@ -23,10 +24,15 @@ public:
   std::chrono::milliseconds deadline() const {
     return std::chrono::milliseconds(static_cast<unsigned>(std::clamp(latencyMs_*8+250,2000.0,5000.0)));
   }
-  std::chrono::milliseconds repairRetry() const {
+  std::chrono::milliseconds repairRetry(double controlRttMs=-1) const {
     // There may be no keyboard/button ACK before the first video picture.
     // The first NACK is independent of this retry interval and remains fast.
-    return latencyMs_ ? std::clamp(retry(false,1),std::chrono::milliseconds(20),std::chrono::milliseconds(200)) : std::chrono::milliseconds(100);
+    if(latencyMs_) return std::clamp(retry(false,1),std::chrono::milliseconds(20),std::chrono::milliseconds(200));
+    // View-only and pointer-only sessions may never receive a reliable input
+    // ACK. Use authenticated control RTT from the same socket in that case.
+    if(std::isfinite(controlRttMs) && controlRttMs>0 && controlRttMs<=3000)
+      return std::chrono::milliseconds(static_cast<unsigned>(std::clamp(std::ceil(controlRttMs*1.5+5),20.0,200.0)));
+    return std::chrono::milliseconds(100);
   }
 private:
   double latencyMs_=0, variationMs_=0;

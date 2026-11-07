@@ -62,7 +62,7 @@ class NativeClient(
     @Synchronized fun rtt(): Double = if (handle == 0L) -1.0 else rtt(handle)
     @Synchronized fun stats():Map<String,Long> {
         if(handle==0L)return emptyMap()
-        val values=stats(handle);val names=listOf("videoPackets","videoFrames","nackRequests","lostFragments","referenceDrops","audioDecoded","audioConcealed","audioLate")
+        val values=stats(handle);val names=listOf("videoPackets","videoFrames","nackRequests","lostFragments","referenceDrops","audioDecoded","audioConcealed","audioLate","sampleTimeMs")
         return names.mapIndexed{index,name->name to values[index]}.toMap()
     }
     @Synchronized override fun close() { val old = handle; handle = 0L; if (old != 0L) destroy(old) }

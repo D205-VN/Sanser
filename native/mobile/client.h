@@ -24,6 +24,7 @@ double sanser_mobile_rtt(SanserMobileClient *client);
 typedef struct {
   uint64_t video_packets,video_frames,nack_requests,lost_fragments,reference_drops;
   uint64_t audio_decoded,audio_concealed,audio_late;
+  uint64_t sample_time_ms;
 } SanserMobileStats;
 // Latest one-second native snapshot; numeric counters only, no payload/IDs.
 void sanser_mobile_stats(SanserMobileClient *client,SanserMobileStats *stats);

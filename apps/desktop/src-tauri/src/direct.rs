@@ -170,6 +170,7 @@ mod tests {
             external_receive_errors: 2,
             native_receive_errors: 3,
             stop_reason: 2,
+            ..standby::RouterStats::default()
         })
         .unwrap();
         let values = serde_json::to_value(sample).unwrap();

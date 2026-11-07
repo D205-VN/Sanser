@@ -99,6 +99,64 @@ class SanserApi {
     return id;
   }
 
+  Future<String> registerClientDevice(
+    Json device, {
+    required String accountId,
+  }) async {
+    if (accountId.trim().isEmpty) {
+      throw const ApiFailure(0, 'Máy chủ chưa xác định được tài khoản.');
+    }
+    // Installation/computer identity can be shared locally, but a device row
+    // belongs to one account. Keychain entries survive reinstalls and logout.
+    final generation = _generation;
+    final name = 'client-device.account.${Uri.encodeComponent(accountId)}';
+    final key = _key(name);
+    var candidate = await identity(name);
+    void checkServer() {
+      if (generation != _generation) {
+        throw const ApiFailure(0, 'Máy chủ đã thay đổi. Vui lòng thử lại.');
+      }
+    }
+
+    Future<Json> register() {
+      checkServer();
+      return request(
+        '/api/v2/devices/register',
+        method: 'POST',
+        body: {...device, 'id': candidate},
+      );
+    }
+
+    Json registered;
+    try {
+      registered = await register();
+    } on ApiFailure catch (error) {
+      if (error.status != 409 ||
+          error.message.trim().toLowerCase() !=
+              'device id is already registered') {
+        rethrow;
+      }
+      // Repair a conflicting restored ID once, without touching the foreign
+      // registration or changing the server's ownership checks.
+      candidate = const Uuid().v4();
+      registered = await register();
+    }
+    final canonical = registered['id'] ?? candidate;
+    if (canonical is! String ||
+        !RegExp(
+          r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+          caseSensitive: false,
+        ).hasMatch(canonical)) {
+      throw const ApiFailure(0, 'Máy chủ trả ID thiết bị không hợp lệ.');
+    }
+    // The server may return an existing row for this computer/account/role.
+    // Heartbeat and session requests must use that returned canonical ID.
+    checkServer();
+    await secrets.write(key, canonical);
+    checkServer();
+    return canonical;
+  }
+
   Future<void> _tokens(Json result, int generation) async {
     if (generation != _generation) return;
     final access = result['accessToken'];

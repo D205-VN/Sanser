@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_client_macos VERSION 2.3.4 LANGUAGES CXX OBJCXX)
+project(sanser_client_macos VERSION 2.3.5 LANGUAGES CXX OBJCXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -30,6 +30,10 @@ add_executable(sanser-client-macos
 )
 
 if(BUILD_TESTING)
+  add_executable(sanser-legacy-video-repair-test ../common/legacy_video_repair_test.cpp)
+  add_test(NAME sanser-legacy-video-repair-test COMMAND sanser-legacy-video-repair-test)
+  add_executable(sanser-audio-capture-recovery-test ../common/audio_capture_recovery_test.cpp)
+  add_test(NAME sanser-audio-capture-recovery-test COMMAND sanser-audio-capture-recovery-test)
   add_executable(sanser-audio-route-watch-test ../common/audio_route_watch_test.cpp)
   add_test(NAME sanser-audio-route-watch-test COMMAND sanser-audio-route-watch-test)
   add_executable(sanser-control-timing-test ../common/control_timing_test.cpp)
@@ -99,4 +103,8 @@ if(BUILD_TESTING)
   target_compile_options(sanser-client-latency-test PRIVATE -fobjc-arc)
   add_test(NAME sanser-client-latency-test COMMAND sanser-client-latency-test)
   add_test(NAME sanser-media-recovery-test COMMAND sanser-client-latency-test --media-recovery-only)
+  add_test(NAME sanser-audio-receive-health-test COMMAND sanser-client-latency-test --audio-receive-health-only)
+  add_test(NAME sanser-video-repair-test COMMAND sanser-client-latency-test --video-repair-only)
+  set_tests_properties(sanser-video-repair-test PROPERTIES TIMEOUT 10)
+  set_tests_properties(sanser-audio-receive-health-test PROPERTIES TIMEOUT 10)
 endif()
