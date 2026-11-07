@@ -52,7 +52,8 @@ struct VoiceRuntime::Impl {
     auto lastStatus=Clock::time_point{};
     auto previousWake=Clock::time_point{};
     std::uint64_t capturedFrames=0,rawClipped=0,cleanClipped=0,staleCapture=0,sentPackets=0;
-    unsigned rawPeak=0,cleanPeak=0; double wakeGapMax=0;
+    unsigned rawPeak=0,cleanPeak=0; double wakeGapMax=0,wakeGapWindowMax=0;
+    std::uint64_t healthEpoch=1;
     const auto signalLevel=[](const AudioSamples& samples,unsigned& peak,std::uint64_t& clipped) {
       for(unsigned i=0;i<audioFrames;++i) {
         const auto level=static_cast<unsigned>(std::max(std::abs(static_cast<int>(samples[i*2])),std::abs(static_cast<int>(samples[i*2+1]))));
@@ -63,16 +64,24 @@ struct VoiceRuntime::Impl {
       status(code);
       while(running && !nativeStopRequested()) {
         const auto began=Clock::now();
-        if(joined && previousWake!=Clock::time_point{}) wakeGapMax=std::max(wakeGapMax,std::chrono::duration<double,std::milli>(began-previousWake).count());
+        if(joined && previousWake!=Clock::time_point{}) {
+          const auto gap=std::chrono::duration<double,std::milli>(began-previousWake).count();
+          wakeGapMax=std::max(wakeGapMax,gap);wakeGapWindowMax=std::max(wakeGapWindowMax,gap);
+        }
         previousWake=began;
         auto changes=takeVoiceCommands();
         { std::lock_guard lock(mutex); for(auto& line:commands) changes.push_back(std::move(line)); commands.clear(); }
         for(const auto& line:changes) {
-          if(const auto config=voice::command(line)) {
+          const auto external=externalVoiceCommand(line);
+          auto config=external ? std::optional<voice::State>(voice::State{}) : voice::command(line);
+          if(external) externalVoiceActive(external->active);
+          // A separate WebRTC room owns capture while this gate is held.
+          if(config && externalVoiceActive() && config->joined) continue;
+          if(config) {
             joined=config->joined; microphone=config->microphone; deafened=config->deafened;
             // The consent gates change before closing a device or clearing
             // buffered PCM; callbacks cannot enqueue newly muted speech.
-            ++captureToken;
+            ++captureToken;++healthEpoch;wakeGapWindowMax=0;
             state(); // Revoke transport permission before potentially waiting for a device to close.
             mic.reset(); capturing=false;
             echo.reset(); // Revoking mic consent destroys its adaptation history.
@@ -83,7 +92,12 @@ struct VoiceRuntime::Impl {
               if(!mixer) mixer=std::make_unique<voice::Mixer>();
               if(!player) player=std::make_unique<AudioPlayer>(true);
             }
-            code=joined ? deafened ? "deafened" : microphone ? "starting" : "listening" : "idle";
+            code=externalVoiceActive() ? "external" : joined ? deafened ? "deafened" : microphone ? "starting" : "listening" : "idle";
+            if(external) {
+              // Acknowledge only after native capture/playback is closed and
+              // shared system-sound publication is gated on the audio thread.
+              std::fprintf(stdout,"SNSHARE_ACK request=%s accepted=1\n",external->request.c_str());std::fflush(stdout);
+            }
             if(joined && microphone && !deafened) {
               if(!encoder) encoder=std::make_unique<voice::Encoder>();
               echo=std::make_unique<voice::EchoCanceller>();
@@ -111,7 +125,7 @@ struct VoiceRuntime::Impl {
         if(!report.empty()) {
           code=report; capturing=report=="running";
           if(report=="permission-denied" || report=="no-device" || report=="unavailable" || report=="stopped") {
-            microphone=false; ++captureToken; mic.reset(); state();
+            microphone=false; ++captureToken;++healthEpoch; mic.reset(); state();
           }
           status(code,capturing);
         }
@@ -135,7 +149,7 @@ struct VoiceRuntime::Impl {
             const auto mix=mixer ? mixer->stats() : voice::Stats{};
             const auto output=player ? player->stats() : AudioQueue::Stats{};
             std::ostringstream line;
-            line<<"SNVOICE_HEALTH voiceCapturedFrames="<<capturedFrames<<" voiceRawPeak="<<rawPeak<<" voiceCleanPeak="<<cleanPeak
+            line<<"SNVOICE_HEALTH voiceHealthEpoch="<<healthEpoch<<" voiceWorkerGapWindowMaxMs="<<wakeGapWindowMax<<" voiceCapturedFrames="<<capturedFrames<<" voiceRawPeak="<<rawPeak<<" voiceCleanPeak="<<cleanPeak
               <<" voiceRawClippedFrames="<<rawClipped<<" voiceCleanClippedFrames="<<cleanClipped
               <<" voiceCaptureQueueDrops="<<captureDrops.load()<<" voiceIncomingQueueDrops="<<incomingDrops.load()
               <<" voiceStaleCaptureBlocks="<<staleCapture<<" voicePacketsSent="<<sentPackets<<" voiceWorkerGapMaxMs="<<wakeGapMax
@@ -145,7 +159,7 @@ struct VoiceRuntime::Impl {
               <<" voicePcmStaleDrops="<<output.staleDrops<<" voicePcmReprimes="<<output.reprimes
               <<" voiceAecBlocks="<<aec.blocks<<" voiceAecMissingReference="<<aec.missingReference
               <<" voiceAecDryBlocks="<<aec.dryBlocks<<" voiceAecResets="<<aec.resets<<'\n';
-            const auto text=line.str(); std::fwrite(text.data(),1,text.size(),stdout); std::fflush(stdout);
+            const auto text=line.str(); std::fwrite(text.data(),1,text.size(),stdout); std::fflush(stdout);wakeGapWindowMax=0;
           }
         }
         std::this_thread::sleep_until(began+std::chrono::milliseconds(5));

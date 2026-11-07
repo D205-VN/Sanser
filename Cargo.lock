@@ -272,6 +272,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "aws-lc-rs"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53"
+dependencies = [
+ "aws-lc-sys",
+ "zeroize",
+]
+
+[[package]]
+name = "aws-lc-sys"
+version = "0.47.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52"
+dependencies = [
+ "cc",
+ "cmake",
+ "dunce",
+ "fs_extra",
+ "pkg-config",
+]
+
+[[package]]
 name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -564,6 +587,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5d6cac793997bd970000024b2934968efe83b382de4fdcf4fcb46b6ee4ad996"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -610,6 +635,12 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chacha20"
@@ -667,6 +698,15 @@ dependencies = [
  "crypto-common",
  "inout",
  "zeroize",
+]
+
+[[package]]
+name = "cmake"
+version = "0.1.58"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -1372,6 +1412,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs_extra"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1599,8 +1645,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1622,9 +1670,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2315,6 +2365,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2483,6 +2543,12 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "lru-slab"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "mac-notification-sys"
@@ -3344,6 +3410,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "quinn"
+version = "0.11.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
+ "pin-project-lite",
+ "quinn-proto",
+ "quinn-udp",
+ "rustc-hash",
+ "rustls",
+ "socket2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn-proto"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "getrandom 0.4.3",
+ "lru-slab",
+ "rand 0.10.2",
+ "rand_pcg",
+ "ring",
+ "rustc-hash",
+ "rustls",
+ "rustls-pki-types",
+ "slab",
+ "thiserror 2.0.18",
+ "tinyvec",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn-udp"
+version = "0.5.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
+dependencies = [
+ "cfg_aliases",
+ "libc",
+ "once_cell",
+ "socket2",
+ "tracing",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3439,6 +3562,15 @@ name = "rand_core"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "raw-window-handle"
@@ -3544,6 +3676,7 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "quinn",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
@@ -3631,6 +3764,7 @@ version = "0.23.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
 dependencies = [
+ "aws-lc-rs",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -3657,6 +3791,7 @@ version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
 dependencies = [
+ "web-time",
  "zeroize",
 ]
 
@@ -3693,6 +3828,7 @@ version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
+ "aws-lc-rs",
  "ring",
  "rustls-pki-types",
  "untrusted",
@@ -3721,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-audio"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3730,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-auth"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3745,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-config"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3756,7 +3892,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-core"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -3765,13 +3901,14 @@ dependencies = [
 
 [[package]]
 name = "sanser-desktop"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "chacha20poly1305",
  "futures-util",
  "keyring",
  "rand 0.8.6",
  "sanser-diagnostics",
+ "sanser-file-transfer",
  "sanser-network",
  "sanser-p2p",
  "serde",
@@ -3794,7 +3931,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-diagnostics"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "sanser-core",
  "serde",
@@ -3804,8 +3941,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sanser-file-transfer"
+version = "2.3.4"
+dependencies = [
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "sanser-input"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "bitflags 2.13.0",
  "serde",
@@ -3814,8 +3961,9 @@ dependencies = [
 
 [[package]]
 name = "sanser-mobile-p2p"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
+ "sanser-file-transfer",
  "sanser-p2p",
  "serde",
  "serde_json",
@@ -3827,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-network"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "hmac",
  "sanser-core",
@@ -3842,7 +3990,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-p2p"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3863,7 +4011,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-protocol"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "bitflags 2.13.0",
  "hex",
@@ -3878,7 +4026,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-server"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3890,6 +4038,7 @@ dependencies = [
  "http",
  "http-body-util",
  "rand 0.8.6",
+ "reqwest",
  "sanser-auth",
  "sanser-core",
  "sanser-network",
@@ -3914,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-storage"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "async-trait",
  "serde",
@@ -3929,7 +4078,7 @@ dependencies = [
 
 [[package]]
 name = "sanser-webrtc"
-version = "2.3.3"
+version = "2.3.4"
 dependencies = [
  "sanser-core",
  "serde",

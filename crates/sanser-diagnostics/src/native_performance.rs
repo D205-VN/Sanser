@@ -21,6 +21,7 @@ pub struct NativeMetric {
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePerformance {
+    pub audio: crate::NativeAudioHealth,
     pub metrics: BTreeMap<&'static str, NativeMetric>,
     #[serde(skip)]
     windows: BTreeMap<&'static str, VecDeque<f64>>,
@@ -41,6 +42,11 @@ fn metric_fields(source: &str) -> &'static [MetricField] {
             ("hostSendCallMs", "hostSendCall", "legacy-control"),
             ("macReceiveQueueMs", "clientReceiveQueue", "legacy-control"),
         ],
+        "SNVOICE_HEALTH" => &[(
+            "voiceWorkerGapWindowMaxMs",
+            "voiceWorkerGap",
+            "native-voice",
+        )],
         "SNV2_CONTROL_TIMING" => &[("appRttMs", "controlAppRtt", "snv2-control")],
         "SNROUTE_HEALTH" => &[("controlSilenceMs", "controlSilence", "legacy-control")],
         // SNINPUT_RTT is emitted by legacy control-pong, despite its name.
@@ -102,6 +108,7 @@ impl NativePerformance {
     pub fn observe(&mut self, source: &str, values: &BTreeMap<String, f64>, at_ms: u64) {
         // Matching both source and field prevents an input retry RTT from
         // silently becoming a network RTT, and keeps capture wait out of work.
+        self.audio.observe(source, values, at_ms);
         let fields = metric_fields(source);
         for &(field, metric, provenance) in fields {
             let Some(&value) = values.get(field) else {
@@ -182,6 +189,27 @@ impl NativePerformance {
                 findings.push(finding);
             }
         }
+        for (keys, finding) in [
+            (&["voicePcmUnderflows"][..], "voice-playout-underflow"),
+            (
+                &["voiceCaptureQueueDrops", "voiceStaleCaptureBlocks"][..],
+                "voice-capture-drops",
+            ),
+            (&["voiceConcealedPackets"][..], "voice-packet-concealment"),
+            (
+                &["voiceRawClippedFrames", "voiceCleanClippedFrames"][..],
+                "voice-signal-clipping",
+            ),
+            (
+                &["systemPcmUnderflows", "systemJitterUnderflows"][..],
+                "system-audio-underflow",
+            ),
+            (&["systemConcealedPackets"][..], "system-audio-concealment"),
+        ] {
+            if keys.iter().any(|key| self.audio.increased(key, now_ms)) {
+                findings.push(finding);
+            }
+        }
         findings
     }
 }
@@ -232,6 +260,32 @@ mod tests {
         legacy.observe("SNINPUT_RTT", &values(&[("rttMs", 10.0)]), 100);
         legacy.observe("SNINPUT_ACK", &values(&[("rttMs", 190.0)]), 100);
         assert_eq!(legacy.findings(100, 60), p.findings(100, 60));
+    }
+    #[test]
+    fn audio_findings_need_fresh_increases_and_window_gaps_are_not_rtt() {
+        let mut p = NativePerformance::default();
+        for (at, count) in [(1000, 10.0), (2000, 11.0)] {
+            p.observe(
+                "SNVOICE_HEALTH",
+                &values(&[
+                    ("voiceHealthEpoch", 1.0),
+                    ("voicePcmUnderflows", count),
+                    ("voiceWorkerGapWindowMaxMs", 12.0),
+                    ("voiceWorkerGapMaxMs", 999.0),
+                ]),
+                at,
+            );
+        }
+        assert_eq!(p.findings(2000, 60), vec!["voice-playout-underflow"]);
+        assert_eq!(p.metrics["voiceWorkerGap"].latest_ms, 12.0);
+        assert!(!p.metrics.contains_key("controlAppRtt"));
+        assert!(p.findings(7001, 60).is_empty());
+        p.observe(
+            "SNVOICE_HEALTH",
+            &values(&[("voiceHealthEpoch", 2.0), ("voicePcmUnderflows", 30.0)]),
+            8000,
+        );
+        assert!(p.findings(8000, 60).is_empty());
     }
     #[test]
     fn bounded_percentiles_reject_invalid_stale_and_private_fields() {

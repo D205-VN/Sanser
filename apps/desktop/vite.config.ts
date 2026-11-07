@@ -13,6 +13,7 @@ export default defineConfig({
   },
   envPrefix: ['VITE_'],
   build: {
+    rollupOptions: { input: { main: 'index.html', voice: 'voice.html' } },
     target: ['es2022', 'chrome120', 'safari14'],
     sourcemap: false,
     cssCodeSplit: true

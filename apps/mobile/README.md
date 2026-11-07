@@ -6,6 +6,64 @@ decoder. Compressed video and PCM never pass through Dart method channels.
 
 Implemented in source:
 
+- Opt-in **Tay cầm analog**: proportional physical sticks/triggers to a
+  supporting Windows virtual-controller host. Native held-state heartbeat,
+  neutral arming and capture/session guards; no analog samples pass through
+  Dart. Older/unsupported/view-only hosts stay disabled. Start+Select releases
+  capture; rumble and device/driver validation remain. See
+  [scope and validation](../../docs/mobile-analog-controller.md).
+
+- **Phím tắt máy tính** in floating controls: host-aware Windows/macOS window
+  and editing shortcuts, with explicit OS selection when host metadata is
+  unknown. Balanced owned keys, bounded requests and reset/lifecycle cancellation
+  keep old chords out of a later input state. See
+  [scope and validation](../../docs/mobile-host-shortcuts.md).
+
+- Opt-in **Tay cầm → phím**: receive a physical controller through iOS
+  GameController/Android input and map it to WASD, arrows and a fixed keyboard
+  profile. Neutral arming, focus/session guards and independent owners protect
+  held input. **Start+Select** releases capture. This is keyboard mapping, **not
+  Xbox/analog passthrough**. See [profile and tests](../../docs/mobile-controller-keys.md).
+
+- Bounded recovery for a native network change during streaming: keep the
+  accepted session, show recovery/Cancel, renew readiness/credentials and choose
+  a fresh route. Two attempts/45 seconds maximum; forced Direct stays Direct,
+  and stale input/events are not replayed. This is a reconnect with a short
+  interruption, not seamless migration. Real handoff validation remains.
+  See [behavior and tests](../../docs/mobile-network-recovery.md).
+
+- Adaptive tablet workspace: left navigation on wide windows, readable two-
+  column computer cards, bounded Settings dialog and larger floating controls.
+  Split-screen/large text fall back to compact layouts; Close/Disconnect stay
+  reachable when content scrolls or the keyboard appears. See
+  [layout and validation](../../docs/mobile-tablet-layout.md).
+
+- Optional **Rung khi thao tác** in Settings/in-session Settings: local feedback
+  for taps, right-click/drag start and touch game controls. Defaults off and
+  persists on this phone. Feedback is rate-limited and never awaited by input;
+  view-only, background and unavailable sessions do not request it. Hardware
+  behavior still needs device testing. See [contract/tests](../../docs/mobile-touch-feedback.md).
+
+- Opt-in **Bàn phím ngoài** for USB/Bluetooth keyboards during a control session:
+  physical HID keys, separate left/right modifiers, bounded repeat and focus/
+  background/session release. **Ctrl+Alt+Esc** disables capture. Local editors
+  keep their keys; view-only cannot enable it. Physical-device validation remains.
+  See [behavior and tests](../../docs/mobile-external-keyboard.md).
+
+- Local IME draft editing in **Bàn phím**: compose/select characters on the phone,
+  finish the candidate with **Chốt chữ** or Done, then explicitly **Gửi**. Updated
+  SNV2 hosts accept committed Unicode; older hosts retain the ASCII path. Remote
+  shortcuts are gated during composition, oversized emoji/combining drafts are
+  rejected whole, and pending/session changes cannot duplicate an edit. This
+  does not mirror the host's IME or selection. See [input contract](../../docs/unicode-input.md).
+
+- Consented file transfer with updated desktop SNV2 control hosts: **Truyền file**
+  in floating controls, native document picker, 25 MiB limit, SHA-256, progress
+  and cancellation. **Tệp đã nhận** in the panel and Settings retains verified
+  files after disconnect; **Lưu** explicitly exports through the OS picker.
+  The shared Rust worker handles bytes and disk I/O outside Flutter. View-only
+  sessions have no transfer permission. See [protocol and validation](../../docs/file-transfer.md).
+
 - HTTPS account login, refresh tokens in Keychain/Android encrypted storage,
   stable installation/device identity and computer discovery.
 - Request remote control or view-only access to a Windows/macOS host; approve or
@@ -17,14 +75,14 @@ Implemented in source:
   stereo PCM from a bounded, lock-free ring instead of scheduling 5 ms buffers;
   underrun/backlog transitions crossfade, and hardware route changes rebuild the
   audio graph. The realtime audio callback does not allocate or lock.
-- Absolute touch/drag, HID buttons and an ASCII keyboard; disconnect/release input
+- Absolute touch/drag, HID buttons and Unicode/ASCII text input; disconnect/release input
   on exit/background. Session state changes only after the native engine reports
   its first frame; RTT comes from actual authenticated probes.
 - Draggable session controls: tap the compact button to open actions, collapse it
   or hide it into an edge tab, then tap the arrow to recover it. Controls remain
   inside the safe viewport after rotation and when the keyboard is visible.
 - A Settings tab and in-session settings sheet persist automatic landscape,
-  Auto/Direct/Relay selection, video bitrate ceiling, initial system audio, compact controls and RTT visibility on this phone.
+  Auto/Direct/Relay selection, video bitrate ceiling, initial system audio, compact controls, touch feedback and RTT visibility on this phone.
   Sessions request landscape by default and restore portrait on exit; platform
   restrictions on large Android screens/iPad multitasking can override rotation.
 
@@ -39,7 +97,13 @@ Initial preview limits:
   when requesting a new session. No fixed Internet latency promise is made.
 - **Group voice and microphone capture are not enabled on mobile.** System audio
   is separate and supported in source. The UI hides unavailable voice actions.
-- No mobile host, gamepad, full IME/Unicode text injection or background control.
+- Updated SNV2 hosts support committed Unicode typing from **Bàn phím**. The
+  **Clipboard** sheet is available in control sessions after the desktop host
+  enables **Settings → Host → Text clipboard** and reconnects. Text transfer is
+  manual and capped at 8 KiB; received text is reviewed before local copy.
+- No mobile host, host-context IME composition or background control. Physical
+  controller keyboard mapping and optional Windows analog input are described above.
+  File transfer requires the updated SNV2 control host described above.
 - Requires a Sanser server accepting **2.3.x clients**; desktop
   Windows/macOS hosts must expose the bidirectional SNV2 engine.
 - Builds/unit tests do not replace real Android/iPhone-to-host testing.

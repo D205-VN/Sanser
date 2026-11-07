@@ -16,6 +16,14 @@ test('all four directions have explicit missing cases rather than fabricated pas
   assert.ok(result.coverage.every((row) => row.status === 'not-observed'));
   assert.equal(new Set(result.coverage.map((row) => `${row.viewer}-${row.host}`)).size, 4);
 });
+test('voice-only numeric evidence counts as observations without inventing timing metrics', () => {
+  const [row] = summarizeCase(entry, [{ ...report, samples: [], performance: { audio: { counters: {
+    voicePcmUnderflows: { latest: 2, observedIncrease: 1, observedDurationMs: 1000, resets: 0, samples: 2, source: 'native-voice' }
+  } } } }]);
+  assert.equal(row.metrics.controlAppRtt, null);
+  assert.equal(row.audioCounters.voicePcmUnderflows.eventsPerSecond, 1);
+  assert.equal(buildMatrix([row]).coverage.filter((v) => v.status === 'observations-only').length, 1);
+});
 test('keeps app RTT, wire RTT, input queue/work and missing stages distinct', () => {
   const [row] = summarizeCase(entry, [report]);
   assert.equal(row.metrics.controlAppRtt.p50Ms, 12);

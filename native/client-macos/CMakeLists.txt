@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_client_macos VERSION 2.3.3 LANGUAGES CXX OBJCXX)
+project(sanser_client_macos VERSION 2.3.4 LANGUAGES CXX OBJCXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -85,6 +85,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../desktop ${CMAKE_BINARY_DIR}/cros
 target_link_libraries(sanser-client-macos PRIVATE sanser-desktop-native)
 
 if(BUILD_TESTING)
+  add_executable(sanser-legacy-shortcuts-test legacy_shortcuts_test.mm)
+  get_target_property(shortcut_client_libraries sanser-client-macos LINK_LIBRARIES)
+  target_link_libraries(sanser-legacy-shortcuts-test PRIVATE ${shortcut_client_libraries})
+  target_include_directories(sanser-legacy-shortcuts-test PRIVATE ../common)
+  target_compile_options(sanser-legacy-shortcuts-test PRIVATE -fobjc-arc)
+  add_test(NAME sanser-legacy-shortcuts-test COMMAND sanser-legacy-shortcuts-test)
+  set_tests_properties(sanser-legacy-shortcuts-test PROPERTIES TIMEOUT 15)
   add_executable(sanser-client-latency-test latency_test.mm)
   get_target_property(client_libraries sanser-client-macos LINK_LIBRARIES)
   target_link_libraries(sanser-client-latency-test PRIVATE ${client_libraries})

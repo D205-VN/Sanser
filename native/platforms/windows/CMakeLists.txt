@@ -1,8 +1,11 @@
 if(NOT TARGET sanser-uac-client)
   add_subdirectory(../../windows-uac ${CMAKE_CURRENT_BINARY_DIR}/windows-uac)
 endif()
+add_subdirectory(text-input)
 add_library(sanser-native-windows STATIC
   backend.cpp
+  gamepad.cpp
+  clipboard.cpp
   audio_player.cpp
   audio_capture.cpp
   microphone_capture.cpp voice_panel.cpp
@@ -14,7 +17,7 @@ add_library(sanser-native-windows STATIC
   ../../host-windows/src/mf_video_encoder.cpp
 )
 add_library(sanser-desktop-native ALIAS sanser-native-windows)
-target_link_libraries(sanser-native-windows PUBLIC sanser-desktop-transport sanser-uac-client)
+target_link_libraries(sanser-native-windows PUBLIC sanser-desktop-transport sanser-uac-client sanser-windows-text-input)
 target_include_directories(sanser-native-windows PRIVATE ../../host-windows/src)
 target_include_directories(sanser-native-windows PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(sanser-native-windows PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

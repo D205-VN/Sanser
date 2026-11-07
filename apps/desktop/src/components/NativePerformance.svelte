@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { nativePerformance, metricIsFresh } from '../stores/nativePerformance';
+  import { nativePerformance, metricIsFresh, audioCounterIsFresh } from '../stores/nativePerformance';
   let now = $state(Date.now());
   onMount(() => { const timer = window.setInterval(() => { now = Date.now(); }, 1_000); return () => window.clearInterval(timer); });
   const labels: Record<string, string> = {
+    voiceWorkerGap: 'Voice worker wake gap (window maximum)',
     controlAppRtt: 'Control application RTT', controlAppRttFallback: 'Control-pong RTT',
     controlSilence: 'Authenticated control silence',
     socketRtt: 'Socket RTT', wireRttEstimate: 'Wire RTT estimate', udpEchoRtt: 'UDP echo RTT',
@@ -18,8 +19,35 @@
     decodeQueue: 'Decode queue', decodeQueueMax: 'Decode queue maximum', decodeWork: 'Decode work', colorConversion: 'Color conversion',
     frameQueue: 'Frame queue', renderGpu: 'Render GPU', paintWork: 'Paint work', decodedToPaint: 'Decoded → paint'
   };
+  const audioLabels: Record<string, string> = {
+    voiceCapturedFrames: 'Voice captured PCM frames', voiceDecodedPackets: 'Voice decoded packets',
+    voiceConcealedPackets: 'Voice concealment packets', voiceFecAttempts: 'Voice FEC attempts',
+    voiceDroppedPackets: 'Voice stale/queue packet drops', voiceLatePackets: 'Voice late/duplicate packets',
+    voiceInvalidPackets: 'Voice invalid packets', voiceRawClippedFrames: 'Mic near-full-scale frames',
+    voiceCleanClippedFrames: 'Processed mic near-full-scale frames', voiceLimitedFrames: 'Voice overload-limited frames',
+    voiceCaptureQueueDrops: 'Mic capture queue drops', voiceIncomingQueueDrops: 'Voice incoming queue drops',
+    voiceStaleCaptureBlocks: 'Mic stale capture blocks', voicePacketsSent: 'Voice packets sent',
+    voicePcmUnderflows: 'Voice PCM underflows', voicePcmCapacityDrops: 'Voice PCM capacity drops',
+    voicePcmStaleDrops: 'Voice PCM stale drops', voicePcmReprimes: 'Voice PCM reprimes',
+    voiceAecBlocks: 'AEC processed blocks', voiceAecMissingReference: 'AEC missing reference blocks',
+    voiceAecDryBlocks: 'AEC dry blocks', voiceAecResets: 'AEC resets',
+    systemDecodedPackets: 'System sound decoded packets', systemConcealedPackets: 'System sound concealment packets',
+    systemDecodeErrors: 'System sound decode errors', systemPcmUnderflows: 'System sound PCM underflows',
+    systemPcmCapacityDrops: 'System sound PCM capacity drops', systemPcmStaleDrops: 'System sound PCM stale drops',
+    systemPcmReprimes: 'System sound PCM reprimes', systemPcmResets: 'System sound PCM resets',
+    systemJitterUnderflows: 'System sound jitter underflows', systemJitterQueueDrops: 'System sound jitter queue drops',
+    systemOutputErrors: 'System sound output errors', systemOutputQueueDrops: 'System sound output queue drops',
+    systemOutputRecoveries: 'System sound output recoveries', systemOutputRouteChanges: 'System sound route changes',
+    systemConverterErrors: 'System sound converter errors', systemClockStalls: 'System sound clock stalls'
+  };
   const primary = ['controlAppRtt', 'wireRttEstimate', 'inputAckRtt', 'hostInput', 'decodeQueue', 'decodeWork', 'frameQueue'];
   const messages: Record<string, string> = {
+    'voice-playout-underflow': 'Voice playback ran short of PCM in a recent observed interval.',
+    'voice-capture-drops': 'Microphone blocks were dropped before encoding.',
+    'voice-packet-concealment': 'Voice used missing-packet concealment. This alone does not identify the network as the cause.',
+    'voice-signal-clipping': 'Microphone PCM reached near-full-scale. Check microphone gain and the audio path.',
+    'system-audio-underflow': 'Shared system sound ran short of buffered audio in a recent observed interval.',
+    'system-audio-concealment': 'Shared system sound used missing-packet concealment.',
     'path-or-os-delay': 'The path or OS/socket scheduling has high delay; this does not identify the router or ISP as the cause.',
     'control-round-trip-high': 'Control RTT is high. It includes application queues and peer processing; network delay has not been isolated.',
     'input-delivery-overhead': 'Input ACK is slower than control RTT. Inspect input handling and retries.',
@@ -45,7 +73,8 @@
     {@const update = $nativePerformance[kind as 'client' | 'host']}
     {#if update}
       {@const metrics = update.performance.metrics}
-      {@const fresh = !update.ended && Object.values(metrics).some((metric) => metricIsFresh(metric, now))}
+      {@const audio = update.performance.audio?.counters ?? {}}
+      {@const fresh = !update.ended && (Object.values(metrics).some((metric) => metricIsFresh(metric, now)) || Object.values(audio).some((counter) => audioCounterIsFresh(counter, now)))}
       <div class="stack">
         <strong>{kind === 'client' ? 'Viewing' : 'Hosting'} · {update.wireProtocol.toUpperCase()} · {update.route}{update.relayTransport ? ` / ${update.relayTransport.toUpperCase()}` : ''} · {update.ended ? 'Ended' : fresh ? 'Receiving measurements' : 'Awaiting fresh measurements'}</strong>
         {#if fresh}
@@ -62,6 +91,24 @@
             </tbody>
           </table>
         </div>
+        <details>
+          <summary>Audio and voice counters</summary>
+          {#if Object.keys(audio).length === 0}
+            <p class="muted">No audio measurements received. This does not confirm working sound.</p>
+          {:else}
+            <div class="performance-table">
+              <table aria-label="Audio and voice counters">
+                <thead><tr><th>Counter</th><th>Latest interval increase</th><th>Observed increase</th><th>Observed time</th><th>Counter/voice resets</th></tr></thead>
+                <tbody>
+                  {#each Object.entries(audio).filter(([key]) => audioLabels[key]) as [key, counter]}
+                    <tr><th>{audioLabels[key]}</th><td>{update.ended || !audioCounterIsFresh(counter, now) ? 'Stale' : counter.delta === null ? 'Baseline' : `+${counter.delta} / ${((counter.intervalMs ?? 0) / 1_000).toFixed(1)} s`}</td><td>{counter.observedIncrease}</td><td>{(counter.observedDurationMs / 1_000).toFixed(1)} s</td><td>{counter.resets}</td></tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+            <p class="muted">Counts are not milliseconds or packet-loss percentages. The first sample, counter reset or gap over 5 seconds establishes a baseline; those gaps are excluded from observed increases. Device, consent and voice changes can reset counters. FEC attempts do not confirm recovery, and AEC dry blocks do not prove echo.</p>
+          {/if}
+        </details>
       </div>
     {/if}
   {/each}

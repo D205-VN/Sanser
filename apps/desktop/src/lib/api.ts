@@ -165,6 +165,19 @@ export class ApiClient {
     return this.tokenProvider();
   }
 
+  async voiceGatewayAvailable(): Promise<boolean> {
+    const result = await this.request<{ gateway?: boolean }>('/api/v2/voice-lab/capabilities');
+    return result.gateway === true;
+  }
+
+  async voiceGatewayCredentials(sharingId: string, deviceId: string): Promise<{ url: string; token: string }> {
+    const result = await this.request<{ provider: string; url: string; token: string }>(`/api/v2/sharing/${encodeURIComponent(sharingId)}/voice-lab/credentials`, {
+      method: 'POST', body: { deviceId }
+    });
+    if (result.provider !== 'livekit-lab' || typeof result.url !== 'string' || typeof result.token !== 'string') throw new Error('Voice server returned an invalid credential');
+    return { url: result.url, token: result.token };
+  }
+
   async register(email: string, password: string, displayName?: string, device?: LoginDevice): Promise<AuthResult> {
     return this.authenticate('/api/v2/auth/register', { email, password, displayName: displayName?.trim() || email.split('@')[0]?.slice(0, 80) || 'Sanser user' }, device);
   }
@@ -435,7 +448,9 @@ export class ApiClient {
         },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: controller.signal,
-        cache: 'no-store'
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'error'
       });
 
       if (response.status === 401 && options.authenticated !== false && !retried && this.renewAuthentication) {

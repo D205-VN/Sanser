@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844">
+<title>Điều khiển / Hướng dẫn chạm</title>
+<rect x="0" y="0" width="390" height="844" rx="0" fill="#0E1119"/>
+<text x="25" y="27.310000000000002" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="600">9:41</text>
+<rect x="150.0" y="10" width="90" height="25" rx="16" fill="#06080D"/>
+<rect x="314" y="25" width="2" height="3" rx="0" fill="#F2F4FA"/>
+<rect x="318" y="23" width="2" height="5" rx="0" fill="#F2F4FA"/>
+<rect x="322" y="21" width="2" height="7" rx="0" fill="#F2F4FA"/>
+<rect x="326" y="19" width="2" height="9" rx="0" fill="#F2F4FA"/>
+<line x1="334.25" y1="22.0" x2="337.375" y2="20.125" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="337.375" y1="20.125" x2="343.625" y2="20.125" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="343.625" y1="20.125" x2="346.75" y2="22.0" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="336.75" y1="24.5" x2="338.625" y2="23.25" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="338.625" y1="23.25" x2="342.375" y2="23.25" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="342.375" y1="23.25" x2="344.25" y2="24.5" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<ellipse cx="340.5" cy="28.25" rx="2.0" ry="2.0" fill="#F2F4FA"/>
+<rect x="357" y="21" width="19" height="9" rx="3" fill="#F2F4FA"/>
+<rect x="378" y="24" width="2" height="3" rx="0" fill="#F2F4FA"/>
+<rect x="20" y="61" width="44" height="44" rx="14" fill="#191F2C"/>
+<line x1="44.75" y1="76.58333333333333" x2="38.333333333333336" y2="83.0" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="38.333333333333336" y1="83.0" x2="44.75" y2="89.41666666666667" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<text x="78" y="89.88" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="700">Chạm để điều khiển</text>
+<text x="78" y="114.44" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="400">Các thao tác dùng trong phiên</text>
+<rect x="24" y="161" width="342" height="96" rx="19" fill="#191F2C" stroke="#303A50" stroke-width="1"/>
+<rect x="48.833333333333336" y="195.33333333333334" width="16.333333333333332" height="23.333333333333332" rx="4" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<line x1="54.666666666666664" y1="212.83333333333334" x2="59.33333333333333" y2="212.83333333333334" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<ellipse cx="57.0" cy="204.76" rx="2.0" ry="2.0" fill="#B9C8FF"/>
+<text x="96" y="198.92" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="16" font-weight="600">Một chạm</text>
+<text x="96" y="224.57" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="400">Nhấp chuột trái</text>
+<rect x="24" y="274" width="342" height="96" rx="19" fill="#191F2C" stroke="#303A50" stroke-width="1"/>
+<rect x="48.833333333333336" y="308.3333333333333" width="16.333333333333332" height="23.333333333333332" rx="4" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<line x1="54.666666666666664" y1="325.8333333333333" x2="59.33333333333333" y2="325.8333333333333" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<ellipse cx="57.0" cy="317.76" rx="2.0" ry="2.0" fill="#B9C8FF"/>
+<text x="96" y="311.92" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="16" font-weight="600">Giữ một lúc</text>
+<text x="96" y="337.57" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="400">Mở menu chuột phải</text>
+<rect x="24" y="387" width="342" height="96" rx="19" fill="#191F2C" stroke="#303A50" stroke-width="1"/>
+<rect x="48.833333333333336" y="421.3333333333333" width="16.333333333333332" height="23.333333333333332" rx="4" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<line x1="54.666666666666664" y1="438.8333333333333" x2="59.33333333333333" y2="438.8333333333333" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<ellipse cx="57.0" cy="430.76" rx="2.0" ry="2.0" fill="#B9C8FF"/>
+<text x="96" y="424.92" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="16" font-weight="600">Hai ngón tay</text>
+<text x="96" y="450.57" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="400">Cuộn trang theo cả hai chiều</text>
+<rect x="24" y="500" width="342" height="96" rx="19" fill="#191F2C" stroke="#303A50" stroke-width="1"/>
+<rect x="45.333333333333336" y="537.8333333333334" width="23.333333333333332" height="16.333333333333332" rx="2" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<line x1="50.0" y1="542.5" x2="50.93333333333334" y2="542.5" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="54.666666666666664" y1="542.5" x2="55.6" y2="542.5" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="59.33333333333333" y1="542.5" x2="60.266666666666666" y2="542.5" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="64.0" y1="542.5" x2="64.93333333333334" y2="542.5" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="50.0" y1="546.0" x2="50.93333333333334" y2="546.0" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="54.666666666666664" y1="546.0" x2="55.6" y2="546.0" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="59.33333333333333" y1="546.0" x2="60.266666666666666" y2="546.0" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="64.0" y1="546.0" x2="64.93333333333334" y2="546.0" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="51.166666666666664" y1="550.6666666666666" x2="62.83333333333333" y2="550.6666666666666" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<text x="96" y="537.92" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="16" font-weight="600">Bàn phím</text>
+<text x="96" y="563.57" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="400">Mở bàn phím và các phím bổ trợ</text>
+<rect x="24" y="691" width="342" height="50" rx="15" fill="#B9C8FF"/>
+<line x1="42.75" y1="713.25" x2="42.75" y2="707.75" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="42.75" y1="707.75" x2="48.25" y2="707.75" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="53.75" y1="707.75" x2="59.25" y2="707.75" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="59.25" y1="707.75" x2="59.25" y2="713.25" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="59.25" y1="718.75" x2="59.25" y2="724.25" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="59.25" y1="724.25" x2="53.75" y2="724.25" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="48.25" y1="724.25" x2="42.75" y2="724.25" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="42.75" y1="724.25" x2="42.75" y2="718.75" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<text x="73" y="719.18" fill="#0E1119" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="600">Đã hiểu, mở màn hình</text>
+</svg>

@@ -8,7 +8,7 @@ import { networkDiagnostics } from '../stores/diagnostics';
 
 const mocks = vi.hoisted(() => ({
   ready: vi.fn(), credentials: vi.fn(), disconnect: vi.fn(), getSession: vi.fn(), token: vi.fn(),
-  punch: vi.fn(), release: vi.fn(), launch: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), status: vi.fn(), recovery: vi.fn(), sound: vi.fn()
+  punch: vi.fn(), release: vi.fn(), launch: vi.fn(), stop: vi.fn(), relay: vi.fn(), stopRelay: vi.fn(), status: vi.fn(), recovery: vi.fn(), sound: vi.fn(), userCapabilities: vi.fn()
 }));
 vi.mock('../stores/session', async () => {
   const { writable } = await import('svelte/store');
@@ -18,7 +18,7 @@ vi.mock('../stores/presence', async () => {
   const { writable } = await import('svelte/store');
   return { presence: writable({ deviceId: 'local-client', online: true }) };
 });
-vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, engineStatus: mocks.status, routeRecoveryPlan: mocks.recovery, setViewerAudio: mocks.sound, saveNativePreferences: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../lib/platform', () => ({ launchEngine: mocks.launch, stopEngine: mocks.stop, startRelay: mocks.relay, stopRelay: mocks.stopRelay, engineStatus: mocks.status, routeRecoveryPlan: mocks.recovery, setViewerAudio: mocks.sound, sessionUserCapabilities: mocks.userCapabilities, sessionUserAction: vi.fn(), saveNativePreferences: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../lib/p2pSignaling', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/p2pSignaling')>(), coordinateP2pConnection: mocks.punch, releaseP2pConnection: mocks.release }));
 import ActiveSession from './ActiveSession.svelte';
 import { DEFAULT_PREFERENCES, preferences } from '../stores/preferences';
@@ -29,6 +29,7 @@ const target = { id: 'test-session', hostDeviceId: 'remote-host', requesterDevic
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  mocks.userCapabilities.mockResolvedValue({ unicodeInput: false, clipboard: false, localClipboard: false });
   viewerAudio.set({}); mocks.sound.mockResolvedValue(undefined);
   nativePerformance.clear();
   networkDiagnostics.clear();
@@ -601,4 +602,49 @@ it('ignores a late startup close check after the active session has changed', as
   await waitFor(() => expect(get(connection).preparing).toBe(false));
   expect(mocks.disconnect).not.toHaveBeenCalled();
   expect(get(connection)).toMatchObject({ session: { id: 'new-session' }, nativeRetryBlocked: false, error: null });
+});
+
+
+it('offers live sound control for an ordinary SNV2 session without restarting video', async () => {
+  render(ActiveSession, { runtime: { ...runtime, capabilities: { ...runtime.capabilities, clientAudio: true } }, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await screen.findByRole('button', { name: 'Mute sound' });
+  await fireEvent.click(screen.getByRole('button', { name: 'Mute sound' }));
+  await waitFor(() => expect(mocks.sound).toHaveBeenCalledWith(target.id, true));
+  expect(await screen.findByRole('button', { name: 'Unmute sound' })).toHaveAttribute('aria-pressed', 'true');
+  expect(mocks.launch).toHaveBeenCalledTimes(1);
+  expect(mocks.stop).not.toHaveBeenCalled();
+});
+
+it('does not offer live unmute when the audio receiver was disabled at startup', async () => {
+  const settings = structuredClone(DEFAULT_PREFERENCES); settings.host.audioEnabled = false;
+  await preferences.save(settings);
+  render(ActiveSession, { runtime: { ...runtime, capabilities: { ...runtime.capabilities, clientAudio: true } }, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ audioEnabled: false })));
+  expect(screen.queryByRole('button', { name: /mute sound/i })).not.toBeInTheDocument();
+  expect(screen.getByText(/To enable live sound controls/)).toBeInTheDocument();
+});
+
+it('opens existing settings and connection diagnostics without relaunching a viewer', async () => {
+  const navigate = vi.fn();
+  render(ActiveSession, { runtime, navigate });
+  await fireEvent.click(screen.getByRole('button', { name: 'Session settings' }));
+  expect(navigate).toHaveBeenLastCalledWith('settings');
+  await fireEvent.click(screen.getByRole('button', { name: 'Connection details' }));
+  expect(navigate).toHaveBeenLastCalledWith('diagnostics');
+  expect(mocks.launch).not.toHaveBeenCalled();
+});
+
+it('does not attach a late audio error to the next session', async () => {
+  let fail: ((reason: Error) => void) | undefined;
+  mocks.sound.mockImplementation(() => new Promise((_resolve, reject) => { fail = reject; }));
+  render(ActiveSession, { runtime: { ...runtime, capabilities: { ...runtime.capabilities, clientAudio: true } }, navigate: vi.fn() });
+  await fireEvent.click(screen.getByRole('button', { name: 'Open remote desktop' }));
+  await fireEvent.click(await screen.findByRole('button', { name: 'Mute sound' }));
+  connection.begin({ ...target, id: 'next-session' });
+  fail?.(new Error('Old audio command failed'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() => expect(screen.queryByText('Old audio command failed')).not.toBeInTheDocument());
+  expect(get(connection).session?.id).toBe('next-session');
 });

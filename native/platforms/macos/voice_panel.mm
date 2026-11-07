@@ -1,13 +1,18 @@
 #include "voice_panel.h"
+#include "external_voice.h"
+#include "../../common/design_tokens.h"
 #import <Cocoa/Cocoa.h>
 #include <cstdlib>
 #include <stdexcept>
 using sanser::desktop::VoiceRuntime;
 
-static NSColor* panelInk() { return [NSColor colorWithSRGBRed:0.88 green:0.91 blue:0.97 alpha:1]; }
-static NSColor* panelMuted() { return [NSColor colorWithSRGBRed:0.55 green:0.61 blue:0.71 alpha:1]; }
-static NSColor* panelAccent() { return [NSColor colorWithSRGBRed:0.40 green:0.86 blue:0.72 alpha:1]; }
-static NSColor* panelRed() { return [NSColor colorWithSRGBRed:1 green:0.49 blue:0.54 alpha:1]; }
+static NSColor* panelColor(std::uint32_t rgb) {
+  return [NSColor colorWithSRGBRed:((rgb>>16)&255)/255.0 green:((rgb>>8)&255)/255.0 blue:(rgb&255)/255.0 alpha:1];
+}
+static NSColor* panelInk() { return panelColor(sanser::design::text); }
+static NSColor* panelMuted() { return panelColor(sanser::design::muted); }
+static NSColor* panelAccent() { return panelColor(sanser::design::success); }
+static NSColor* panelRed() { return panelColor(sanser::design::danger); }
 
 // Clicking floating controls must not take keyboard focus from the desktop.
 @interface SanserCallPanel : NSPanel
@@ -22,10 +27,10 @@ static NSColor* panelRed() { return [NSColor colorWithSRGBRed:1 green:0.49 blue:
 @implementation SanserCallSurface
 - (void)drawRect:(NSRect)dirty {
   (void)dirty;
-  NSBezierPath* shape=[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds,0.5,0.5) xRadius:15 yRadius:15];
-  NSGradient* gradient=[[NSGradient alloc] initWithStartingColor:[NSColor colorWithSRGBRed:0.055 green:0.071 blue:0.105 alpha:1] endingColor:[NSColor colorWithSRGBRed:0.085 green:0.108 blue:0.15 alpha:1]];
+  NSBezierPath* shape=[NSBezierPath bezierPathWithRoundedRect:NSInsetRect(self.bounds,0.5,0.5) xRadius:sanser::design::panelRadius yRadius:sanser::design::panelRadius];
+  NSGradient* gradient=[[NSGradient alloc] initWithStartingColor:panelColor(sanser::design::surface) endingColor:panelColor(sanser::design::surface)];
   [gradient drawInBezierPath:shape angle:90];
-  [[NSColor colorWithSRGBRed:0.19 green:0.23 blue:0.30 alpha:1] setStroke]; [shape stroke];
+  [panelColor(sanser::design::borderStrong) setStroke]; [shape stroke];
   if(self.bounds.size.height>52) {
     [[NSColor colorWithWhite:1 alpha:0.08] setStroke];
     NSBezierPath* line=[NSBezierPath bezierPath];
@@ -129,8 +134,8 @@ static void callControl(NSButton* button,NSString* symbol,NSString* title,NSStri
   const bool sharing=static_cast<bool>(stop);
   const auto width=self.panel.frame.size.width,height=self.panel.frame.size.height;
   self.titleLabel.stringValue=sharing ? @"Screen sharing" : @"Voice chat";
-  self.subtitle.stringValue=!self.voiceEnabled ? @"Sharing is active" : state.joined ? @"Connected to voice" : @"Voice is off";
-  self.subtitle.textColor=state.joined ? panelAccent() : panelMuted();
+  self.subtitle.stringValue=!self.voiceEnabled ? @"Sharing is active" : value.capturing ? @"Microphone on" : state.microphone ? @"Opening microphone…" : state.deafened ? @"Voice muted · mic off" : state.joined ? @"Listening · mic off" : @"Voice is off";
+  self.subtitle.textColor=value.capturing ? panelAccent() : panelMuted();
   self.titleLabel.frame=NSMakeRect(48,height-25,124,17); self.subtitle.frame=NSMakeRect(48,height-40,124,13);
   self.toggle.frame=NSMakeRect(12,height-40,28,28);
   callIcon(self.toggle,sharing ? @"display" : @"waveform",sharing ? @"Screen sharing active · open voice controls" : @"Open voice controls",sharing || state.joined ? panelAccent() : panelInk(),YES);
@@ -216,6 +221,8 @@ VoicePanel::VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> st
 VoicePanel::~VoicePanel()=default;
 void VoicePanel::pump() {
   if(!impl_) return;
+  if(externalVoiceActive()) {if(impl_->panel.isVisible) [impl_->panel orderOut:nil];}
+  else if(!impl_->panel.isVisible) [impl_->panel orderFrontRegardless];
   for(unsigned count=0;count<64;++count) {
     NSEvent* event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:YES];
     if(!event) break; [NSApp sendEvent:event];

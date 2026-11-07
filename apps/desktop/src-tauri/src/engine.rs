@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::Write,
     net::IpAddr,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -44,6 +43,8 @@ const INHERITED_ENVIRONMENT: [&str; 7] = [
 struct EngineChild {
     session_id: Option<Uuid>,
     process: Child,
+    control: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    user: Arc<crate::engine_user::UserControl>,
     output: EngineOutput,
     acknowledgements: std::sync::mpsc::Receiver<crate::engine_output::SharingAck>,
     sharing: Option<crate::sharing_engine::SharingHost>,
@@ -52,6 +53,7 @@ struct EngineChild {
     voice: crate::voice::ObservedVoice,
     voice_group: Option<Uuid>,
     voice_supported: bool,
+    external_voice_supported: bool,
     voice_floating_controls: bool,
     direct_bridges: HashMap<Uuid, crate::direct::Bridge>,
 }
@@ -69,12 +71,33 @@ impl EngineChild {
             return Err(std::io::Error::other("native stderr pipe is missing"));
         };
         let first_frame = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let user = Arc::new(crate::engine_user::UserControl::default());
+        let control = match process
+            .stdin
+            .take()
+            .map(crate::engine_user::command_writer)
+            .transpose()
+        {
+            Ok(control) => control,
+            Err(error) => {
+                let _ = process.kill();
+                let _ = process.wait();
+                return Err(error);
+            }
+        };
         let sharing_statuses = Arc::new(Mutex::new(HashMap::new()));
+        if let Some(pipe) = control.as_ref()
+            && let Err(error) = user.connect_files(pipe.clone())
+        {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err(error);
+        }
         let voice = Arc::new(Mutex::new(crate::voice::VoiceStatus::default()));
         let (acknowledgements, ack_receiver) = std::sync::mpsc::sync_channel(16);
         if let Some(stdout) = process.stdout.take()
             && let Err(error) = EngineOutput::start_with_voice(
-                stdout,
+                crate::engine_user::PrivateOutput::new(stdout, Arc::clone(&user)),
                 None,
                 metrics.clone(),
                 Some(acknowledgements),
@@ -95,6 +118,8 @@ impl EngineChild {
             Ok(output) => Ok(Self {
                 session_id: None,
                 process,
+                control,
+                user,
                 output,
                 acknowledgements: ack_receiver,
                 sharing: None,
@@ -103,6 +128,7 @@ impl EngineChild {
                 voice,
                 voice_group: None,
                 voice_supported: false,
+                external_voice_supported: false,
                 voice_floating_controls: false,
                 direct_bridges: HashMap::new(),
             }),
@@ -115,14 +141,7 @@ impl EngineChild {
     }
 
     fn sharing_command(&mut self, request: Uuid, command: &[u8]) -> Result<(), DesktopError> {
-        let input = self.process.stdin.as_mut().ok_or_else(|| {
-            DesktopError::Process("native sharing control pipe is unavailable".into())
-        })?;
-        if input
-            .write_all(command)
-            .and_then(|()| input.flush())
-            .is_err()
-        {
+        if self.send_command(command.to_vec()).is_err() {
             if let Some(sharing) = self.sharing.as_mut() {
                 sharing.desynchronized = true;
             }
@@ -131,6 +150,13 @@ impl EngineChild {
             ));
         }
         self.wait_sharing_ack(request, Duration::from_secs(3))
+    }
+    fn send_command(&self, command: Vec<u8>) -> Result<(), DesktopError> {
+        self.control
+            .as_ref()
+            .ok_or_else(|| DesktopError::Process("Native control pipe is unavailable".into()))?
+            .try_send(command)
+            .map_err(|_| DesktopError::Process("Native command queue is busy or closed".into()))
     }
     fn wait_sharing_ack(&mut self, request: Uuid, timeout: Duration) -> Result<(), DesktopError> {
         let deadline = Instant::now() + timeout;
@@ -257,6 +283,10 @@ struct SidecarCapabilities {
     group_voice_implementation: bool,
     #[serde(default)]
     group_voice_floating_controls: bool,
+    #[serde(default)]
+    external_voice_gate: bool,
+    #[serde(default)]
+    clipboard_implementation: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -270,7 +300,9 @@ pub struct SidecarProbe {
     pub multi_viewer_host: bool,
     pub snv2_audio: bool,
     pub group_voice: bool,
+    pub external_voice_gate: bool,
     pub group_voice_floating_controls: bool,
+    pub clipboard: bool,
     pub reason: Option<String>,
 }
 
@@ -285,7 +317,9 @@ impl SidecarProbe {
             multi_viewer_host: false,
             snv2_audio: false,
             group_voice: false,
+            external_voice_gate: false,
             group_voice_floating_controls: false,
+            clipboard: false,
             reason: Some(reason.into()),
         }
     }
@@ -387,7 +421,9 @@ pub(crate) fn probe_path(path: &Path, kind: EngineKind) -> SidecarProbe {
                 multi_viewer_host: capabilities.multi_viewer_host,
                 snv2_audio: capabilities.snv2_audio_implementation,
                 group_voice: capabilities.group_voice_implementation,
+                external_voice_gate: capabilities.external_voice_gate,
                 group_voice_floating_controls: capabilities.group_voice_floating_controls,
+                clipboard: capabilities.clipboard_implementation,
                 reason: (!capabilities.native_direct).then(|| {
                     "Native sidecar does not advertise the authenticated direct transport"
                         .to_owned()
@@ -569,6 +605,13 @@ fn host_endpoint(request: &LaunchEngineRequest, port: u16) -> Result<String, Des
 
 fn snv2_args(args: &mut Vec<String>, request: &LaunchEngineRequest) {
     args.push("--snv2".into());
+    if request.kind == EngineKind::Host
+        && request.clipboard_enabled
+        && request.input_enabled
+        && request.sharing_id.is_none()
+    {
+        args.push("--enable-clipboard".into());
+    }
     if !request.audio_enabled {
         args.push("--disable-audio".into());
     }
@@ -754,6 +797,10 @@ fn sanitized_command(path: &Path, args: &[String], request: &LaunchEngineRequest
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .env("SANSER_CONTROL_STDIN", "1");
+        if request.input_enabled && request.sharing_id.is_none() {
+            // Environment opt-in is ignored safely by older sidecars.
+            command.env("SANSER_FILE_TRANSFER", "1");
+        }
     }
     command
 }
@@ -771,12 +818,15 @@ fn prepare_direct(
 }
 
 fn stop_child(engine: &mut EngineChild) -> std::io::Result<()> {
+    if let Some(files) = engine.user.files() {
+        files.close();
+    }
     let child = &mut engine.process;
     if child.try_wait()?.is_some() {
         return Ok(());
     }
-    if let Some(mut input) = child.stdin.take() {
-        let _ = input.write_all(b"stop\n");
+    if let Some(input) = engine.control.take() {
+        let _ = input.try_send(b"stop\n".to_vec());
         drop(input);
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
@@ -818,6 +868,33 @@ fn stabilize_child(child: &mut EngineChild) -> Result<(), String> {
 }
 
 impl EngineManager {
+    pub fn file_service(
+        &self,
+        kind: EngineKind,
+        session: Uuid,
+    ) -> Result<crate::file_transfer::Service, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("Engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&kind)
+            .ok_or_else(|| DesktopError::Unavailable("Session engine is not running".into()))?;
+        if child.session_id != Some(session)
+            || child.sharing.is_some()
+            || child.voice_group.is_some()
+            || child.process.try_wait()?.is_some()
+        {
+            return Err(DesktopError::Unavailable(
+                "File session is no longer active".into(),
+            ));
+        }
+        child
+            .user
+            .files()
+            .ok_or_else(|| DesktopError::Unavailable("Native file channel is unavailable".into()))
+    }
     fn voice_child(
         state: &mut EngineState,
         kind: EngineKind,
@@ -862,14 +939,43 @@ impl EngineManager {
         if !child.voice_supported {
             return Err(DesktopError::Unavailable("Update Sanser's native engine to use group voice; screen sharing remains available".into()));
         }
-        let input =
-            child.process.stdin.as_mut().ok_or_else(|| {
-                DesktopError::Process("Group voice control is unavailable".into())
-            })?;
-        input
-            .write_all(crate::voice::config_command(joined, microphone, deafened).as_bytes())
-            .and_then(|()| input.flush())
-            .map_err(|_| DesktopError::Process("Unable to change group voice".into()))
+        child.send_command(crate::voice::config_command(joined, microphone, deafened).into_bytes())
+    }
+
+    pub fn external_voice_gate(
+        &self,
+        kind: EngineKind,
+        group: Uuid,
+        session: Option<Uuid>,
+        active: bool,
+    ) -> Result<(), DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("Engine state unavailable".into()))?;
+        if active {
+            for (other_kind, other) in &mut state.children {
+                if *other_kind != kind
+                    && *other_kind != EngineKind::LocalServer
+                    && other.process.try_wait()?.is_none()
+                {
+                    return Err(DesktopError::Unavailable(
+                        "Close other desktop sessions before joining enhanced voice".into(),
+                    ));
+                }
+            }
+        }
+        let child = Self::voice_child(&mut state, kind, group, session)?;
+        if !child.external_voice_supported {
+            return Err(DesktopError::Unavailable(
+                "Update the native engine to use WebRTC voice safely".into(),
+            ));
+        }
+        let request = Uuid::new_v4();
+        child.send_command(
+            format!("voice-external\t{request}\t{}\n", u8::from(active)).into_bytes(),
+        )?;
+        child.wait_sharing_ack(request, Duration::from_secs(3))
     }
 
     pub fn group_voice_status(
@@ -920,17 +1026,65 @@ impl EngineManager {
                 "viewer session is no longer active".into(),
             ));
         }
-        child
-            .process
-            .stdin
-            .as_mut()
-            .ok_or_else(|| DesktopError::Process("viewer control is unavailable".into()))?
-            .write_all(if muted {
-                b"audio-muted\t1\n"
-            } else {
-                b"audio-muted\t0\n"
-            })
-            .map_err(|_| DesktopError::Process("unable to change viewer audio".into()))
+        child.send_command(if muted {
+            b"audio-muted\t1\n".to_vec()
+        } else {
+            b"audio-muted\t0\n".to_vec()
+        })
+    }
+    pub fn user_capabilities(
+        &self,
+        session: Uuid,
+    ) -> Result<crate::engine_user::Capabilities, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or_else(|| DesktopError::Unavailable("Viewer is not running".into()))?;
+        if child.session_id != Some(session)
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("Unable to inspect viewer".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "Viewer session is no longer active".into(),
+            ));
+        }
+        Ok(child.user.capabilities())
+    }
+    pub fn user_action(
+        &self,
+        session: Uuid,
+        operation: &str,
+        text: &str,
+    ) -> Result<crate::engine_user::Request, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or_else(|| DesktopError::Unavailable("Viewer is not running".into()))?;
+        if child.session_id != Some(session)
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("Unable to inspect viewer".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "Viewer session is no longer active".into(),
+            ));
+        }
+        let (request, command) = child.user.prepare(operation, text)?;
+        child.send_command(command)?;
+        Ok(request)
     }
     pub fn sharing_peer_status(
         &self,
@@ -1105,6 +1259,7 @@ impl EngineManager {
             child.direct_bridges.insert(session, bridge);
         }
         child.voice_supported = probe.group_voice;
+        child.external_voice_supported = probe.external_voice_gate;
         child.voice_floating_controls = probe.group_voice_floating_controls;
         child.voice_group = request
             .sharing_id
@@ -1526,6 +1681,7 @@ mod tests {
             audio_enabled: true,
             audio_muted: false,
             input_enabled: true,
+            clipboard_enabled: false,
             relative_mouse: false,
             session_token: Some("a".repeat(32)),
             udp_connect: None,
@@ -1536,6 +1692,59 @@ mod tests {
             direct_attempt_id: None,
             wire_protocol: None,
         }
+    }
+    #[test]
+    fn clipboard_flag_requires_snv2_host_control_and_explicit_opt_in() -> Result<(), DesktopError> {
+        let mut request = request(EngineKind::Host);
+        request.wire_protocol = Some("snv2".into());
+        assert!(
+            !build_args(&request)?
+                .iter()
+                .any(|arg| arg == "--enable-clipboard")
+        );
+        request.clipboard_enabled = true;
+        assert!(
+            build_args(&request)?
+                .iter()
+                .any(|arg| arg == "--enable-clipboard")
+        );
+        request.input_enabled = false;
+        assert!(
+            !build_args(&request)?
+                .iter()
+                .any(|arg| arg == "--enable-clipboard")
+        );
+        request.input_enabled = true;
+        request.wire_protocol = None;
+        assert!(
+            !build_args(&request)?
+                .iter()
+                .any(|arg| arg == "--enable-clipboard")
+        );
+        Ok(())
+    }
+    #[cfg(unix)]
+    #[test]
+    fn bounded_control_writer_preserves_graceful_child_shutdown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "while IFS= read -r line; do if [ \"$line\" = stop ]; then exit 0; fi; done",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = EngineChild::spawn(&mut command, None, None)?;
+        stop_child(&mut child)?;
+        assert!(
+            child
+                .process
+                .try_wait()?
+                .is_some_and(|status| status.success())
+        );
+        Ok(())
     }
 
     #[test]
@@ -1584,6 +1793,67 @@ mod tests {
         value.input_enabled = false;
         value.wire_protocol = Some("legacy".into());
         assert!(build_args(&value).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_voice_requires_current_scope_capability_and_native_ack()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "while IFS= read -r line; do request=$(printf '%s' \"$line\" | cut -f2); printf 'SNSHARE_ACK request=%s accepted=1\\n' \"$request\"; done"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = EngineChild::spawn(&mut command, None, None)?;
+        let group = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        child.session_id = Some(session);
+        child.voice_group = Some(group);
+        let manager = EngineManager::default();
+        manager
+            .state
+            .lock()
+            .map_err(|_| "state")?
+            .children
+            .insert(EngineKind::Client, child);
+        assert!(
+            manager
+                .external_voice_gate(EngineKind::Client, group, Some(session), true)
+                .is_err()
+        );
+        manager
+            .state
+            .lock()
+            .map_err(|_| "state")?
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or("child")?
+            .external_voice_supported = true;
+        assert!(
+            manager
+                .external_voice_gate(EngineKind::Client, Uuid::new_v4(), Some(session), true)
+                .is_err()
+        );
+        assert!(
+            manager
+                .external_voice_gate(EngineKind::Client, group, Some(Uuid::new_v4()), true)
+                .is_err()
+        );
+        manager.external_voice_gate(EngineKind::Client, group, Some(session), true)?;
+        manager.external_voice_gate(EngineKind::Client, group, Some(session), false)?;
+        let other = EngineChild::spawn(&mut command, None, None)?;
+        manager
+            .state
+            .lock()
+            .map_err(|_| "state")?
+            .children
+            .insert(EngineKind::Host, other);
+        assert!(
+            manager
+                .external_voice_gate(EngineKind::Client, group, Some(session), true)
+                .is_err()
+        );
+        manager.stop(EngineKind::Host)?;
+        manager.stop(EngineKind::Client)?;
         Ok(())
     }
 

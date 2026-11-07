@@ -52,7 +52,19 @@ int main() {
       require(CGEventGetIntegerValueField(events.back(),kCGKeyboardEventKeycode)==13 && (CGEventGetFlags(events.back())&kCGEventFlagMaskCommand),"Command+W is not forwarded");
       input.apply(Input{});
       require(CGEventGetType(events.back())==kCGEventLeftMouseUp && !(CGEventGetFlags(events.back())&kCGEventFlagMaskCommand),"Focus reset did not release buttons/modifiers");
-      std::cout<<"Mac input: keycode zero, modifiers, click count, double click, drag, Command+W and reset passed without posting OS input\n";
+      input.apply({Input::Key,0,0,227,0,true});
+      Input edit; edit.kind=Input::Text; edit.text="ế😀";
+      const auto before=events.size(); input.apply(edit);
+      require(events.size()==before+5 && CGEventGetType(events[before])==kCGEventFlagsChanged,"Text must release held Command first");
+      for(std::size_t i=before+1;i<events.size();++i) require(CGEventGetFlags(events[i])==0,"Unicode must not turn into a held-modifier shortcut");
+      UniChar units[4]{}; UniCharCount count=0;
+      CGEventKeyboardGetUnicodeString(events[before+1],4,&count,units);
+      require(count==1 && units[0]==0x1ebf,"Vietnamese was not carried in the native key event");
+      CGEventKeyboardGetUnicodeString(events[before+3],4,&count,units);
+      require(count==2 && units[0]==0xd83d && units[1]==0xde00,"Emoji surrogate pair was split between Mac key events");
+      edit.text="valid\xed\xa0\x80"; const auto unchanged=events.size(); input.apply(edit);
+      require(events.size()==unchanged,"Malformed Unicode injected a partial prefix");
+      std::cout<<"Mac input: modifiers, clicks, Unicode scalar pairs and reset passed without posting OS input\n";
       return 0;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
   }

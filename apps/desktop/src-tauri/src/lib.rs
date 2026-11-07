@@ -4,14 +4,17 @@ mod device_identity;
 mod direct;
 mod engine;
 mod engine_output;
+mod engine_user;
 mod error;
 mod fec_health;
+mod file_transfer;
 mod models;
 mod relay;
 mod sharing_engine;
 mod storage;
 mod tray;
 mod voice;
+mod voice_window;
 mod windows_uac;
 
 use engine::EngineManager;
@@ -43,6 +46,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineManager::default())
+        .manage(voice_window::VoiceWindowState::default())
         .manage(commands::P2pSessionManager::default())
         .manage(relay::RelayManager::default())
         .setup(|app| {
@@ -53,62 +57,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("Sanser lifecycle: setup completed");
             Ok(())
         })
-        .on_window_event(|window, event| {
-            #[cfg(debug_assertions)]
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                eprintln!("Sanser lifecycle: close event label={}", window.label());
-            }
-            if cfg!(target_os = "windows")
-                && window.label() == "main"
-                && let tauri::WindowEvent::CloseRequested { api, .. } = event
-            {
-                // Keep the webview, host polling and native engines alive. The
-                // tray is installed before this handler can hide the window.
-                api.prevent_close();
-                #[cfg(debug_assertions)]
-                eprintln!("Sanser lifecycle: hide requested");
-                // Leave the native close callback before changing WebView2's
-                // visibility, which can synchronously send more window events.
-                let window = window.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) = window.hide() {
-                        eprintln!("Unable to hide Sanser in the system tray: {error}");
-                    }
-                    #[cfg(debug_assertions)]
-                    eprintln!("Sanser lifecycle: hide queued");
-                });
-            }
-        })
-        .invoke_handler(tauri::generate_handler![
-            windows_uac::windows_uac_status,
-            windows_uac::configure_windows_uac,
-            commands::get_runtime_status,
-            device_identity::get_device_identity,
-            device_identity::get_login_device,
-            commands::load_preferences,
-            commands::save_preferences,
-            commands::secure_get,
-            commands::secure_set,
-            commands::secure_delete,
-            commands::get_local_route_address,
-            commands::launch_engine,
-            commands::stop_engine,
-            commands::set_viewer_audio,
-            commands::set_group_voice,
-            commands::get_group_voice_status,
-            commands::sharing_engine_add_peer,
-            commands::sharing_engine_remove_peer,
-            commands::sharing_engine_peer_status,
-            commands::get_engine_status,
-            commands::route_recovery_plan,
-            commands::export_diagnostics,
-            commands::p2p_stop,
-            commands::p2p_gather,
-            commands::p2p_punch,
-            relay::relay_start,
-            relay::relay_peer_failure,
-            relay::relay_stop
-        ])
+        .on_window_event(app_window_event)
+        .invoke_handler(app_invoke)
         .build(context)?
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
@@ -124,4 +74,83 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     Ok(())
+}
+
+fn app_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    voice_window::window_event(window, event);
+    #[cfg(debug_assertions)]
+    if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+        eprintln!("Sanser lifecycle: close event label={}", window.label());
+    }
+    if cfg!(target_os = "windows")
+        && window.label() == "main"
+        && let tauri::WindowEvent::CloseRequested { api, .. } = event
+    {
+        // Keep the webview, host polling and native engines alive. The
+        // tray is installed before this handler can hide the window.
+        api.prevent_close();
+        #[cfg(debug_assertions)]
+        eprintln!("Sanser lifecycle: hide requested");
+        // Leave the native close callback before changing WebView2's
+        // visibility, which can synchronously send more window events.
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = window.hide() {
+                eprintln!("Unable to hide Sanser in the system tray: {error}");
+            }
+            #[cfg(debug_assertions)]
+            eprintln!("Sanser lifecycle: hide queued");
+        });
+    }
+}
+
+fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
+    if !voice_window::allowed_app_command(
+        invoke.message.webview_ref().label(),
+        invoke.message.command(),
+    ) {
+        invoke
+            .resolver
+            .reject("This command is unavailable in voice controls");
+        return true;
+    }
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        windows_uac::windows_uac_status,
+        windows_uac::configure_windows_uac,
+        commands::get_runtime_status,
+        device_identity::get_device_identity,
+        device_identity::get_login_device,
+        commands::load_preferences,
+        commands::save_preferences,
+        commands::secure_get,
+        commands::secure_set,
+        commands::secure_delete,
+        commands::get_local_route_address,
+        commands::launch_engine,
+        commands::stop_engine,
+        commands::set_viewer_audio,
+        commands::session_user_capabilities,
+        commands::session_user_action,
+        commands::session_file_status,
+        commands::session_file_action,
+        commands::set_group_voice,
+        commands::get_group_voice_status,
+        voice_window::open_voice_window,
+        voice_window::take_voice_window_grant,
+        voice_window::voice_window_ready,
+        voice_window::stop_voice_sharing,
+        commands::sharing_engine_add_peer,
+        commands::sharing_engine_remove_peer,
+        commands::sharing_engine_peer_status,
+        commands::get_engine_status,
+        commands::route_recovery_plan,
+        commands::export_diagnostics,
+        commands::p2p_stop,
+        commands::p2p_gather,
+        commands::p2p_punch,
+        relay::relay_start,
+        relay::relay_peer_failure,
+        relay::relay_stop
+    ];
+    handler(invoke)
 }

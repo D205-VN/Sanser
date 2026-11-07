@@ -10,6 +10,7 @@ pub mod routes;
 pub mod state;
 mod time;
 pub mod udp_relay;
+pub mod voice_lab;
 pub mod websocket;
 
 use std::{net::SocketAddr, time::Duration};
@@ -67,6 +68,14 @@ pub fn build_router(state: AppState) -> Router {
         .max_age(Duration::from_secs(600));
 
     Router::new()
+        .route("/rtc", get(voice_lab::gateway::socket))
+        .route("/rtc/v1", get(voice_lab::gateway::socket))
+        .route("/rtc/validate", get(voice_lab::gateway::validate))
+        .route("/rtc/v1/validate", get(voice_lab::gateway::validate))
+        .route(
+            "/api/v2/voice-lab/capabilities",
+            get(voice_lab::capabilities),
+        )
         .route("/api/v2/auth/register", post(routes::auth::register))
         .route("/api/v2/auth/login", post(routes::auth::login))
         .route("/api/v2/auth/logout", post(routes::auth::logout))
@@ -130,6 +139,10 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::sharing::list).post(routes::sharing::create),
         )
         .route("/api/v2/sharing/{id}", get(routes::sharing::get))
+        .route(
+            "/api/v2/sharing/{id}/voice-lab/credentials",
+            post(voice_lab::credentials),
+        )
         .route("/api/v2/sharing/{id}/invite", post(routes::sharing::invite))
         .route(
             "/api/v2/sharing/{id}/members/{member}/respond",
@@ -160,7 +173,7 @@ pub fn build_router(state: AppState) -> Router {
                     tracing::info_span!(
                         "http_request",
                         method = %request.method(),
-                        uri = %request.uri(),
+                        uri = %request.uri().path(),
                         request_id = request
                             .headers()
                             .get(&middleware::REQUEST_ID_HEADER)
@@ -202,6 +215,7 @@ pub async fn serve(config: Config) -> Result<(), ServerError> {
         None
     };
     let cleanup_task = spawn_cleanup(state.clone(), cancellation.clone());
+    let voice_closer = voice_lab::spawn_room_closer(state.clone(), cancellation.clone());
     tracing::info!(address = %listener.local_addr().unwrap_or(address), "Sanser API server listening");
 
     let result = axum::serve(
@@ -217,6 +231,9 @@ pub async fn serve(config: Config) -> Result<(), ServerError> {
     .map_err(ServerError::Serve);
     cancellation.cancel();
     let _ = cleanup_task.await;
+    if let Some(task) = voice_closer {
+        let _ = task.await;
+    }
     if let Some(task) = udp_task {
         let _ = task.await;
     }

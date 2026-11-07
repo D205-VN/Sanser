@@ -4,6 +4,13 @@ The media engines use separate platform libraries. The account/settings workspac
 remains a Tauri/Svelte application; this change does not replace it with SwiftUI
 or WinUI. Remote video windows and OS input are native, outside the WebView.
 
+Source update 2026-11-04: the SNV2 Mac viewer offers opt-in native text/IME input
+through `ime_view.mm`, while physical HID remains its default. The title-bar
+action is negotiated with the host. Source update 2026-11-05: the SNV2 Windows
+viewer adds a native local draft editor with explicit Send; its Windows runtime
+validation is pending. Legacy Mac does not have these native IME modes. See
+[Unicode/IME behavior and validation](unicode-input.md).
+
 | Module | Responsibility | Build target |
 | --- | --- | --- |
 | `native/platforms/macos` | AppKit window/input, ScreenCaptureKit capture, VideoToolbox codec, Metal presentation | `sanser-native-macos` |
@@ -39,6 +46,15 @@ These are code-path improvements, not measured end-to-end FPS or latency gains.
 The shared transport and its packet-loss limitations have not changed.
 
 ## Local validation
+
+SNV2 viewers also have a [modeless native host shortcut panel](native-session-shortcuts.md).
+It reuses reliable HID input with atomic group admission. The
+[Legacy Mac → Windows panel](legacy-session-shortcuts.md) uses authenticated fixed
+named operations separately. Real Windows/device validation remains pending.
+
+The [SNV2 analog-controller core](native-gamepad-core.md) has an optional Windows
+host backend with runtime capability detection. Mobile analog capture/UI,
+macOS virtual-controller hosting and rumble remain separate; no driver is bundled.
 
 - macOS ARM64 host/client build and capability probes.
 - macOS x86_64 host/client cross-compilation (not execution on an Intel Mac).

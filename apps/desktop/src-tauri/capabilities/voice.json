@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voice-controls",
+  "description": "Local floating voice controls; no storage or updater capability",
+  "windows": ["webrtc-voice"],
+  "permissions": ["core:window:allow-close", "core:window:allow-start-dragging"]
+}

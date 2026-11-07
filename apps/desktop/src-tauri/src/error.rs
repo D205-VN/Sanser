@@ -29,3 +29,13 @@ impl From<std::io::Error> for DesktopError {
         Self::Storage(error.to_string())
     }
 }
+impl From<sanser_file_transfer::TransferError> for DesktopError {
+    fn from(error: sanser_file_transfer::TransferError) -> Self {
+        match error {
+            sanser_file_transfer::TransferError::InvalidRequest(message) => {
+                Self::InvalidRequest(message)
+            }
+            sanser_file_transfer::TransferError::Storage(error) => Self::Storage(error.to_string()),
+        }
+    }
+}

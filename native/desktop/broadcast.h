@@ -88,6 +88,8 @@ public:
   std::function<void(voice::Packet)> onVoice;
   std::uint32_t bitrate() const;
   std::function<void(Input)> onInput;
+  std::function<bool()> onGamepadAvailable;
+  Peer::ClipboardHandler onClipboard;
 private:
   Options options_;
   std::unique_ptr<Peer> single_;

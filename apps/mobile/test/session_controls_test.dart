@@ -77,11 +77,19 @@ void main() {
       store.values['mobile.preferences'],
       contains('"autoLandscape":false'),
     );
+    expect(c.preferences.haptics, false);
+    await tester.ensureVisible(find.text('Rung khi thao tác'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rung khi thao tác'));
+    await tester.pumpAndSettle();
+    expect(c.preferences.haptics, true);
+    expect(store.values['mobile.preferences'], contains('"haptics":true'));
     await tester.pumpWidget(const SizedBox.shrink());
     c.dispose();
     final restored = MobileController(SanserApi(store), IdleEngine());
     await restored.initialize();
     expect(restored.preferences.autoLandscape, false);
+    expect(restored.preferences.haptics, true);
     restored.dispose();
   });
 

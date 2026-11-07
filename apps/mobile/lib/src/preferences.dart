@@ -4,7 +4,11 @@ class MobilePreferences {
   final String networkMode;
   final String pointerMode;
   final int videoBitrateMbps;
-  final bool autoLandscape, soundOnConnect, compactControls, showLatency;
+  final bool autoLandscape,
+      soundOnConnect,
+      compactControls,
+      showLatency,
+      haptics;
   const MobilePreferences({
     this.networkMode = 'auto',
     this.pointerMode = 'direct',
@@ -13,6 +17,7 @@ class MobilePreferences {
     this.soundOnConnect = true,
     this.compactControls = true,
     this.showLatency = true,
+    this.haptics = false,
   });
   factory MobilePreferences.fromJson(Json json) => MobilePreferences(
     pointerMode: ['direct', 'touchpad'].contains(json['pointerMode'])
@@ -32,6 +37,7 @@ class MobilePreferences {
         ? json['compactControls']
         : true,
     showLatency: json['showLatency'] is bool ? json['showLatency'] : true,
+    haptics: json['haptics'] is bool ? json['haptics'] : false,
   );
   MobilePreferences copyWith({
     String? networkMode,
@@ -41,6 +47,7 @@ class MobilePreferences {
     bool? soundOnConnect,
     bool? compactControls,
     bool? showLatency,
+    bool? haptics,
   }) => MobilePreferences(
     networkMode: networkMode ?? this.networkMode,
     pointerMode: pointerMode ?? this.pointerMode,
@@ -49,6 +56,7 @@ class MobilePreferences {
     soundOnConnect: soundOnConnect ?? this.soundOnConnect,
     compactControls: compactControls ?? this.compactControls,
     showLatency: showLatency ?? this.showLatency,
+    haptics: haptics ?? this.haptics,
   );
   Json toJson() => {
     'networkMode': networkMode,
@@ -58,5 +66,6 @@ class MobilePreferences {
     'soundOnConnect': soundOnConnect,
     'compactControls': compactControls,
     'showLatency': showLatency,
+    'haptics': haptics,
   };
 }

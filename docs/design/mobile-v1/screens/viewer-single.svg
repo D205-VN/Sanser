@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="844" height="390" viewBox="0 0 844 390">
+<title>Chỉ xem / Windows Studio</title>
+<rect x="0" y="0" width="844" height="390" rx="0" fill="#0E1119"/>
+<defs><clipPath id="clip-1"><rect x="34" y="10" width="776" height="348" rx="12"/></clipPath></defs><g clip-path="url(#clip-1)">
+<rect x="34" y="10" width="776" height="348" rx="12" fill="#283B50"/>
+<ellipse cx="616.0" cy="159.64" rx="174.0" ry="174.0" fill="#3E6471"/>
+<ellipse cx="639.28" cy="264.03999999999996" rx="132.24" ry="132.24" fill="#638C88"/>
+<ellipse cx="204.72" cy="295.35999999999996" rx="201.83999999999997" ry="201.83999999999997" fill="#283548"/>
+<rect x="48" y="22" width="748" height="22" rx="6" fill="#182230"/>
+<text x="58" y="34.96" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="8" font-weight="600">Sanser Workspace</text>
+<rect x="119.36" y="93.52" width="450.08" height="191.4" rx="8" fill="#131C29"/>
+<text x="150.39999999999998" y="121.35999999999999" fill="#B9C8FF" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="600">Project Sanser</text>
+<text x="150.39999999999998" y="140.75" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="9" font-weight="400">Design / Mobile</text>
+<text x="150.39999999999998" y="162.75" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="9" font-weight="400">Ready when you are.</text>
+<rect x="584.9599999999999" y="110.91999999999999" width="147.44" height="125.28" rx="8" fill="#9BC4B6"/>
+<rect x="608.24" y="131.8" width="85.36" height="4" rx="2" fill="#446E67"/>
+<rect x="608.24" y="144.8" width="85.36" height="4" rx="2" fill="#446E67"/>
+<rect x="608.24" y="157.8" width="85.36" height="4" rx="2" fill="#446E67"/>
+<rect x="251.28000000000003" y="337" width="341.44" height="12" rx="4" fill="#1F2A3C"/>
+</g>
+<rect x="55" y="28" width="242" height="44" rx="16" fill="#141C29"/>
+<line x1="81.75" y1="43.583333333333336" x2="75.33333333333333" y2="50.0" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="75.33333333333333" y1="50.0" x2="81.75" y2="56.41666666666667" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<text x="105" y="48.31" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="600">Windows Studio</text>
+<text x="105" y="62.83" fill="#78DFC0" font-family="Inter,Arial,sans-serif" font-size="9" font-weight="400">Chỉ xem</text>
+<rect x="560" y="28" width="229" height="48" rx="17" fill="#141C29" stroke="#303A50" stroke-width="1"/>
+<rect x="582.25" y="42.833333333333336" width="5.5" height="11.916666666666666" rx="3" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<line x1="579.5" y1="50.166666666666664" x2="579.5" y2="52.916666666666664" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="579.5" y1="52.916666666666664" x2="582.25" y2="57.5" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="582.25" y1="57.5" x2="587.75" y2="57.5" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="587.75" y1="57.5" x2="590.5" y2="52.916666666666664" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="590.5" y1="52.916666666666664" x2="590.5" y2="50.166666666666664" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="585.0" y1="57.5" x2="585.0" y2="61.16666666666667" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="581.3333333333334" y1="61.16666666666667" x2="588.6666666666666" y2="61.16666666666667" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="576.75" y1="43.75" x2="593.25" y2="60.25" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="629.6666666666666" y1="49.25" x2="633.3333333333334" y2="49.25" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="633.3333333333334" y1="49.25" x2="637.9166666666666" y2="44.666666666666664" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="637.9166666666666" y1="44.666666666666664" x2="637.9166666666666" y2="59.33333333333333" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="637.9166666666666" y1="59.33333333333333" x2="633.3333333333334" y2="54.75" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="633.3333333333334" y1="54.75" x2="629.6666666666666" y2="54.75" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="629.6666666666666" y1="54.75" x2="629.6666666666666" y2="49.25" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="641.5833333333334" y1="48.333333333333336" x2="644.3333333333334" y2="52.0" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="644.3333333333334" y1="52.0" x2="641.5833333333334" y2="55.666666666666664" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<ellipse cx="685.3333333333334" cy="46.5" rx="2.75" ry="2.75" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<ellipse cx="693.5833333333334" cy="46.5" rx="2.75" ry="2.75" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<line x1="679.8333333333334" y1="59.33333333333333" x2="680.75" y2="54.75" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="680.75" y1="54.75" x2="685.3333333333334" y2="52.916666666666664" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="685.3333333333334" y1="52.916666666666664" x2="689.9166666666666" y2="54.75" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="689.9166666666666" y1="54.75" x2="690.8333333333334" y2="59.33333333333333" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="693.5833333333334" y1="52.916666666666664" x2="697.25" y2="55.666666666666664" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="697.25" y1="55.666666666666664" x2="698.1666666666666" y2="59.33333333333333" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="739.1666666666666" y1="44.666666666666664" x2="733.6666666666666" y2="44.666666666666664" stroke="#F49BA8" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="733.6666666666666" y1="44.666666666666664" x2="733.6666666666666" y2="59.33333333333333" stroke="#F49BA8" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="733.6666666666666" y1="59.33333333333333" x2="739.1666666666666" y2="59.33333333333333" stroke="#F49BA8" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="739.1666666666666" y1="52.0" x2="749.25" y2="52.0" stroke="#F49BA8" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="745.5833333333334" y1="48.333333333333336" x2="749.25" y2="52.0" stroke="#F49BA8" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="749.25" y1="52.0" x2="745.5833333333334" y2="55.666666666666664" stroke="#F49BA8" stroke-width="1.7" stroke-linecap="round"/>
+<rect x="195" y="308" width="454" height="38" rx="13" fill="#141C29"/>
+<text x="213" y="329.57" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="11" font-weight="400">Chỉ xem · Không gửi thao tác chuột hoặc bàn phím</text>
+<rect x="228" y="359" width="388" height="21" rx="10" fill="#18212F"/>
+<text x="246" y="372.83" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="9" font-weight="400">DEMO   ·   1080p / 60 FPS   ·   RTT 12 ms (minh họa)</text>
+<rect x="367" y="382" width="110" height="4" rx="3" fill="#C6CCD9"/>
+</svg>

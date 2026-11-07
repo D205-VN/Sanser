@@ -59,12 +59,15 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include "legacy_host_shortcut.h"
+#import "../../platforms/macos/shortcuts_panel.h"
 
 namespace {
 
 sanser::LatencyPolicy gLatencyPolicy;
 std::atomic<bool> gShowLatencyOverlay{false};
 bool gViewOnly = false;
+bool gShortcutInputReleased = false; // Main-thread physical input/focus gate.
 std::atomic<bool> gHostCapturePaused{false};
 struct HostHelperFailure {
   bool known=false;
@@ -614,15 +617,20 @@ class NativeInputSender {
   friend struct NativeInputPolicyTest;
 #endif
 public:
-  NativeInputSender() : inputSessionId_(randomHex(8)), worker_(&NativeInputSender::workerLoop, this) {}
+  NativeInputSender() : inputSessionId_(randomHex(8)) {
+    // Start after all connection/capability/queue members are initialized.
+    worker_=std::thread(&NativeInputSender::workerLoop,this);
+  }
   void setViewOnly(bool enabled) {
     std::lock_guard<std::mutex> lock(mutex_);
     viewOnly_ = enabled;
+    if(enabled)invalidateShortcutsLocked();
     if (enabled) { queue_.clear(); urgentQueue_.clear(); pendingBatches_.clear(); }
   }
 
   void setUdpTarget(int fd, const UdpEndpoint& endpoint) {
     std::lock_guard<std::mutex> lock(mutex_);
+    invalidateShortcutsLocked();hostShortcuts_=false;
     udpFd_ = fd;
     hostEndpoint_ = endpoint;
     isUdp_ = true;
@@ -647,6 +655,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     fd_ = fd;
     fdGeneration_ += 1;
+    invalidateShortcutsLocked();hostShortcuts_=false;
     queue_.clear();
     urgentQueue_.clear();
     pausePendingBatchesLocked("fd-set");
@@ -662,6 +671,7 @@ public:
     if (fd_ == fd) {
       fd_ = -1;
       fdGeneration_ += 1;
+      invalidateShortcutsLocked();hostShortcuts_=false;
       queue_.clear();
       urgentQueue_.clear();
       pausePendingBatchesLocked("fd-clear");
@@ -675,6 +685,7 @@ public:
   void setAuthRequired(bool required, const std::string& packetAuthToken = {}) {
     std::lock_guard<std::mutex> lock(mutex_);
     authRequired_ = required;
+    invalidateShortcutsLocked();hostShortcuts_=false;
     packetAuthToken_ = packetAuthToken;
     controlAuthenticated_ = !authRequired_;
     packetAuthEnabled_ = false;
@@ -694,6 +705,7 @@ public:
       return;
     }
     controlAuthenticated_ = authenticated;
+    invalidateShortcutsLocked();
     if (!controlAuthenticated_) {
       batchEnabled_ = false;
       packetAuthEnabled_ = false;
@@ -713,6 +725,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     const bool next = enabled && !packetAuthToken_.empty();
     if (packetAuthEnabled_ == next) return;
+    invalidateShortcutsLocked();
     packetAuthEnabled_ = next;
     packetAuthSequence_ = 0;
     std::cout << "SNCONTROL packetAuth=" << (packetAuthEnabled_ ? "enabled" : "disabled") << "\n";
@@ -722,6 +735,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     if (authRequired_ && !controlAuthenticated_) enabled = false;
     if (batchEnabled_ == enabled) return;
+    invalidateShortcutsLocked();
     batchEnabled_ = enabled;
     std::cout << "SNCONTROL inputBatch=" << (enabled ? "enabled" : "disabled") << "\n";
     condition_.notify_all();
@@ -731,9 +745,48 @@ public:
     return inputSessionId_;
   }
 
+  void setShortcutCapability(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(hostShortcuts_==enabled)return;
+    invalidateShortcutsLocked();hostShortcuts_=enabled;
+  }
+  std::uint32_t shortcutGeneration() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return shortcutReadyLocked() ? shortcutEpoch_:0;
+  }
+  bool beginShortcuts(std::uint32_t epoch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!shortcutReadyLocked() || !epoch || epoch!=shortcutEpoch_)return false;
+    // Replace old physical work with a monotonic reliable reset. Once the
+    // host sees it, delayed older batches cannot resurrect held input.
+    queue_.clear();urgentQueue_.clear();pendingBatches_.clear();
+    shortcutMode_=true;
+    urgentQueue_.push_back("{\"type\":\"input-reset\",\"reason\":\"shortcut-panel\"}");
+    condition_.notify_one();return true;
+  }
+  void resumePhysicalInput() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    invalidateShortcutsLocked();shortcutMode_=false;
+  }
+  void cancelShortcuts() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    invalidateShortcutsLocked();
+  }
+  bool sendHostShortcut(std::span<const std::uint16_t> keys,std::uint32_t epoch) {
+    const auto id=sanser::legacyHostShortcutId(keys);if(!id)return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(!shortcutReadyLocked() || !shortcutMode_ || !epoch || epoch!=shortcutEpoch_ ||
+       urgentQueue_.size()+pendingBatches_.size()>=maxPendingBatches_)return false;
+    urgentQueue_.push_back("{\"type\":\"host-shortcut\",\"action\":\""+std::string(*id)+"\"}");
+    condition_.notify_one();return true;
+  }
+
   bool sendJson(const std::string& original) {
     const auto queuedAt = steadyMicros(); // T0 includes waiting for sender mutex.
     std::lock_guard<std::mutex> lock(mutex_);
+    if(inputTypeName(original)=="host-shortcut")return false;
+    if(shortcutMode_ && (isBatchable(original) || inputTypeName(original)=="gamepad-state") &&
+       inputTypeName(original)!="input-reset")return false;
     if (viewOnly_ && !(isControlHello(original) || isControlPing(original) ||
         isStreamStats(original) || isUdpRepairStats(original) || isRenderStats(original) ||
         isKeyframeRequest(original) || isVideoNack(original))) return false;
@@ -821,6 +874,13 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = pendingBatches_.find(sequence);
     if (it == pendingBatches_.end()) return;
+    if(strictShortcut(it->second.json) &&
+       (stale || sessionMismatch || applied<it->second.events)) {
+      // A rejected Copy must not silently unlock a queued Paste.
+      invalidateShortcutsLocked();
+      condition_.notify_one();
+      return;
+    }
     const std::uint32_t attempts = it->second.attempts;
     const std::uint64_t sentSteadyMicros = it->second.sentSteadyMicros;
     const bool priority = it->second.priority || priorityAck;
@@ -872,6 +932,24 @@ public:
   }
 
 private:
+  static bool strictShortcut(const std::string& json) {
+    return json.find("\"type\":\"host-shortcut\"")!=std::string::npos ||
+        json.find("\"reason\":\"shortcut-panel\"")!=std::string::npos;
+  }
+  bool shortcutReadyLocked() const {
+    return shortcutEpoch_ && hostShortcuts_ && !gHostCapturePaused.load() && !viewOnly_ && !stopped_ &&
+        batchEnabled_ && authRequired_ && controlAuthenticated_ && packetAuthEnabled_ &&
+        (fd_>=0 || (isUdp_ && udpFd_>=0));
+  }
+  void invalidateShortcutsLocked() {
+    if(shortcutEpoch_==UINT32_MAX)shortcutEpoch_=0;else if(shortcutEpoch_)++shortcutEpoch_;
+    for(auto* queue:{&queue_,&urgentQueue_})
+      std::erase_if(*queue,[](const auto& value){return strictShortcut(value);});
+    std::erase_if(pendingBatches_,[](const auto& entry){return strictShortcut(entry.second.json);});
+  }
+  bool shortcutPendingLocked() const {
+    return std::any_of(pendingBatches_.begin(),pendingBatches_.end(),[](const auto& entry){return strictShortcut(entry.second.json);});
+  }
   struct PendingBatch {
     std::string json;
     std::size_t events = 0;
@@ -1064,7 +1142,9 @@ private:
 
   void trimUrgentQueueLocked() {
     while (urgentQueue_.size() >= maxUrgentQueueSize_) {
-      urgentQueue_.pop_front();
+      const auto discard=std::find_if(urgentQueue_.begin(),urgentQueue_.end(),[](const auto& json){return !strictShortcut(json);});
+      if(discard==urgentQueue_.end())return; // Strict admission is bounded below this limit.
+      urgentQueue_.erase(discard);
       droppedPriorityEvents_ += 1;
       if (droppedPriorityEvents_ == 1 || droppedPriorityEvents_ % 16 == 0) {
         std::cout << "SNINPUT_PRIORITY_DROP dropped=" << droppedPriorityEvents_
@@ -1277,6 +1357,7 @@ private:
       bool priorityBatch = false;
       bool retry = false;
       std::uint64_t generation = 0;
+      std::uint32_t shortcutEpoch=0;
       int sendFd = -1;
       bool isUdp = false;
       int udpFd = -1;
@@ -1304,6 +1385,7 @@ private:
           if (sendFd < 0) {
             fd_ = -1;
             fdGeneration_ += 1;
+            invalidateShortcutsLocked();hostShortcuts_=false;
             queue_.clear();
             urgentQueue_.clear();
             pausePendingBatchesLocked("dup-failed");
@@ -1340,7 +1422,8 @@ private:
           }
         };
 
-        if (!urgentQueue_.empty()) {
+        const bool shortcutBlocked=!urgentQueue_.empty() && strictShortcut(urgentQueue_.front()) && shortcutPendingLocked();
+        if (!urgentQueue_.empty() && !shortcutBlocked) {
           priorityBatch = true;
           takeBatchFromQueue(urgentQueue_);
         } else if (prepareRetryLocked(now, json, batchSequence, batchEvents, retryAttempt, priorityBatch)) {
@@ -1348,9 +1431,11 @@ private:
         } else if (!queue_.empty()) {
           takeBatchFromQueue(queue_);
         } else {
-          close(sendFd);
+          if(sendFd>=0)close(sendFd);
+          if(shortcutBlocked)condition_.wait_for(lock,std::chrono::milliseconds(2));
           continue;
         }
+        if(strictShortcut(json))shortcutEpoch=shortcutEpoch_;
       }
 
       if (retry) {
@@ -1378,6 +1463,11 @@ private:
       std::string outbound = json;
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        if(shortcutEpoch && (shortcutEpoch!=shortcutEpoch_ || !shortcutMode_ || !shortcutReadyLocked())) {
+          if(batchSequence)pendingBatches_.erase(batchSequence);
+          if(sendFd>=0)close(sendFd);
+          continue;
+        }
         if (packetAuthEnabled_) {
           outbound = makeSecureControlEnvelope(packetAuthToken_, "c2h", ++packetAuthSequence_, json);
         }
@@ -1405,6 +1495,7 @@ private:
           if (!isUdp) {
             fd_ = -1;
             fdGeneration_ += 1;
+            invalidateShortcutsLocked();hostShortcuts_=false;
             queue_.clear();
             urgentQueue_.clear();
             pausePendingBatchesLocked("send-failed");
@@ -1500,6 +1591,15 @@ private:
         continue;
       }
       if (it->second.attempts >= maxBatchRetryAttempts_) {
+        if(strictShortcut(it->second.json)) {
+          // Delivery became uncertain. Cancel the dependent named actions on
+          // TCP as well as UDP; never advance them after an unconfirmed reset.
+          invalidateShortcutsLocked();
+          urgentQueue_.clear();queue_.clear();
+          urgentQueue_.push_front("{\"type\":\"input-reset\",\"reason\":\"retry-deadline\"}");
+          condition_.notify_one();
+          return false;
+        }
         if (isUdp_) {
           // A key-up that missed every ACK must not leave a held key behind.
           // The reset is itself acknowledged/retried; never send it only once.
@@ -1650,6 +1750,8 @@ private:
   UdpEndpoint hostEndpoint_{};
   bool isUdp_ = false;
   bool batchEnabled_ = false;
+  bool hostShortcuts_=false,shortcutMode_=false;
+  std::uint32_t shortcutEpoch_=1;
   bool authRequired_ = false;
   bool controlAuthenticated_ = true;
   bool packetAuthEnabled_ = false;
@@ -2474,6 +2576,7 @@ bool gamepadSnapshotChanged(const GamepadSnapshot& left, const GamepadSnapshot& 
 }
 
 void pollAndSendGamepadState() {
+  if(gShortcutInputReleased)return;
   static std::array<GamepadSnapshot, kMaxGamepadSlots> lastSnapshots{};
   static std::array<bool, kMaxGamepadSlots> hasLastSnapshots{};
   static std::array<std::chrono::steady_clock::time_point, kMaxGamepadSlots> lastSentAts{};
@@ -2896,6 +2999,7 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
       gNativeInputSender->setControlAuthenticated(sessionAccepted, sessionAccepted || !needsSessionAuth);
       gNativeInputSender->setPacketAuthEnabled(gHostPacketAuthVerified);
       gNativeInputSender->setBatchEnabled(sessionAccepted && inputBatch && inputAck);
+      if(!gHostPacketAuthVerified)gNativeInputSender->setShortcutCapability(false);
     }
     if (sessionAccepted && proofAccepted && mediaCrypto && mediaEpoch > 0) {
       // The host may have encoded its first epoch frame before this ACK
@@ -2955,6 +3059,8 @@ HostControlEvent handleHostControlPayload(const std::string& rawPayload, std::ui
   if (sentSteadyMicros == 0 || sentSteadyMicros > processedMicros) return HostControlEvent::Other;
   const double rttMs = static_cast<double>(processedMicros - sentSteadyMicros) / 1000.0;
   if (payload.find("\"type\":\"control-pong\"") != std::string::npos) {
+    if(gNativeInputSender)gNativeInputSender->setShortcutCapability(securePayload &&
+        jsonBoolValue(payload,"hostShortcuts") && jsonUint64Value(payload,"capturePaused")!=1);
     // Keep retry/congestion feedback conservative (application RTT), but do not
     // mix input ACK/retry latencies into the control-ping estimator.
     recordControlRtt(rttMs);
@@ -3125,7 +3231,7 @@ std::string pasteboardText() {
 }
 
 bool sendCommandShortcut(NSEvent* event) {
-  if (gViewOnly) return false;
+  if (gViewOnly || gShortcutInputReleased) return false;
   if (([event modifierFlags] & NSEventModifierFlagCommand) == 0) return false;
   NSString* key = [[[event charactersIgnoringModifiers] lowercaseString] copy];
   if (!key || [key length] == 0) return false;
@@ -3155,12 +3261,12 @@ void logPointerEvent(const char* type,
                      NSView* view,
                      std::uint32_t buttons = 0,
                      bool dragging = false) {
-  if (gViewOnly) return;
+  if (gViewOnly || gShortcutInputReleased) return;
   sendNativeInputJson(pointerEventJson(type, event, view, buttons, dragging));
 }
 
 void logKeyEvent(const char* type, NSEvent* event) {
-  if (gViewOnly) return;
+  if (gViewOnly || gShortcutInputReleased) return;
   sendNativeInputJson(keyEventJson(type, event));
 }
 
@@ -6363,14 +6469,15 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 
 - (void)mouseEntered:(NSEvent*)event {
   (void)event;
+  if(gShortcutInputReleased)return;
   [[self window] makeFirstResponder:self];
   [[self window] setAcceptsMouseMovedEvents:YES];
 }
 
 - (void)pollMouseLocation {
-  if (gViewOnly) return;
+  if (gViewOnly || gShortcutInputReleased) return;
   NSWindow* window = [self window];
-  if (!window || ![window isVisible]) return;
+  if (!window || ![window isVisible] || !window.isKeyWindow || !NSApp.active) return;
   if (gRelativeMouse && gMouseGrabbed) {
     _hasPolledPoint = NO;
     return;
@@ -6425,6 +6532,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)mouseMoved:(NSEvent*)event {
+  if(gShortcutInputReleased)return;
   [[self window] makeFirstResponder:self];
   logPointerEvent("pointer-move", event, self, _activeMouseButtons, _activeMouseButtons != 0);
 }
@@ -6445,6 +6553,12 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
 }
 
 - (void)mouseDown:(NSEvent*)event {
+  if(gShortcutInputReleased) {
+    if(gViewOnly || gHostCapturePaused.load())return;
+    if(gNativeInputSender)gNativeInputSender->resumePhysicalInput();
+    gShortcutInputReleased=false;[self clearActiveMouseButtons];
+    if(gRelativeMouse)setRelativeMouseGrab(true);
+  }
   [[self window] makeFirstResponder:self];
   _activeMouseButtons |= pointerButtonMask([event buttonNumber]);
   logPointerEvent("pointer-down", event, self, _activeMouseButtons, false);
@@ -8652,7 +8766,7 @@ int runVideoRenderTcp(std::uint16_t port,
                                                                            queue:[NSOperationQueue mainQueue]
                                                                       usingBlock:^(NSNotification* notification) {
                                                                         (void)notification;
-                                                                        if (gRelativeMouse) setRelativeMouseGrab(true);
+                                                                        if (gRelativeMouse && !gShortcutInputReleased) setRelativeMouseGrab(true);
                                                                       }];
     id gamepadConnectObserver = [[NSNotificationCenter defaultCenter] addObserverForName:GCControllerDidConnectNotification
                                                                                   object:nil
@@ -8697,6 +8811,20 @@ int runVideoRenderTcp(std::uint16_t port,
     inputSender->setViewOnly(gViewOnly);
     inputSender->setAuthRequired(!gExpectedSessionToken.empty(), gExpectedSessionToken);
     gNativeInputSender = inputSender;
+    SanserShortcuts* shortcuts=nil;
+    sanser::desktop::ShortcutSession shortcutSession({
+      [&]{return !gViewOnly && inputSender->shortcutGeneration()!=0;},
+      [&]{return NSApp.active && (window.isKeyWindow || shortcuts.panel.isKeyWindow);},
+      [&]{return inputSender->shortcutGeneration();},
+      [&]{gShortcutInputReleased=true;gMacModifierKeyMask=0;[view clearActiveMouseButtons];restoreRelativeMouseGrab();return inputSender->beginShortcuts(inputSender->shortcutGeneration());},
+      [&](auto keys,auto epoch){return inputSender->sendHostShortcut(keys,epoch);},
+      [](auto host){return host==sanser::desktop::ShortcutHost::Windows;},
+      [&]{inputSender->cancelShortcuts();}
+    });
+    if(!gViewOnly)shortcuts=[[SanserShortcuts alloc] initWithOwner:window session:&shortcutSession];
+    struct ShortcutCleanup {SanserShortcuts* __strong panel;~ShortcutCleanup(){[panel detach];}} shortcutCleanup{shortcuts};
+    NSTimer* shortcutRefresh=[NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer*){[shortcuts refresh];}];
+    [[NSRunLoop mainRunLoop] addTimer:shortcutRefresh forMode:NSRunLoopCommonModes];
     auto avSyncClock = std::make_shared<AvSyncClock>();
 
     startAudioListener(audioSettings,udpVideo,controlPort,audioPort,[&] {
@@ -8738,6 +8866,7 @@ int runVideoRenderTcp(std::uint16_t port,
     [[NSNotificationCenter defaultCenter] removeObserver:gamepadDisconnectObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
     [gamepadPollTimer invalidate];
+    [shortcutRefresh invalidate];[shortcuts detach];
     [GCController stopWirelessControllerDiscovery];
     sendInputReset("renderer-exit");
     [view clearActiveMouseButtons];
@@ -8967,7 +9096,7 @@ int main(int argc, char** argv) {
                    "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,"
                    "\"h264DecoderImplementation\":true,"
                    "\"hevcDecoderImplementation\":true,\"metalImplementation\":true,"
-                   "\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,"
+                   "\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,\"clipboardImplementation\":true,\"unicodeInputImplementation\":true,"
                    "\"gamepadImplementation\":true}\n";
       return 0;
     }

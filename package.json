@@ -1,8 +1,8 @@
 {
   "name": "sanser",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "private": true,
-  "description": "Sanser 2.3.3 low-latency remote desktop and game streaming platform.",
+  "description": "Sanser 2.3.4 low-latency remote desktop and game streaming platform.",
   "license": "UNLICENSED",
   "workspaces": [
     "apps/desktop"
@@ -15,6 +15,8 @@
     "desktop:stage-sidecar": "node scripts/stage-native-sidecar.mjs",
     "desktop:dev": "npm run desktop:stage-sidecar && node scripts/run-with-cargo-env.mjs npm --workspace @sanser/desktop run tauri -- dev",
     "desktop:build": "npm --workspace @sanser/desktop run build",
+    "design:generate": "node scripts/generate-design-tokens.mjs",
+    "design:check": "node scripts/generate-design-tokens.mjs --check",
     "release:validate": "node scripts/validate-release-config.mjs",
     "desktop:bundle": "npm run release:validate && npm run desktop:stage-sidecar && node scripts/run-with-cargo-env.mjs npm --workspace @sanser/desktop run tauri -- build",
     "desktop:bundle:local": "node scripts/validate-release-config.mjs --allow-loopback && npm run desktop:stage-sidecar && node scripts/run-with-cargo-env.mjs npm --workspace @sanser/desktop run tauri -- build --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",

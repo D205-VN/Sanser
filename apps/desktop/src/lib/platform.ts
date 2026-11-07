@@ -126,9 +126,40 @@ export async function setViewerAudio(sessionId: string, muted: boolean): Promise
   await invoke('set_viewer_audio', { sessionId, muted });
 }
 
+export interface FileTransfer {
+  id: string;
+  name: string;
+  size: number;
+  bytes: number;
+  state: 'offered' | 'sending' | 'receiving' | 'verifying' | 'completed' | 'cancelled';
+  error: string | null;
+  savedPath: string | null;
+}
+export interface FileTransferStatus { available: boolean; incoming: FileTransfer | null; outgoing: FileTransfer | null }
+export type FileTransferAction =
+  | { operation: 'offer'; name: string; size: number }
+  | { operation: 'accept' | 'finish' | 'cancel'; id: string }
+  | { operation: 'chunk'; id: string; offset: number; bytes: number[] };
+export async function sessionFileStatus(kind: EngineKind, sessionId: string): Promise<FileTransferStatus> {
+  return isTauriRuntime() ? invoke<FileTransferStatus>('session_file_status', { kind, sessionId }) : { available: false, incoming: null, outgoing: null };
+}
+export async function sessionFileAction(kind: EngineKind, sessionId: string, action: FileTransferAction): Promise<FileTransferStatus> {
+  if (!isTauriRuntime()) throw new Error('File transfer requires the Sanser desktop app');
+  return invoke<FileTransferStatus>('session_file_action', { kind, sessionId, action });
+}
+
 export async function engineStatus(kind: EngineKind): Promise<EngineStatus> {
   if (isTauriRuntime()) return invoke<EngineStatus>('get_engine_status', { kind });
   return { kind, installed: false, running: false, processId: null, lastError: null };
+}
+export interface SessionUserCapabilities { unicodeInput: boolean; clipboard: boolean; localClipboard: boolean }
+export type SessionUserOperation = 'text' | 'clipboard-read' | 'clipboard-write' | 'clipboard-local-read' | 'clipboard-local-write';
+export async function sessionUserCapabilities(sessionId: string): Promise<SessionUserCapabilities> {
+  return isTauriRuntime() ? invoke('session_user_capabilities', { sessionId }) : { unicodeInput: false, clipboard: false, localClipboard: false };
+}
+export async function sessionUserAction(sessionId: string, operation: SessionUserOperation, text = ''): Promise<string> {
+  if (!isTauriRuntime()) throw new Error('Text controls require the Sanser desktop app');
+  return invoke('session_user_action', { sessionId, operation, text });
 }
 
 export interface RouteRecoveryEvidence {

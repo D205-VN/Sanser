@@ -8,6 +8,17 @@ afterEach(() => {
 });
 
 describe('normalizeServerUrl', () => {
+  it('keeps enhanced voice admission account-authenticated, uncached and on the selected server', async () => {
+    const fetchMock=vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({gateway:true})))
+      .mockResolvedValueOnce(new Response(JSON.stringify({provider:'livekit-lab',url:'wss://voice.example/',token:'abc.def.ghi'})));
+    vi.stubGlobal('fetch',fetchMock);
+    const client=new ApiClient('https://chosen.example',()=>Promise.resolve('account-token'));
+    expect(await client.voiceGatewayAvailable()).toBe(true);
+    expect(await client.voiceGatewayCredentials('group','device')).toEqual({url:'wss://voice.example/',token:'abc.def.ghi'});
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('https://chosen.example/api/v2/sharing/group/voice-lab/credentials');
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({cache:'no-store',redirect:'error',credentials:'omit',headers:{Authorization:'Bearer account-token'}});
+  });
   it.each(['login', 'register'] as const)('sends actual device labels and a stable installation ID on %s', async (action) => {
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(new Response('{}')));
     vi.stubGlobal('fetch', fetchMock);

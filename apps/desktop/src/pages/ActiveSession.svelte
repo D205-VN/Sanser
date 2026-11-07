@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import GroupVoice from '../components/GroupVoice.svelte';
+  import SessionTextTools from '../components/SessionTextTools.svelte';
+  import SessionFiles from '../components/SessionFiles.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay, routeRecoveryPlan, type RouteRecoveryEvidence } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
@@ -14,7 +16,7 @@
   import { preferences } from '../stores/preferences';
   import { presence } from '../stores/presence';
   import { session } from '../stores/session';
-  import { viewerAudio, prepareViewerAudio, muteViewerAudio } from '../stores/viewerAudio';
+  import { viewerAudio, prepareViewerAudio, muteViewerAudio, forgetViewerAudio } from '../stores/viewerAudio';
 
   let { runtime, navigate }: { runtime: RuntimeStatus; navigate: (page: Page) => void } = $props();
   let localError = $state<string | null>(null);
@@ -37,12 +39,14 @@
   const metrics = $derived($connection.metrics);
   let changingSound = $state(false);
   const groupSound = $derived(sessionState?.wireProtocol === 'snv2' && !!sessionState.sharingId);
+  const liveSoundControl = $derived(sessionState?.wireProtocol === 'snv2' && runtime.capabilities.clientAudio === true && sessionState.id in $viewerAudio);
   const soundUnavailable = $derived(sessionState?.wireProtocol === 'snv2' && runtime.capabilities.clientAudio !== true);
   async function toggleSound(): Promise<void> {
-    if (!sessionState || changingSound) return;
+    if (!sessionState || changingSound || !liveSoundControl || !$connection.engineRunning || disconnecting || recoveryInFlight) return;
+    const id = sessionState.id;
     changingSound = true;
-    try { await muteViewerAudio(sessionState.id, !($viewerAudio[sessionState.id] ?? !$preferences.host.audioEnabled)); }
-    catch (error) { localError = error instanceof Error ? error.message : 'Unable to change sound'; }
+    try { await muteViewerAudio(id, !($viewerAudio[id] ?? false)); }
+    catch (error) { if ($connection.session?.id === id) localError = error instanceof Error ? error.message : 'Unable to change sound'; }
     finally { changingSound = false; }
   }
   const nativeReady = $derived(
@@ -138,6 +142,11 @@
       }
       phase = 'launching';
       connection.markNativeLaunch();
+      const audioEnabled = (!!target.sharingId || $preferences.host.audioEnabled) &&
+        (target.wireProtocol !== 'snv2' || runtime.capabilities.clientAudio === true);
+      const audioMuted = target.wireProtocol === 'snv2' && audioEnabled
+        ? prepareViewerAudio(target.id, !!target.sharingId && !$preferences.host.audioEnabled) : false;
+      if (target.wireProtocol !== 'snv2' || !audioEnabled) forgetViewerAudio(target.id);
       await launchEngine({
         ultraLowLatency: stream.profile === 'competitive',
         directCheck,
@@ -153,9 +162,8 @@
         width: size.width,
         height: size.height,
         networkMode: target.networkMode,
-        audioEnabled: (!!target.sharingId || $preferences.host.audioEnabled) &&
-          (target.wireProtocol !== 'snv2' || runtime.capabilities.clientAudio === true),
-        audioMuted: !!target.sharingId && prepareViewerAudio(target.id, !$preferences.host.audioEnabled),
+        audioEnabled,
+        audioMuted,
         inputEnabled: target.accessMode !== 'view-only' && $preferences.host.inputEnabled,
         relativeMouse: target.accessMode !== 'view-only' && target.wireProtocol !== 'snv2' && $preferences.input.mouseMode === 'relative',
         sessionToken: target.sessionToken,
@@ -533,13 +541,16 @@
     <div class="session-identity">
       <StatusPill state={$connection.engineRunning ? 'online' : 'warning'} label={$connection.nativeRecoveryPending ? 'Reconnecting' : $connection.engineRunning ? 'Window open' : sessionState.status} />
       {#if activeRoute}<span class="session-route"><Icon name="link" />{activeRoute === 'direct' ? 'Direct connection' : 'Relay connection'}</span>{/if}
+      <span class="session-access" title="Session access mode"><Icon name={sessionState.accessMode === 'view-only' ? 'eye' : 'pointer'} />{sessionState.accessMode === 'view-only' ? 'View only' : 'Remote control'}</span>
     </div>
-    <div class="session-actions">
-      {#if groupSound && !soundUnavailable && $connection.engineRunning}
-        <button class="button small" disabled={changingSound || disconnecting || recoveryInFlight} onclick={toggleSound}>{($viewerAudio[sessionState.id] ?? !$preferences.host.audioEnabled) ? 'Unmute sound' : 'Mute sound'}</button>
+    <div class="session-actions" role="group" aria-label="Session actions">
+      {#if liveSoundControl && $connection.engineRunning}
+        <button class="button small" disabled={changingSound || disconnecting || recoveryInFlight} aria-pressed={$viewerAudio[sessionState.id] ?? false} title="Mute or unmute only this viewer" onclick={toggleSound}><Icon name={($viewerAudio[sessionState.id] ?? false) ? 'volume-off' : 'volume'} />{($viewerAudio[sessionState.id] ?? false) ? 'Unmute sound' : 'Mute sound'}</button>
       {/if}
-      {#if $connection.engineRunning}<button class="button small" title="Close and reopen the remote window" disabled={$connection.busy || nativePreparationInFlight || recoveryInFlight || disconnecting} onclick={() => recoverRoute(sessionState, null, true)}>Reconnect</button>{/if}
-      <button class="button small danger" disabled={disconnecting} onclick={disconnect}>{disconnecting ? 'Disconnecting…' : nativePreparationInFlight ? 'Cancel connection' : $connection.nativeRecoveryPending ? 'Cancel reconnection' : 'Disconnect'}</button>
+      {#if $connection.engineRunning}<button class="button small" title="Close and reopen the remote window" disabled={$connection.busy || nativePreparationInFlight || recoveryInFlight || disconnecting} onclick={() => recoverRoute(sessionState, null, true)}><Icon name="refresh" />Reconnect</button>{/if}
+      <button class="button small" onclick={() => navigate('settings')}><Icon name="settings" />Session settings</button>
+      <button class="button small" onclick={() => navigate('diagnostics')}><Icon name="diagnostics" />Connection details</button>
+      <button class="button small danger" disabled={disconnecting} onclick={disconnect}><Icon name="leave" />{disconnecting ? 'Disconnecting…' : nativePreparationInFlight ? 'Cancel connection' : $connection.nativeRecoveryPending ? 'Cancel reconnection' : 'Disconnect'}</button>
     </div>
   </div>{/if}
 
@@ -558,6 +569,11 @@
     <div class="notice">This viewer does not support sound for this connection yet.</div>
   {:else if groupSound}
     <div class="notice">Sound is available when the host shares system audio. Muting here affects only this viewer.</div>
+  {:else if sessionState?.wireProtocol === 'snv2' && $connection.engineRunning && !liveSoundControl}
+    <div class="notice">To enable live sound controls, turn on sound in Settings and reconnect.</div>
+  {/if}
+  {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && !sessionState.sharingId && $connection.engineRunning}
+    {#key sessionState.id}<SessionTextTools sessionId={sessionState.id} /><SessionFiles sessionId={sessionState.id} />{/key}
   {/if}
   {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && $preferences.input.mouseMode === 'relative'}
     <div class="notice">This connection uses absolute mouse control. Relative mouse capture is not supported yet.</div>

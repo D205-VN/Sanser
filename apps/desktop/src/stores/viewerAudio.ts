@@ -14,3 +14,8 @@ export async function muteViewerAudio(id: string, muted: boolean): Promise<void>
   await setViewerAudio(id, muted);
   viewerAudio.update((current) => ({ ...current, [id]: muted }));
 }
+
+// A receiver started without audio cannot be unmuted over the live control path.
+export function forgetViewerAudio(id: string): void {
+  viewerAudio.update((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== id)));
+}

@@ -177,7 +177,7 @@ UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
   if(sent==count) return sent;
   for(;sent<count;++sent) {
     const auto& in=inputs[sent]; Request request; request.operation=Operation::Input; request.type=in.type;
-    if(in.type==INPUT_KEYBOARD) { request.flags=in.ki.dwFlags; request.data=(in.ki.dwFlags&KEYEVENTF_SCANCODE)?in.ki.wScan:in.ki.wVk; }
+    if(in.type==INPUT_KEYBOARD) { request.flags=in.ki.dwFlags; request.data=(in.ki.dwFlags&(KEYEVENTF_SCANCODE|KEYEVENTF_UNICODE))?in.ki.wScan:in.ki.wVk; }
     else if(in.type==INPUT_MOUSE) { request.flags=in.mi.dwFlags; request.x=in.mi.dx; request.y=in.mi.dy; request.data=in.mi.mouseData; }
     if(!valid(request)) break;
     Response response;

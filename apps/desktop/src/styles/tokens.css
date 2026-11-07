@@ -1,0 +1,29 @@
+/* Generated from design/tokens.json; run node scripts/generate-design-tokens.mjs. */
+:root {
+  --sn-background: #0b1018;
+  --sn-surface: #141c29;
+  --sn-raised: #1c2738;
+  --sn-hover: #263449;
+  --sn-selected: #243855;
+  --sn-text: #edf3ff;
+  --sn-text-soft: #ced9eb;
+  --sn-muted: #a0aec4;
+  --sn-muted-low: #8292ac;
+  --sn-accent: #a8c4ff;
+  --sn-accent-hover: #c8d9ff;
+  --sn-on-accent: #112340;
+  --sn-success: #70dfb3;
+  --sn-warning: #f0c77b;
+  --sn-danger: #ff909f;
+  --sn-border: #283448;
+  --sn-border-strong: #3a4b65;
+  --sn-accent-soft: #a8c4ff14;
+  --sn-accent-border: #a8c4ff3d;
+  --sn-success-soft: #70dfb31a;
+  --sn-warning-soft: #f0c77b1a;
+  --sn-danger-soft: #ff909f1a;
+  --sn-control-radius: 10px;
+  --sn-card-radius: 16px;
+  --sn-panel-radius: 16px;
+  --sn-touch-target: 48px;
+}

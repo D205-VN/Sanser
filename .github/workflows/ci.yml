@@ -17,6 +17,24 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  voice-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/voice-lab
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/voice-lab/package-lock.json
+      - run: npm ci --workspaces=false --ignore-scripts --no-audit --no-fund
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+
   server-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -70,6 +88,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run design:check
       - run: npm run desktop:check
       - run: npm run desktop:lint
       - run: npm run desktop:test
@@ -99,6 +118,16 @@ jobs:
       - run: ./build/client-macos/sanser-client-macos --capabilities-json
       - run: ./build/client-macos/cross-platform/sanser-host-macos --capabilities-json
       - run: ctest --test-dir build/client-macos --output-on-failure
+
+  windows-ime:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native text input without capture or audio SDK dependencies
+        run: cmake -S native/platforms/windows/text-input -B build/windows-ime -A x64 -DBUILD_TESTING=ON
+      - run: cmake --build build/windows-ime --config Release --parallel
+      - run: ctest --test-dir build/windows-ime -C Release --output-on-failure
 
   windows-host:
     runs-on: windows-latest

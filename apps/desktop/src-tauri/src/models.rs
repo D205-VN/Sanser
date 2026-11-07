@@ -57,6 +57,8 @@ pub struct LaunchEngineRequest {
     #[serde(default)]
     pub input_enabled: bool,
     #[serde(default)]
+    pub clipboard_enabled: bool,
+    #[serde(default)]
     pub relative_mouse: bool,
     #[serde(default)]
     pub session_token: Option<String>,

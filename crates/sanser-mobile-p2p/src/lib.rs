@@ -1,6 +1,7 @@
 //! Mobile keeps the nominated socket alive and uses desktop's SNP2/standby/FEC
 //! implementations. No mobile-specific authentication or NAT protocol is invented.
 #![deny(unsafe_op_in_unsafe_fn)]
+mod files;
 use sanser_p2p::{
     CandidatePair, GathererConfig, P2pCandidate, PairState, check_connectivity_measured,
     gather_candidates_on_socket, make_pair_id, pair_priority, select_signaling_candidates, standby,

@@ -13,8 +13,10 @@
 #include <codecapi.h>
 #include <wrl/client.h>
 #include "transport.h"
+#include "clipboard.h"
 #include "telemetry.h"
 #include "broadcast.h"
+#include "gamepad.h"
 #include "voice_runtime.h"
 #include "voice_panel.h"
 #include "decode_worker.h"
@@ -24,6 +26,9 @@
 #include "engine.h"
 #include "keyboard.h"
 #include "window_presenter.h"
+#include "ime_panel.h"
+#include "shortcuts_panel.h"
+#include "controller_input.h"
 #include "desktop_duplication.h"
 #include "../../windows-uac/client.h"
 #include "mf_video_packet_encoder.h"
@@ -35,6 +40,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <functional>
+#include "text_input.h"
 using Microsoft::WRL::ComPtr;
 namespace sanser::desktop {
 namespace {
@@ -55,6 +61,28 @@ public:
   }
   void apply(const Input& event) {
     if(event.kind==Input::Reset) { reset(); return; }
+    if(event.kind==Input::Text) {
+      const auto text=sanser::textInputUtf16(event.text); if(!text) return;
+      reset();
+      // Do not turn a literal edit into shortcuts if a modifier release failed.
+      if(!keys_.empty() || !buttons_.empty() || !unicodeUps_.empty()) return;
+      for(const auto unit:*text) {
+        INPUT pair[2]{};
+        for(auto& input:pair) {
+          input.type=INPUT_KEYBOARD;
+          if(unit=='\n' || unit=='\t') input.ki.wVk=unit=='\n' ? VK_RETURN:VK_TAB;
+          else { input.ki.wScan=unit; input.ki.dwFlags=KEYEVENTF_UNICODE; }
+        }
+        pair[1].ki.dwFlags|=KEYEVENTF_KEYUP;
+        const auto sent=send_(2,pair,sizeof(INPUT));
+        if(sent!=2) {
+          if(sent==1) unicodeUps_.push_back(pair[1]);
+          std::cerr<<"SNINPUT_TEXT_REJECTED inputRejected=1"<<std::endl;
+          return;
+        }
+      }
+      return;
+    }
     INPUT input{};
     if(event.kind==Input::Key) {
       const auto scan=windowsKey(event.code); if(!scan) return;
@@ -91,6 +119,9 @@ public:
   }
 private:
   void reset() {
+    for(auto it=unicodeUps_.begin();it!=unicodeUps_.end();) {
+      if(send_(1,&*it,sizeof(INPUT))==1) it=unicodeUps_.erase(it); else ++it;
+    }
     for(auto it=keys_.begin();it!=keys_.end();) {
       const auto scan=windowsKey(*it); INPUT input{}; input.type=INPUT_KEYBOARD; input.ki.wScan=scan&255;
       input.ki.dwFlags=KEYEVENTF_SCANCODE|KEYEVENTF_KEYUP|(scan&256?KEYEVENTF_EXTENDEDKEY:0);
@@ -105,6 +136,7 @@ private:
   struct Viewport { long left=0,top=0; std::uint32_t width=1,height=1; };
   std::mutex viewportMutex_; Viewport viewport_;
   std::set<std::uint16_t> keys_,buttons_;
+  std::vector<INPUT> unicodeUps_;
   Send send_;
   Clock::time_point lastFailure_{};
 };
@@ -207,6 +239,9 @@ struct WindowState {
   bool viewOnly=false;
   bool userClosed=false;
   bool inputPaused=false;
+  std::unique_ptr<WindowsTextInput> textInput;
+  std::unique_ptr<WindowsShortcuts> shortcuts;
+  std::unique_ptr<WindowsControllerInput> controller;
   std::function<void(Input)> sendInput; std::mutex mutex; std::shared_ptr<const Image> image;
   bool released=false; RECT video{};
   WindowPresenter presenter;
@@ -216,7 +251,7 @@ struct WindowState {
   // for every frame. Painting retains a snapshot without blocking decoding.
   HANDLE frameReady=CreateEventW(nullptr,FALSE,FALSE,nullptr);
   WindowState() { if(!frameReady) throw std::runtime_error("Unable to create frame notification"); }
-  ~WindowState() { CloseHandle(frameReady); }
+  ~WindowState() { if(controller)controller->detach();if(shortcuts)shortcuts->detach();if(textInput) { textInput->detach(); textInput.reset(); } CloseHandle(frameReady); }
 };
 std::uint16_t windowsHid(WPARAM key,LPARAM detail) {
   auto scan=static_cast<std::uint16_t>((detail>>16)&0xff);
@@ -233,8 +268,17 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   auto* state=reinterpret_cast<WindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE) { state=static_cast<WindowState*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state)); }
   if(!state) return DefWindowProcW(window,message,w,l);
+  if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowsControllerInput::menuCommand && state->controller) {state->controller->toggle();return 0;}
+  if(message==WM_TIMER && w==WindowsControllerInput::timerId && state->controller) {state->controller->refresh();return 0;}
+  if((message==WM_KILLFOCUS || (message==WM_ACTIVATE && LOWORD(w)==WA_INACTIVE) || message==WM_ENTERMENULOOP || message==WM_ENTERSIZEMOVE || message==WM_CLOSE) && state->controller)state->controller->stop();
+  if(message==WM_NCDESTROY && state->controller)state->controller->detach();
+  if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowsShortcuts::menuCommand && state->shortcuts) {state->shortcuts->toggle();return 0;}
+  if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowsTextInput::menuCommand && state->textInput) { state->textInput->toggle(); return 0; }
+  if(message==WM_ACTIVATE && LOWORD(w)==WA_INACTIVE && state->textInput) state->textInput->cancel();
+  if(message==WM_NCDESTROY && state->textInput) state->textInput->detach();
+  if(message==WM_NCDESTROY && state->shortcuts)state->shortcuts->detach();
   if((state->viewOnly || state->inputPaused) && ((message>=WM_KEYFIRST && message<=WM_KEYLAST) || (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST))) return DefWindowProcW(window,message,w,l);
-  if(message==WM_CLOSE) { state->userClosed=true; DestroyWindow(window); return 0; }
+  if(message==WM_CLOSE) { if(state->shortcuts)state->shortcuts->cancel();if(state->textInput) state->textInput->cancel(); state->userClosed=true; DestroyWindow(window); return 0; }
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
   if(message==WM_ERASEBKGND) return 1;
   if(message==WM_PAINT) {
@@ -261,16 +305,28 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_ENTERSIZEMOVE) { SetTimer(window,1,16,nullptr); return 0; }
   if(message==WM_EXITSIZEMOVE) { KillTimer(window,1); InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_TIMER && w==1) { if(WaitForSingleObject(state->frameReady,0)==WAIT_OBJECT_0) InvalidateRect(window,nullptr,FALSE); return 0; }
-  if(message==WM_SIZE) { InvalidateRect(window,nullptr,FALSE); return 0; }
-  if(message==WM_KILLFOCUS) { if(!state->viewOnly) state->sendInput(Input{}); state->released=true; if(GetCapture()==window) ReleaseCapture(); return 0; }
+  if(message==WM_SIZE) { if(state->shortcuts)state->shortcuts->resize();if(state->textInput) state->textInput->resize(); InvalidateRect(window,nullptr,FALSE); return 0; }
+  if(message==WM_KILLFOCUS) {
+    if(state->shortcuts && state->shortcuts->owns(reinterpret_cast<HWND>(w))) {state->released=true;if(GetCapture()==window)ReleaseCapture();return 0;}
+    if(state->textInput && state->textInput->owns(reinterpret_cast<HWND>(w))) { state->released=true; if(GetCapture()==window) ReleaseCapture(); return 0; }
+    if(state->textInput && !state->textInput->owns(reinterpret_cast<HWND>(w))) state->textInput->cancel();
+    if(!state->viewOnly) state->sendInput(Input{}); state->released=true; if(GetCapture()==window) ReleaseCapture(); return 0;
+  }
   if(message==WM_KEYDOWN || message==WM_SYSKEYDOWN || message==WM_KEYUP || message==WM_SYSKEYUP) {
     const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;
+    if(down && w=='G' && state->controller && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000) && !(GetKeyState(VK_RMENU)&0x8000)) {if(!(l&(1LL<<30)))state->controller->toggle();return 0;}
+    if(down && w=='K' && state->shortcuts && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000) && !(GetKeyState(VK_RMENU)&0x8000)) {if(!(l&(1LL<<30)))state->shortcuts->toggle();return 0;}
+    if(down && w=='I' && state->textInput && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000) && !(GetKeyState(VK_RMENU)&0x8000)) { if(!(l&(1LL<<30))) state->textInput->toggle(); return 0; }
+    if(state->textInput && state->textInput->isOpen()) return 0;
+    if(state->shortcuts && state->shortcuts->panel())return 0;
     if(down && w==VK_ESCAPE && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000)) { state->sendInput(Input{}); state->released=true; ReleaseCapture(); SetWindowTextW(window,L"Sanser · Input released · Click to resume"); return 0; }
     if(!state->released) { const auto hid=windowsHid(w,l); if(hid) state->sendInput(Input{Input::Key,0,0,hid,0,down}); }
     return 0;
   }
   if(message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN || message==WM_LBUTTONUP || message==WM_RBUTTONDOWN || message==WM_RBUTTONUP || message==WM_MBUTTONDOWN || message==WM_MBUTTONUP || message==WM_MOUSEWHEEL) {
-    if(message==WM_LBUTTONDOWN && state->released) { SetFocus(window); state->released=false; SetWindowTextW(window,L"Sanser · Remote desktop · Ctrl+Alt+Escape releases input"); }
+    if((message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN || message==WM_MBUTTONDOWN) && state->shortcuts)state->shortcuts->cancel();
+    if((message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN || message==WM_MBUTTONDOWN) && state->textInput) state->textInput->cancel();
+    if(message==WM_LBUTTONDOWN && state->released) { SetFocus(window); state->released=false; SetWindowTextW(window,L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release"); }
     if(state->released) return 0;
     POINT point{static_cast<short>(LOWORD(l)),static_cast<short>(HIWORD(l))}; if(message==WM_MOUSEWHEEL) ScreenToClient(window,&point);
     const auto& r=state->video; if(r.right<=r.left || r.bottom<=r.top) return 0;
@@ -281,12 +337,14 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   }
   return DefWindowProcW(window,message,w,l);
 }
-bool pumpWindowMessages(MSG& message) {
+bool pumpWindowMessages(MSG& message,WindowsTextInput* textInput=nullptr,WindowsShortcuts* shortcuts=nullptr) {
   // A busy input queue must yield to frameReady. WM_PAINT is normally below
   // mouse/key messages in priority, so pumping until empty can starve video.
   const auto deadline=Clock::now()+std::chrono::milliseconds(2);
   for(unsigned count=0;count<64 && PeekMessageW(&message,nullptr,0,0,PM_REMOVE);++count) {
     if(message.message==WM_QUIT) return false;
+    if(shortcuts && shortcuts->preTranslate(message)) {if(Clock::now()>=deadline)break;continue;}
+    if(textInput && textInput->preTranslate(message)) { if(Clock::now()>=deadline) break; continue; }
     TranslateMessage(&message); DispatchMessageW(&message);
     if(Clock::now()>=deadline) break;
   }
@@ -306,7 +364,7 @@ void testWindowsInput() {
     DesktopDuplicator unused;
     bool allowed=false; std::vector<INPUT> attempts;
     Injector injector(unused,[&](UINT count,INPUT* input,int) {
-      attempts.push_back(*input); return allowed ? count : 0U;
+      attempts.insert(attempts.end(),input,input+count); return allowed ? count : 0U;
     });
     injector.apply({Input::Key,0,0,225,0,true});
     attempts.clear(); allowed=true; injector.apply(Input{});
@@ -321,6 +379,14 @@ void testWindowsInput() {
     require(attempts.size()==1 && attempts[0].type==INPUT_MOUSE && attempts[0].mi.dwFlags==MOUSEEVENTF_LEFTUP,"Failed mouse-up must survive until recovery Reset");
     attempts.clear(); injector.apply(Input{});
     require(attempts.empty(),"Successful recovery must not replay presses or repeat releases");
+    Input edit; edit.kind=Input::Text; edit.text="ế😀";
+    injector.apply(edit);
+    require(attempts.size()==6,"Unicode must emit a down/up pair per UTF-16 unit");
+    const WORD units[]={0x1ebf,0xd83d,0xde00};
+    for(unsigned i=0;i<6;++i) require(attempts[i].type==INPUT_KEYBOARD && attempts[i].ki.wVk==0 &&
+      attempts[i].ki.wScan==units[i/2] && attempts[i].ki.dwFlags==(KEYEVENTF_UNICODE|(i%2?KEYEVENTF_KEYUP:0)),"Unicode did not use VK_PACKET UTF-16 input");
+    attempts.clear(); edit.text="a\xed\xa0\x80"; injector.apply(edit);
+    require(attempts.empty(),"Invalid Unicode injected a partial prefix");
     injector.setViewport(0,0,640,480);
     injector.apply({Input::Move,65535,65535});
     const auto oldTarget=attempts.back().mi;
@@ -481,6 +547,7 @@ int runWindows(bool host,int argc,char** argv) {
   SetProcessDPIAware(); const auto options=parseOptions(host,argc,argv);
   if(host) {
     DesktopDuplicator display; display.initialize(); HostOutput peer(options); Injector injector(display);
+    WindowsGamepad gamepad(options.input && !options.sharing);
     VideoPacketEncodeOptions encoding; encoding.fps=options.fps; encoding.bitrate=options.bitrate; encoding.codec=VideoCodec::H264;
     encoding.live=options.sharing || options.ultraLowLatency;
     encoding.gpuDevice=encoding.live ? display.gpuDevice() : nullptr;
@@ -491,7 +558,12 @@ int runWindows(bool host,int argc,char** argv) {
     VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
     VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{});
     peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
-    peer.onInput=[&](Input event) { injector.apply(event); }; HostOutputStop shutdown{peer}; peer.start();
+    peer.onGamepadAvailable=[&]{return gamepad.available();};
+    peer.onInput=[&](Input event) {
+      if(event.kind==Input::Gamepad){(void)gamepad.apply(event.gamepad);return;}
+      if(event.kind==Input::Reset)(void)gamepad.apply({});
+      injector.apply(event);
+    };peer.onClipboard=platformClipboard; HostOutputStop shutdown{peer}; peer.start();
     std::atomic<bool> loopbackExcludesVoice{!options.groupVoice};
     AudioCapture audio(options.audio,[&](const AudioSamples& samples) {
       // Older Windows releases cannot exclude the voice playback process.
@@ -547,7 +619,7 @@ int runWindows(bool host,int argc,char** argv) {
     }
     peer.stop(); return 0;
   }
-  Peer peer(options); WindowState state; state.sendInput=[&](Input input) { peer.input(input); }; state.viewOnly=!options.input;
+  Peer peer(options);peer.onClipboard=platformClipboard; WindowState state; state.sendInput=[&](Input input) { if(input.kind==Input::Reset && state.controller)state.controller->stop();peer.input(input); }; state.viewOnly=!options.input;
   VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State value) { peer.setVoiceState(value); });
   VoicePanel voicePanel(options.groupVoice,voice);
   peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
@@ -579,16 +651,49 @@ int runWindows(bool host,int argc,char** argv) {
   peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
-  HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+Escape releases input" : L"Sanser · View only",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
+  HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
   if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); SetFocus(window); peer.start();
+  ControllerSession controllerSession({
+    [&]{return options.input && peer.inputAvailable() && peer.gamepadAvailable();},
+    [&]{return peer.remoteGeneration();},
+    [&](auto epoch){
+      if(state.textInput)state.textInput->cancel();if(state.shortcuts)state.shortcuts->cancel();
+      if(!peer.releaseForController(epoch))return false;
+      state.released=false;return true;
+    },
+    [&](auto sample,auto epoch){return peer.gamepad(sample,epoch);}
+  });
+  struct ControllerCleanup {WindowState& state;~ControllerCleanup(){if(state.controller){state.controller->detach();state.controller.reset();}}} controllerCleanup{state};
+  if(options.input)state.controller=std::make_unique<WindowsControllerInput>(window,controllerSession,[&]{
+    return GetForegroundWindow()==window && GetFocus()==window && !state.viewOnly && !state.inputPaused &&
+      !(state.textInput && state.textInput->isOpen()) && !(state.shortcuts && state.shortcuts->panel());
+  });
+  if(options.input) state.textInput=std::make_unique<WindowsTextInput>(window,WindowsTextInput::Callbacks{
+    [&] { return !state.viewOnly && !state.inputPaused && peer.inputAvailable() && peer.textAvailable(); },
+    [&] { const auto focus=GetFocus(); return GetForegroundWindow()==window && GetActiveWindow()==window && (focus==window || IsChild(window,focus)); },
+    [&] { return peer.remoteGeneration(); },
+    [&](const std::string& text,std::uint32_t epoch) { return peer.text(text,epoch); },
+    [&] { if(state.shortcuts)state.shortcuts->cancel();state.sendInput(Input{}); state.released=true; if(GetCapture()==window) ReleaseCapture(); }
+  });
+  if(options.input)state.shortcuts=std::make_unique<WindowsShortcuts>(window,ShortcutSession::Callbacks{
+    [&] {return !state.viewOnly && !state.inputPaused && peer.inputAvailable() && peer.textAvailable();},
+    [&] {const auto focus=GetFocus();return GetForegroundWindow()==window && GetActiveWindow()==window && (focus==window || IsChild(window,focus));},
+    [&] {return peer.remoteGeneration();},
+    [&] {if(state.controller)state.controller->stop();if(state.textInput)state.textInput->cancel();state.released=true;if(GetCapture()==window)ReleaseCapture();return peer.releaseForShortcuts(peer.remoteGeneration());},
+    [&](auto keys,auto epoch){return peer.shortcut(keys,epoch);}
+  });
   MSG message{}; bool open=true;
   auto lastProgress=Clock::now();
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
     if(options.input && state.inputPaused==peer.inputAvailable()) {
       state.inputPaused=!peer.inputAvailable(); state.released=true;
+      if(state.textInput) state.textInput->cancel();
       if(GetCapture()==window) ReleaseCapture();
       SetWindowTextW(window,state.inputPaused ? peer.capturePaused() ? L"Sanser · Host capture temporarily unavailable · Check UAC on the host" : L"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists" : L"Sanser · Input restored · Click to resume");
     }
+    if(state.controller)state.controller->refresh();
+    if(state.textInput) state.textInput->refresh();
+    if(state.shortcuts)state.shortcuts->refresh();
     if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastProgress>=std::chrono::seconds(1)) {
       std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decodedFrames.load()<<" converted="<<convertedFrames.load()
         <<" encodedQueueDrops="<<decode.dropped()<<" decodeQueueExpired="<<decode.expired()<<" decodeErrors="<<decode.failures()<<" rendered="<<state.painted;
@@ -604,9 +709,10 @@ int runWindows(bool host,int argc,char** argv) {
     const auto wake=MsgWaitForMultipleObjectsEx(1,&state.frameReady,100,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
     if(wake==WAIT_FAILED) { peer.stop(); DestroyWindow(window); throw std::runtime_error("Remote window event wait failed"); }
     if(wake==WAIT_OBJECT_0) presentReadyFrame(window);
-    open=pumpWindowMessages(message);
+    open=pumpWindowMessages(message,state.textInput.get(),state.shortcuts.get());
   }
   if(state.userClosed) std::cerr<<"SNV2_VIEWER_CLOSED"<<std::endl;
+  if(state.controller)state.controller->detach();
   peer.stop(); decode.stop(); conversion.stop(); if(IsWindow(window)) DestroyWindow(window);
   if(decode.failures()>=10) throw std::runtime_error("Unable to decode the remote video: "+decode.error());
   if(conversionFailed) throw std::runtime_error("Unable to convert the remote video frame");

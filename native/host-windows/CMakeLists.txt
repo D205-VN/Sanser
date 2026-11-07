@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(sanser_host_windows VERSION 2.3.3 LANGUAGES CXX)
+project(sanser_host_windows VERSION 2.3.4 LANGUAGES CXX)
 
 set(SANSER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "Sanser product version")
 
@@ -33,6 +33,8 @@ target_compile_definitions(sanser-host-windows PRIVATE
 target_include_directories(sanser-host-windows PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
 if(BUILD_TESTING)
+  add_executable(sanser-legacy-host-shortcut-test ../common/legacy_host_shortcut_test.cpp)
+  add_test(NAME sanser-legacy-host-shortcut-test COMMAND sanser-legacy-host-shortcut-test)
   target_sources(sanser-host-windows PRIVATE ../windows-uac/input_test.cpp)
   target_compile_definitions(sanser-host-windows PRIVATE SANSER_UAC_TEST=1)
   target_compile_definitions(sanser-host-windows PRIVATE SANSER_AUDIO_TEST=1)

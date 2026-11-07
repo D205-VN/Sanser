@@ -20,6 +20,7 @@ pub struct AppState {
     pub udp_relay: Arc<crate::udp_relay::UdpRelayHub>,
     pub general_limiter: RateLimiter,
     pub login_limiter: RateLimiter,
+    pub voice_lab_limiter: RateLimiter,
 }
 
 impl AppState {
@@ -37,6 +38,7 @@ impl AppState {
             udp_relay: Arc::new(crate::udp_relay::UdpRelayHub::default()),
             general_limiter: RateLimiter::new(general_limit, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(login_limit, Duration::from_secs(600)),
+            voice_lab_limiter: RateLimiter::new(12, Duration::from_secs(60)),
         }
     }
 }

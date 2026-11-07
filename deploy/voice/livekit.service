@@ -1,0 +1,22 @@
+[Unit]
+Description=Sanser private voice SFU (LiveKit 1.13.11)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sanser-voice
+Group=sanser-voice
+ExecStart=/usr/local/bin/livekit-server --config /etc/sanser-voice/livekit.yaml --key-file /etc/sanser-voice/keys.yaml
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

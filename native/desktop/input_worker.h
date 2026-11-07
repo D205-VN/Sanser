@@ -25,6 +25,8 @@ public:
     if(stopping_) return false;
     const Item item{event,Clock::now()};
     if(event.kind==Input::Reset) pending_.clear();
+    if(event.kind==Input::Gamepad)
+      std::erase_if(pending_,[](const Item& value){return value.event.kind==Input::Gamepad;});
     // Coalesce only adjacent moves. Never move a drag across a button/key/reset.
     if(event.kind==Input::Move && !pending_.empty() && pending_.back().event.kind==Input::Move) {
       pending_.back()=item; ++stats_.coalescedMoves;
@@ -50,9 +52,21 @@ private:
     try {
       for(;;) {
         Item item;
-        { std::unique_lock lock(mutex_); wake_.wait(lock,[&] { return stopping_ || !pending_.empty(); });
+        { std::unique_lock lock(mutex_);
+          const auto ready=[&]{return stopping_ || !pending_.empty();};
+          if(gamepad_.active())wake_.wait_until(lock,gamepad_.deadline(),ready);else wake_.wait(lock,ready);
+          if(!stopping_ && gamepad_.expired(Clock::now())) {
+            lock.unlock();Input neutral;neutral.kind=Input::Gamepad;apply_(neutral);continue;
+          }
+          if(!stopping_ && pending_.empty())continue;
           if(stopping_) break; item=pending_.front(); pending_.pop_front(); }
-        const auto began=Clock::now(); apply_(item.event);
+        const auto began=Clock::now();
+        if(item.event.kind==Input::Reset)gamepad_.reset();
+        if(item.event.kind==Input::Gamepad) {
+          const auto state=gamepad_.accept(item.event.gamepad,item.queued,began);
+          if(!state)continue;item.event.gamepad=*state;
+        }
+        apply_(item.event);
         const auto finished=Clock::now();
         const auto queue=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(began-item.queued).count());
         const auto work=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(finished-began).count());
@@ -71,6 +85,7 @@ private:
   std::function<void()> failed_;
   std::mutex mutex_; std::condition_variable wake_; std::deque<Item> pending_;
   Stats stats_{}; bool stopping_=false;
+  GamepadLease gamepad_;
   std::thread worker_;
 };
 }

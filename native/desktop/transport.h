@@ -9,6 +9,9 @@
 #include "audio.h"
 #include "opus_audio.h"
 #include "voice.h"
+#include "external_voice.h"
+#include "user_messages.h"
+#include <deque>
 #include <condition_variable>
 #include <cstddef>
 #include <atomic>
@@ -22,6 +25,7 @@
 #include <vector>
 #include <bitset>
 #include <set>
+#include <span>
 #include <memory>
 
 namespace sanser::desktop {
@@ -44,6 +48,8 @@ struct Options {
   bool audioMuted = false;
   bool sharing = false;
   bool groupVoice = false;
+  bool clipboard = false;
+  bool files = false;
   unsigned voiceSlot = 255;
   std::string viewerId;
   std::string peer;
@@ -115,7 +121,7 @@ public:
   Peer& operator=(const Peer&) = delete;
   void start();
   void stop();
-  void cancel() { running_=false; sendReady_.notify_all(); }
+  void cancel() { running_=false; userMailbox_->alive=false; sendReady_.notify_all(); }
   bool running() const { return running_.load(); }
   unsigned stopReason() const { return stopReason_.load(); }
   bool ready() const { return ready_.load(); }
@@ -130,7 +136,7 @@ public:
     const auto budget=std::max(1000000U,videoBudget_.load());
     return static_cast<double>(queued)*8000.0/(budget*1.2)<=std::max(20.0,2000.0/std::max(1U,options_.fps));
   }
-  bool inputAvailable() const { return options_.input && !inputSuspended_.load() && !remoteCapturePaused_.load(); }
+  bool inputAvailable() const { return options_.input && !options_.sharing && !inputSuspended_.load() && !remoteCapturePaused_.load(); }
   bool capturePaused() const { return remoteCapturePaused_.load(); }
   void setCapturePaused(bool paused);
   // Last authenticated application RTT; absent until a supporting peer replies.
@@ -146,6 +152,38 @@ public:
   };
   VideoFeedback videoFeedback() const;
   void input(const Input& input);
+  // Optional single analog controller. Caller sends a full snapshot at least
+  // every 50 ms while captured, neutral first; no virtual capability is assumed.
+  bool gamepadAvailable() const;
+  bool gamepad(const GamepadState& state,std::uint32_t expectedGeneration);
+  std::function<bool()> onGamepadAvailable;
+  // Explicit native UI action. Whole reliable sequence is accepted or none is
+  // queued. The negotiated modern control permission and generation must match.
+  bool shortcut(std::span<const std::uint16_t> keys,std::uint32_t expectedGeneration);
+  bool releaseForShortcuts(std::uint32_t expectedGeneration);
+  bool releaseForController(std::uint32_t expectedGeneration);
+  // Negotiated capability stays known during a temporary capture/input pause.
+  // text() separately checks live availability, so the UI never silently falls
+  // back to unacknowledged ASCII typing merely because a capable host paused.
+  bool textAvailable() const { return !options_.host && !options_.sharing && options_.input && running_ && ready_ && peerUnicode_; }
+  // True means queued, not that the foreground application accepted the edit.
+  bool text(const std::string& utf8,std::uint32_t expectedGeneration=0);
+  bool clipboardAvailable() const { return !options_.host && options_.input && !options_.sharing && running_ && ready_ && peerClipboard_; }
+  using ClipboardResult=std::function<void(unsigned,std::string)>;
+  bool clipboard(bool write,const std::string& utf8,ClipboardResult completed);
+  bool localClipboardAvailable() const {return !options_.host && options_.input && !options_.sharing && running_ && ready_ && static_cast<bool>(onClipboard);}
+  void localClipboard(bool write,const std::string& utf8,ClipboardResult completed);
+  using ClipboardHandler=std::function<void(bool,std::string,std::function<bool()>,ClipboardResult)>;
+  ClipboardHandler onClipboard;
+  // Desktop shell owns consent, disk I/O and hashing. The media worker only
+  // relays bounded authenticated messages through the low-priority data lane.
+  bool filesAvailable() const {return options_.files && options_.input && !options_.sharing && running_ && ready_ && peerFiles_;}
+  bool fileMessage(const Bytes& body,std::uint32_t expectedGeneration=0);
+  bool configureFiles(bool enabled) {if(running_)return false;options_.files=enabled;return true;}
+  // Updated on every authenticated peer generation, even with files disabled.
+  std::uint32_t remoteGeneration() const {return fileGeneration_.load();}
+  std::uint32_t fileGeneration() const {return remoteGeneration();}
+  std::function<void(Bytes)> onFile;
   void audio(const AudioSamples& samples);
   void audioPrepared(const Bytes& packet, bool opus);
   void setAudioMuted(bool muted);
@@ -188,7 +226,9 @@ private:
   void sendLoop();
   void acknowledgeInput();
   void logHealth();
-  void transmit(snv2::PacketType type, const Bytes& payload, std::uint32_t stream = 0,
+  bool queueInput(const Input& input);
+  bool queueShortcut(std::span<const std::uint16_t> keys,std::uint32_t expectedGeneration,bool controller=false);
+  bool transmit(snv2::PacketType type, const Bytes& payload, std::uint32_t stream = 0,
                 std::uint64_t frame = 0, std::uint16_t flags = 0, bool reliable = false,
                 Clock::time_point deadline = {},std::shared_ptr<std::atomic<std::uint32_t>> originalSent = {});
   void datagram(const Bytes& bytes);
@@ -197,6 +237,8 @@ private:
   void queueVideoRepair(const Bytes& bytes);
   void serviceVideoRepairs();
   void announceVideoRate();
+  void processUserMessage(Bytes body);
+  void serviceUserMessages(Clock::time_point now);
   void sendVideoFragment(const PreparedFrame& frame,std::uint64_t id,std::size_t index,bool repair,Clock::time_point deadline = {},std::shared_ptr<std::atomic<std::uint32_t>> originalSent = {});
   Options options_;
   DatagramIo io_;
@@ -262,6 +304,26 @@ private:
   // Optional authenticated input-only reset. Acknowledging its sequence fence
   // is required before input resumes; video/control keep their own lifetime.
   bool peerInputRecovery_=false, inputRecoveryPending_=false, inputLeaseArmed_=false;
+  std::atomic<bool> peerUnicode_{false};
+  std::atomic<bool> peerClipboard_{false};
+  std::atomic<bool> peerFiles_{false};
+  std::atomic<bool> peerGamepad_{false};
+  std::atomic<std::int64_t> peerGamepadAt_{0};
+  std::uint64_t lastGamepad_=0,lastGamepadCapability_=0;
+  std::atomic<std::uint32_t> fileGeneration_{0};
+  int announcedFiles_=-1;
+  struct UserMailbox {
+    std::mutex mutex;std::atomic<bool> alive{true};std::uint64_t epoch=0;unsigned hostJobs=0,localJobs=0,servicing=0;
+    std::deque<Bytes> replies;
+  };
+  std::shared_ptr<UserMailbox> userMailbox_=std::make_shared<UserMailbox>();
+  struct ClipboardPending { Clock::time_point created;ClipboardResult result; };
+  std::mutex userMutex_;
+  UserMessages userMessages_;
+  std::map<std::uint64_t,ClipboardPending> clipboardPending_;
+  std::uint64_t clipboardSerial_=0;
+  Clock::time_point lastUserPoll_{},lastClipboardRequest_{};
+  int announcedUserCapabilities_=-1;
   std::atomic<bool> inputSuspended_{false};
   std::atomic<bool> localCapturePaused_{false}, remoteCapturePaused_{false};
   std::uint64_t inputRecoverySerial_=0, inputRecoveryFence_=0, receivedRecoverySerial_=0, receivedRecoveryFence_=0;

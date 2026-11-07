@@ -5,6 +5,7 @@ import 'src/api.dart';
 import 'src/controller.dart';
 import 'src/native_engine.dart';
 import 'src/screens.dart';
+import 'src/theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -40,39 +41,7 @@ class _SanserAppState extends State<SanserApp> {
   Widget build(BuildContext context) => MaterialApp(
     title: 'Sanser',
     debugShowCheckedModeBanner: false,
-    theme: ThemeData(
-      brightness: Brightness.dark,
-      useMaterial3: true,
-      scaffoldBackgroundColor: const Color(0xff0e1119),
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: const Color(0xffb9c8ff),
-        brightness: Brightness.dark,
-        primary: const Color(0xffb9c8ff),
-        secondary: const Color(0xff78dfc0),
-        surface: const Color(0xff191f2c),
-      ),
-      inputDecorationTheme: InputDecorationTheme(
-        filled: true,
-        fillColor: const Color(0xff101620),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(16),
-          borderSide: BorderSide.none,
-        ),
-      ),
-      cardTheme: CardThemeData(
-        elevation: 0,
-        margin: EdgeInsets.zero,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-      ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          minimumSize: const Size(48, 52),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-        ),
-      ),
-    ),
+    theme: sanserTheme(),
     home: FutureBuilder<void>(
       future: ready,
       builder: (context, snapshot) =>

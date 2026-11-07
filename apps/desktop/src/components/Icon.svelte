@@ -1,10 +1,12 @@
 <script lang="ts">
-  let { name }: { name: 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' | 'laptop' | 'windows' | 'refresh' | 'arrow' | 'link' | 'grid' | 'list' | 'pin' | 'more' } = $props();
+  let { name }: { name: 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' | 'laptop' | 'windows' | 'refresh' | 'arrow' | 'link' | 'grid' | 'list' | 'pin' | 'more' | 'mic' | 'mic-off' | 'headphones' | 'volume-off' | 'leave' | 'stop' | 'volume' | 'eye' | 'pointer' | 'clipboard' } = $props();
 </script>
 
 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   {#if name === 'computers'}
     <rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>
+  {:else if name === 'clipboard'}
+    <rect x="5" y="4" width="14" height="18" rx="2"/><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M9 11h6M9 15h6"/>
   {:else if name === 'laptop'}
     <rect x="4" y="3" width="16" height="12" rx="2"/><path d="m4 15-2 5h20l-2-5M9 18h6"/>
   {:else if name === 'windows'}
@@ -23,6 +25,23 @@
     <path d="m8 3 8 0-1 7 3 3v2H6v-2l3-3-1-7Zm4 12v6"/>
   {:else if name === 'more'}
     <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
+  {:else if name === 'mic' || name === 'mic-off'}
+    <rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/>
+    {#if name === 'mic-off'}<path d="m2 2 20 20"/>{/if}
+  {:else if name === 'headphones'}
+    <path d="M3 14v-3a9 9 0 0 1 18 0v3"/><rect x="3" y="12" width="4" height="9" rx="2"/><rect x="17" y="12" width="4" height="9" rx="2"/>
+  {:else if name === 'volume'}
+    <path d="m11 5-6 4H2v6h3l6 4V5ZM15 8a6 6 0 0 1 0 8M18 5a10 10 0 0 1 0 14"/>
+  {:else if name === 'eye'}
+    <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>
+  {:else if name === 'pointer'}
+    <path d="m4 3 6 18 3-7 7-3L4 3Z"/>
+  {:else if name === 'volume-off'}
+    <path d="m11 5-6 4H2v6h3l6 4V5ZM17 9l5 6M22 9l-5 6"/>
+  {:else if name === 'leave'}
+    <path d="M9 4H4v16h5M10 12h12m-5-5 5 5-5 5"/>
+  {:else if name === 'stop'}
+    <rect x="5" y="5" width="14" height="14" rx="3"/>
   {:else if name === 'host'}
     <rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/>
   {:else if name === 'session'}

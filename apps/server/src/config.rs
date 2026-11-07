@@ -11,6 +11,7 @@ pub const PROTOCOL_VERSION: u8 = sanser_core::PROTOCOL_VERSION;
 
 #[derive(Clone)]
 pub struct Config {
+    pub voice_lab: Option<crate::voice_lab::VoiceLabConfig>,
     pub host: IpAddr,
     pub port: u16,
     pub udp_relay_bind: Option<std::net::SocketAddr>,
@@ -105,6 +106,7 @@ impl Config {
         // Relay checks removed as TURN is deprecated.
 
         let config = Self {
+            voice_lab: crate::voice_lab::VoiceLabConfig::from_env()?,
             host,
             port,
             udp_relay_bind: optional_env("RELAY_UDP_BIND")
@@ -164,6 +166,7 @@ impl Config {
     pub fn test(database_url: String) -> Result<Self, ConfigError> {
         validate_neon_database_url(&database_url, true)?;
         let config = Self {
+            voice_lab: None,
             host: "127.0.0.1".parse().expect("valid loopback address"),
             port: 0,
             udp_relay_bind: None,

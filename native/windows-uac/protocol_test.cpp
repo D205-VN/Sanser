@@ -13,7 +13,10 @@ int main() {
   request.adapter=0; request.type=1; check(!valid(request));
   request=Request{}; request.signature=0; check(!valid(request));
   request=Request{}; request.operation=Operation::Input; request.type=1; request.flags=8; request.data=0x2a;
-  check(valid(request)); request.flags=4; check(!valid(request));
+  check(valid(request)); request.flags=4; request.data=0x1ebf; check(valid(request));
+  request.flags=6; check(valid(request)); request.data=0xd83d; check(valid(request));
+  request.flags=5; check(!valid(request)); request.flags=12; check(!valid(request));
+  request.flags=4; request.data=0x10000; check(!valid(request)); request.data=0; check(!valid(request));
   request.flags=8; request.data=256; check(!valid(request));
   request=Request{}; request.operation=Operation::Input; request.flags=0xc001; request.x=65535; request.y=0;
   check(valid(request)); request.x=-1; check(!valid(request));

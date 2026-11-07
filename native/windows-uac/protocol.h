@@ -38,7 +38,9 @@ inline bool valid(const Request& r) {
   if(r.operation==Operation::Capture)
     return r.adapter<8 && r.output<16 && !r.type && !r.flags && !r.data && !r.x && !r.y;
   if(r.operation!=Operation::Input || r.adapter || r.output) return false;
-  if(r.type==1) { // Keyboard: vk or scan code; no Unicode/system commands.
+  if(r.type==1) { // Fixed keyboard events only, no pointers or system commands.
+    if(r.flags&4U) // KEYEVENTF_UNICODE: wVk=0, one UTF-16 unit; only optional KEYUP.
+      return !r.x && !r.y && r.data>0 && r.data<=0xffff && !(r.flags&~6U);
     return !r.x && !r.y && r.data>0 && r.data<=255 && !(r.flags&~0x0bU);
   }
   if(r.type!=0 || !r.flags || (r.flags&~0xe9ffU)) return false;

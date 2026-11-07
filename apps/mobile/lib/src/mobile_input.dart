@@ -9,17 +9,21 @@ class MobileInput {
   final String sessionId;
   final bool enabled;
   final void Function()? onError;
+  final bool Function()? current;
   Offset cursor = const Offset(.5, .5);
   final Map<int, Set<Object>> _owners = {};
   Future<void> _queue = Future.value();
   Timer? _moveTimer;
   Offset? _pendingMove;
   bool _closed = false;
+  int _resetEpoch = 0;
+  bool _chordPending = false;
   MobileInput(
     this.engine,
     this.sessionId, {
     required this.enabled,
     this.onError,
+    this.current,
   });
   int _coordinate(double value) => (value.clamp(0.0, 1.0) * 65535).round();
   Future<void> _send(
@@ -33,18 +37,22 @@ class MobileInput {
     final at = position ?? cursor;
     _queue = _queue
         .then(
-          (_) => engine.remoteInput(
-            sessionId,
-            kind,
-            x: _coordinate(at.dx),
-            y: _coordinate(at.dy),
-            code: code,
-            delta: delta,
-            down: down,
-          ),
+          (_) => current?.call() == false
+              ? Future<void>.value()
+              : engine.remoteInput(
+                  sessionId,
+                  kind,
+                  x: _coordinate(at.dx),
+                  y: _coordinate(at.dy),
+                  code: code,
+                  delta: delta,
+                  down: down,
+                ),
         )
         .catchError((Object _) async {
+          _resetEpoch++;
           _owners.clear();
+          if (current?.call() == false) return;
           try {
             await engine.remoteInput(sessionId, 4);
           } catch (_) {
@@ -107,7 +115,71 @@ class MobileInput {
     await hold(code, false, owner);
   }
 
+  /// One-shot keyboard chord, with source-owned releases in reverse order.
+  /// Reset/failure cancels the remaining presses, even if input becomes ready
+  /// again before a slow native reply returns. Never auto-retry a shortcut.
+  Future<bool> chord(List<int> codes, {bool Function()? current}) async {
+    final keys = List<int>.of(codes);
+    if (keys.isEmpty ||
+        keys.length > 4 ||
+        keys.toSet().length != keys.length ||
+        keys.any(
+          // Match native/desktop/keyboard.h: never reserve a reliable input
+          // sequence for a usage the receiving host will reject.
+          (code) =>
+              !((code >= 4 && code <= 49) ||
+                  (code >= 51 && code <= 69) ||
+                  (code >= 73 && code <= 100) ||
+                  (code >= 224 && code <= 231)),
+        )) {
+      return false;
+    }
+    final epoch = _resetEpoch;
+    bool valid() =>
+        !_closed &&
+        enabled &&
+        epoch == _resetEpoch &&
+        this.current?.call() != false &&
+        current?.call() != false;
+    if (_chordPending ||
+        !valid() ||
+        _owners.values.any((owners) => owners.isNotEmpty)) {
+      return false;
+    }
+    _chordPending = true;
+    final owner = Object(), pressed = <int>[];
+    var completed = false;
+    try {
+      await drain();
+      if (!valid() || _owners.values.any((owners) => owners.isNotEmpty)) {
+        return false;
+      }
+      for (final code in keys) {
+        if (!valid()) return false;
+        pressed.add(code);
+        await hold(code, true, owner);
+      }
+      completed = valid();
+    } finally {
+      for (final code in pressed.reversed) {
+        await hold(code, false, owner);
+      }
+      _chordPending = false;
+    }
+    return completed && valid();
+  }
+
+  /// Repeat only a key this source still owns. Reset/release cannot resurrect
+  /// it, and another source's held key is not enough to authorize a repeat.
+  Future<void> repeatKey(int code, Object owner) {
+    if (_closed || !enabled || !(_owners[code]?.contains(owner) ?? false)) {
+      return Future.value();
+    }
+    return _send(2, code: code, down: true);
+  }
+
   Future<void> releaseAll() {
+    _resetEpoch++;
     _moveTimer?.cancel();
     _moveTimer = null;
     _pendingMove = null;

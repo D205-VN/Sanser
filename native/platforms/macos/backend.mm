@@ -14,10 +14,14 @@
 #include "audio_capture.h"
 #include "audio_player.h"
 #include "input_injector.h"
+#include "clipboard.h"
 #include "latest_frame_worker.h"
 #include "decode_worker.h"
 #include "h264_low_delay.h"
 #import "metal_presenter.h"
+#import "ime_view.h"
+#import "shortcuts_panel.h"
+#import "controller_input.h"
 #include "keyboard.h"
 #include <algorithm>
 #include <iostream>
@@ -231,63 +235,6 @@ API_AVAILABLE(macos(12.3))
 - (void)stream:(SCStream*)stream didStopWithError:(NSError*)error { (void)stream; std::cerr<<captureFailure(error,"Screen capture stopped")<<std::endl; self.failed=YES; }
 @end
 
-@interface SanserSnv2RemoteView : SanserSnv2MetalView
-@property(nonatomic,assign) Peer* peer;
-@property(nonatomic,assign) BOOL inputEnabled;
-@property(nonatomic,assign) BOOL released;
-- (void)sendInput:(Input)input;
-- (void)pointer:(NSEvent*)event kind:(Input::Kind)kind down:(BOOL)down;
-@end
-@implementation SanserSnv2RemoteView
-- (BOOL)acceptsFirstResponder { return self.inputEnabled; }
-- (void)sendInput:(Input)input { if(self.inputEnabled && self.peer) self.peer->input(input); }
-- (void)pointer:(NSEvent*)event kind:(Input::Kind)kind down:(BOOL)down {
-  if(!self.inputEnabled || self.released || self.imageSize.width<=0 || self.imageSize.height<=0 || self.bounds.size.width<=0 || self.bounds.size.height<=0) return;
-  auto point=[self convertPoint:event.locationInWindow fromView:nil]; const auto bounds=self.bounds;
-  const auto size=self.imageSize; const auto scale=std::min(bounds.size.width/size.width,bounds.size.height/size.height);
-  const auto width=size.width*scale,height=size.height*scale; point.x-=(bounds.size.width-width)/2; point.y-=(bounds.size.height-height)/2;
-  const double y=std::clamp(point.y/height,0.0,1.0);
-  Input input; input.kind=kind; input.x=static_cast<std::uint16_t>(std::clamp(point.x/width,0.0,1.0)*65535); input.y=static_cast<std::uint16_t>((self.isFlipped ? y : 1-y)*65535); input.down=down;
-  // AppKit asserts if a scroll-only property is read on a mouse-move/button
-  // event. View-only must return before inspecting any input-only fields too.
-  if(kind==Input::Scroll) {
-    if(event.type!=NSEventTypeScrollWheel) return;
-    input.delta=static_cast<std::int16_t>(std::clamp(event.scrollingDeltaY,-120.0,120.0));
-  } else if(kind==Input::Button) {
-    switch(event.type) {
-      case NSEventTypeLeftMouseDown: case NSEventTypeLeftMouseUp: input.code=0; break;
-      case NSEventTypeRightMouseDown: case NSEventTypeRightMouseUp: input.code=1; break;
-      case NSEventTypeOtherMouseDown: case NSEventTypeOtherMouseUp:
-        if(event.buttonNumber!=2) return;
-        input.code=2; break;
-      default: return;
-    }
-  }
-  [self sendInput:input];
-}
-- (void)mouseMoved:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
-- (void)mouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
-- (void)rightMouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
-- (void)otherMouseDragged:(NSEvent*)event { [self pointer:event kind:Input::Move down:NO]; }
-- (void)mouseDown:(NSEvent*)event { if(!self.inputEnabled) return; if(self.released) { self.released=NO; self.window.title=@"Sanser · Remote desktop · Control+Option+Escape releases input"; } [self.window makeFirstResponder:self]; [self pointer:event kind:Input::Button down:YES]; }
-- (void)mouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
-- (void)rightMouseDown:(NSEvent*)event { [self pointer:event kind:Input::Button down:YES]; }
-- (void)rightMouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
-- (void)otherMouseDown:(NSEvent*)event { [self pointer:event kind:Input::Button down:YES]; }
-- (void)otherMouseUp:(NSEvent*)event { [self pointer:event kind:Input::Button down:NO]; }
-- (void)scrollWheel:(NSEvent*)event { [self pointer:event kind:Input::Scroll down:NO]; }
-- (void)keyDown:(NSEvent*)event {
-  if(!self.inputEnabled) return;
-  if(event.keyCode==53 && (event.modifierFlags & NSEventModifierFlagControl) && (event.modifierFlags & NSEventModifierFlagOption)) { self.released=YES; [self sendInput:Input{}]; self.window.title=@"Sanser · Input released · Click the stream to resume"; return; }
-  if(self.released) return; const auto hid=hidFromMac(event.keyCode); if(hid) [self sendInput:Input{Input::Key,0,0,hid,0,true}];
-}
-- (void)keyUp:(NSEvent*)event { if(self.inputEnabled && !self.released) { const auto hid=hidFromMac(event.keyCode); if(hid) [self sendInput:Input{Input::Key,0,0,hid,0,false}]; } }
-- (void)flagsChanged:(NSEvent*)event {
-  if(!self.inputEnabled || self.released) return; const auto hid=hidFromMac(event.keyCode); NSEventModifierFlags flag=0;
-  if(hid==224||hid==228) flag=NSEventModifierFlagControl; if(hid==225||hid==229) flag=NSEventModifierFlagShift; if(hid==226||hid==230) flag=NSEventModifierFlagOption; if(hid==227||hid==231) flag=NSEventModifierFlagCommand;
-  if(flag) [self sendInput:Input{Input::Key,0,0,hid,0,(event.modifierFlags&flag)!=0}];
-}
-@end
 
 #ifdef SANSER_CODEC_TEST
 // Exercise the real AppKit callbacks without sending packets or OS input.
@@ -661,6 +608,7 @@ int runMac(bool host,int argc,char** argv) {
         voice::PlaybackTap originalSound(voice::RenderSource::External);
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
         peer.onInput=[&](Input event) { injector.apply(event); };
+        peer.onClipboard=platformClipboard;
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         capture.audio=&audio;
         capture.originalSound=&originalSound;
@@ -706,7 +654,7 @@ int runMac(bool host,int argc,char** argv) {
       } else throw std::runtime_error("Hosting requires macOS 12.3 or newer");
     }
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    Peer peer(options); Decoder decoder;
+    Peer peer(options);peer.onClipboard=platformClipboard; Decoder decoder;
     VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
     VoicePanel voicePanel(options.groupVoice,voice);
     peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
@@ -719,23 +667,54 @@ int runMac(bool host,int argc,char** argv) {
       [] { return Clock::now(); },[&] { return decoder.decoded()>decodedBase; });
     peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
-    window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Control+Option+Escape releases input" : @"Sanser · View only";
+    window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Ctrl+Option+I: text input · Ctrl+Option+Escape: release" : @"Sanser · View only";
     SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.inputEnabled=options.input; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
     if (options.ultraLowLatency) { ((CAMetalLayer*)view.layer).displaySyncEnabled=NO; }
     window.contentView=view; window.acceptsMouseMovedEvents=options.input; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];
+    [view installTextControls];
+    SanserShortcuts* shortcuts=nil;
+    SanserControllerInput* controller=nil;
+    ControllerSession controllerSession({
+      [&]{return options.input && peer.inputAvailable() && peer.gamepadAvailable();},
+      [&]{return peer.remoteGeneration();},
+      [&](auto epoch){if(!peer.releaseForController(epoch))return false;view.released=NO;return true;},
+      [&](auto sample,auto epoch){return peer.gamepad(sample,epoch);}
+    });
+    if(options.input)controller=[[SanserControllerInput alloc] initWithOwner:window session:&controllerSession source:{} focused:[&]{
+      return NSApp.active && window.isKeyWindow && !view.textMode && !shortcuts.panel;
+    }];
+    view.willResetInput=^{[controller stop];};
+    struct ControllerCleanup {SanserControllerInput* __strong panel;SanserSnv2RemoteView* __strong view;
+      ~ControllerCleanup(){view.willResetInput=nil;[panel detach];}} controllerCleanup{controller,view};
+    ShortcutSession shortcutSession({
+      [&] {return options.input && peer.inputAvailable() && peer.textAvailable();},
+      [&] {return NSApp.active && (window.isKeyWindow || shortcuts.panel.isKeyWindow);},
+      [&] {return peer.remoteGeneration();},
+      [&] {[controller stop];[view suspendTextInput];view.released=YES;return peer.releaseForShortcuts(peer.remoteGeneration());},
+      [&](auto keys,auto epoch){return peer.shortcut(keys,epoch);}
+    });
+    if(options.input)shortcuts=[[SanserShortcuts alloc] initWithOwner:window session:&shortcutSession];
+    struct ShortcutCleanup {SanserShortcuts* __strong panel;~ShortcutCleanup(){[panel detach];}} shortcutCleanup{shortcuts};
     Peer* peerPointer=&peer;
-    id observer=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { if(view.inputEnabled) { peerPointer->input(Input{}); view.released=YES; } }];
+    id observer=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidResignKeyNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { [controller stop];if(view.inputEnabled) { if(!shortcuts.panel)peerPointer->input(Input{});view.released=YES; } }];
     __block bool userClosed=false;
-    id closeObserver=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { userClosed=true; }];
+    id closeObserver=[[NSNotificationCenter defaultCenter] addObserverForName:NSWindowWillCloseNotification object:window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) { [controller stop];userClosed=true; }];
+    id inactiveObserver=[[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidResignActiveNotification object:NSApp queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification*) {[controller stop];}];
+    struct ObserverCleanup {id __strong resign;id __strong close;id __strong inactive;
+      ~ObserverCleanup(){for(id token in @[resign,close,inactive])[[NSNotificationCenter defaultCenter] removeObserver:token];}} observerCleanup{observer,closeObserver,inactiveObserver};
     PeerStop shutdown{peer};
     peer.start();
     auto lastHealth=Clock::now(); std::uint64_t presented=0;
     while(window.visible && peer.running() && decode.failures()<10) {
       @autoreleasepool {
+        if(view.textMode) [view validateTextSession];
         if(options.input && view.inputEnabled!=peer.inputAvailable()) {
           view.inputEnabled=peer.inputAvailable(); view.released=YES;
           window.title=view.inputEnabled ? @"Sanser · Input restored · Click to resume" : peer.capturePaused() ? @"Sanser · Host capture temporarily unavailable · Check UAC on the host" : @"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists";
         }
+        [view refreshTextControls];
+        [shortcuts refresh];
+        [controller refresh];
         NSEvent* event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:options.ultraLowLatency ? 0.001 : 0.008] inMode:NSDefaultRunLoopMode dequeue:YES]; if(event) [NSApp sendEvent:event];
         auto pixels=decoder.take(); if(pixels) { [view presentPixels:pixels]; ++presented; CVPixelBufferRelease(pixels); }
         [window displayIfNeeded];
@@ -754,8 +733,10 @@ int runMac(bool host,int argc,char** argv) {
     }
     [[NSNotificationCenter defaultCenter] removeObserver:observer];
     [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
+    [[NSNotificationCenter defaultCenter] removeObserver:inactiveObserver];
+    view.willResetInput=nil;[controller detach];
     if(userClosed) std::cerr<<"SNV2_VIEWER_CLOSED"<<std::endl;
-    view.peer=nullptr; peer.stop(); decode.stop(); [window close];
+    view.released=YES; view.peer=nullptr; peer.stop(); decode.stop(); [window close];
     if(decode.failures()>=10) throw std::runtime_error("Unable to decode the remote video: "+decode.error());
     return 0;
   }

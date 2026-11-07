@@ -7,6 +7,8 @@
 #include <gdiplus.h>
 #include <uxtheme.h>
 #include "voice_panel.h"
+#include "external_voice.h"
+#include "../../common/design_tokens.h"
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
@@ -18,7 +20,8 @@
 #endif
 namespace sanser::desktop {
 namespace {
-constexpr COLORREF surface=RGB(28,36,49),ink=RGB(225,232,247),muted=RGB(141,156,181),accent=RGB(102,219,184),red=RGB(255,125,138),edge=RGB(48,59,77);
+constexpr COLORREF panelColor(std::uint32_t rgb) { return RGB((rgb>>16)&255,(rgb>>8)&255,rgb&255); }
+constexpr COLORREF surface=panelColor(design::raised),ink=panelColor(design::text),muted=panelColor(design::muted),accent=panelColor(design::success),red=panelColor(design::danger),edge=panelColor(design::borderStrong);
 Gdiplus::Color tint(COLORREF value) { return Gdiplus::Color(255,GetRValue(value),GetGValue(value),GetBValue(value)); }
 Gdiplus::Rect pixels(RECT value) {
   return Gdiplus::Rect(static_cast<INT>(value.left),static_cast<INT>(value.top),static_cast<INT>(value.right-value.left),static_cast<INT>(value.bottom-value.top));
@@ -115,7 +118,7 @@ struct VoicePanel::Impl {
   }
   void layout() {
     SetWindowPos(window,HWND_TOPMOST,0,0,px(width()),px(height()),SWP_NOMOVE|SWP_NOACTIVATE);
-    SetWindowRgn(window,CreateRoundRectRgn(0,0,px(width())+1,px(height())+1,px(30),px(30)),TRUE);
+    SetWindowRgn(window,CreateRoundRectRgn(0,0,px(width())+1,px(height())+1,px(design::panelRadius*2),px(design::panelRadius*2)),TRUE);
     const auto place=[&](HWND child,int x,int y,int w,int h) { MoveWindow(child,px(x),px(y),px(w),px(h),TRUE); };
     place(toggle,12,10,164,32); place(shortcut,width()-(stop ? 164 : 132),12,78,28);
     place(chevron,width()-(stop ? 78 : 42),12,28,28); place(stopButton,width()-42,12,28,28);
@@ -144,7 +147,7 @@ struct VoicePanel::Impl {
     write(next); refresh();
   }
   const wchar_t* subtitle() const {
-    return !voiceEnabled ? L"Sharing is active" : current.state.joined ? L"Connected to voice" : L"Voice is off";
+    return !voiceEnabled ? L"Sharing is active" : current.capturing ? L"Microphone on" : current.state.microphone ? L"Opening microphone…" : current.state.deafened ? L"Voice muted · mic off" : current.state.joined ? L"Listening · mic off" : L"Voice is off";
   }
   const wchar_t* status() const {
     const auto& state=current.state;
@@ -173,7 +176,7 @@ struct VoicePanel::Impl {
   void backdrop(HDC dc,RECT rect,int offsetY=0) const {
     Gdiplus::Graphics graphics(dc);
     Gdiplus::LinearGradientBrush gradient(Gdiplus::Point(0,-offsetY),Gdiplus::Point(0,px(height())-offsetY),
-      Gdiplus::Color(255,14,18,27),Gdiplus::Color(255,22,28,38));
+      tint(panelColor(design::surface)),tint(panelColor(design::surface)));
     graphics.FillRectangle(&gradient,pixels(rect));
   }
   void fill(HDC dc,RECT rect,COLORREF color,int diameter=0) const {
@@ -240,7 +243,7 @@ struct VoicePanel::Impl {
       RECT tile{0,px(2),px(28),px(30)}; fill(dc,tile,RGB(20,49,45),16); icon(dc,px(4),px(6),10,color);
       RECT title{px(36),-px(1),px(164),px(17)},detail{px(36),px(18),px(164),px(32)};
       text(dc,stop ? L"Screen sharing" : L"Voice chat",title,titleFont,ink,DT_LEFT|DT_SINGLELINE);
-      text(dc,subtitle(),detail,detailFont,current.state.joined ? accent : muted,DT_LEFT|DT_SINGLELINE);
+      text(dc,subtitle(),detail,detailFont,current.capturing ? accent : muted,DT_LEFT|DT_SINGLELINE);
     } else {
       const wchar_t* caption=quick ? (!current.state.joined ? L"Join" : current.capturing ? L"Mic on" : current.state.microphone ? L"…" : L"Muted") : id==11 ? L"Join voice" : id==12 ? (current.state.microphone ? L"Mute mic" : L"Unmute") : id==13 ? (current.state.deafened ? L"Hear voice" : L"Mute voice") : nullptr;
       const auto symbol=quick && !current.state.joined ? 11u : id;
@@ -259,7 +262,7 @@ struct VoicePanel::Impl {
       Gdiplus::Graphics graphics(dc); graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
       Gdiplus::Pen border(tint(edge),1.f);
       Gdiplus::GraphicsPath shape;
-      roundedPath(shape,0.5f,0.5f,rect.right-0.5f,rect.bottom-0.5f,static_cast<float>(px(30)));
+      roundedPath(shape,0.5f,0.5f,rect.right-0.5f,rect.bottom-0.5f,static_cast<float>(px(design::panelRadius*2)));
       graphics.DrawPath(&border,&shape);
       if(expanded) {
         Gdiplus::Pen separator(Gdiplus::Color(20,255,255,255),1.f);
@@ -315,6 +318,8 @@ VoicePanel::VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> st
 VoicePanel::~VoicePanel()=default;
 void VoicePanel::pump() {
   if(!impl_) return;
+  if(externalVoiceActive()) {if(IsWindowVisible(impl_->window)) ShowWindow(impl_->window,SW_HIDE);}
+  else if(!IsWindowVisible(impl_->window)) ShowWindow(impl_->window,SW_SHOWNOACTIVATE);
   MSG message; for(unsigned count=0;count<64 && PeekMessageW(&message,nullptr,0,0,PM_REMOVE);++count) { TranslateMessage(&message); DispatchMessageW(&message); }
 }
 #ifdef SANSER_CODEC_TEST

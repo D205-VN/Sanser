@@ -1,0 +1,24 @@
+{
+  "baseline": {
+    "file": "baseline-diagnostics.json",
+    "viewer": "windows",
+    "host": "macos",
+    "network": "lan",
+    "role": "client"
+  },
+  "candidate": {
+    "file": "candidate-diagnostics.json",
+    "viewer": "windows",
+    "host": "macos",
+    "network": "lan",
+    "role": "client"
+  },
+  "conditions": {
+    "sameDevices": false,
+    "sameNetwork": false,
+    "sameAudioRoute": false,
+    "sameWorkload": false,
+    "participants": 3,
+    "microphones": 2
+  }
+}

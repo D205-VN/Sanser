@@ -1,15 +1,16 @@
 [package]
 name = "sanser-mobile-p2p"
-description = "Mobile C ABI for the shared authenticated Sanser P2P engine"
+description = "Mobile C ABI for the shared Sanser P2P and consented file workers"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
-rust-version.workspace = true
+rust-version = "1.90"
 
 [lib]
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+sanser-file-transfer = { path = "../sanser-file-transfer" }
 sanser-p2p = { path = "../sanser-p2p" }
 serde.workspace = true
 serde_json.workspace = true

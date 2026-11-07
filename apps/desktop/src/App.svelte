@@ -4,7 +4,7 @@
   import BrandMark from './components/BrandMark.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import { runtimeStatus, stopEngine } from './lib/platform';
-  import type { Page, RuntimeStatus, SharingGroup, SharingMember } from './lib/types';
+  import type { Page, RuntimeStatus, SharingGroup, SharingMember, ConnectionSession } from './lib/types';
   import ActiveSession from './pages/ActiveSession.svelte';
   import About from './pages/About.svelte';
   import Computers from './pages/Computers.svelte';
@@ -22,6 +22,7 @@
   import { sharing } from './stores/sharing';
   import Updater from './components/Updater.svelte';
   import ConnectionAlerts from './components/ConnectionAlerts.svelte';
+  import FileInvitations from './components/FileInvitations.svelte';
   import { incomingSharingInvitations } from './lib/sharingInvitations';
 
   let updater = $state<{ checkForUpdates: (manual?: boolean) => Promise<void> }>();
@@ -37,6 +38,7 @@
   let autoOnlineAccountId = $state<string | null>(null);
   let sharingActionError = $state<string | null>(null);
   const invitations = $derived(incomingSharingInvitations($sharing.groups, $presence.deviceId, $connection.session?.id));
+  const hostFileSession = $derived($host.engineRunning && !$host.sharingActive ? ($host.sessions as ConnectionSession[]).find((item) => item.status === 'accepted')?.id ?? null : null);
   const watchingCount = $derived($sharing.paused ? 0 : $sharing.ownGroup?.members.filter((member) => {
     const health = $sharing.peerVideo[member.id];
     return member.state === 'accepted' && member.startedAt !== undefined && (!health || (health.ready && health.running && health.videoState === 'active'));
@@ -157,6 +159,7 @@
     let stopPerformance: UnlistenFn | undefined;
     let stopPaths: UnlistenFn | undefined;
     let stopFec: UnlistenFn | undefined;
+    let stopVoiceSharing: UnlistenFn | undefined;
     const expiryTimer = window.setInterval(checkSessionInactivity, 60_000);
     window.addEventListener('focus', checkSessionInactivity);
     document.addEventListener('visibilitychange', checkSessionInactivity);
@@ -167,6 +170,11 @@
         const [loadedRuntime] = await Promise.all([runtimeStatus(), session.initialize(loadedPreferences.serverUrl)]);
         runtime = loadedRuntime;
         if (loadedRuntime.capabilities.desktopShell.state === 'available') {
+          const stopVoice = await listen<string>('voice-stop-sharing', (event) => {
+            if (event.payload === $sharing.ownGroup?.id) void stopSharing();
+          }).catch(() => undefined);
+          if (routeHealthLifecycle.signal.aborted) stopVoice?.();
+          else stopVoiceSharing = stopVoice;
           const unlisten = await listen<DirectRouteHealth>('direct-route-health', (event) => networkDiagnostics.updateRouteHealth(event.payload))
             .catch(() => { diagnostics.add({ level: 'warn', category: 'network', message: 'Live route comparison is unavailable; measurements are still saved in connection reports.' }); return undefined; });
           if (routeHealthLifecycle.signal.aborted) unlisten?.();
@@ -193,6 +201,7 @@
       stopPerformance?.();
       stopPaths?.();
       stopFec?.();
+      stopVoiceSharing?.();
       void sharing.shutdown();
       window.clearInterval(expiryTimer);
       window.removeEventListener('focus', checkSessionInactivity);
@@ -231,6 +240,7 @@
       <main bind:this={pageContainer} class:session-scroll={page === 'session'} class="page-scroll">
         {#if signOutError}<div class="notice error" role="alert">{signOutError}</div>{/if}
         {#if sharingActionError}<div class="notice error" role="alert">{sharingActionError}</div>{/if}
+        <FileInvitations hostSession={hostFileSession} clientSession={$connection.engineRunning && $connection.session?.accessMode !== 'view-only' ? $connection.session?.id ?? null : null} {navigate} />
         {#if $sharing.error && page !== 'host'}<div class="notice warning" role="status">Screen sharing invitations could not be loaded. {$sharing.error} <button class="button small" onclick={() => sharing.refresh()}>Retry invitations</button></div>{/if}
         {#each invitations as invitation (invitation.member.id)}
           <div class="notice sharing-invitation" role="status"><div><strong>{$sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? 'A computer in your account'} invited you to view its screen.</strong><p>View only · Your keyboard and mouse remain on this computer.</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? 'Open shared screen' : 'Join'}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>Decline</button>{/if}</span></div>

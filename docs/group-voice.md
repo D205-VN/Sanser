@@ -165,3 +165,11 @@ The compact floating bar exposes Join before joining and an explicit mic state
 and toggle afterward. Expanded controls distinguish Unmute/Mute mic, Hear/Mute
 voice and Leave. Hosts retain the combined sharing bar; viewers retain voice-only
 controls. Join still listens only and Unmute explicitly opens capture.
+
+## Phase 5a diagnostics follow-up
+
+[Voice/performance evidence](voice-performance-ab.md) adds live interval counter
+summaries, consent/configuration epochs and an offline A/B report tool. Existing
+voice permission, audio capture and codec settings are unchanged. No real audio
+hardware is exercised by its tests, and this is not yet the LiveKit prototype or
+an audible-quality/latency acceptance result.

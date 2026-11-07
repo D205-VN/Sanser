@@ -10,6 +10,17 @@ export interface NativeMetric {
   updatedAtMs: number;
   source: string;
 }
+export interface NativeAudioCounter {
+  latest: number;
+  delta: number | null;
+  intervalMs: number | null;
+  observedIncrease: number;
+  observedDurationMs: number;
+  resets: number;
+  samples: number;
+  updatedAtMs: number;
+  source: string;
+}
 export interface NativePerformanceUpdate {
   reportId: string;
   sessionId?: string | null;
@@ -20,7 +31,7 @@ export interface NativePerformanceUpdate {
   relayTransport: 'udp' | 'wss' | null;
   startedAtMs: number;
   ended: boolean;
-  performance: { metrics: Record<string, NativeMetric> };
+  performance: { metrics: Record<string, NativeMetric>; audio?: { counters: Record<string, NativeAudioCounter> } };
   findings: string[];
 }
 
@@ -44,4 +55,8 @@ export const nativePerformance = {
 
 export function metricIsFresh(metric: NativeMetric | undefined, now: number): metric is NativeMetric {
   return !!metric && now >= metric.updatedAtMs && now - metric.updatedAtMs <= 5_000;
+}
+
+export function audioCounterIsFresh(counter: NativeAudioCounter | undefined, now: number): counter is NativeAudioCounter {
+  return !!counter && now >= counter.updatedAtMs && now - counter.updatedAtMs <= 5_000;
 }

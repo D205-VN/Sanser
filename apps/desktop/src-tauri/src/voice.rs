@@ -56,6 +56,7 @@ pub(crate) fn parse_status(line: &[u8]) -> Option<VoiceStatus> {
             | "no-device"
             | "unavailable"
             | "stopped"
+            | "external"
     ) {
         return None;
     }

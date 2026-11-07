@@ -9,12 +9,15 @@ class MobileTouchSurface extends StatefulWidget {
   final TouchMode mode;
   final Size videoSize;
   final int resetZoom;
+  final VoidCallback? onTapFeedback, onHoldFeedback;
   const MobileTouchSurface({
     super.key,
     required this.input,
     required this.mode,
     required this.videoSize,
     this.resetZoom = 0,
+    this.onTapFeedback,
+    this.onHoldFeedback,
   });
   @override
   State<MobileTouchSurface> createState() => _MobileTouchSurfaceState();
@@ -149,6 +152,7 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
         _point(dragOrigin ?? startFocal);
         dragging = true;
         unawaited(widget.input.button(0, true));
+        if (widget.input.enabled) widget.onHoldFeedback?.call();
       }
       _point(d.localFocalPoint);
     }
@@ -202,6 +206,7 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
               _point(d.localPosition);
             }
             unawaited(widget.input.click());
+            if (widget.input.enabled) widget.onTapFeedback?.call();
           },
           onLongPressStart: (d) {
             if (widget.mode == TouchMode.pan) return;
@@ -210,6 +215,7 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
               _point(d.localPosition);
             }
             unawaited(widget.input.click(1));
+            if (widget.input.enabled) widget.onHoldFeedback?.call();
           },
           child: Stack(
             children: [
@@ -255,7 +261,12 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
 /// has an owner so releasing a stick never releases another pressed control.
 class MobileGameControls extends StatefulWidget {
   final MobileInput input;
-  const MobileGameControls({super.key, required this.input});
+  final VoidCallback? onPressFeedback;
+  const MobileGameControls({
+    super.key,
+    required this.input,
+    this.onPressFeedback,
+  });
   @override
   State<MobileGameControls> createState() => _MobileGameControlsState();
 }
@@ -263,6 +274,7 @@ class MobileGameControls extends StatefulWidget {
 class _MobileGameControlsState extends State<MobileGameControls> {
   Offset stick = Offset.zero;
   void _stick(Offset p) {
+    final wasActive = stick.dx.abs() > 12 || stick.dy.abs() > 12;
     stick = Offset(
       (p.dx - 60).clamp(-42.0, 42.0),
       (p.dy - 60).clamp(-42.0, 42.0),
@@ -276,6 +288,11 @@ class _MobileGameControlsState extends State<MobileGameControls> {
       };
       unawaited(widget.input.hold(key, down, 'stick'));
     }
+    if (!wasActive &&
+        (stick.dx.abs() > 12 || stick.dy.abs() > 12) &&
+        widget.input.enabled) {
+      widget.onPressFeedback?.call();
+    }
     setState(() {});
   }
 
@@ -288,8 +305,10 @@ class _MobileGameControlsState extends State<MobileGameControls> {
 
   Widget _button(String label, int code) => Listener(
     key: ValueKey('game-$code'),
-    onPointerDown: (event) =>
-        unawaited(widget.input.hold(code, true, '$label:${event.pointer}')),
+    onPointerDown: (event) {
+      unawaited(widget.input.hold(code, true, '$label:${event.pointer}'));
+      if (widget.input.enabled) widget.onPressFeedback?.call();
+    },
     onPointerUp: (event) =>
         unawaited(widget.input.hold(code, false, '$label:${event.pointer}')),
     onPointerCancel: (event) =>

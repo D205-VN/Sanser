@@ -13,6 +13,10 @@ template<class F> bool waitFor(F check) {
 }
 int main() {
   try {
+    const std::string id="12345678-1234-1234-1234-123456789abc";
+    require(externalVoiceCommand("voice-external\t"+id+"\t1").has_value(),"External voice gate command UUID");
+    for(const auto& invalid:std::array<std::string,3>{"voice-external\t"+id+"\t2","voice-external\t"+id+"\t1\t0","voice-external\tbad\t1"})
+      require(!externalVoiceCommand(invalid),"Malformed gate command must not be acknowledged");
     Options source; source.host=true; source.input=false; source.audio=true; source.sharing=true;
     Broadcaster group(source);
     std::array<std::unique_ptr<Peer>,3> viewers;
@@ -49,6 +53,12 @@ int main() {
     require(group.encodedAudioPackets()-before==60,"Opus must encode once per source block, not once per viewer");
     require(waitFor([&] { return received[0]>20 && received[1]>20 && received[2]>20; }),"All viewers receive Opus/PCM with independent credentials");
     require(!wrong,"PCM fallback must keep exact stereo samples");
+    const auto beforeGate=group.encodedAudioPackets();const auto gatePicture=videos[0].load();
+    externalVoiceActive(true);send(30);
+    require(group.encodedAudioPackets()==beforeGate,"WebRTC voice must gate shared system sound before encoding");
+    require(waitFor([&]{return videos[0]>gatePicture;}),"External voice gate must preserve screen video");
+    externalVoiceActive(false);send(30);
+    require(group.encodedAudioPackets()>beforeGate,"Closing external voice restores shared system sound");
     viewers[0]->setAudioMuted(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
     const auto muted=received[0].load(),healthy=received[1].load(),picture=videos[0].load();

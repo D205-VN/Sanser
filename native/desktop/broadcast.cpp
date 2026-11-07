@@ -204,7 +204,7 @@ void Broadcaster::publish(Frame frame) {
   for(const auto& [id,peer]:peers_) { (void)id; peer->submit(prepared); }
 }
 void Broadcaster::audio(const AudioSamples& samples) {
-  if(!running_ || !source_.audio) return;
+  if(externalVoiceActive() || !running_ || !source_.audio) return;
   std::lock_guard audioLock(audioMutex_);
   std::vector<std::shared_ptr<Delivery>> peers;
   { std::lock_guard lock(peersMutex_); for(const auto& [id,peer]:peers_) { (void)id; peers.push_back(peer); } }
@@ -299,6 +299,10 @@ HostOutput::HostOutput(const Options& options):options_(options) {
   } else {
     single_=std::make_unique<Peer>(options);
     single_->onInput=[this](Input input) { if(onInput) onInput(input); };
+    single_->onGamepadAvailable=[this]{return onGamepadAvailable && onGamepadAvailable();};
+    single_->onClipboard=[this](bool write,std::string text,std::function<bool()> current,Peer::ClipboardResult done) {
+      if(onClipboard)onClipboard(write,std::move(text),std::move(current),std::move(done));else done(3,{});
+    };
     single_->onKeyframe=[this] { keyframeRequested_=true; };
     single_->onReady=[this] { keyframeRequested_=true; };
   }
@@ -323,6 +327,9 @@ void HostOutput::setCapturePaused(bool paused) { if(broadcast_) broadcast_->setC
 std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : single_->recommendedBitrate(); }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }
 void HostOutput::pumpControl() {
+  // The single peer drains its own private file/input commands on the UDP
+  // worker. Do not race it here or reject a file command as a sharing command.
+  if(!broadcast_) return;
   if(broadcast_) broadcast_->updateHealth();
   for(const auto& line:takeNativeCommands()) {
     const auto command=parseSharingCommand(line,options_.bitrate);

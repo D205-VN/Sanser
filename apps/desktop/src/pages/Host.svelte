@@ -3,6 +3,7 @@
   import Icon from '../components/Icon.svelte';
   import Toggle from '../components/Toggle.svelte';
   import SharingPanel from '../components/SharingPanel.svelte';
+  import SessionFiles from '../components/SessionFiles.svelte';
   import WindowsUac from '../components/WindowsUac.svelte';
   import ConnectionNotificationSettings from '../components/ConnectionNotificationSettings.svelte';
   import { sharing } from '../stores/sharing';
@@ -169,5 +170,8 @@
         <div class="empty compact-empty"><div><h3>No active client</h3><p>No computer is accessing your screen.</p></div></div>
       {/if}
     </article>
+    {#if activeSession && $host.engineRunning && !$host.sharingActive}
+      {#key activeSession.id}<SessionFiles sessionId={activeSession.id} kind="host" />{/key}
+    {/if}
   </div>
 </section>

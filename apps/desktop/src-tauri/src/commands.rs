@@ -190,9 +190,11 @@ pub fn get_runtime_status(
                 )
             },
             gamepad: Capability::planned("Native controller state transport is not linked yet"),
-            clipboard: Capability::planned(
-                "Permission-gated clipboard transport is not linked yet",
-            ),
+            clipboard: if host_probe.clipboard || client_probe.clipboard {
+                Capability::available()
+            } else {
+                Capability::unavailable("Update the native engine to use manual text clipboard")
+            },
             p2p_v2: Capability::available(),
             cross_platform_host: host_probe.compatible && host_probe.cross_platform,
             cross_platform_client: client_probe.compatible && client_probe.cross_platform,
@@ -275,6 +277,11 @@ pub async fn launch_engine(
     relay: State<'_, crate::relay::RelayManager>,
     mut request: LaunchEngineRequest,
 ) -> Result<(), DesktopError> {
+    if !crate::voice_window::native_replacement_allowed(&app, request.kind) {
+        return Err(DesktopError::Unavailable(
+            "Close enhanced voice before replacing a desktop session".into(),
+        ));
+    }
     let reserved_socket = if request.relay {
         relay.verify_launch(&request)?;
         request.relay_transport = relay.transport(
@@ -388,6 +395,66 @@ pub fn set_viewer_audio(
     let session = uuid::Uuid::parse_str(&session_id)
         .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
     engines.set_viewer_audio(session, muted)
+}
+
+#[tauri::command]
+pub fn session_user_capabilities(
+    engines: State<'_, EngineManager>,
+    session_id: String,
+) -> Result<crate::engine_user::Capabilities, DesktopError> {
+    let id = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    engines.user_capabilities(id)
+}
+#[tauri::command]
+pub fn session_file_status(
+    engines: State<'_, EngineManager>,
+    kind: crate::models::EngineKind,
+    session_id: String,
+) -> Result<crate::file_transfer::Snapshot, DesktopError> {
+    let id = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    Ok(engines.file_service(kind, id)?.snapshot())
+}
+#[tauri::command]
+pub async fn session_file_action(
+    app: AppHandle,
+    engines: State<'_, EngineManager>,
+    kind: crate::models::EngineKind,
+    session_id: String,
+    action: crate::file_transfer::Action,
+) -> Result<crate::file_transfer::Snapshot, DesktopError> {
+    let id = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    let files = engines.file_service(kind, id)?;
+    let directory = if matches!(action, crate::file_transfer::Action::Accept { .. }) {
+        Some(
+            app.path()
+                .download_dir()
+                .map_err(|_| DesktopError::Storage("Downloads directory is unavailable".into()))?,
+        )
+    } else {
+        None
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        files.action(action, directory).map_err(DesktopError::from)
+    })
+    .await
+    .map_err(|_| DesktopError::Process("File operation ended unexpectedly".into()))?
+}
+#[tauri::command]
+pub async fn session_user_action(
+    engines: State<'_, EngineManager>,
+    session_id: String,
+    operation: String,
+    text: Option<String>,
+) -> Result<String, DesktopError> {
+    let id = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    let pending = engines.user_action(id, &operation, text.as_deref().unwrap_or(""))?;
+    tauri::async_runtime::spawn_blocking(move || pending.wait())
+        .await
+        .map_err(|_| DesktopError::Process("Native text operation ended unexpectedly".into()))?
 }
 
 #[tauri::command]

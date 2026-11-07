@@ -16,6 +16,7 @@
 #include "opus_audio.h"
 #include "audio_route_watch.h"
 #include "audio_playout.h"
+#include "legacy_host_shortcut.h"
 
 #include <algorithm>
 #include <atomic>
@@ -3196,9 +3197,9 @@ void handleUdpRepairStatsPayload(const std::string& json) {
             << "\n";
 }
 
-int handleControlPayload(const std::string& json) {
+int handleControlPayload(const std::string& json,bool allowHostShortcuts=false) {
   const std::string type = jsonStringValue(json, "type");
-  const bool remoteInputEvent = type == "input-batch" ||
+  const bool remoteInputEvent = type == "host-shortcut" || type == "input-batch" ||
                                 type == "pointer-move" ||
                                 type == "pointer-down" ||
                                 type == "pointer-up" ||
@@ -3222,9 +3223,22 @@ int handleControlPayload(const std::string& json) {
     const auto events = jsonObjectArrayValue(json, "events");
     int applied = 0;
     for (const auto& eventJson : events) {
-      applied += handleControlPayload(eventJson);
+      applied += handleControlPayload(eventJson,allowHostShortcuts);
     }
     return applied;
+  } else if(type=="host-shortcut") {
+    if(!allowHostShortcuts)return 0;
+    const bool applied=sanser::applyLegacyHostShortcut(jsonStringValue(json,"action"),
+      []{resetRemoteInputState("host-shortcut");resetAllGamepadSlots("host-shortcut");},
+      []{std::lock_guard lock(gRemoteInputStateMutex);
+        return std::none_of(gRemoteKeysDown.begin(),gRemoteKeysDown.end(),[](const auto& key){return key.down;}) &&
+            std::none_of(gRemoteMouseButtonsDown.begin(),gRemoteMouseButtonsDown.end(),[](bool down){return down;});},
+      []{return gRemoteInputAllowed.load(std::memory_order_relaxed);},
+      [](std::uint16_t hid,bool down){
+        const auto scan=sanser::desktop::windowsKey(hid);
+        return sendKeyInjection(KeyInjection{0,static_cast<WORD>(scan&255),(scan&0x100)!=0,true},down);
+      });
+    recordInputHealth(InputHealthKind::Key,applied);return applied ? 1:0;
   } else if (type == "pointer-move") {
     const double x = jsonDoubleValue(json, "x");
     const double y = jsonDoubleValue(json, "y");
@@ -3894,6 +3908,7 @@ private:
                 << ",\"inputSessionId\":\"" << jsonEscape(inputSessionId) << "\""
                 << ",\"inputBatch\":true"
                 << ",\"inputAck\":true"
+                << ",\"hostShortcuts\":" << (canPacketAuth && gRemoteInputAllowed.load() ? "true":"false")
                 << ",\"videoUdpPacing\":true"
                 << ",\"audioUdp\":true"
                 << ",\"audioPcm16\":" << (clientAudioPcm16 ? "true" : "false")
@@ -3962,6 +3977,7 @@ private:
                << ",\"inputFailureStatus\":" << gInputFailureStatus.load()
                << ",\"inputFailureError\":" << gInputFailureError.load()
                << ",\"inputAllowed\":" << (gRemoteInputAllowed.load() ? 1 : 0)
+               << ",\"hostShortcuts\":" << (gRemoteInputAllowed.load() ? "true":"false")
                << ",\"uacFailures\":" << uacHealth.failures
                << ",\"uacReady\":" << uacHealth.readyConnections
                << ",\"uacFrames\":" << uacHealth.captureFrames
@@ -4004,7 +4020,7 @@ private:
             stale = true;
           } else {
             for (const auto& eventJson : events) {
-              applied += handleControlPayload(eventJson);
+              applied += handleControlPayload(eventJson,securePayload && sessionVerified_ && !sessionToken_.empty());
             }
             if (sequence != 0) {
               recentInputBatches_[sequence] = applied;
@@ -4050,7 +4066,7 @@ private:
           flushGamepadRumbleEvents("input-batch");
           continue;
         }
-        handleControlPayload(payload);
+        handleControlPayload(payload,securePayload && sessionVerified_ && !sessionToken_.empty());
         flushGamepadRumbleEvents("control-payload");
       } catch (const std::exception& error) {
         std::cerr << "SNINPUT control error: " << error.what() << "\n";
@@ -7489,6 +7505,29 @@ int main(int argc, char** argv) {
     require(!gRemoteMouseButtonsDown[0] && !remoteKeyDown(key),"Later Reset must release retained input without replaying presses");
     const auto settled=attempts; resetRemoteInputState("synthetic-idempotent");
     require(attempts==settled,"A successful Reset must not repeat releases");
+    std::vector<INPUT> shortcutEvents;unsigned failAt=0;
+    gInputDispatchTestHook=[&](INPUT& input,sanser::uac::InputDispatch& dispatch)->UINT {
+      shortcutEvents.push_back(input);
+      if(failAt && shortcutEvents.size()==failAt){dispatch.failureStatus=4;dispatch.failureError=ERROR_ACCESS_DENIED;return 0;}
+      dispatch.privileged=1;return 1;
+    };
+    const std::string named="{\"type\":\"host-shortcut\",\"action\":\"desktop\"}";
+    const bool oldAllowed=gRemoteInputAllowed.exchange(false);
+    struct RestorePolicy {bool value;~RestorePolicy(){gRemoteInputAllowed=value;}} restorePolicy{oldAllowed};
+    require(handleControlPayload(named,true)==0 && shortcutEvents.empty(),"Host policy allowed fixed shortcut");
+    gRemoteInputAllowed=true;
+    require(handleControlPayload(named)==0 && shortcutEvents.empty(),"Unauthenticated channel allowed fixed shortcut");
+    require(handleControlPayload("{\"type\":\"host-shortcut\",\"action\":\"arbitrary\"}",true)==0 && shortcutEvents.empty(),"Unlisted shortcut reached OS");
+    require(handleControlPayload(named,true)==1 && shortcutEvents.size()==4,"Fixed action did not produce balanced edges");
+    require(shortcutEvents.front().ki.wScan==0x5b && (shortcutEvents.front().ki.dwFlags&KEYEVENTF_EXTENDEDKEY) &&
+      shortcutEvents.back().ki.wScan==0x5b && (shortcutEvents.back().ki.dwFlags&KEYEVENTF_KEYUP),"Win shortcut aliased to Mac Command/Ctrl");
+    shortcutEvents.clear();failAt=2;
+    require(handleControlPayload(named,true)==0 && shortcutEvents.size()==4 &&
+      (shortcutEvents[2].ki.dwFlags&KEYEVENTF_KEYUP) && (shortcutEvents[3].ki.dwFlags&KEYEVENTF_KEYUP),"Partial shortcut retried a press instead of reverse cleanup");
+    shortcutEvents.clear();failAt=3;
+    require(handleControlPayload(named,true)==0,"Rejected key-up reported success");
+    const KeyInjection keyD{0,0x20,false,true};require(remoteKeyDown(keyD),"Failed release lost tracked ownership");
+    failAt=0;resetRemoteInputState("synthetic-shortcut-recovery");require(!remoteKeyDown(keyD),"Watchdog/reset could not recover failed shortcut release");
     std::cout<<"Legacy input: denied clicks/scroll/keys, no false-success fallback, no key replay and recovered releases passed\n";
     return 0;
   }
@@ -7623,7 +7662,7 @@ int main(int argc, char** argv) {
                    "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,\"multiViewerHost\":true,"
                    "\"h264EncoderImplementation\":true,"
                    "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,"
-                   "\"inputImplementation\":true,\"gamepadImplementation\":true}\n";
+                   "\"inputImplementation\":true,\"clipboardImplementation\":true,\"unicodeInputImplementation\":true,\"gamepadImplementation\":true}\n";
       return 0;
     }
     makeProcessDpiAware();

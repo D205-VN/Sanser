@@ -28,6 +28,32 @@ typedef struct {
 // Latest one-second native snapshot; numeric counters only, no payload/IDs.
 void sanser_mobile_stats(SanserMobileClient *client,SanserMobileStats *stats);
 void sanser_mobile_input(SanserMobileClient *client,unsigned kind,unsigned x,unsigned y,unsigned code,int delta,int down);
+typedef struct {
+  int connected,sampled;
+  uint32_t buttons; // Mobile physical layout: A B X Y LB RB Start Select L3 R3 U D L R.
+  double lx,ly,rx,ry,lt,rt; // Y up, sticks [-1,1], triggers [0,1].
+} SanserMobileGamepad;
+int sanser_mobile_gamepad_available(SanserMobileClient *);
+// Capture IDs are monotonic per client. Old stop/sample commands never affect
+// a replacement. Native snapshots/heartbeat bypass Flutter input serialization.
+int sanser_mobile_gamepad_capture(SanserMobileClient *,uint64_t capture,int enabled);
+int sanser_mobile_gamepad_sample(SanserMobileClient *,uint64_t capture,const SanserMobileGamepad *);
+// Bits: 1 available, 2 matching capture active, 4 locally armed, 8 connected.
+unsigned sanser_mobile_gamepad_status(SanserMobileClient *,uint64_t capture);
+int sanser_mobile_text_available(SanserMobileClient *client);
+// UTF-8, explicit length, <=1024 bytes/256 UTF-16 units. No C-string truncation.
+int sanser_mobile_text(SanserMobileClient *client,const uint8_t *utf8,size_t bytes);
+int sanser_mobile_clipboard_available(SanserMobileClient *client);
+typedef void (*SanserMobileClipboardReply)(void *,unsigned,const uint8_t *,size_t);
+// A queued request completes once on a native worker, including stop/timeout.
+int sanser_mobile_clipboard(SanserMobileClient *,int write,const uint8_t *utf8,size_t bytes,void *context,SanserMobileClipboardReply reply);
+int sanser_mobile_files_enable(SanserMobileClient *,int enabled); // Before start only.
+int sanser_mobile_files_available(SanserMobileClient *);
+uint32_t sanser_mobile_file_generation(SanserMobileClient *);
+int sanser_mobile_file_send(SanserMobileClient *,uint32_t generation,const uint8_t *,size_t);
+// Native receive queue: at most 16 bounded messages. Caller supplies 8192 bytes.
+size_t sanser_mobile_file_receive(SanserMobileClient *,uint32_t generation,uint8_t *,size_t capacity);
+int sanser_mobile_file_overflow(SanserMobileClient *); // Read-and-clear; abort files only.
 void sanser_mobile_mute(SanserMobileClient *client,int muted);
 void sanser_mobile_keyframe(SanserMobileClient *client);
 // One PCM producer and one realtime render consumer; render never locks/allocates.

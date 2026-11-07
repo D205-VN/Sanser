@@ -119,7 +119,7 @@ INPUT winInput(const Request& request) {
   INPUT in{}; in.type=request.type;
   if(in.type==INPUT_KEYBOARD) {
     in.ki.dwFlags=request.flags;
-    if(request.flags&KEYEVENTF_SCANCODE) in.ki.wScan=static_cast<WORD>(request.data); else in.ki.wVk=static_cast<WORD>(request.data);
+    if(request.flags&(KEYEVENTF_SCANCODE|KEYEVENTF_UNICODE)) in.ki.wScan=static_cast<WORD>(request.data); else in.ki.wVk=static_cast<WORD>(request.data);
   } else { in.mi.dwFlags=request.flags; in.mi.dx=request.x; in.mi.dy=request.y; in.mi.mouseData=request.data; }
   return in;
 }

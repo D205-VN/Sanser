@@ -2,6 +2,9 @@
 #include "telemetry.h"
 #include "transport.h"
 #include "media_thread.h"
+#include "text_input.h"
+#include "user_ipc.h"
+#include "session_shortcuts.h"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -34,6 +37,7 @@
 namespace sanser::desktop {
 namespace {
 std::atomic<bool> stopRequested{false};
+std::atomic<bool> externalVoice{false};
 std::mutex nativeCommandMutex;
 std::vector<std::string> nativeCommands;
 std::vector<std::string> voiceCommands;
@@ -128,21 +132,27 @@ sockaddr_in endpoint(const std::string& value) {
   return address;
 }
 }
+bool externalVoiceActive() { return externalVoice.load(std::memory_order_acquire); }
+void externalVoiceActive(bool active) { externalVoice.store(active,std::memory_order_release); }
 Options parseOptions(bool host, int argc, char** argv) {
   Options o; o.host = host;
+  o.files=std::getenv("SANSER_FILE_TRANSFER") && std::getenv("SANSER_CONTROL_STDIN");
   if (std::getenv("SANSER_CONTROL_STDIN")) {
     std::thread([] {
       std::string line; bool oversized=false; int c;
       while((c=std::fgetc(stdin))!=EOF) {
-        if(c!='\n') { if(line.size()<1024) line.push_back(static_cast<char>(c)); else oversized=true; continue; }
+        if(c!='\n') { if(line.size()<sanser::maxClipboardBytes*2+128) line.push_back(static_cast<char>(c)); else oversized=true; continue; }
         if(!oversized && line=="stop") break;
         if(!oversized) {
           std::lock_guard lock(nativeCommandMutex);
-          if(line.starts_with("voice-config\t") || line.starts_with("voice-mute\t")) {
+          if(line.starts_with("voice-config\t") || line.starts_with("voice-mute\t") || line.starts_with("voice-external\t")) {
             if(voiceCommands.size()>=16) voiceCommands.erase(voiceCommands.begin());
             voiceCommands.push_back(std::move(line));
           } else {
-            if(nativeCommands.size()>=32) break;
+            if(nativeCommands.size()>=32) {
+              if(const auto request=parseUserCommand(line)) { if(request->kind==UserCommand::FileMessage) {if(request->body.size()>=4) {std::uint32_t epoch=0;for(unsigned i=0;i<4;++i)epoch=(epoch<<8)|static_cast<std::uint8_t>(request->body[i]);std::fprintf(stdout,"SNUSER_FILE_FAIL\t%u\n",epoch);std::fflush(stdout);}}else userReply(request->request,2);line.clear();oversized=false;continue; }
+              break;
+            }
             nativeCommands.push_back(std::move(line));
           }
         }
@@ -164,6 +174,7 @@ Options parseOptions(bool host, int argc, char** argv) {
     else if (arg == "--group-voice") o.groupVoice = true;
     else if (arg == "--share-peer-id") o.viewerId = value();
     else if (arg == "--disable-input") o.input = false;
+    else if (arg == "--enable-clipboard") o.clipboard = true;
     else if (arg == "--disable-audio") o.audio = false;
     else if (arg == "--mute-audio") o.audioMuted = true;
     else if (arg == "--relative-mouse") throw std::runtime_error("SNV2 currently supports absolute mouse mode; select Auto or Absolute");
@@ -194,10 +205,19 @@ std::vector<std::string> takeVoiceCommands() {
 }
 bool nativeStopRequested() { return stopRequested.load(); }
 Bytes encodeInput(const Input& input) {
+  if(input.kind==Input::Text) {
+    if(!sanser::textInputUtf16(input.text)) return {};
+    Bytes out{Input::Text}; out.insert(out.end(),input.text.begin(),input.text.end()); return out;
+  }
   Bytes out{static_cast<std::uint8_t>(input.kind), static_cast<std::uint8_t>(input.down)};
   u16(out, input.x); u16(out, input.y); u16(out, input.code); u16(out, static_cast<std::uint16_t>(input.delta)); return out;
 }
 std::optional<Input> decodeInput(const Bytes& b) {
+  if(!b.empty() && b[0]==Input::Text) {
+    if(b.size()>sanser::maxTextInputBytes+1) return std::nullopt;
+    Input input; input.kind=Input::Text; input.text.assign(b.begin()+1,b.end());
+    return sanser::textInputUtf16(input.text) ? std::optional<Input>{std::move(input)}:std::nullopt;
+  }
   if (b.size() != 10 || b[0] > Input::Reset || b[1] > 1) return std::nullopt;
   Input input{static_cast<Input::Kind>(b[0]), r16(b.data()+2), r16(b.data()+4), r16(b.data()+6), static_cast<std::int16_t>(r16(b.data()+8)), b[1] != 0};
   if ((input.kind == Input::Key && (input.code < 4 || input.code > 231)) || (input.kind == Input::Button && input.code > 2)) return std::nullopt;
@@ -379,6 +399,7 @@ Peer::~Peer() { stop(); if (socket_ != -1) closeSocket(static_cast<Socket>(socke
 }
 void Peer::start() {
   if (running_.exchange(true)) return;
+  userMailbox_->alive=true;
   audioMuted_=options_.audioMuted;
   voiceSlot_=options_.voiceSlot;
   lastReceived_=Clock::now();
@@ -387,7 +408,7 @@ void Peer::start() {
       if(options_.host && !options_.sharedAudioEncoder) audioEncoder_=std::make_unique<sanser::audio::Encoder>();
       else if(onAudio) audioReceiver_=std::make_unique<sanser::audio::ReceiveWorker>([this](sanser::audio::Decoded decoded) { if(!audioMuted_) onAudio(std::move(decoded.samples)); });
     }
-    if(options_.host && options_.input) inputWorker_=std::make_unique<InputWorker>(
+    if(options_.host && options_.input && !options_.sharing) inputWorker_=std::make_unique<InputWorker>(
       [this](Input event) {
         if(onInput) {
           onInput(event);
@@ -403,7 +424,7 @@ void Peer::start() {
   }
   catch(...) { running_=false; sendReady_.notify_all(); if(sender_.joinable()) sender_.join(); if(inputWorker_) inputWorker_->stop(); throw; }
 }
-void Peer::stop() { if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); audioReceiver_.reset(); if(inputWorker_) inputWorker_->stop(); }
+void Peer::stop() { userMailbox_->alive=false; if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); audioReceiver_.reset(); if(inputWorker_) inputWorker_->stop(); }
 void Peer::datagram(const Bytes& b) {
   const auto result=io_.send(socket_,b.data(),b.size());
   if(result.bytes==static_cast<std::ptrdiff_t>(b.size())) return;
@@ -415,32 +436,39 @@ void Peer::datagram(const Bytes& b) {
   }
   throw std::runtime_error("UDP send failed, socket error "+std::to_string(result.error));
 }
-void Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable,Clock::time_point deadline,std::shared_ptr<std::atomic<std::uint32_t>> originalSent) {
+bool Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream,std::uint64_t frame,std::uint16_t flags,bool reliable,Clock::time_point deadline,std::shared_ptr<std::atomic<std::uint32_t>> originalSent) {
   const auto queuedAt=Clock::now(); // Include sender mutex/encryption time in application input latency.
   std::lock_guard lock(sendMutex_);
-  if(!options_.host && inputSuspended_ && (type==snv2::PacketType::Keyboard || type==snv2::PacketType::MouseMove)) return;
-  if(type==snv2::PacketType::Video && !(flags & snv2::kFlagRetransmitted) && videoPaused_) return;
-  if (stream > 2 || (reliable && pending_.size() >= 64)) { stopReason_=4; running_=false; return; }
+  if(!options_.host && inputSuspended_ && (type==snv2::PacketType::Keyboard || type==snv2::PacketType::MouseMove)) return false;
+  if(!options_.host && type==snv2::PacketType::Keyboard && !body.empty() && body[0]==Input::Text && !textAvailable()) return false;
+  // A text edit can be declined before taking a sequence. It must not tear
+  // down a healthy video session merely because the input window is full.
+  if(reliable && !body.empty() && body[0]==Input::Text && pending_.size()>=64) return false;
+  if(type==snv2::PacketType::Video && !(flags & snv2::kFlagRetransmitted) && videoPaused_) return false;
+  if (stream > 2 || (reliable && pending_.size() >= 64)) { stopReason_=4; running_=false; return false; }
   snv2::Header h; h.packetType=type; h.streamId=stream; h.sequence=++sequences_[stream]; h.frameId=frame; h.flags=flags; h.keyId=generation_;
   auto b=codec_.seal(h,body);
-  if (type == snv2::PacketType::Disconnect) { datagram(b); return; }
+  if (type == snv2::PacketType::Disconnect) { datagram(b); return true; }
   const auto lane = type == snv2::PacketType::Video ? ((flags & snv2::kFlagRetransmitted) ? TxScheduler::Repair : TxScheduler::Video)
     : reliable ? TxScheduler::InputLane
-    : type == snv2::PacketType::Audio ? (voice::isPacket(body) ? TxScheduler::Voice : TxScheduler::Audio) : TxScheduler::Control;
+    : type == snv2::PacketType::Audio ? (voice::isPacket(body) ? TxScheduler::Voice : TxScheduler::Audio)
+    : type == snv2::PacketType::Clipboard ? TxScheduler::UserData : TxScheduler::Control;
   TxScheduler::Packet queued{b,queuedAt,frame,false,false,deadline};
   queued.inputSequence=reliable ? h.sequence : 0;
   queued.input=reliable || type==snv2::PacketType::MouseMove;
+  if(lane==TxScheduler::UserData) { queued.userMessage=UserMessages::key(body);queued.userFragment=UserMessages::fragment(body); }
   if(originalSent && type==snv2::PacketType::Video && !(flags&snv2::kFlagRetransmitted) && body.size()>=8) {
     queued.originalSent=std::move(originalSent);queued.originalOrdinal=r16(body.data())+1;
   }
   if (type == snv2::PacketType::MouseMove) tx_.latestInput(std::move(queued));
   else if (!tx_.push(lane, std::move(queued))) {
     if (lane == TxScheduler::Video) { tx_.clearRealtimeVideo(); outgoingNeedsKeyframe_ = true; ++videoQueueDrops_; }
-    else if(lane!=TxScheduler::Repair) { stopReason_=4; running_ = false; } // Stop/reset rather than silently losing key-up.
-    return;
+    else if(lane!=TxScheduler::Repair && lane!=TxScheduler::UserData) { stopReason_=4; running_ = false; } // Stop/reset rather than silently losing key-up.
+    return false;
   }
   if (reliable) pending_.emplace(h.sequence, Pending{std::move(b),{},queuedAt,0,false,true,static_cast<Input::Kind>(body[0])});
   sendReady_.notify_one();
+  return true;
 }
 void Peer::video(const Frame& frame) {
   videoPrepared(std::make_shared<const PreparedFrame>(prepareFrame(frame)));
@@ -557,15 +585,187 @@ void Peer::announceVideoRate() {
 }
 
 void Peer::input(const Input& input) {
-  if (!ready_ || !inputAvailable() || options_.host) return;
+  (void)queueInput(input);
+}
+bool Peer::gamepadAvailable() const {
+  const auto at=peerGamepadAt_.load();
+  const auto now=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+  return !options_.host && !options_.sharing && options_.input && ready_ && running_ && peerGamepad_ &&
+      at>0 && now>=at && now-at<3000;
+}
+bool Peer::gamepad(const GamepadState& state,std::uint32_t expectedGeneration) {
+  const auto bytes=encodeGamepad(state);if(bytes.empty() || !expectedGeneration)return false;
+  std::lock_guard userLock(userMutex_);std::lock_guard sendLock(sendMutex_);
+  if(!gamepadAvailable() || !inputAvailable() || remoteGeneration()!=expectedGeneration || sequences_[0]==UINT64_MAX)return false;
+  snv2::Header header;header.packetType=snv2::PacketType::Gamepad;header.streamId=0;
+  header.sequence=++sequences_[0];header.keyId=generation_;
+  // Fence snapshots behind the latest reliable reset/key action. A late
+  // pre-reset neutral sample must not rearm the next capture generation.
+  header.frameId=sequences_[2];
+  TxScheduler::Packet packet;packet.bytes=codec_.seal(header,bytes);packet.queued=Clock::now();packet.input=true;
+  packet.deadline=packet.queued+std::chrono::milliseconds(100);
+  tx_.latestGamepad(std::move(packet));sendReady_.notify_one();return true;
+}
+bool Peer::shortcut(std::span<const std::uint16_t> keys,std::uint32_t expectedGeneration) {
+  if(!validShortcutKeys(keys) || !expectedGeneration)return false;
+  return queueShortcut(keys,expectedGeneration);
+}
+bool Peer::releaseForShortcuts(std::uint32_t expectedGeneration) {
+  return expectedGeneration && queueShortcut({},expectedGeneration);
+}
+bool Peer::releaseForController(std::uint32_t expectedGeneration) {
+  return expectedGeneration && queueShortcut({},expectedGeneration,true);
+}
+bool Peer::queueShortcut(std::span<const std::uint16_t> keys,std::uint32_t expectedGeneration,bool controller) {
+  std::lock_guard userLock(userMutex_);
+  std::lock_guard sendLock(sendMutex_);
+  const auto current=[&] {return (controller ? gamepadAvailable():textAvailable()) && inputAvailable() && remoteGeneration()==expectedGeneration;};
+  const auto count=keys.empty() ? 1:keys.size()*2;
+  if(!current() || pending_.size()+count>64 || sequences_[2]>UINT64_MAX-count)return false;
+  std::vector<Input> events;
+  if(keys.empty())events.push_back(Input{});
+  for(auto key:keys)events.push_back(Input{Input::Key,0,0,key,0,true});
+  for(auto it=keys.rbegin();it!=keys.rend();++it)events.push_back(Input{Input::Key,0,0,*it,0,false});
+  // The panel releases input once on entry. Reset is a host queue fence, not
+  // an ordinary key-up: resetting per action would erase an earlier queued
+  // shortcut before a slow OS injector can execute it. Each action only has
+  // balanced edges, so rapid Copy followed by Paste retains both operations.
+  auto nextPending=pending_;std::vector<TxScheduler::Packet> packets;
+  const auto now=Clock::now();auto sequence=sequences_[2];
+  for(const auto& event:events) {
+    snv2::Header header;header.packetType=snv2::PacketType::Keyboard;header.streamId=2;
+    header.sequence=++sequence;header.flags=snv2::kFlagAcknowledgementRequired;header.keyId=generation_;
+    auto bytes=codec_.seal(header,encodeInput(event));
+    TxScheduler::Packet packet{bytes,now};packet.input=true;packet.inputSequence=header.sequence;
+    packets.push_back(std::move(packet));
+    nextPending.emplace(sequence,Pending{std::move(bytes),{},now,0,false,true,event.kind});
+  }
+  if(!current() || !tx_.pushInputBatch(std::move(packets)))return false;
+  pending_.swap(nextPending);sequences_[2]=sequence;queuedKeys_+=keys.size()*2;
+  sendReady_.notify_one();return true;
+}
+bool Peer::queueInput(const Input& input) {
+  if (!running_ || !ready_ || !inputAvailable() || options_.host) return false;
+  if(input.kind==Input::Gamepad)return false; // Only negotiated latest-state path.
+  if(input.kind==Input::Text && !textAvailable()) return false;
   // Never reserve a reliable sequence for an unsupported OS key/event. A
   // rejected payload would otherwise leave an unfillable ordered input gap.
   const auto encoded=encodeInput(input);
-  if(!decodeInput(encoded)) return;
+  if(!decodeInput(encoded)) return false;
   if(input.kind==Input::Key) ++queuedKeys_;
   if(input.kind==Input::Button) ++queuedButtons_;
   const bool reliable=input.kind!=Input::Move;
-  transmit(reliable ? snv2::PacketType::Keyboard : snv2::PacketType::MouseMove,encoded,reliable ? 2 : 0,0,reliable ? snv2::kFlagAcknowledgementRequired : 0,reliable);
+  return transmit(reliable ? snv2::PacketType::Keyboard : snv2::PacketType::MouseMove,encoded,reliable ? 2 : 0,0,reliable ? snv2::kFlagAcknowledgementRequired : 0,reliable);
+}
+bool Peer::text(const std::string& utf8,std::uint32_t expectedGeneration) {
+  std::lock_guard lock(userMutex_);
+  if((expectedGeneration && expectedGeneration!=remoteGeneration()) || !textAvailable() || !sanser::textInputUtf16(utf8)) return false;
+  Input edit; edit.kind=Input::Text; edit.text=utf8; return queueInput(edit);
+}
+bool Peer::clipboard(bool write,const std::string& utf8,ClipboardResult completed) {
+  if(!clipboardAvailable() || !inputAvailable() || !completed || !sanser::clipboardUtf16(utf8) || (!write && !utf8.empty())) return false;
+  std::lock_guard lock(userMutex_);
+  if(clipboardPending_.size()>=4 || clipboardSerial_==UINT64_MAX) return false;
+  const auto request=++clipboardSerial_;
+  Bytes body{'S','C','B','1',static_cast<std::uint8_t>(write ? 1:2)};
+  for(int i=7;i>=0;--i) body.push_back(static_cast<std::uint8_t>(request>>(i*8)));
+  body.push_back(0); body.insert(body.end(),utf8.begin(),utf8.end());
+  if(!userMessages_.queue(std::move(body))) return false;
+  clipboardPending_.emplace(request,ClipboardPending{Clock::now(),std::move(completed)});return true;
+}
+void Peer::localClipboard(bool write,const std::string& utf8,ClipboardResult completed) {
+  if(!completed)return;
+  if(!localClipboardAvailable() || !sanser::clipboardUtf16(utf8) || (!write && !utf8.empty())) {completed(3,{});return;}
+  std::uint64_t epoch;
+  {std::unique_lock lock(userMailbox_->mutex);if(userMailbox_->localJobs>=4) {lock.unlock();completed(2,{});return;}
+    ++userMailbox_->localJobs;epoch=userMailbox_->epoch;}
+  const std::weak_ptr<UserMailbox> weak=userMailbox_;
+  const auto current=[weak,epoch,deadline=Clock::now()+std::chrono::seconds(5)]{auto state=weak.lock();if(!state || Clock::now()>deadline)return false;std::lock_guard lock(state->mutex);return state->alive && state->epoch==epoch;};
+  auto once=std::make_shared<std::atomic<bool>>(false);
+  auto done=[weak,epoch,once,completed=std::move(completed)](unsigned status,std::string text) {
+    if(once->exchange(true))return;
+    auto state=weak.lock();bool valid=false;
+    if(state){std::lock_guard lock(state->mutex);if(state->epoch==epoch){--state->localJobs;valid=state->alive;}}
+    if(!valid) {completed(5,{});return;}
+    if(status>5 || !sanser::clipboardUtf16(text)) {completed(4,{});return;}
+    completed(status,status==0 ? std::move(text):std::string{});
+  };
+  try {onClipboard(write,utf8,current,done);}catch(...){done(3,{});}
+}
+bool Peer::fileMessage(const Bytes& body,std::uint32_t expectedGeneration) {
+  if(!filesAvailable() || body.size()<21 || body.size()>8192 || !std::equal(body.begin(),body.begin()+4,"SFT1"))return false;
+  std::lock_guard lock(userMutex_);
+  if(!filesAvailable() || (expectedGeneration && expectedGeneration!=fileGeneration_))return false;
+  return userMessages_.queue(body);
+}
+void Peer::processUserMessage(Bytes body) {
+  if(body.size()>=21 && body.size()<=8192 && std::equal(body.begin(),body.begin()+4,"SFT1")) {
+    if(filesAvailable()) {
+      if(onFile)onFile(std::move(body));
+      else if(std::getenv("SANSER_CONTROL_STDIN")) {const auto encoded=userHex(std::string_view(reinterpret_cast<const char*>(body.data()),body.size()));std::fprintf(stdout,"SNUSER_FILE_DATA\t%u\t%s\n",peerGeneration_,encoded.c_str());std::fflush(stdout);}
+    }return;
+  }
+  if(body.size()<14 || body.size()>sanser::maxClipboardBytes+14 || !std::equal(body.begin(),body.begin()+4,"SCB1") || body[4]<1 || body[4]>3 || body[13]>5) return;
+  std::uint64_t request=0;for(unsigned i=5;i<13;++i)request=(request<<8)|body[i];if(!request)return;
+  std::string text(body.begin()+14,body.end());
+  if(body[4]==3 && !options_.host) {
+    ClipboardResult callback;
+    { std::lock_guard lock(userMutex_);const auto found=clipboardPending_.find(request);if(found==clipboardPending_.end())return;
+      callback=std::move(found->second.result);clipboardPending_.erase(found); }
+    const bool valid=sanser::clipboardUtf16(text).has_value();
+    callback(valid ? body[13]:4,valid && body[13]==0 ? std::move(text):std::string{});return;
+  }
+  if(!options_.host || body[4]==3 || body[13] || (body[4]==2 && !text.empty())) return;
+  Bytes response(body.begin(),body.begin()+14);response[4]=3;
+  const auto reject=[&](unsigned code) {
+    response[13]=static_cast<std::uint8_t>(code);std::lock_guard lock(userMailbox_->mutex);
+    if(userMailbox_->alive && userMailbox_->replies.size()+userMailbox_->hostJobs+userMailbox_->servicing<8)userMailbox_->replies.push_back(std::move(response));
+  };
+  if(!options_.clipboard || !options_.input || options_.sharing || localCapturePaused_ || !onClipboard) {reject(1);return;}
+  if(!sanser::clipboardUtf16(text)) {reject(4);return;}
+  const auto now=Clock::now();
+  if(now-lastClipboardRequest_<std::chrono::milliseconds(100)) {reject(2);return;}
+  std::uint64_t epoch;
+  { std::unique_lock lock(userMailbox_->mutex);if(userMailbox_->hostJobs>=4 || userMailbox_->hostJobs+userMailbox_->replies.size()+userMailbox_->servicing>=8 || !userMailbox_->alive) {lock.unlock();reject(2);return;}
+    epoch=userMailbox_->epoch;++userMailbox_->hostJobs; }
+  lastClipboardRequest_=now;
+  const std::weak_ptr<UserMailbox> weak=userMailbox_;
+  const auto current=[weak,epoch,deadline=now+std::chrono::seconds(5)] { const auto state=weak.lock();if(!state || Clock::now()>deadline)return false;std::lock_guard lock(state->mutex);return state->alive && state->epoch==epoch; };
+  auto once=std::make_shared<std::atomic<bool>>(false);
+  auto done=[weak,epoch,response=std::move(response),once](unsigned status,std::string text) mutable {
+    if(once->exchange(true))return;
+    const auto state=weak.lock();if(!state)return;
+    std::lock_guard lock(state->mutex);if(!state->alive || state->epoch!=epoch)return;
+    --state->hostJobs;
+    response[13]=static_cast<std::uint8_t>(status<=5 ? status:3);
+    if(status==0 && !sanser::clipboardUtf16(text)) response[13]=4;
+    if(response[13]==0) response.insert(response.end(),text.begin(),text.end());
+    if(state->replies.size()<8)state->replies.push_back(std::move(response));
+  };
+  try { onClipboard(body[4]==1,std::move(text),current,done); } catch(...) {done(3,{});}
+}
+void Peer::serviceUserMessages(Clock::time_point now) {
+  if(now-lastUserPoll_<std::chrono::milliseconds(16))return;lastUserPoll_=now;
+  std::deque<Bytes> replies;
+  { std::lock_guard lock(userMailbox_->mutex);replies.swap(userMailbox_->replies);userMailbox_->servicing=static_cast<unsigned>(replies.size()); }
+  std::deque<Bytes> deferred;
+  std::vector<Bytes> packets;std::vector<ClipboardResult> expired;
+  { std::lock_guard lock(userMutex_);
+    for(auto& body:replies)if(!userMessages_.queue(body,now))deferred.push_back(std::move(body));
+    packets=userMessages_.poll(now,std::chrono::milliseconds(static_cast<unsigned>(std::clamp(controlRoundTripMs().value_or(30)*2+10,60.0,2000.0))));
+    for(auto it=clipboardPending_.begin();it!=clipboardPending_.end();) {
+      if(now-it->second.created>std::chrono::seconds(10)) {expired.push_back(std::move(it->second.result));it=clipboardPending_.erase(it);}else ++it;
+    }
+  }
+  { std::lock_guard lock(userMailbox_->mutex);userMailbox_->servicing=0;
+    if(userMailbox_->alive)while(!deferred.empty() && userMailbox_->replies.size()<8) {userMailbox_->replies.push_front(std::move(deferred.back()));deferred.pop_back();}
+  }
+  for(auto& packet:packets) {
+    Clock::time_point deadline;
+    {std::lock_guard lock(userMutex_);deadline=userMessages_.expires(packet);}
+    transmit(snv2::PacketType::Clipboard,packet,0,0,0,false,deadline);
+  }
+  for(auto& callback:expired)callback(5,{});
 }
 void Peer::setCapturePaused(bool paused) {
   if(!options_.host || localCapturePaused_.exchange(paused)==paused) return;
@@ -573,7 +773,7 @@ void Peer::setCapturePaused(bool paused) {
   if(inputWorker_ && !inputWorker_->submit(Input{})) { stopReason_=4; cancel(); }
 }
 void Peer::audio(const AudioSamples& samples) {
-  if(!audioReady()) return;
+  if(externalVoiceActive() || !audioReady()) return;
   std::lock_guard lock(audioMutex_);
   if(peerAudioOpus_ && audioEncoder_) {
     const auto sequence=++audioSequence_;
@@ -582,7 +782,7 @@ void Peer::audio(const AudioSamples& samples) {
   } else transmit(snv2::PacketType::Audio,encodeAudio(samples));
 }
 void Peer::audioPrepared(const Bytes& packet,bool opus) {
-  if(!audioReady() || opus!=opusAudioReady()) return;
+  if(externalVoiceActive() || !audioReady() || opus!=opusAudioReady()) return;
   transmit(snv2::PacketType::Audio,packet);
   if(opus) { ++opusTxPackets_; opusTxBytes_+=packet.size(); }
 }
@@ -635,7 +835,16 @@ void Peer::process(const Bytes& bytes) {
     if(previousGenerations_.contains(h.keyId)) return;
     if(previousGenerations_.size()>=16) { running_=false; return; }
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
-    peerGeneration_=h.keyId; peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false;
+    peerGeneration_=h.keyId; peerFiles_=false;announcedFiles_=-1;
+    if(options_.files && std::getenv("SANSER_CONTROL_STDIN")) {std::fprintf(stdout,"SNUSER_FILE_RESET\n");std::fflush(stdout);}
+    peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false; peerUnicode_=false; peerClipboard_=false;
+    peerGamepad_=false;peerGamepadAt_=0;lastGamepad_=lastGamepadCapability_=0;
+    { std::lock_guard lock(userMailbox_->mutex);++userMailbox_->epoch;userMailbox_->hostJobs=0;userMailbox_->localJobs=0;userMailbox_->servicing=0;userMailbox_->replies.clear(); }
+    std::vector<ClipboardResult> cancelled;
+    { std::lock_guard lock(userMutex_);fileGeneration_=h.keyId;userMessages_=UserMessages{};
+      for(auto& [id,pending]:clipboardPending_) { (void)id;cancelled.push_back(std::move(pending.result)); }clipboardPending_.clear(); }
+    { std::lock_guard lock(sendMutex_);tx_.clearUserData(); }
+    for(auto& callback:cancelled)callback(5,{});
     receivedRecoverySerial_=receivedRecoveryFence_=0; inputLeaseArmed_=false;
     lastAudio_=0; lastAudioPreference_=0; receivingOpus_=false; peerAudioOpus_=false; peerAudioMuted_=false;
     peerVoiceJoined_=peerVoiceMic_=peerVoiceDeaf_=false; peerVoiceAt_=0; lastVoicePreference_=0;
@@ -661,6 +870,7 @@ void Peer::process(const Bytes& bytes) {
   const bool becameReady=!ready_.exchange(true);
   if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
+  if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','F','T','1'})) peerFiles_=true;
   if(options_.groupVoice && h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
     if(b.size()==7 && !std::memcmp(b.data(),"SVC1",4) && b[4]<=1 && b[5]<=1 && b[6]<=1 && h.sequence>lastVoicePreference_) {
       lastVoicePreference_=h.sequence;
@@ -672,6 +882,12 @@ void Peer::process(const Bytes& bytes) {
     if(!options_.host && b.size()==5 && !std::memcmp(b.data(),"SVI1",4) && b[4]>0 && b[4]<voice::maxSpeakers) { voiceSlot_=b[4]; return; }
   }
   if(h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
+    if(!options_.host && b.size()==5 && std::memcmp(b.data(),"SGC1",4)==0 && b[4]<=1 && h.sequence>lastGamepadCapability_) {
+      lastGamepadCapability_=h.sequence;peerGamepad_=b[4]!=0;
+      peerGamepadAt_=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();return;
+    }
+    if(!options_.host && b==Bytes({'S','U','T','1'})) { peerUnicode_=true; return; }
+    if(!options_.host && b==Bytes({'S','C','B','1'})) { peerClipboard_=true; return; }
     if(b==Bytes({'S','I','C','1'})) { peerInputRecovery_=true; return; }
     if(!options_.host && b.size()==5 && std::memcmp(b.data(),"SCP1",4)==0 && b[4]<=1) {
       remoteCapturePaused_=b[4]!=0; return;
@@ -793,6 +1009,12 @@ void Peer::process(const Bytes& bytes) {
     // authenticated error reasons preserve reconnect instead of ending a share.
     stopReason_=(b.size()==1 && b[0]>=2 && b[0]<=5) ? b[0] : 1;
     running_=false; return;
+  }
+  if(h.packetType==snv2::PacketType::Clipboard && h.streamId==0) {
+    UserMessages::Received received;
+    { std::lock_guard lock(userMutex_);received=userMessages_.receive(b); }
+    if(received.ack)transmit(snv2::PacketType::Clipboard,*received.ack);
+    if(received.body)processUserMessage(std::move(*received.body));return;
   }
   if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::NetworkFeedback && b.size()==12 && std::memcmp(b.data(),"SVP1",4)==0) {
     std::uint64_t completed=0; for(std::size_t i=4;i<12;++i) completed=(completed<<8)|b[i];
@@ -920,6 +1142,14 @@ void Peer::process(const Bytes& bytes) {
       if(inputWorker_ && !localCapturePaused_) inputWorker_->submit(*event);
     }
   }
+  if(options_.host && h.packetType==snv2::PacketType::Gamepad && h.streamId==0 && h.sequence>lastGamepad_) {
+    lastGamepad_=h.sequence;
+    if(h.frameId!=deliveredInput_ || localCapturePaused_ || !inputWorker_ || !onGamepadAvailable || !onGamepadAvailable())return;
+    if(const auto state=decodeGamepad(b)) {
+      Input event;event.kind=Input::Gamepad;event.gamepad=*state;
+      (void)inputWorker_->submit(std::move(event));
+    }
+  }
 }
 void Peer::deliverVideo(std::optional<Frame> frame) {
   if(!frame) frame=reassembler_.take();
@@ -954,7 +1184,9 @@ void Peer::acknowledgeInput() {
 void Peer::sendLoop() {
   (void)sanser::prioritizeMediaThread();
   auto creditAt=Clock::now();
+  auto dataCreditAt=creditAt;
   double credit=8*1500;
+  double dataCredit=1000;
   // Bitrate describes encoded video. Budget framing overhead separately.
   try {
     while(running_) {
@@ -969,16 +1201,24 @@ void Peer::sendLoop() {
         const double bytesPerSecond=static_cast<double>(std::max(1000000U,wireRate))*1.2/8.0;
         credit=std::min(maxBurstBytes, credit+std::chrono::duration<double>(now-creditAt).count()*bytesPerSecond);
         creditAt=now;
+        const double dataRate=std::min(65536.0,bytesPerSecond*0.02);
+        dataCredit=std::min(2000.0,dataCredit+std::chrono::duration<double>(now-dataCreditAt).count()*dataRate);
+        dataCreditAt=now;
         const auto videoBytes=tx_.nextVideoBytes();
-        packet=tx_.pop(credit>=static_cast<double>(videoBytes));
+        const auto dataBytes=tx_.nextUserBytes();
+        packet=tx_.pop(credit>=static_cast<double>(videoBytes),credit>=dataBytes && dataCredit>=dataBytes);
         if(!packet) {
           const auto nextVideo=now+std::chrono::microseconds(static_cast<std::uint64_t>(
             std::max(1.0,(static_cast<double>(videoBytes)-credit)*1000000.0/bytesPerSecond)));
-          sendReady_.wait_until(lock, tx_.hasVideo() ? nextVideo : now+std::chrono::milliseconds(20),
-            [&] { return !running_ || tx_.hasPriority() || (tx_.hasVideo() && Clock::now()>=nextVideo); });
+          const auto nextData=now+std::chrono::microseconds(static_cast<std::uint64_t>(std::max({1.0,(dataBytes-credit)*1000000.0/bytesPerSecond,(dataBytes-dataCredit)*1000000.0/dataRate})));
+          auto wake=now+std::chrono::milliseconds(20);if(tx_.hasVideo())wake=std::min(wake,nextVideo);if(tx_.hasUserData())wake=std::min(wake,nextData);
+          sendReady_.wait_until(lock,wake,
+            [&] { return !running_ || tx_.hasPriority() || (tx_.hasVideo() && Clock::now()>=nextVideo) || (tx_.hasUserData() && Clock::now()>=nextData); });
           continue;
         }
         if(packet->audio && now-packet->queued>std::chrono::milliseconds(40)) continue;
+        if(packet->gamepad && now>packet->deadline)continue;
+        if(packet->userData && packet->deadline!=Clock::time_point{} && now>packet->deadline) continue;
         if(packet->inputSequence) {
           const auto pending=pending_.find(packet->inputSequence);
           if(pending==pending_.end() || pending->second.sacked) continue;
@@ -998,9 +1238,10 @@ void Peer::sendLoop() {
       }
       datagram(packet->bytes);
       if(packet->originalSent)packet->originalSent->store(packet->originalOrdinal,std::memory_order_release);
-      if (packet->frame) {
+      if (packet->frame || packet->userData) {
         credit-=static_cast<double>(packet->bytes.size());
       }
+      if(packet->userData)dataCredit-=static_cast<double>(packet->bytes.size());
     }
   } catch (const std::exception& error) { std::cerr<<"SNV2_SEND_ERROR "<<error.what()<<std::endl; stopReason_=5; running_=false; }
 }
@@ -1063,10 +1304,35 @@ void Peer::loop() {
   auto lastHealth=Clock::now();
   try {
     while(running_ && !stopRequested) {
-      if(!options_.host) for(const auto& command:takeNativeCommands()) {
+      // A sharing host's process-wide commands belong to HostOutput, never to
+      // one of its per-viewer peers. A single host owns its file commands here.
+      if(!options_.host || !options_.sharing) for(const auto& command:takeNativeCommands()) {
         if(command=="audio-muted\t1" || command=="audio-muted\t0") setAudioMuted(command.back()=='1');
+        else if(const auto request=parseUserCommand(command)) {
+          if(request->kind==UserCommand::FileMessage) {
+            const auto bytes=userFileBody(request->body,peerGeneration_);
+            if(bytes && !fileMessage(*bytes)) {std::fprintf(stdout,"SNUSER_FILE_FAIL\t%u\n",peerGeneration_);std::fflush(stdout);}
+          }
+          else if(request->kind==UserCommand::Text)userReply(request->request,text(request->body) ? 0:3);
+          else if(request->kind==UserCommand::ReadLocalClipboard || request->kind==UserCommand::WriteLocalClipboard) {
+            const auto id=request->request;
+            localClipboard(request->kind==UserCommand::WriteLocalClipboard,request->body,[id](unsigned status,std::string body){userReply(id,status,body);});
+          }
+          else {
+            const auto id=request->request;
+            if(!clipboard(request->kind==UserCommand::WriteClipboard,request->body,[id](unsigned status,std::string body) {userReply(id,status,body);}))userReply(id,3);
+          }
+        }
       }
       const auto now=Clock::now();
+      serviceUserMessages(now);
+      if(options_.files && std::getenv("SANSER_CONTROL_STDIN")) {const int available=filesAvailable()?1:0;
+        if(available!=announcedFiles_) {announcedFiles_=available;std::fprintf(stdout,"SNUSER_FILE_CAP\t%d\t%u\n",available,peerGeneration_);std::fflush(stdout);}
+      }
+      if(!options_.host && std::getenv("SANSER_CONTROL_STDIN")) {
+        const int caps=(textAvailable()?1:0)|(clipboardAvailable()?2:0)|(localClipboardAvailable()?4:0);
+        if(caps!=announcedUserCapabilities_) {announcedUserCapabilities_=caps;std::fprintf(stdout,"SNUSER_CAP\t%d\t%d\t%d\n",caps&1?1:0,caps&2?1:0,caps&4?1:0);std::fflush(stdout);}
+      }
       if(!options_.host && ready_ && now-lastControlProbe>=std::chrono::milliseconds(receiveVideoLimit_ ? 250:1000)) {
         const auto id=controlProbe_.sent(now); Bytes probe{'S','R','Q','1'};
         for(int i=7;i>=0;--i) probe.push_back(static_cast<std::uint8_t>(id>>(i*8)));
@@ -1096,8 +1362,15 @@ void Peer::loop() {
           if(options_.host && options_.voiceSlot>0 && options_.voiceSlot<voice::maxSpeakers)
             transmit(snv2::PacketType::Keepalive,Bytes{'S','V','I','1',static_cast<std::uint8_t>(options_.voiceSlot)});
         }
+        if(options_.files && options_.input && !options_.sharing)transmit(snv2::PacketType::Keepalive,Bytes{'S','F','T','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','I','C','1'});
+        if(options_.host && options_.input && !options_.sharing && onInput)
+          transmit(snv2::PacketType::Keepalive,Bytes{'S','U','T','1'});
+        if(options_.host && options_.input && !options_.sharing && options_.clipboard && onClipboard)
+          transmit(snv2::PacketType::Keepalive,Bytes{'S','C','B','1'});
+        if(options_.host)transmit(snv2::PacketType::Keepalive,Bytes{'S','G','C','1',
+          static_cast<std::uint8_t>(options_.input && !options_.sharing && onGamepadAvailable && onGamepadAvailable())});
         if(options_.host) transmit(snv2::PacketType::Keepalive,Bytes{'S','C','P','1',static_cast<std::uint8_t>(localCapturePaused_.load())});
         if(!options_.host && inputAvailable()) transmit(snv2::PacketType::Keepalive,Bytes{'S','I','E','1'});
         // Optional authenticated capability. Old engines safely ignore it;
@@ -1217,7 +1490,10 @@ void Peer::loop() {
     const auto reason=stopReason_.load();
     transmit(snv2::PacketType::Disconnect,reason>=2 ? Bytes{static_cast<std::uint8_t>(reason)} : Bytes{});
   } catch (...) {}
-  running_=false; ready_=false; sendReady_.notify_all();
+  running_=false; ready_=false; userMailbox_->alive=false; sendReady_.notify_all();
+  std::vector<ClipboardResult> pendingUser;
+  { std::lock_guard lock(userMutex_);for(auto& [id,pending]:clipboardPending_) {(void)id;pendingUser.push_back(std::move(pending.result));}clipboardPending_.clear(); }
+  for(auto& callback:pendingUser)callback(5,{});
   logHealth();
   if(stopReason_>=2) std::cerr<<"SNV2_STOP reason="<<stopReason_.load()
     <<" (2=peer-timeout 3=input-ack-timeout 4=priority-queue-overflow 5=transport-error)"<<std::endl;

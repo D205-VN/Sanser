@@ -1,5 +1,6 @@
 #include "input_injector.h"
 #include "keyboard.h"
+#include "text_input.h"
 #include <IOKit/hidsystem/IOLLEvent.h>
 #include <cmath>
 #include <stdexcept>
@@ -33,6 +34,27 @@ void MacInputInjector::emit(CGEventRef event) {
 }
 void MacInputInjector::apply(const Input& input) {
   if(input.kind==Input::Reset) { reset(); return; }
+  if(input.kind==Input::Text) {
+    const auto text=sanser::textInputUtf16(input.text); if(!text) return;
+    // A committed edit is literal text, never a held Ctrl/Command shortcut.
+    reset();
+    for(std::size_t i=0;i<text->size();) {
+      const auto unit=(*text)[i];
+      if(unit=='\n' || unit=='\t') {
+        const std::uint16_t code=unit=='\n' ? 40:43;
+        apply({Input::Key,0,0,code,0,true}); apply({Input::Key,0,0,code,0,false}); ++i; continue;
+      }
+      const auto count=unit>=0xd800 && unit<=0xdbff ? 2U:1U;
+      const UniChar scalar[]={static_cast<UniChar>(unit),static_cast<UniChar>(count==2 ? (*text)[i+1]:0)};
+      for(bool down:{true,false}) {
+        auto event=CGEventCreateKeyboardEvent(source_,0,down);
+        if(event) CGEventKeyboardSetUnicodeString(event,count,scalar);
+        emit(event);
+      }
+      i+=count;
+    }
+    return;
+  }
   if(input.kind==Input::Key) {
     const auto key=macKey(input.code); if(key<0) return;
     if(input.down) keys_.insert(input.code); else keys_.erase(input.code);

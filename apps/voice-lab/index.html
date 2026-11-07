@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https: wss: http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; media-src 'self' blob:; img-src 'self' data:; worker-src 'self' blob:; base-uri 'none'; form-action 'none'" />
+    <title>Sanser · Voice Lab</title>
+  </head>
+  <body>
+    <main>
+      <header><a class="brand" href="/" aria-label="Sanser Voice Lab">S<span>Sanser <small>VOICE LAB</small></span></a><span class="tag">Thử nghiệm · LiveKit</span></header>
+      <section class="intro"><div class="eyebrow">PHẦN 5B · THỬ NGHIỆM ĐỘC LẬP</div><h1>Nghe rõ hơn.<br /><span>Đo trước khi thay đổi.</span></h1><p>Phòng thoại nhỏ để thử mic với 2–4 người, tách khỏi luồng hình của Sanser.</p></section>
+      <div class="layout">
+        <section class="card connection">
+          <div class="card-heading"><div><h2>Vào phòng thoại</h2><p>Dùng tài khoản và phiên chia sẻ Sanser.</p></div><span class="dot" id="connection-dot"></span></div>
+          <form id="account-form" autocomplete="off">
+            <label for="sanser-server">Sanser server tin cậy</label><input id="sanser-server" type="url" placeholder="https://your-sanser-server" required spellcheck="false" />
+            <label for="email">Email</label><input id="email" type="email" required autocomplete="username" />
+            <label for="password">Mật khẩu</label><input id="password" type="password" required autocomplete="current-password" />
+            <button id="login" type="submit" class="primary">Đăng nhập vào bản thử</button>
+          </form>
+          <form id="sharing-form" hidden>
+            <label for="sharing-choice">Vai trò của máy này trong phiên chia sẻ</label><select id="sharing-choice" required></select>
+            <p class="hint">Chọn host hoặc viewer đã chấp nhận lời mời. Cần mở Sanser trên máy tương ứng; mỗi vai trò chỉ mở một Voice Lab.</p>
+            <button id="account-join" class="primary" type="submit">Tham gia · chỉ nghe →</button>
+            <div class="controls"><button id="refresh-sharing" type="button">Tải lại phiên</button><button id="logout" type="button">Đăng xuất</button></div>
+          </form>
+          <p id="account-status" class="hint" role="status">Cần server Sanser đã bật Voice Lab thử nghiệm.</p>
+          <details><summary>Thử với token riêng · nâng cao</summary>
+          <form id="connect-form" autocomplete="off">
+            <label for="endpoint">LiveKit server</label><input id="endpoint" type="url" placeholder="wss://your-livekit-server" required autocomplete="off" spellcheck="false" />
+            <label for="token">Token tham gia phòng</label><input id="token" type="password" placeholder="Dán token có thời hạn" required autocomplete="off" spellcheck="false" />
+            <p class="hint">Chỉ nhập token tham gia, không nhập API secret. Token không được lưu.</p>
+            <button class="primary" id="join" type="submit">Tham gia · chỉ nghe <span aria-hidden="true">→</span></button>
+          </form>
+          </details>
+          <div class="notice">Trong lần thử này, dùng tai nghe và tắt voice gốc. Host cần tắt âm thanh hệ thống của phiên chia sẻ để tiếng từ trình duyệt không bị thu lại.</div>
+        </section>
+        <section class="card room">
+          <div class="card-heading"><div><h2>Cuộc trò chuyện</h2><p id="room-state" role="status">Chưa tham gia · mic đang tắt</p></div><span class="member-count" id="members">0 / 4</span></div>
+          <div class="voice-orb" id="voice-orb" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+          <p class="voice-caption" id="mic-caption">Bạn quyết định khi nào mở mic.</p>
+          <div class="controls" aria-label="Điều khiển voice">
+            <button id="mic" type="button" disabled aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg><span id="mic-label">Mở mic</span></button>
+            <button id="deafen" type="button" disabled aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 14v-3a9 9 0 0 1 18 0v3M3 14h4v7H3zM17 14h4v7h-4z"/></svg><span id="deafen-label">Tắt nghe</span></button>
+            <button id="leave" class="danger" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H4v16h5M9 12h12M17 8l4 4-4 4"/></svg><span>Rời phòng</span></button>
+          </div>
+          <button id="resume" class="secondary" type="button" hidden>Bấm để phát âm thanh</button>
+          <p id="error" class="error" role="alert" hidden></p>
+          <p class="hint">Mở mic là thao tác riêng. Đổi tab, đóng trang hoặc mất kết nối sẽ dừng mic; tham gia lại không tự mở mic.</p>
+        </section>
+      </div>
+      <section class="card measurements">
+        <div class="card-heading"><div><h2>Quan sát kết nối</h2><p>Số liệu WebRTC tới server, cập nhật mỗi giây.</p></div><button id="export" type="button" class="secondary" disabled>Xuất số liệu ↓</button></div>
+        <div class="metrics">
+          <div><span>RTP jitter · lớn nhất</span><strong id="jitter">—</strong><small id="jitter-range">Chưa có dữ liệu</small></div>
+          <div><span>RTT gửi tới SFU</span><strong id="rtt">—</strong><small id="rtt-range">Có thể thiếu khi chỉ nghe</small></div>
+          <div><span>Thời gian trong jitter buffer</span><strong id="buffer">—</strong><small id="buffer-range">Chưa có dữ liệu</small></div>
+        </div>
+        <p class="hint">P50/P95 lấy tối đa 120 lần quan sát, không phải độ trễ thoại đầu cuối. Dữ liệu xuất chỉ gồm số đo; không có token, tên phòng, địa chỉ máy hay bản ghi giọng nói.</p>
+      </section>
+      <footer>Sanser Voice Lab · Không thay thế voice trong ứng dụng · Cần server LiveKit và token hợp lệ</footer>
+    </main>
+    <div id="audio-sink" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

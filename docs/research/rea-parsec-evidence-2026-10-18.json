@@ -1,0 +1,529 @@
+{
+  "date": "2026-10-18",
+  "sanserCommit": "2e5767fab504dda35611d425a20fa7fda8865fd0",
+  "method": "REA CLI static artifact and Mach-O inspection; separate source review and official documentation; no runtime or packet capture",
+  "rea": {
+    "package": "rea-agents",
+    "version": "6.5.0",
+    "integrity": "sha512-C6BG7LyrAdR74mSjertM6PrxJkcNZ2bfQNOJornPo9erDEp2tyPRVYPnV5Yodr+1RqewCQla68WulXlVnveD+A==",
+    "mcpRegistered": false,
+    "optionalFridaInstalled": false
+  },
+  "parsec": {
+    "bundleVersion": "150.101.1",
+    "bundleIdentifier": "tv.parsec.www",
+    "bundleInventoryEvidenceId": "ev_339a11ace0ef183b3a079745d2288ab71271a14c3605201ceec104d4bd3cf630",
+    "bundleInventoryDigest": {
+      "sha256": "174e5ded6cc2fbe5f24048f4378bbe77eaec1b3d2c8f6479ad112abb2686273e"
+    },
+    "launcher": {
+      "sha256": "785f985d7f0cf6cffda8966b776a61b6c6cb0c79e582a8e3f35cda36305be76d",
+      "evidenceId": "ev_d0696921cd662881da3c6c81ae8237a314e2804f5e59d2495f7519b2824fb380"
+    },
+    "core": {
+      "relativePath": "Contents/Resources/skel/parsecd-150-101a.dylib",
+      "sha256": "9cce85059c7f95f1a8e578b3c9f7200cb364520e557b5c85294802c8c596cdd5",
+      "evidenceId": "ev_cfa140bebf703b74977e33e763412d66cbdb1103b2f84983d3026866052bfeab",
+      "selectedArchitecture": {
+        "name": "arm64",
+        "container_file_offset": 3309568
+      },
+      "architectures": {
+        "items": [
+          {
+            "name": "x86_64",
+            "cpu_type": "CPU_TYPE_X86_64",
+            "cpu_subtype": "CPU_SUBTYPE_X86_ALL",
+            "file_offset": 16384,
+            "size": 3286480,
+            "alignment": 16384
+          },
+          {
+            "name": "arm64",
+            "cpu_type": "CPU_TYPE_ARM64",
+            "cpu_subtype": "CPU_SUBTYPE_ARM64_ALL",
+            "file_offset": 3309568,
+            "size": 2926096,
+            "alignment": 16384
+          }
+        ],
+        "total": 2,
+        "exhaustive": true,
+        "limitations": []
+      },
+      "linkedDependencies": {
+        "items": [
+          {
+            "path": "parsecd-150-101a-arm64.dylib",
+            "kind": "LC_ID_DYLIB",
+            "current_version": "0.0.0",
+            "compatibility_version": "0.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "61439.120.27",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "368.12.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "3225.7.1",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "3225.7.1",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1.11.0",
+            "compatibility_version": "1.2.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "2575.60.5",
+            "compatibility_version": "45.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "275.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "170.0.0",
+            "compatibility_version": "2.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1000.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "2.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit",
+            "kind": "LC_LOAD_WEAK_DYLIB",
+            "current_version": "1.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/WebKit.framework/Versions/A/WebKit",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "621.2.5",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1351.120.3",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/usr/lib/libc++.1.dylib",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1900.180.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/usr/lib/libSystem.B.dylib",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1351.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "65.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "3502.1.255",
+            "compatibility_version": "150.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1889.5.3",
+            "compatibility_version": "64.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1226.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1.5.0",
+            "compatibility_version": "1.2.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "3502.1.255",
+            "compatibility_version": "300.0.0"
+          },
+          {
+            "path": "/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "1.0.0",
+            "compatibility_version": "1.0.0"
+          },
+          {
+            "path": "/usr/lib/libobjc.A.dylib",
+            "kind": "LC_LOAD_DYLIB",
+            "current_version": "228.0.0",
+            "compatibility_version": "1.0.0"
+          }
+        ],
+        "total": 27,
+        "exhaustive": true,
+        "limitations": []
+      },
+      "selectedImports": [
+        {
+          "name": "_AudioQueueAllocateBuffer",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_AudioQueueDispose",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_AudioQueueEnqueueBuffer",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_AudioQueueNewInput",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_AudioQueueNewOutput",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_AudioQueueSetProperty",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_AudioQueueStart",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_AudioQueueStop",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "AudioToolbox"
+        },
+        {
+          "name": "_OBJC_CLASS_$_SCStream",
+          "address": null,
+          "weak": true,
+          "reexport": null,
+          "source": "ScreenCaptureKit"
+        },
+        {
+          "name": "_OBJC_CLASS_$_SCStreamConfiguration",
+          "address": null,
+          "weak": true,
+          "reexport": null,
+          "source": "ScreenCaptureKit"
+        },
+        {
+          "name": "_VTCompressionSessionCompleteFrames",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_VTCompressionSessionCreate",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_VTCompressionSessionEncodeFrame",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_VTCompressionSessionGetPixelBufferPool",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_VTCompressionSessionInvalidate",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_VTCompressionSessionPrepareToEncodeFrames",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_VTDecompressionSessionCreate",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_VTDecompressionSessionDecodeFrame",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "VideoToolbox"
+        },
+        {
+          "name": "_recvfrom",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "libSystem"
+        },
+        {
+          "name": "_sendto",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "libSystem"
+        },
+        {
+          "name": "_socket",
+          "address": null,
+          "weak": null,
+          "reexport": null,
+          "source": "libSystem"
+        }
+      ],
+      "stringIndicators": [
+        {
+          "string": "opus_encode",
+          "fileByteOffset": 3031011,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "opus_decode",
+          "fileByteOffset": 3031087,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "opus_decoder_create",
+          "fileByteOffset": 3031054,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "opus_encoder_create",
+          "fileByteOffset": 3030974,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "network_cg_level",
+          "fileByteOffset": 3072229,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "network_fast_relay_ping",
+          "fileByteOffset": 3062349,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "network_upnp",
+          "fileByteOffset": 3072170,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "app_stun_address",
+          "fileByteOffset": 3062292,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "stun.parsec.app",
+          "fileByteOffset": 2983580,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        },
+        {
+          "string": "libminiupnpc",
+          "fileByteOffset": 3014797,
+          "interpretation": "static presence only; not an executed call or enabled setting"
+        }
+      ],
+      "limitations": [
+        "Imports and exports combine dyld_info and nm; stripped or toolchain-hidden symbols may be absent.",
+        "vtool output is retained as provenance but only otool build metadata is normalized."
+      ]
+    }
+  },
+  "nativeDecompilers": [
+    {
+      "id": "ghidra",
+      "status": "unavailable"
+    },
+    {
+      "id": "hopper",
+      "status": "unavailable"
+    },
+    {
+      "id": "ida",
+      "status": "unavailable"
+    }
+  ],
+  "sourceFiles": [
+    {
+      "repo": "moonlight-stream/moonlight-common-c",
+      "commit": "aeba988e0a302145eff2e70fa3e11cd98ec01f5d",
+      "path": "src/AudioStream.c",
+      "sha256": "1b0d9f1c41b79c294073e0e6c5e5939a8ecd14c1c4b0a3cd62dd8fd416fdd9c0",
+      "url": "https://github.com/moonlight-stream/moonlight-common-c/blob/aeba988e0a302145eff2e70fa3e11cd98ec01f5d/src/AudioStream.c"
+    },
+    {
+      "repo": "moonlight-stream/moonlight-common-c",
+      "commit": "aeba988e0a302145eff2e70fa3e11cd98ec01f5d",
+      "path": "src/RtpAudioQueue.c",
+      "sha256": "ab339c371e2549787c575f6dbc3042f3be49170783a278c03f5f6fff8c898ae0",
+      "url": "https://github.com/moonlight-stream/moonlight-common-c/blob/aeba988e0a302145eff2e70fa3e11cd98ec01f5d/src/RtpAudioQueue.c"
+    },
+    {
+      "repo": "moonlight-stream/moonlight-common-c",
+      "commit": "aeba988e0a302145eff2e70fa3e11cd98ec01f5d",
+      "path": "src/InputStream.c",
+      "sha256": "77f48afab340020f959ec091507f2b205ccae60ab4c770995d4692c35e746083",
+      "url": "https://github.com/moonlight-stream/moonlight-common-c/blob/aeba988e0a302145eff2e70fa3e11cd98ec01f5d/src/InputStream.c"
+    },
+    {
+      "repo": "moonlight-stream/moonlight-common-c",
+      "commit": "aeba988e0a302145eff2e70fa3e11cd98ec01f5d",
+      "path": "src/VideoDepacketizer.c",
+      "sha256": "2f1b8f3236866853621170d2b03e7622b8a60b8de4b6b401b3dbde578c6db61f",
+      "url": "https://github.com/moonlight-stream/moonlight-common-c/blob/aeba988e0a302145eff2e70fa3e11cd98ec01f5d/src/VideoDepacketizer.c"
+    },
+    {
+      "repo": "moonlight-stream/moonlight-common-c",
+      "commit": "aeba988e0a302145eff2e70fa3e11cd98ec01f5d",
+      "path": "src/Limelight.h",
+      "sha256": "bb4bf89e1496e79ebea5d260361518e4af7ee56307f1e4f7bbd881069798c447",
+      "url": "https://github.com/moonlight-stream/moonlight-common-c/blob/aeba988e0a302145eff2e70fa3e11cd98ec01f5d/src/Limelight.h"
+    },
+    {
+      "repo": "LizardByte/Sunshine",
+      "commit": "3d6e1d6008bd4a24906283ab25fcd0becc0a1c07",
+      "path": "src/audio.cpp",
+      "sha256": "703edfbca8755d904cefe12d10b95cead3936653a5728b439120c275e4bb4f96",
+      "url": "https://github.com/LizardByte/Sunshine/blob/3d6e1d6008bd4a24906283ab25fcd0becc0a1c07/src/audio.cpp"
+    },
+    {
+      "repo": "LizardByte/Sunshine",
+      "commit": "3d6e1d6008bd4a24906283ab25fcd0becc0a1c07",
+      "path": "src/stream.cpp",
+      "sha256": "38bce72cab7c4ebed15e02bcb402f386f0579a3bc218a9b13d51df86e9978512",
+      "url": "https://github.com/LizardByte/Sunshine/blob/3d6e1d6008bd4a24906283ab25fcd0becc0a1c07/src/stream.cpp"
+    },
+    {
+      "repo": "LizardByte/Sunshine",
+      "commit": "3d6e1d6008bd4a24906283ab25fcd0becc0a1c07",
+      "path": "src/video.cpp",
+      "sha256": "c18df2c4eabc575c61145b2e34c1134792c00fa85bcdf39d5d4e7414a2c9b2a2",
+      "url": "https://github.com/LizardByte/Sunshine/blob/3d6e1d6008bd4a24906283ab25fcd0becc0a1c07/src/video.cpp"
+    },
+    {
+      "repo": "rustdesk/rustdesk",
+      "commit": "53996e3c404ea5083df0775057e4149e49102084",
+      "path": "src/server/audio_service.rs",
+      "sha256": "c0a23d7ed76f934be052d5e0565e511fbea72ddf21d89924ffed80a90df3ef61",
+      "url": "https://github.com/rustdesk/rustdesk/blob/53996e3c404ea5083df0775057e4149e49102084/src/server/audio_service.rs"
+    },
+    {
+      "repo": "rustdesk/rustdesk",
+      "commit": "53996e3c404ea5083df0775057e4149e49102084",
+      "path": "src/audio_resampler.rs",
+      "sha256": "560447aff85c46c36e42a9bdd76b80b109aec2ca4a889f1cffe374a57dcbac77",
+      "url": "https://github.com/rustdesk/rustdesk/blob/53996e3c404ea5083df0775057e4149e49102084/src/audio_resampler.rs"
+    },
+    {
+      "repo": "rustdesk/rustdesk",
+      "commit": "53996e3c404ea5083df0775057e4149e49102084",
+      "path": "src/client.rs",
+      "sha256": "152aad030e7b5b02a7ae3bc1e7c4b34f6d33aa43d21ec89fcf7677ab4c0f62a9",
+      "url": "https://github.com/rustdesk/rustdesk/blob/53996e3c404ea5083df0775057e4149e49102084/src/client.rs"
+    }
+  ],
+  "limitations": [
+    "Packaged Parsec skel core may differ from the runtime-updated core. No account/application-data directory was inspected.",
+    "Imports and strings do not establish call paths, active settings, default behavior, frame latency or congestion algorithm.",
+    "No two-machine benchmark, network capture or native decompilation was performed.",
+    "No vendor application was launched, attached to, modified or installed by this analysis."
+  ]
+}

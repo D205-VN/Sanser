@@ -3,11 +3,13 @@
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { summarizeAudio } from './audio-health.mjs';
 import { summarize } from './compare-latency-baseline.mjs';
 
 const platforms = ['macos', 'windows'];
 const transports = ['direct-lan', 'direct-wan', 'relay-udp', 'relay-wss'];
 const stages = {
+  voiceWorkerGap: [['SNVOICE_HEALTH', 'voiceWorkerGapWindowMaxMs']],
   controlAppRtt: [['SNCONTROL_TIMING', 'appRttMs'], ['SNV2_CONTROL_TIMING', 'appRttMs'], ['SNINPUT_RTT', 'rttMs']],
   wireRttEstimate: [['SNCONTROL_TIMING', 'wireEstimateMs']],
   udpEchoRtt: [['SNU1_ECHO', 'rttMs']],
@@ -68,6 +70,7 @@ export function summarizeCase(entry, reports) {
       annotationCheck: local ? 'local-os-matched-peer-unverified' : 'os-unverified',
       settings: { width: bounded(report.requestedWidth, 16384), height: bounded(report.requestedHeight, 16384),
         fps: bounded(report.requestedFps, 1000), bitrateKbps: bounded(report.requestedBitrateKbps, 1_000_000), codec: pick(report.requestedCodec, ['auto', 'h264', 'hevc']) },
+      audioCounters: summarizeAudio(report),
       metrics: Object.fromEntries(Object.entries(stages).map(([name, aliases]) => [name, metric(report, name, aliases)]))
     };
   });
@@ -76,13 +79,14 @@ export function summarizeCase(entry, reports) {
 export function buildMatrix(rows) {
   const coverage = [];
   for (const viewer of platforms) for (const host of platforms) for (const transport of transports) for (const mode of ['standard', 'ultra']) {
-    const matches = rows.filter((row) => row.viewer === viewer && row.host === host && row.transport === transport && row.mode === mode && Object.values(row.metrics).some(Boolean));
+    const matches = rows.filter((row) => row.viewer === viewer && row.host === host && row.transport === transport && row.mode === mode && (Object.values(row.metrics).some(Boolean) || Object.values(row.audioCounters ?? {}).some(Boolean)));
     coverage.push({ viewer, host, transport, mode, reports: matches.length, status: matches.length ? 'observations-only' : 'not-observed' });
   }
   return { schemaVersion: 1, coverage, rows, limitations: [
     'Case direction and LAN/WAN are operator annotations; only the recorded local OS is checked. Peer OS/version and route endpoints are not verified.',
     'Observations are not passing benchmarks. Missing metrics stay null and missing cases stay not-observed.',
     'P50/P95 summarize bounded periodic observations; some are interval averages. They are not per-frame or screen-to-screen latency.',
+    'Audio counters are observed increases over covered intervals, not milliseconds; resets, first samples and gaps are excluded. Missing counter coverage is unknown.',
     'Reports remain separate. Percentiles from different runs, settings, routes, protocols and roles are never pooled.',
     'Wire RTT, application RTT, receipt ACK, OS input work and combined encode/publish stages have distinct meanings.'
   ] };
