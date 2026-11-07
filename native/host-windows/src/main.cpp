@@ -7661,7 +7661,7 @@ int main(int argc, char** argv) {
                 << ",\"engine\":\"host-windows\","
                    "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,\"multiViewerHost\":true,"
                    "\"h264EncoderImplementation\":true,"
-                   "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,"
+                   "\"hevcEncoderImplementation\":true,\"audioImplementation\":true,\"externalVoiceGate\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,"
                    "\"inputImplementation\":true,\"clipboardImplementation\":true,\"unicodeInputImplementation\":true,\"gamepadImplementation\":true}\n";
       return 0;
     }

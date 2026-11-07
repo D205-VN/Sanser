@@ -9096,7 +9096,7 @@ int main(int argc, char** argv) {
                    "\"nativeSnv2\":true,\"nativeDirect\":true,\"crossPlatform\":true,"
                    "\"h264DecoderImplementation\":true,"
                    "\"hevcDecoderImplementation\":true,\"metalImplementation\":true,"
-                   "\"audioImplementation\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,\"clipboardImplementation\":true,\"unicodeInputImplementation\":true,"
+                   "\"audioImplementation\":true,\"externalVoiceGate\":true,\"groupVoiceImplementation\":true,\"groupVoiceFloatingControls\":true,\"snv2AudioImplementation\":true,\"inputImplementation\":true,\"clipboardImplementation\":true,\"unicodeInputImplementation\":true,"
                    "\"gamepadImplementation\":true}\n";
       return 0;
     }

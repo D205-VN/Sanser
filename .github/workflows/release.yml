@@ -50,6 +50,7 @@ jobs:
           if ($viewer.snv2AudioImplementation -ne $true) { throw 'Windows SNV2 audio playback is missing' }
           if ($capabilities.groupVoiceImplementation -ne $true -or $viewer.groupVoiceImplementation -ne $true) { throw 'Windows group voice is missing' }
           if ($capabilities.groupVoiceFloatingControls -ne $true -or $viewer.groupVoiceFloatingControls -ne $true) { throw 'Windows floating voice controls are missing' }
+          if ($capabilities.externalVoiceGate -ne $true -or $viewer.externalVoiceGate -ne $true) { throw 'Windows external voice handoff is missing' }
       - name: Build Tauri application
         run: npm --workspace @sanser/desktop run tauri -- build --target x86_64-pc-windows-msvc
         env:
@@ -115,8 +116,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          apps/desktop/src-tauri/binaries/sanser-client-macos-aarch64-apple-darwin --capabilities-json | jq -e --arg version "$SANSER_VERSION" '.nativeSnv2 == true and .groupVoiceImplementation == true and .groupVoiceFloatingControls == true and .version == $version'
-          apps/desktop/src-tauri/binaries/sanser-host-macos-aarch64-apple-darwin --capabilities-json | jq -e --arg version "$SANSER_VERSION" '.nativeSnv2 == true and .groupVoiceImplementation == true and .groupVoiceFloatingControls == true and .version == $version'
+          apps/desktop/src-tauri/binaries/sanser-client-macos-aarch64-apple-darwin --capabilities-json | jq -e --arg version "$SANSER_VERSION" '.nativeSnv2 == true and .groupVoiceImplementation == true and .groupVoiceFloatingControls == true and .externalVoiceGate == true and .version == $version'
+          apps/desktop/src-tauri/binaries/sanser-host-macos-aarch64-apple-darwin --capabilities-json | jq -e --arg version "$SANSER_VERSION" '.nativeSnv2 == true and .groupVoiceImplementation == true and .groupVoiceFloatingControls == true and .externalVoiceGate == true and .version == $version'
       - name: Build application and DMG
         shell: bash
         run: |
