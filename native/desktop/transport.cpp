@@ -117,6 +117,16 @@ DatagramIo::Result sendDatagram(std::intptr_t socket,const std::uint8_t* bytes,s
   return {sent,sent<0 ? socketError() : 0};
 }
 DatagramIo::Result receiveDatagram(std::intptr_t socket,std::uint8_t* bytes,std::size_t size) {
+#ifdef _WIN32
+  // Repeated very short SO_RCVTIMEO blocking receives can leave Winsock in an
+  // indeterminate/pending state during capture silence. Wait for readability
+  // on a nonblocking socket instead; no overlapped operation/buffer survives
+  // this call, and control/repair/stop work keeps its bounded two-ms cadence.
+  fd_set readable; FD_ZERO(&readable); FD_SET(static_cast<Socket>(socket),&readable);
+  timeval timeout{0,2000};
+  const auto ready=::select(0,&readable,nullptr,nullptr,&timeout);
+  if(ready<=0) return {-1,ready==0 ? WSAEWOULDBLOCK:socketError()};
+#endif
   const auto received=::recv(static_cast<Socket>(socket),reinterpret_cast<char*>(bytes),static_cast<int>(size),0);
   return {received,received<0 ? socketError() : 0};
 }
@@ -374,8 +384,9 @@ Peer::Peer(const Options& o,DatagramIo io) : options_(o), io_(io), codec_(o.toke
   sockaddr_in local{}; local.sin_family = AF_INET; local.sin_port = htons(o.port); local.sin_addr.s_addr = htonl(INADDR_ANY);
   if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 || ::connect(fd, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) != 0) throw std::runtime_error("Unable to bind/connect native UDP socket");
 #ifdef _WIN32
-  DWORD timeout=2; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
-  setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&timeout),sizeof(timeout));
+  u_long nonblocking=1;
+  if(ioctlsocket(fd,FIONBIO,&nonblocking)==SOCKET_ERROR)
+    throw std::runtime_error("Unable to configure nonblocking native UDP socket");
 #else
   timeval timeout{0,2000}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
   setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
