@@ -33,7 +33,9 @@ bool WindowsShortcuts::open(){
   close_=child(L"BUTTON",L"Close",BS_PUSHBUTTON|WS_TABSTOP,closeId);
   status_=child(L"STATIC",L"No OS is assumed. Copy/Paste uses the host clipboard.",SS_LEFT,11);
   if(!title_ || !windows_ || !mac_ || !list_ || !send_ || !close_ || !status_){cancel();return false;}
-  resize();if(!panel_)return false;ShowWindow(panel_,SW_SHOW);SetFocus(windows_);refresh();return true;
+  // Focusing an auto-radio button can emit BN_CLICKED on Win32. Start on the
+  // empty list so opening the panel cannot silently choose the remote OS.
+  resize();if(!panel_)return false;ShowWindow(panel_,SW_SHOW);SetFocus(list_);refresh();return true;
 }
 void WindowsShortcuts::toggle(){if(panel_)cancel();else (void)open();}
 void WindowsShortcuts::cancel(){

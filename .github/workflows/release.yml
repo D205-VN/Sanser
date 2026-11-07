@@ -25,7 +25,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
@@ -94,13 +94,13 @@ jobs:
 
   macos-arm64:
     needs: source-policy
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       SANSER_TARGET_TRIPLE: aarch64-apple-darwin
       CARGO_TARGET_DIR: /tmp/sanser-target
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
