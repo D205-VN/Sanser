@@ -16,6 +16,14 @@ try {
     & "$Build/windows-uac/Release/sanser-uac-deny-test.exe"
     if ($LASTEXITCODE -ne 0) { throw 'UAC broker authorization failed' }
     $path = Join-Path $env:ProgramFiles 'SanserUac'
+    # Running/current is not proof that the authorized protected process can
+    # complete the handshake. Probe it without injecting keys or taking frames.
+    $probe = (& "$path/sanser-host-windows.exe" --uac-ready-json) | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Protected host readiness probe failed' }
+    if ($probe.ready) { Write-Host 'Protected host completed real broker/worker readiness handshake' }
+    elseif ($probe.status -eq 9 -and $probe.check -eq 3 -and $probe.win32 -ne 0) {
+        Write-Warning 'Runner has no unlocked console; broker explicitly rejected its session, no input attempted'
+    } else { throw "Protected host not ready: stage=$($probe.stage) status=$($probe.status) check=$($probe.check) win32=$($probe.win32)" }
     $ownerBefore = Get-Content "$path/allowed-user.sid" -Raw
     & "$Build/windows-uac/Release/sanser-uac-input-test.exe" "$path/sanser-host-windows.exe"
     if ($LASTEXITCODE -eq 77) { Write-Warning 'Runner has no usable synthetic-input desktop; actual elevated Cancel click was not exercised' }

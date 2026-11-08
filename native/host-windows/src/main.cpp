@@ -7538,6 +7538,16 @@ void testLegacyVideoFragmentRepair() {
 
 int main(int argc, char** argv) {
   try {
+#ifdef _WIN32
+    if(argc==2 && std::string_view(argv[1])=="--uac-ready-json") {
+      const bool ready=sanser::uac::probeInput();
+      const auto health=sanser::uac::health();
+      std::cout<<"{\"ready\":"<<(ready ? "true":"false")
+        <<",\"stage\":"<<health.lastStage<<",\"status\":"<<health.lastStatus
+        <<",\"check\":"<<health.lastCheck<<",\"win32\":"<<health.lastError<<"}\n";
+      return 0;
+    }
+#endif
 #ifdef SANSER_UAC_TEST
   if(argc>=2 && std::string_view(argv[1])=="--test-uac-input") return testUacInput(argc,argv);
   if(argc==2 && std::string_view(argv[1])=="--test-input-dispatch") {

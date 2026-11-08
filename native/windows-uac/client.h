@@ -22,6 +22,8 @@ struct Health {
   std::uint32_t lastStage=0,lastError=0,lastStatus=0,lastCheck=0;
 };
 Health health();
+// Side-effect-free readiness check from the protected host. No capture/input.
+bool probeInput();
 struct ServerIdentity { bool trusted=false; DWORD error=0; std::uint32_t check=0; };
 // Verify a connected endpoint against SCM, not a SYSTEM process handle.
 ServerIdentity verifyServiceEndpoint(HANDLE pipe);

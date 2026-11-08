@@ -193,28 +193,38 @@ int worker(const wchar_t* channelName) {
   }
   return 0;
 }
-bool authorized(HANDLE pipe,DWORD& session,Handle& owner) {
-  ULONG pid=0; if(!GetNamedPipeClientProcessId(pipe,&pid)) return false;
-  owner=Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid)); if(!owner) return false;
-  if(!ProcessIdToSessionId(pid,&session) || !unlockedConsole(session)) return false;
+struct AdmissionFailure { DWORD error=ERROR_ACCESS_DENIED; BrokerCheck check=BrokerCheck::ClientPid; };
+bool authorized(HANDLE pipe,DWORD& session,Handle& owner,AdmissionFailure& failure) {
+  const auto reject=[&](BrokerCheck check,DWORD error) { failure={error ? error : ERROR_ACCESS_DENIED,check};return false; };
+  ULONG pid=0;
+  if(!GetNamedPipeClientProcessId(pipe,&pid)) return reject(BrokerCheck::ClientPid,GetLastError());
+  if(!pid) return reject(BrokerCheck::ClientPid,ERROR_INVALID_OWNER);
+  owner=Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid));
+  if(!owner) return reject(BrokerCheck::Process,GetLastError());
+  if(!ProcessIdToSessionId(pid,&session)) return reject(BrokerCheck::Session,GetLastError());
+  if(!unlockedConsole(session)) return reject(BrokerCheck::Session,ERROR_ACCESS_DENIED);
   wchar_t path[32768]; DWORD length=32768;
-  if(!QueryFullProcessImageNameW(owner.value,0,path,&length)) return false;
-  // Never trust a caller-supplied executable or a per-user writable copy.
+  if(!QueryFullProcessImageNameW(owner.value,0,path,&length)) return reject(BrokerCheck::Image,GetLastError());
+  // Preserve the protected executable, owner, unlocked-console and SID checks.
+  // A normal bundled/user-writable host is never admitted to SYSTEM input.
   const auto expected=installDirectory()/L"sanser-host-windows.exe";
-  if(_wcsicmp(std::wstring(path,length).c_str(),expected.c_str())) return false;
+  if(_wcsicmp(std::wstring(path,length).c_str(),expected.c_str())) return reject(BrokerCheck::ProtectedPath,ERROR_ACCESS_DENIED);
   HANDLE rawClient=nullptr,rawUser=nullptr;
-  if(!OpenProcessToken(owner.value,TOKEN_QUERY,&rawClient)) return false;
+  if(!OpenProcessToken(owner.value,TOKEN_QUERY,&rawClient)) return reject(BrokerCheck::ClientToken,GetLastError());
   Handle client(rawClient);
-  if(!WTSQueryUserToken(session,&rawUser)) return false;
+  if(!WTSQueryUserToken(session,&rawUser)) return reject(BrokerCheck::SessionToken,GetLastError());
   Handle user(rawUser);
   auto sid=[](HANDLE token) {
     DWORD n=0; GetTokenInformation(token,TokenUser,nullptr,0,&n); std::vector<unsigned char> data(n);
     if(!n || !GetTokenInformation(token,TokenUser,data.data(),n,&n)) data.clear(); return data;
   };
   const auto a=sid(client.value),b=sid(user.value);
-  return !a.empty() && !b.empty() && tokenSid(client.value)==allowedSid()
-    && EqualSid(reinterpret_cast<const TOKEN_USER*>(a.data())->User.Sid,reinterpret_cast<const TOKEN_USER*>(b.data())->User.Sid);
+  if(a.empty() || b.empty() || tokenSid(client.value)!=allowedSid()
+    || !EqualSid(reinterpret_cast<const TOKEN_USER*>(a.data())->User.Sid,reinterpret_cast<const TOKEN_USER*>(b.data())->User.Sid))
+    return reject(BrokerCheck::Account,ERROR_ACCESS_DENIED);
+  return true;
 }
+
 struct Worker {
   Handle job,process,channel;
   ~Worker() {
@@ -251,14 +261,14 @@ struct Worker {
     require(CreateProcessAsUserW(copy,exe.c_str(),command.data(),nullptr,nullptr,FALSE,
       CREATE_NO_WINDOW|CREATE_SUSPENDED,nullptr,directory.c_str(),&start,&info)!=FALSE,"Start UAC worker");
     process=Handle(info.hProcess); Handle thread(info.hThread);
-    if(!AssignProcessToJobObject(job.value,process.value)) { TerminateProcess(process.value,1); throw std::runtime_error("Unable to bind UAC worker lifetime"); }
+    if(!AssignProcessToJobObject(job.value,process.value)) { const auto error=GetLastError();TerminateProcess(process.value,1);throw Win32Failure("Unable to bind UAC worker lifetime",error); }
     require(ResumeThread(thread.value)!=static_cast<DWORD>(-1),"Resume UAC worker");
     Handle event(CreateEventW(nullptr,TRUE,FALSE,nullptr)); require(static_cast<bool>(event),"Worker accept event");
     OVERLAPPED io{}; io.hEvent=event.value;
     if(!ConnectNamedPipe(channel.value,&io)) {
       const auto error=GetLastError();
       if(error==ERROR_IO_PENDING) {
-        if(WaitForSingleObject(event.value,workerStartupTimeoutMs)!=WAIT_OBJECT_0) { CancelIoEx(channel.value,&io); WaitForSingleObject(event.value,INFINITE); throw std::runtime_error("UAC worker startup timed out"); }
+        if(WaitForSingleObject(event.value,workerStartupTimeoutMs)!=WAIT_OBJECT_0) { CancelIoEx(channel.value,&io); WaitForSingleObject(event.value,INFINITE); throw Win32Failure("UAC worker startup timed out",ERROR_TIMEOUT); }
         DWORD n=0; require(GetOverlappedResult(channel.value,&io,&n,FALSE)!=FALSE,"UAC worker connection");
       } else require(error==ERROR_PIPE_CONNECTED,"UAC worker connection");
     }
@@ -276,29 +286,60 @@ bool nextRequest(HANDLE pipe,HANDLE owner,Request& request) {
 }
 void serve(Handle pipe) {
   struct Count { ~Count() { --clients; } } count;
+  // Consume the fixed, side-effect-free first probe before reporting failure.
+  // Previously admission/startup errors silently closed the pipe; the client
+  // saw only ERROR_NO_DATA (232), hiding the actual rejection or worker error.
+  const auto reject=[&](Status status,DWORD error,BrokerCheck check) {
+    Response response;response.status=status;response.left=static_cast<LONG>(error);
+    response.top=static_cast<LONG>(check);
+    if(timedTransfer(pipe.value,&response,sizeof(response),true,250)) {
+      // Keep the endpoint alive until the client consumes the fixed rejection
+      // and closes, without an unbounded FlushFileBuffers on an untrusted peer.
+      Request discarded;
+      (void)timedTransfer(pipe.value,&discarded,sizeof(discarded),false,250);
+    }
+  };
   try {
-    DWORD session=0; Handle owner;
-    if(!authorized(pipe.value,session,owner)) return;
-    Worker workerProcess(session); Request request; bool firstCapture=true;
-    while(nextRequest(pipe.value,owner.value,request)) {
+    Request request;
+    if(!timedTransfer(pipe.value,&request,sizeof(request),false,1000)) return;
+    if(!valid(request) || request.operation!=Operation::Probe) {
+      reject(Status::ClientRejected,ERROR_INVALID_DATA,BrokerCheck::Protocol);return;
+    }
+    DWORD session=0; Handle owner; AdmissionFailure admission;
+    if(!authorized(pipe.value,session,owner,admission)) {
+      reject(Status::ClientRejected,admission.error,admission.check);return;
+    }
+    std::unique_ptr<Worker> workerProcess;
+    try { workerProcess=std::make_unique<Worker>(session); }
+    catch(const Win32Failure& failure) { reject(Status::WorkerUnavailable,failure.error,BrokerCheck::WorkerStart);return; }
+    catch(...) { reject(Status::WorkerUnavailable,ERROR_GEN_FAILURE,BrokerCheck::WorkerStart);return; }
+    bool firstCapture=true;
+    do {
       if(!valid(request) || !unlockedConsole(session)) break;
       Response response; std::vector<unsigned char> pixels;
       const auto timeout=request.operation==Operation::Probe ? readyTimeoutMs
         : request.operation==Operation::Capture && firstCapture ? captureStartupTimeoutMs : responseTimeoutMs;
       if(request.operation==Operation::Capture) firstCapture=false;
-      bool ok=timedTransfer(workerProcess.channel.value,&request,sizeof(request),true,250)
-        && timedTransfer(workerProcess.channel.value,&response,sizeof(response),false,timeout) && response.signature==magic;
+      bool ok=timedTransfer(workerProcess->channel.value,&request,sizeof(request),true,250)
+        && timedTransfer(workerProcess->channel.value,&response,sizeof(response),false,timeout) && response.signature==magic;
       if(ok && response.bytes) {
         ok=validFrame(response);
-        if(ok) { pixels.resize(response.bytes); ok=timedTransfer(workerProcess.channel.value,pixels.data(),response.bytes,false,1000); }
+        if(ok) { pixels.resize(response.bytes); ok=timedTransfer(workerProcess->channel.value,pixels.data(),response.bytes,false,1000); }
       }
-      if(!ok) break;
-      if(!unlockedConsole(session)) break; // A lock may arrive during GPU readback.
+      if(!ok) {
+        // Only a probe is known not to have injected an event. Never replay a
+        // timed-out click/key or tell its caller it was safely rejected.
+        if(request.operation==Operation::Probe)
+          reject(Status::WorkerUnavailable,GetLastError() ? GetLastError() : ERROR_BROKEN_PIPE,BrokerCheck::WorkerReply);
+        break;
+      }
+      if(!unlockedConsole(session)) break;
       if(!timedTransfer(pipe.value,&response,sizeof(response),true,1000)) break;
       if(response.bytes && !timedTransfer(pipe.value,pixels.data(),response.bytes,true,1000)) break;
-    }
-  } catch(...) { /* Fail closed. The caller retains its last frame and session. */ }
+    } while(nextRequest(pipe.value,owner.value,request));
+  } catch(...) { /* No input success is inferred after an ambiguous failure. */ }
 }
+
 void WINAPI control(DWORD code) { if(code==SERVICE_CONTROL_STOP || code==SERVICE_CONTROL_SHUTDOWN) stopping=true; }
 void WINAPI serviceMain(DWORD,wchar_t**) {
   serviceHandle=RegisterServiceCtrlHandlerW(serviceName,control); if(!serviceHandle) return;

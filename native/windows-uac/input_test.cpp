@@ -48,6 +48,12 @@ int testUacInput(int argc,char** argv) {
   // Exercise the same fallback as real clicks after UAC closes. Do not force
   // active() or call the broker directly; that would miss the regression.
   sanser::uac::InputDispatch dispatch;
+  if(!sanser::uac::probeInput()) {
+    const auto health=sanser::uac::health();
+    std::cout<<"Protected input handshake failed stage="<<health.lastStage<<" status="<<health.lastStatus
+      <<" check="<<health.lastCheck<<" error="<<health.lastError<<'\n';
+    return 1;
+  }
   const auto sent=sanser::uac::sendInput(3,events,sizeof(INPUT),&dispatch);
   const auto error=GetLastError();
   POINT cursor{}; GetCursorPos(&cursor);

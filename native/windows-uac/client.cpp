@@ -71,7 +71,7 @@ public:
           return failed(Stage::Ready,GetLastError());
         if(ready.signature!=magic) return failed(Stage::Ready,ERROR_INVALID_DATA);
         if(ready.status!=Status::Ready || ready.bytes)
-          return failed(Stage::Ready,static_cast<DWORD>(ready.left),ready.status);
+          return failed(Stage::Ready,static_cast<DWORD>(ready.left),ready.status,static_cast<std::uint32_t>(ready.top));
         { std::lock_guard lock(healthMutex); ++brokerHealth.readyConnections; }
       }
       const auto timeout=request.operation==Operation::Capture && firstCapture_ ? captureStartupTimeoutMs : responseTimeoutMs;
@@ -88,7 +88,8 @@ public:
       } else if(response.bytes) return failed(Stage::Response,ERROR_INVALID_DATA);
       if(response.status==Status::ConsoleUnavailable || response.status==Status::DesktopUnavailable
           || response.status==Status::InputUnavailable || response.status==Status::CaptureUnavailable
-          || response.status==Status::Unavailable) {
+          || response.status==Status::Unavailable || response.status==Status::ClientRejected
+          || response.status==Status::WorkerUnavailable) {
         // Retain the explicit status for the caller; close this worker before
         // a later retry rather than silently classifying it as healthy idle.
         failed(Stage::Rejected,static_cast<DWORD>(response.left),response.status);
@@ -96,6 +97,8 @@ public:
       return true;
     } catch(...) { return failed(Stage::Response,ERROR_GEN_FAILURE); }
   }
+  DWORD failureError() const { return failureError_; }
+  DWORD failureStatus() const { return failureStatus_; }
 private:
   bool failed(Stage stage,DWORD error,Status status=Status::Unavailable,std::uint32_t check=0) {
     const auto now=GetTickCount64(); bool log=false;
@@ -108,12 +111,15 @@ private:
     }
     if(log) std::cerr<<"SNUAC_HEALTH uacStage="<<static_cast<std::uint32_t>(stage)
       <<" uacError="<<error<<" uacStatus="<<static_cast<std::uint32_t>(status)<<" uacCheck="<<check<<'\n';
+    failureError_=error;failureStatus_=static_cast<DWORD>(status);
     pipe_=Handle(); firstCapture_=true; retryAt_=now+1000; return false;
   }
   Handle pipe_;
   ULONGLONG retryAt_=0;
   bool firstCapture_=true;
+  DWORD failureError_=0,failureStatus_=0;
 };
+Connection& inputConnection() { thread_local Connection connection; return connection; }
 }
 ServerIdentity verifyServiceEndpoint(HANDLE pipe) {
   ULONG pid=0;
@@ -151,6 +157,10 @@ struct CaptureClient::Impl { Connection connection; };
 CaptureClient::CaptureClient():impl_(std::make_unique<Impl>()) {}
 CaptureClient::~CaptureClient()=default;
 Health health() { std::lock_guard lock(healthMutex); return brokerHealth; }
+bool probeInput() {
+  Request request;request.operation=Operation::Probe;Response response;
+  return inputConnection().exchange(request,response) && response.status==Status::Ready;
+}
 bool CaptureClient::capture(FrameBgra& frame,unsigned adapter,unsigned output,bool& changed) {
   Request request; request.adapter=adapter; request.output=output; Response response;
   changed=false;
@@ -166,7 +176,7 @@ void resumed() { servedUntil=0; }
 UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
   if(dispatch) *dispatch={};
   if(size!=sizeof(INPUT) || count>16) return 0;
-  thread_local Connection connection;
+  auto& connection=inputConnection();
   // Ordinary input remains in-process. The helper is also needed for a high-
   // integrity installer window after its UAC prompt returns to Default.
   // An elevated installer on Default is also privileged, even though capture
@@ -181,7 +191,10 @@ UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
     else if(in.type==INPUT_MOUSE) { request.flags=in.mi.dwFlags; request.x=in.mi.dx; request.y=in.mi.dy; request.data=in.mi.mouseData; }
     if(!valid(request)) break;
     Response response;
-    if(!connection.exchange(request,response)) break;
+    if(!connection.exchange(request,response)) {
+      if(dispatch) { dispatch->failureStatus=connection.failureStatus();dispatch->failureError=connection.failureError(); }
+      break;
+    }
     if(response.status==Status::Unavailable) {
       if(dispatch) dispatch->failureStatus=static_cast<DWORD>(response.status);
       // UAC closed between capture and input. A positively rejected event can

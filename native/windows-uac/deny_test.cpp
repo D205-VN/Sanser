@@ -17,7 +17,10 @@ int main() {
       timedTransfer(pipe.value,&request,sizeof(request),true,1000);
       // This executable is not the protected host. Even the side-effect-free
       // readiness probe must be rejected before a worker is created.
-      require(!timedTransfer(pipe.value,&response,sizeof(response),false,1500),"UAC service accepted an unauthorized executable");
+      require(timedTransfer(pipe.value,&response,sizeof(response),false,1500)
+        && response.signature==magic && response.status==Status::ClientRejected
+        && !response.bytes && response.left!=0 && response.top!=0,
+        "UAC service did not explicitly reject an unauthorized executable");
     }
     std::cout<<"Unauthorized executable rejected; no capture/input requested\n"; return 0;
   } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

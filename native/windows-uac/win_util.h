@@ -22,7 +22,11 @@ struct Handle {
   Handle& operator=(Handle&& h) noexcept { if(this!=&h) { Handle old(std::exchange(value,std::exchange(h.value,nullptr))); } return *this; }
   explicit operator bool() const { return value && value!=INVALID_HANDLE_VALUE; }
 };
-inline void require(bool ok,const char* name) { if(!ok) throw std::runtime_error(std::string(name)+" (Win32 "+std::to_string(GetLastError())+")"); }
+struct Win32Failure : std::runtime_error {
+  DWORD error;
+  Win32Failure(const char* name,DWORD code):std::runtime_error(std::string(name)+" (Win32 "+std::to_string(code)+")"),error(code) {}
+};
+inline void require(bool ok,const char* name) { if(!ok) throw Win32Failure(name,GetLastError()); }
 inline std::filesystem::path imagePath() {
   std::vector<wchar_t> path(32768); const DWORD n=GetModuleFileNameW(nullptr,path.data(),static_cast<DWORD>(path.size()));
   require(n>0 && n<path.size(),"Executable path"); return std::wstring(path.data(),n);

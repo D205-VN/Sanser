@@ -1135,9 +1135,27 @@ impl EngineManager {
             ));
         }
         #[cfg(windows)]
-        if request.kind == EngineKind::Host {
-            crate::windows_uac::ensure_current(app)?;
-        }
+        let protected = if request.kind == EngineKind::Host {
+            crate::windows_uac::launch_host(
+                app,
+                request.input_enabled && request.sharing_id.is_none(),
+            )?
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let path = protected
+            .or_else(|| {
+                // UAC is disabled/unavailable: the regular host remains supported.
+                // An enabled-but-broken helper returned an error above, never None.
+                candidate_paths(app, request.kind)
+                    .into_iter()
+                    .find(|p| p.is_file())
+            })
+            .ok_or_else(|| {
+                DesktopError::Unavailable(format!("{} is not bundled", sidecar_name(request.kind)))
+            })?;
+        #[cfg(not(windows))]
         let path = find_sidecar(app, request.kind).ok_or_else(|| {
             DesktopError::Unavailable(format!("{} is not bundled", sidecar_name(request.kind)))
         })?;

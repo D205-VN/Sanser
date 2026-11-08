@@ -9,7 +9,13 @@ inline constexpr std::uint32_t magic=0x31435553; // SUC1, local IPC only.
 inline constexpr std::uint32_t maxPixelsBytes=64*1024*1024;
 enum class Operation : std::uint32_t { Capture=1, Input=2, Probe=3 };
 enum class Status : std::uint32_t { Unavailable=0, Frame=1, Idle=2, Applied=3,
-  ConsoleUnavailable=4, DesktopUnavailable=5, InputUnavailable=6, Ready=7, CaptureUnavailable=8 };
+  ConsoleUnavailable=4, DesktopUnavailable=5, InputUnavailable=6, Ready=7, CaptureUnavailable=8,
+  ClientRejected=9, WorkerUnavailable=10 };
+enum class BrokerCheck : std::uint32_t {
+  ClientPid=1, Process=2, Session=3, Image=4, ProtectedPath=5,
+  ClientToken=6, SessionToken=7, Account=8, Protocol=9,
+  WorkerStart=10, WorkerReply=11,
+};
 inline constexpr std::uint32_t workerStartupTimeoutMs=3000;
 inline constexpr std::uint32_t readyTimeoutMs=4000;
 inline constexpr std::uint32_t captureStartupTimeoutMs=4000;
