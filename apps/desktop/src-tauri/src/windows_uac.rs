@@ -233,7 +233,8 @@ mod tests {
     }
 
     #[test]
-    fn enabled_broker_never_falls_back_to_an_unprotected_host() {
+    fn enabled_broker_never_falls_back_to_an_unprotected_host()
+    -> Result<(), Box<dyn std::error::Error>> {
         use super::resolve_launch_host;
         use crate::error::DesktopError;
         let current = json!({"enabled":true,"current":true});
@@ -258,29 +259,30 @@ mod tests {
         assert!(
             resolve_launch_host(&json!({"enabled":false}), || panic!(
                 "disabled broker queried"
-            ))
-            .unwrap()
+            ))?
             .is_none()
         );
-        let exe = std::env::current_exe().unwrap();
+        let exe = std::env::current_exe()?;
         let mut lookups = 0;
         let selected = resolve_launch_host(&current, || {
             lookups += 1;
             Ok(Some(exe.clone()))
-        })
-        .unwrap();
+        })?;
         assert_eq!(selected, Some(exe));
         assert_eq!(lookups, 1);
+        Ok(())
     }
 
     #[test]
-    fn service_running_does_not_imply_the_privileged_input_channel_is_ready() {
+    fn service_running_does_not_imply_the_privileged_input_channel_is_ready()
+    -> Result<(), Box<dyn std::error::Error>> {
         use super::validate_input_readiness;
         assert!(validate_input_readiness(&json!({"enabled":true,"current":true})).is_err());
-        let failure = validate_input_readiness(&json!({"ready":false,"stage":3,"status":9,"check":5,"win32":5,"path":"private","token":"secret"})).unwrap_err().to_string();
+        let failure = validate_input_readiness(&json!({"ready":false,"stage":3,"status":9,"check":5,"win32":5,"path":"private","token":"secret"})).err().ok_or("broken readiness was accepted")?.to_string();
         assert!(failure.contains("stage=3, status=9, check=5, win32=5"));
         assert!(!failure.contains("private") && !failure.contains("secret"));
         assert!(validate_input_readiness(&json!({"ready":true})).is_ok());
+        Ok(())
     }
 }
 
