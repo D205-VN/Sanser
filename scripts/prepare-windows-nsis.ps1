@@ -6,7 +6,10 @@ if (-not $IsWindows) { throw 'NSIS preparation requires Windows' }
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ('sanser-nsis-' + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $stage | Out-Null
 function Get-VerifiedFile([string]$Url, [string]$Path, [string]$Sha256) {
-    & curl.exe --fail --location --silent --show-error --retry 4 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 60 --output $Path $Url
+    # GitHub's asset redirect can retain a failed edge response for this URL.
+    # A fresh query obtains a fresh redirect; the pinned digest remains required.
+    $freshUrl = $Url + '?sanser=' + [Guid]::NewGuid().ToString('N')
+    & curl.exe --fail --location --silent --show-error --retry 4 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 60 --output $Path $freshUrl
     if ($LASTEXITCODE -ne 0) { throw 'Unable to download the official NSIS toolchain' }
     if ((Get-FileHash -Algorithm SHA256 $Path).Hash -ne $Sha256) { throw 'NSIS toolchain checksum mismatch' }
 }
