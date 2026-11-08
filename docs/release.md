@@ -1,7 +1,7 @@
 # Release
 
-The current release definition is [Sanser 2.3.5](releases/v2.3.5.md), tagged
-`v2.3.5`. Its workflow publishes Mac/Windows installers and signed updater
+The current release definition is [Sanser 2.3.6](releases/v2.3.6.md), tagged
+`v2.3.6`. Its workflow publishes Mac/Windows installers and signed updater
 bundles. Enhanced voice is an off-by-default experiment and needs a configured
 SFU/gateway; see the release notes for validation and known limitations.
 See [sharing implementation and validation progress](multi-viewer-progress.md)
