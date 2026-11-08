@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { isTauri } from '@tauri-apps/api/core';
-  import { check, type Update } from '@tauri-apps/plugin-updater';
+  import type { Update } from '@tauri-apps/plugin-updater';
+  import { checkForDesktopUpdates } from '../lib/updater';
   import { relaunch } from '@tauri-apps/plugin-process';
   import { connection } from '../stores/connection';
   import { host as hostStore } from '../stores/host';
@@ -11,6 +12,9 @@
   let { checking = $bindable(false), onAvailabilityChange = () => undefined }: { checking?: boolean; onAvailabilityChange?: (available: boolean) => void } = $props();
   let mounted = false;
   let requested = $state(false);
+  let retryTimer: number | undefined;
+  let retryDelay = 30_000;
+  let lastCheckAt = -Infinity;
 
   let dialog = $state<HTMLDialogElement>();
   let manifest = $state<Update | null>(null);
@@ -32,12 +36,20 @@
     const checkInBackground = () => { if (isTauri()) void checkForUpdates(false); };
     const timer = window.setTimeout(checkInBackground, 5_000);
     const interval = window.setInterval(checkInBackground, 15 * 60_000);
+    const checkWhenVisible = () => {
+      if (!document.hidden && Date.now() - lastCheckAt >= 5 * 60_000) checkInBackground();
+    };
     window.addEventListener('online', checkInBackground);
+    window.addEventListener('focus', checkWhenVisible);
+    document.addEventListener('visibilitychange', checkWhenVisible);
     return () => {
       mounted = false;
       window.clearTimeout(timer);
       window.clearInterval(interval);
+      window.clearTimeout(retryTimer);
       window.removeEventListener('online', checkInBackground);
+      window.removeEventListener('focus', checkWhenVisible);
+      document.removeEventListener('visibilitychange', checkWhenVisible);
       if (manifest) void manifest.close().catch(() => undefined);
     };
   });
@@ -51,20 +63,26 @@
   export async function checkForUpdates(manual = true): Promise<void> {
     if (manual) requested = true;
     if (checking || updating || manifest || status === 'done') return;
+    if (!manual && Date.now() - lastCheckAt < 30_000) return;
+    window.clearTimeout(retryTimer);
     error = '';
     if (!isTauri()) { status = 'unsupported'; return; }
     checking = true;
+    lastCheckAt = Date.now();
     status = 'checking';
     try {
-      const update = await check();
+      const update = await checkForDesktopUpdates();
       if (!mounted) { if (update) await update.close(); return; }
       manifest = update;
       status = update ? 'idle' : 'current';
+      retryDelay = 30_000;
     } catch (caught) {
       if (!mounted) return;
       status = 'error';
       error = 'Unable to check for updates. Check your connection and try again.';
       diagnostics.add({ level: 'warn', category: 'app', message: caught instanceof Error ? caught.message : error });
+      retryTimer = window.setTimeout(() => { if (mounted) void checkForUpdates(false); }, retryDelay);
+      retryDelay = Math.min(5 * 60_000, retryDelay * 2);
     } finally {
       checking = false;
     }

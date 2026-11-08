@@ -5,7 +5,7 @@ import { SANSER_VERSION } from '../lib/types';
 
 const mocks = vi.hoisted(() => ({ check: vi.fn(), relaunch: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => true }));
-vi.mock('@tauri-apps/plugin-updater', () => ({ check: mocks.check }));
+vi.mock('../lib/updater', () => ({ checkForDesktopUpdates: mocks.check }));
 vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: mocks.relaunch }));
 import Updater from './Updater.svelte';
 
@@ -91,6 +91,16 @@ it('reports an available update silently and opens only when requested', async (
   expect(await screen.findByRole('dialog')).toHaveTextContent('Update available');
 });
 
+it('allows a manual retry after a failed background check', async () => {
+  mocks.check.mockRejectedValueOnce(new Error('HTTP 504')).mockResolvedValueOnce(null);
+  const component = renderUpdater();
+  await component.checkForUpdates(false);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  await component.checkForUpdates();
+  expect(await screen.findByRole('heading', { name: 'You’re up to date' })).toBeInTheDocument();
+  expect(mocks.check).toHaveBeenCalledTimes(2);
+});
+
 it.each([false, true])('keeps the indicator hidden when a background check has no update or fails (%s)', async (fails) => {
   if (fails) mocks.check.mockRejectedValue(new Error('offline'));
   else mocks.check.mockResolvedValue(null);
@@ -100,4 +110,38 @@ it.each([false, true])('keeps the indicator hidden when a background check has n
   await waitFor(() => expect(availability).toHaveBeenLastCalledWith(false));
   expect(availability).not.toHaveBeenCalledWith(true);
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it('retries a failed background check without showing Update until confirmation', async () => {
+  vi.useFakeTimers();
+  mocks.check.mockRejectedValueOnce(new Error('HTTP 504')).mockResolvedValueOnce({ version: '2.3.7', close: vi.fn().mockResolvedValue(undefined) });
+  const availability = vi.fn();
+  renderUpdater(availability);
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(mocks.check).toHaveBeenCalledTimes(1);
+  expect(availability).not.toHaveBeenCalledWith(true);
+  await vi.advanceTimersByTimeAsync(30_000);
+  await Promise.resolve();
+  expect(mocks.check).toHaveBeenCalledTimes(2);
+  expect(availability).toHaveBeenLastCalledWith(true);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it('checks on return to the app, throttles focus events and removes retry listeners on close', async () => {
+  vi.useFakeTimers();
+  mocks.check.mockResolvedValue(null);
+  renderUpdater();
+  await vi.advanceTimersByTimeAsync(5_000);
+  window.dispatchEvent(new Event('focus'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mocks.check).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(5 * 60_000);
+  window.dispatchEvent(new Event('focus'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mocks.check).toHaveBeenCalledTimes(2);
+  cleanup();
+  window.dispatchEvent(new Event('focus'));
+  window.dispatchEvent(new Event('online'));
+  await vi.advanceTimersByTimeAsync(15 * 60_000);
+  expect(mocks.check).toHaveBeenCalledTimes(2);
 });

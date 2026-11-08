@@ -250,7 +250,7 @@
         {#if page === 'computers'}<Computers {runtime} {navigate} />
         {:else if page === 'host'}<Host {runtime} />
         {:else if page === 'settings' || page === 'diagnostics'}<Settings {runtime} onSignOut={signOut} initialSection={page === 'diagnostics' ? 'diagnostics' : 'stream'} />
-        {:else if page === 'about'}<About />{/if}
+        {:else if page === 'about'}<About checking={updateChecking} {updateAvailable} onCheckForUpdates={() => { void updater?.checkForUpdates(); }} />{/if}
       </main>
     </div>
   </div>

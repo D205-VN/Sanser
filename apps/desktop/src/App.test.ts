@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { connection } from './stores/connection';
 import type { ConnectionSession } from './lib/types';
 
@@ -40,6 +40,11 @@ import App from './App.svelte';
 
 const sharingState = sharing as unknown as Writable<SharingState>;
 const presenceState = presence as unknown as Writable<PresenceState>;
+
+beforeAll(() => {
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+});
 
 beforeEach(() => {
   sharingState.update((state) => ({ ...state, groups: [], devices: [], ownGroup: null, error: null }));
@@ -118,10 +123,13 @@ it('provides a list layout without changing the device list', async () => {
 });
 
 
-it('hides Update until an available update has been confirmed', async () => {
+it('keeps Update hidden until confirmed and allows a manual check from About', async () => {
   render(App);
   await screen.findByRole('heading', { name: 'Your computers' });
   expect(screen.queryByRole('button', { name: 'Update' })).not.toBeInTheDocument();
+  await fireEvent.click(screen.getByRole('button', { name: 'About' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+  expect(await screen.findByRole('dialog')).toHaveTextContent('Open the desktop app to update');
 });
 
 it('shows one named computer for both roles and keeps older registrations available', async () => {

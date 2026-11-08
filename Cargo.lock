@@ -3907,6 +3907,7 @@ dependencies = [
  "futures-util",
  "keyring",
  "rand 0.8.6",
+ "reqwest",
  "sanser-diagnostics",
  "sanser-file-transfer",
  "sanser-network",

@@ -13,6 +13,7 @@ mod relay;
 mod sharing_engine;
 mod storage;
 mod tray;
+mod updater;
 mod voice;
 mod voice_window;
 mod windows_uac;
@@ -115,6 +116,7 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         return true;
     }
     let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+        updater::check_update_via_github,
         windows_uac::windows_uac_status,
         windows_uac::configure_windows_uac,
         commands::get_runtime_status,
