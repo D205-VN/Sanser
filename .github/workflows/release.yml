@@ -35,6 +35,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run release:validate
+      - name: Prepare verified Windows installer tools
+        shell: pwsh
+        run: ./scripts/prepare-windows-nsis.ps1
       - run: npm run desktop:stage-sidecar
         env:
           SANSER_TARGET_TRIPLE: x86_64-pc-windows-msvc
