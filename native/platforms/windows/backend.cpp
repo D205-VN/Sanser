@@ -297,7 +297,7 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     state->released=true;return 0;
   }
   if((state->viewOnly || state->inputPaused) && ((message>=WM_KEYFIRST && message<=WM_KEYLAST) || (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST))) return DefWindowProcW(window,message,w,l);
-  if(message==WM_CLOSE) { if(state->shortcuts)state->shortcuts->cancel();if(state->textInput) state->textInput->cancel(); state->userClosed=true; DestroyWindow(window); return 0; }
+  if(message==WM_CLOSE) { if(state->shortcuts)state->shortcuts->cancel();if(state->textInput) state->textInput->cancel();if(!state->viewOnly)state->sendInput(Input{}); state->userClosed=true; DestroyWindow(window); return 0; }
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
   if(message==WM_ERASEBKGND) return 1;
   if(message==WM_PAINT) {
@@ -321,7 +321,13 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   // Windows runs its own modal loop while a window is dragged or resized.
   // Its loop cannot wait on frameReady, so keep repainting the latest frame
   // with a short-lived timer until normal event processing resumes.
-  if(message==WM_ENTERSIZEMOVE) { SetTimer(window,1,16,nullptr); return 0; }
+  if(message==WM_ENTERMENULOOP || message==WM_ENTERSIZEMOVE) {
+    state->capturedButtons.clear();state->wheel.reset();
+    if(!state->viewOnly)state->sendInput(Input{});
+    state->released=true;if(GetCapture()==window)ReleaseCapture();
+    if(message==WM_ENTERSIZEMOVE)SetTimer(window,1,16,nullptr);
+    return 0;
+  }
   if(message==WM_EXITSIZEMOVE) { KillTimer(window,1); InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_TIMER && w==1) { if(WaitForSingleObject(state->frameReady,0)==WAIT_OBJECT_0) InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_SIZE) { if(state->shortcuts)state->shortcuts->resize();if(state->textInput) state->textInput->resize(); InvalidateRect(window,nullptr,FALSE); return 0; }
@@ -751,6 +757,7 @@ int runWindows(bool host,int argc,char** argv) {
     }
     if(options.input && state.inputPaused==peer.inputAvailable()) {
       state.inputPaused=!peer.inputAvailable(); state.released=true;
+      (void)clipboardKeys.apply(Input{},peer.macHost());state.capturedButtons.clear();state.wheel.reset();
       if(state.textInput) state.textInput->cancel();
       if(GetCapture()==window) ReleaseCapture();
       SetWindowTextW(window,state.inputPaused ? peer.capturePaused() ? L"Sanser · Host capture temporarily unavailable · Check UAC on the host" : L"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists" : L"Sanser · Input restored · Click to resume");
