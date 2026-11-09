@@ -20,6 +20,17 @@ The deterministic recovery tests and real UDP pacing/loss tests passed locally
 after this correction. Final CI and physical-device verification are recorded
 separately; this does not establish that all perceived stutter is eliminated.
 
+The next CI run confirmed zero surplus repairs in that lossless case. Its
+separate 600 ms stalled-sender/lost-tail case did not complete the old picture;
+the fixture provided no encoder response and did not record recovery requests.
+It now records and models that encoder responsibility: repair the same picture
+when possible, or, only after
+an observed IDR request beyond the unchanged 1.5 s send budget, provide a fresh
+independent picture and require video to resume. It still requires the final
+original datagram to have actually been dropped, and fails on a silent stall.
+The deterministic no-progress/retry-renewal case still requires repair of the
+original picture; no production deadline or retry assertion was widened.
+
 The user reported visible video stutter while audio remained normal on the
 personal-device Release build 2.3.6 (20310). The session stayed connected during
 inspection; neither screen nor audio content was recorded.
