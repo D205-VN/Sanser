@@ -23,6 +23,11 @@ int main() {
   request.x=0; request.flags=0xffffffff; check(!valid(request));
   request.flags=0x80; request.data=0xffffffff; check(!valid(request));
   request.data=1; check(valid(request));
+  request.flags=0x1000;request.data=static_cast<std::uint32_t>(-120);check(valid(request));
+  request.flags=0x800;request.data=120;check(valid(request));
+  request.flags=0x1800;check(!valid(request));
+  request.flags=0x1080;request.data=1;check(!valid(request));
+  request.flags=0x1880;check(!valid(request));
   Response response; response.status=Status::Frame; response.width=1920; response.height=1080;
   response.stride=7680; response.bytes=7680*1080; check(validFrame(response));
   --response.bytes; check(!validFrame(response)); response.bytes=0xffffffff; check(!validFrame(response));
