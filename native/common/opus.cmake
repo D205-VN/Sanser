@@ -16,7 +16,9 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
   set(OPUS_PRESUME_NEON ON CACHE BOOL "" FORCE)
 endif()
 FetchContent_Declare(sanser_opus
-  URL https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+  URL
+    https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+    https://ftp.osuosl.org/pub/xiph/releases/opus/opus-1.6.1.tar.gz
   URL_HASH SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1)
 # Upstream promotes BUILD_TESTING into its own tests; scope it to the dependency.
 set(_sanser_build_testing ${BUILD_TESTING})

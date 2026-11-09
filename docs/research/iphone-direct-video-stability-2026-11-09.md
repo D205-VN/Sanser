@@ -31,6 +31,15 @@ original datagram to have actually been dropped, and fails on a silent stall.
 The deterministic no-progress/retry-renewal case still requires repair of the
 original picture; no production deadline or retry assertion was widened.
 
+Another CI run reached the overload phase with one encoded-picture expiry.
+The synthetic source now uses approximately 4 KB pictures appropriate to its
+negotiated 2 Mbps/60 fps profile, in bursts of eight rather than four 8 KB
+pictures. The offered 32 KB burst, source-overload requirement, raw-skip check,
+no-encoded-drop assertion and separate explicit deadline-expiry case remain.
+The Windows runner also experienced an Opus download connection abort. A second
+official Xiph mirror was verified against the unchanged archive SHA-256 and
+added as a download fallback; no codec version or build setting changed.
+
 The user reported visible video stutter while audio remained normal on the
 personal-device Release build 2.3.6 (20310). The session stayed connected during
 inspection; neither screen nor audio content was recorded.

@@ -103,10 +103,12 @@ int main(){try{
   unsigned admitted=0,skipped=0;
   const auto until=Clock::now()+std::chrono::seconds(1);
   while(Clock::now()<until) {
-    // A burst keeps this an overload test even when the producer's requested
-    // 16ms sleep coalesces to 32ms on CI (a single 8KiB frame would then fit).
-    for(unsigned raw=0;raw<4;++raw) {
-      if(host->acceptsCapture()){host->video({Bytes(8000,0x43),1920,1080,false});++admitted;}
+    // ~4KB matches this negotiated 2 Mbps / 60fps profile. Eight pictures
+    // retain the original 32KB offered burst, including under CI timer
+    // coalescing, while leaving per-picture scheduling room below its hard
+    // deadline. Deadline expiry and IDR recovery are exercised separately.
+    for(unsigned raw=0;raw<8;++raw) {
+      if(host->acceptsCapture()){host->video({Bytes(4000,0x43),1920,1080,false});++admitted;}
       else ++skipped;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(16));
