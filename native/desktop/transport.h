@@ -88,7 +88,7 @@ class Reassembler {
 public:
   explicit Reassembler(std::uint32_t bitrate=20000000,bool ultra=false,bool mobile=false):bitrate_(bitrate),ultra_(ultra),mobile_(mobile) {}
   void wireBitrate(std::uint32_t bitrate) { bitrate_=bitrate; }
-  std::optional<Frame> push(const snv2::Header& header, const Bytes& payload);
+  std::optional<Frame> push(const snv2::Header& header, const Bytes& payload,Clock::time_point now=Clock::now());
   // Drain dependent pictures in order after a delayed reference is repaired.
   std::optional<Frame> take();
   std::uint64_t lostFragments() const { return lostFragments_; }
@@ -101,7 +101,7 @@ public:
     return false;
   }
 private:
-  struct Partial { Bytes data; std::vector<bool> seen; std::uint16_t received = 0; Clock::time_point started; bool keyframe = false; Clock::time_point lastRepair{}; unsigned repairAttempts=0; std::size_t highestSeen=0; };
+  struct Partial { Bytes data; std::vector<bool> seen; std::uint16_t received = 0; Clock::time_point started; bool keyframe = false; Clock::time_point lastRepair{}; unsigned repairAttempts=0; std::size_t highestSeen=0; Clock::time_point progressed{}; };
   std::uint32_t bitrate_;
   bool ultra_;
   bool mobile_;

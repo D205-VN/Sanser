@@ -284,13 +284,12 @@ std::chrono::milliseconds videoSendBudget(std::size_t bytes,std::uint32_t bitrat
   if(mobileKeyframe) return std::chrono::milliseconds(1500);
   return std::chrono::milliseconds(std::clamp<std::int64_t>(serialization+(ultra ? 40 : 100),ultra ? 40 : 100,500));
 }
-std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b) {
+std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b,Clock::time_point now) {
   if (b.size() < 8 || h.frameId <= lastFrame_) return std::nullopt;
   const auto index = r16(b.data()), count = r16(b.data()+2); const auto size = r32(b.data()+4);
   if (size < 8 || size > maxFrame || count != (size+chunkSize-1)/chunkSize || index >= count) return std::nullopt;
   const auto offset = static_cast<std::size_t>(index)*chunkSize;
   if (b.size()-8 != std::min(chunkSize, size-offset)) return std::nullopt;
-  const auto now = Clock::now();
   for (auto i = frames_.begin(); i != frames_.end();) {
     if (now-i->second.started > videoSendBudget(i->second.data.size(),bitrate_,ultra_,mobile_ && i->second.keyframe)+std::chrono::milliseconds(350)) {
       lostFragments_+=i->second.seen.size()-i->second.received; haveReference_=false;
@@ -316,6 +315,7 @@ std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b) {
   // Once unique fragments arrive, a later real hole needs a fresh repair chance.
   // Keep lastRepair and started: neither retry spacing nor hard expiry extends.
   p.repairAttempts=0;
+  p.progressed=now;
   p.highestSeen=std::max(p.highestSeen,static_cast<std::size_t>(index)+1);
   if (p.received != count) return std::nullopt;
   const auto width=r32(p.data.data()),height=r32(p.data.data()+4);
@@ -360,16 +360,24 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
     // capped 500ms expiry budget prematurely NACKed a still-paced mobile IDR.
     const auto serialization=videoSerializationTime(partial.data.size(),bitrate_);
     const auto reorder=std::clamp((retry-std::chrono::milliseconds(8))/4,std::chrono::milliseconds(3),std::chrono::milliseconds(20));
-    const auto tailDue=serialization+reorder;
+    auto tailAt=partial.started+serialization+reorder;
+    if(mobile_) {
+      // Scheduling or a changed pacing rate can invalidate the initial tail
+      // estimate. A unique fragment gives a fresh lower bound for the remaining
+      // paced suffix. Duplicates never refresh it; hard frame expiry is unchanged.
+      const auto remaining=partial.data.size()-std::min(partial.data.size(),partial.highestSeen*chunkSize);
+      tailAt=std::max(tailAt,partial.progressed+videoSerializationTime(remaining,bitrate_)+reorder);
+    }
+    const bool tailDue=now>=tailAt;
     // On a slower path, allow the picture's own serialization plus a small
     // reorder window before declaring holes. Complete frames are never held.
     // Otherwise harmless packet reordering can fill the repair lane and starve
     // the few repairs that are genuinely needed. Fast paths keep a 3ms NACK.
-    const auto gapDue=retry>std::chrono::milliseconds(40) ? tailDue : std::chrono::milliseconds(3);
+    const bool gapDue=retry>std::chrono::milliseconds(40) ? tailDue : now-partial.started>=std::chrono::milliseconds(3);
     if(partial.repairAttempts<3 && now-partial.lastRepair>=retry &&
-       now-partial.started>=(gap ? gapDue : tailDue) && result.size()<4) {
+       (gap ? gapDue : tailDue) && result.size()<4) {
       Repair request{it->first,{}};
-      const auto limit=now-partial.started<tailDue ? partial.highestSeen : partial.seen.size();
+      const auto limit=tailDue ? partial.seen.size():partial.highestSeen;
       for(std::size_t i=0;i<limit && request.missing.size()<32;++i) if(!partial.seen[i]) request.missing.push_back(static_cast<std::uint16_t>(i));
       if(!request.missing.empty()) { result.push_back(std::move(request)); partial.lastRepair=now; ++partial.repairAttempts; }
     }

@@ -274,6 +274,22 @@ int main() {
       require(receiving.push(header,fragment(pacedFrame,static_cast<std::uint16_t>(count-1))).has_value(),"renewed tail repair must complete the existing IDR without a reset");
     }
     {
+      // A sender/receiver scheduling pause shifts the paced tail's arrival.
+      // Fresh consecutive progress must not NACK a whole still-paced suffix.
+      Reassembler receiving(2000000,false,true);auto header=h;header.frameId=1;header.flags=snv2::kFlagKeyFrame;
+      Bytes picture{0,0,7,128,0,0,4,56};picture.resize(128*1024,0x65);
+      const auto began=Clock::now();
+      for(unsigned index=0;index<64;++index)
+        require(!receiving.push(header,fragment(picture,index),began+std::chrono::milliseconds(index*3)),"paced test picture unexpectedly complete");
+      // Resume after the original whole-frame serialization estimate passed.
+      require(!receiving.push(header,fragment(picture,64),began+std::chrono::milliseconds(650)),"resumed paced picture unexpectedly complete");
+      bool expired=false;
+      require(receiving.repairs(expired,began+std::chrono::milliseconds(655),std::chrono::milliseconds(20)).empty() && !expired,"resumed pacing must not repair the unsent suffix using an obsolete start timestamp");
+      // Repeated copies cannot postpone a genuine tail loss indefinitely.
+      require(!receiving.push(header,fragment(picture,64),began+std::chrono::milliseconds(950)),"duplicate completed the paced picture");
+      require(!receiving.repairs(expired,began+std::chrono::milliseconds(960),std::chrono::milliseconds(20)).empty() && !expired,"duplicates postponed real tail repair");
+    }
+    {
       Bytes pacedFrame{0,0,7,128,0,0,4,56};pacedFrame.resize(128*1024,0x44);
       Reassembler receiving(1000000,false,true);auto header=h;header.frameId=1;header.flags=snv2::kFlagKeyFrame;
       require(!receiving.push(header,fragment(pacedFrame,0)),"start slow paced IDR");

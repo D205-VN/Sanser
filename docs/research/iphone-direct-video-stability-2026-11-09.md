@@ -1,5 +1,25 @@
 # iPhone → Mac Direct video stability, 2026-11-09
 
+## Release CI follow-up
+
+Two macOS CI runs completed the lossless paced IDR but each sent 11 repair
+datagrams, failing the existing at-most-four assertion. Their injected sender
+pauses measured about 372 ms and 300 ms. The input regressions passed. One
+earlier run also failed the broadcast isolation timing assertion; the next run
+passed it without a broadcast change. These results must not be described as
+an entirely green release check.
+
+A deterministic added case reproduced an obsolete paced-tail estimate: after
+consecutive unique fragments resume at 650 ms, the original frame-start estimate
+already says the still-paced suffix is missing. It failed before the correction.
+For mobile receivers, the tail estimate now also accounts for the most recent
+unique fragment plus serialization of the remaining suffix. Duplicate fragments
+cannot refresh this estimate. Interior-hole recovery and the original hard
+expiry remain bounded; completed pictures are still delivered immediately.
+The deterministic recovery tests and real UDP pacing/loss tests passed locally
+after this correction. Final CI and physical-device verification are recorded
+separately; this does not establish that all perceived stutter is eliminated.
+
 The user reported visible video stutter while audio remained normal on the
 personal-device Release build 2.3.6 (20310). The session stayed connected during
 inspection; neither screen nor audio content was recorded.
