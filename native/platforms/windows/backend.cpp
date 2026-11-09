@@ -239,6 +239,7 @@ private:
 };
 struct WindowState {
   static constexpr UINT macClipboardCommand=0x1eb0;
+  static constexpr UINT macEditingCommand=0x1ea0;
   bool viewOnly=false;
   bool userClosed=false;
   bool inputPaused=false;
@@ -250,6 +251,7 @@ struct WindowState {
   std::set<std::uint16_t> capturedButtons;
   WheelInput wheel;
   bool macClipboardShortcuts=true;
+  bool macEditingShortcuts=false;
   std::function<bool()> macHost=[] {return false;};
   WindowPresenter presenter;
   std::weak_ptr<const Image> lastPresented;
@@ -275,10 +277,20 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   auto* state=reinterpret_cast<WindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE) { state=static_cast<WindowState*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state)); }
   if(!state) return DefWindowProcW(window,message,w,l);
-  if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowState::macClipboardCommand) {
+  if(message==WM_SYSCOMMAND && ((w&0xfff0)==WindowState::macClipboardCommand || (w&0xfff0)==WindowState::macEditingCommand)) {
     if(!state->viewOnly && state->macHost()) {
-      state->sendInput(Input{});state->macClipboardShortcuts=!state->macClipboardShortcuts;
-      if(auto menu=GetSystemMenu(window,FALSE))CheckMenuItem(menu,WindowState::macClipboardCommand,MF_BYCOMMAND|(state->macClipboardShortcuts ? MF_CHECKED:MF_UNCHECKED));
+      state->sendInput(Input{});
+      if((w&0xfff0)==WindowState::macEditingCommand) {
+        state->macEditingShortcuts=!state->macEditingShortcuts;
+        if(state->macEditingShortcuts)state->macClipboardShortcuts=true;
+      } else {
+        state->macClipboardShortcuts=!state->macClipboardShortcuts;
+        if(!state->macClipboardShortcuts)state->macEditingShortcuts=false;
+      }
+      if(auto menu=GetSystemMenu(window,FALSE)) {
+        CheckMenuItem(menu,WindowState::macClipboardCommand,MF_BYCOMMAND|(state->macClipboardShortcuts ? MF_CHECKED:MF_UNCHECKED));
+        CheckMenuItem(menu,WindowState::macEditingCommand,MF_BYCOMMAND|(state->macEditingShortcuts ? MF_CHECKED:MF_UNCHECKED));
+      }
     }
     return 0;
   }
@@ -434,7 +446,7 @@ void testWindowsInput() {
       "Unavailable display dimensions must not underflow the input target");
   }
   WindowState state; std::vector<Input> events; WindowsMacClipboard clipboardKeys;
-  state.sendInput=[&](Input input) {for(const auto& event:clipboardKeys.apply(std::move(input),state.macHost() && state.macClipboardShortcuts))events.push_back(event);};
+  state.sendInput=[&](Input input) {for(const auto& event:clipboardKeys.apply(std::move(input),state.macHost() && state.macClipboardShortcuts,state.macEditingShortcuts))events.push_back(event);};
   WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=GetModuleHandleW(nullptr); klass.lpszClassName=L"SanserInputRegression"; RegisterClassW(&klass);
   HWND window=CreateWindowW(klass.lpszClassName,L"Input test",WS_OVERLAPPEDWINDOW,0,0,640,480,nullptr,nullptr,klass.hInstance,&state);
   require(window!=nullptr,"Create native input test window");
@@ -477,6 +489,10 @@ void testWindowsInput() {
   SendMessageW(window,WM_KEYDOWN,VK_CONTROL,0x1dLL<<16);SendMessageW(window,WM_KEYDOWN,'C',0x2eLL<<16);
   SendMessageW(window,WM_KEYUP,'C',(0x2eLL<<16)|(1LL<<31));SendMessageW(window,WM_KEYUP,VK_CONTROL,(0x1dLL<<16)|(1LL<<31));
   require(!state.macClipboardShortcuts && events.size()==4 && events[0].code==224 && events[1].code==6,"Raw Control mode for terminal/game shortcuts was ignored");
+  SendMessageW(window,WM_SYSCOMMAND,WindowState::macEditingCommand,0);events.clear();
+  SendMessageW(window,WM_KEYDOWN,VK_CONTROL,0x1dLL<<16);SendMessageW(window,WM_KEYDOWN,'A',0x1eLL<<16);
+  SendMessageW(window,WM_KEYUP,'A',(0x1eLL<<16)|(1LL<<31));SendMessageW(window,WM_KEYUP,VK_CONTROL,(0x1dLL<<16)|(1LL<<31));
+  require(state.macEditingShortcuts && state.macClipboardShortcuts && events.size()==8 && events[2].code==227 && events[3].code==4,"Opt-in Mac editing profile did not translate Select All");
   state.macHost=[] {return false;};events.clear();
   POINT wheelPoint{100,50};ClientToScreen(window,&wheelPoint);
   for(unsigned i=0;i<4;++i)SendMessageW(window,WM_MOUSEWHEEL,MAKEWPARAM(0,30),MAKELPARAM(wheelPoint.x,wheelPoint.y));
@@ -681,7 +697,7 @@ int runWindows(bool host,int argc,char** argv) {
     if(input.kind==Input::Reset && state.controller)state.controller->stop();
     const auto generation=peer.remoteGeneration();
     if(generation!=keyboardGeneration) { (void)clipboardKeys.apply(Input{},false); keyboardGeneration=generation; }
-    for(const auto& event:clipboardKeys.apply(std::move(input),peer.macHost() && state.macClipboardShortcuts)) peer.input(event);
+    for(const auto& event:clipboardKeys.apply(std::move(input),peer.macHost() && state.macClipboardShortcuts,state.macEditingShortcuts)) peer.input(event);
   }; state.viewOnly=!options.input;
   VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State value) { peer.setVoiceState(value); });
   VoicePanel voicePanel(options.groupVoice,voice);
@@ -716,7 +732,10 @@ int runWindows(bool host,int argc,char** argv) {
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
   HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
   if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); SetFocus(window); peer.start();
-  if(options.input)if(auto menu=GetSystemMenu(window,FALSE))AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macClipboardCommand,L"Mac Copy/Paste: Ctrl+C / Ctrl+V (off for raw Control)");
+  if(options.input)if(auto menu=GetSystemMenu(window,FALSE)) {
+    AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macClipboardCommand,L"Mac Copy/Paste (Ctrl+C / Ctrl+V)");
+    AppendMenuW(menu,MF_STRING|MF_GRAYED,WindowState::macEditingCommand,L"Use Windows editing shortcuts on Mac");
+  }
   ControllerSession controllerSession({
     [&]{return options.input && peer.inputAvailable() && peer.gamepadAvailable();},
     [&]{return peer.remoteGeneration();},
@@ -752,7 +771,10 @@ int runWindows(bool host,int argc,char** argv) {
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
     const bool available=options.input && peer.macHost();
     if(available!=macClipboardAvailable) {
-      if(auto menu=GetSystemMenu(window,FALSE))EnableMenuItem(menu,WindowState::macClipboardCommand,MF_BYCOMMAND|(available ? MF_ENABLED:MF_GRAYED));
+      if(auto menu=GetSystemMenu(window,FALSE)) {
+        EnableMenuItem(menu,WindowState::macClipboardCommand,MF_BYCOMMAND|(available ? MF_ENABLED:MF_GRAYED));
+        EnableMenuItem(menu,WindowState::macEditingCommand,MF_BYCOMMAND|(available ? MF_ENABLED:MF_GRAYED));
+      }
       macClipboardAvailable=available;
     }
     if(options.input && state.inputPaused==peer.inputAvailable()) {

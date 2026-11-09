@@ -6,12 +6,16 @@
   Command+C/V. A Windows-only mapper now temporarily releases physical Control,
   sends the native Command chord, and restores only still-held Control sides.
   It activates only after an authenticated Mac host capability is received.
-  Windows/unknown hosts, Shift/Alt/Command combinations, games' other Control
+  Windows/unknown hosts, other Shift/Alt/Command combinations, games' other Control
   keys and Ctrl+click retain their native meaning. Focus/reset, repeats, both
   Control sides, early Control release and host-generation changes are fenced.
-- A checked **Mac Copy/Paste** item in the Windows viewer's window system menu
-  disables this convenience mapping when literal Control+C is needed, such as
-  interrupting a process in Terminal. The default enables Mac copy/paste.
+- The checked **Mac Copy/Paste** item in the viewer's window system menu enables
+  only C/V by default. Disable it for literal Control+C in Terminal; doing so
+  also disables the extended editing profile. The separate, opt-in **Use Windows
+  editing shortcuts on Mac** item maps Ctrl+A/C/F/S/V/W/X/Z to the corresponding
+  Command chord and Ctrl+Shift+Z to Command+Shift+Z. Other Shift/Alt combinations
+  remain physical. The extended profile defaults off so Ctrl+W in a game cannot
+  unexpectedly close its Mac window.
 - Windows sub-notch wheel messages were truncated to zero. Independent signed
   axis remainders now accumulate them. Horizontal wheel messages now use scroll
   axis 1; Mac injection converts Windows right-positive direction correctly.
@@ -29,7 +33,7 @@
 
 | Operation | Coverage |
 | --- | --- |
-| Ctrl+C/V, left/right/both Ctrl, repeat, early release | Portable event trace plus actual CGEvent construction/injection callback |
+| Editing shortcuts, left/right/both Ctrl, repeat, early release | Portable event trace plus actual CGEvent construction/injection callback |
 | Raw Control, Shift/Alt/Command chords, Ctrl+click | Portable regression and Windows window-message fixture |
 | Letters, digits, punctuation, navigation, F1–F12, keypad, modifier sides | All entries in the existing HID-to-Mac key table; key-down/up mapping |
 | Caps Lock and held typing | Native Mac flags and autorepeat assertions |

@@ -14,17 +14,25 @@ int main() {
       MacInputInjector input(CGRectMake(100,50,1280,832),[&](CGEventRef event) { events.push_back(CGEventCreateCopy(event)); });
       {
         WindowsMacClipboard mapper;
-        for(auto code:{6,25}) {
+        for(auto code:{4,6,9,22,25,26,27,29}) {
           const auto before=events.size();
           for(const auto& edge:std::vector<Input>{{Input::Key,0,0,228,0,true},{Input::Key,0,0,static_cast<std::uint16_t>(code),0,true},
                 {Input::Key,0,0,static_cast<std::uint16_t>(code),0,false},{Input::Key,0,0,228,0,false}})
-            for(const auto& translated:mapper.apply(edge,true)) input.apply(translated);
+            for(const auto& translated:mapper.apply(edge,true,true)) input.apply(translated);
           require(events.size()==before+8,"Windows clipboard chord lost an edge before Mac injection");
           auto pressed=events[before+3];
           require(CGEventGetIntegerValueField(pressed,kCGKeyboardEventKeycode)==macKey(code) &&
             (CGEventGetFlags(pressed)&kCGEventFlagMaskCommand) && !(CGEventGetFlags(pressed)&kCGEventFlagMaskControl),
             "Windows Ctrl+C/V must arrive as native Command+C/V without Control");
           require(CGEventGetFlags(events.back())==0,"Windows clipboard chord left a Mac modifier pressed");
+        }
+        for(auto event:events)CFRelease(event);events.clear();
+        for(auto shift:{225,229}) {
+          for(const auto& edge:std::vector<Input>{{Input::Key,0,0,224,0,true},{Input::Key,0,0,static_cast<std::uint16_t>(shift),0,true},{Input::Key,0,0,29,0,true}})
+            for(const auto& translated:mapper.apply(edge,true,true))input.apply(translated);
+          const auto flags=CGEventGetFlags(events.back());
+          require((flags&kCGEventFlagMaskCommand) && (flags&kCGEventFlagMaskShift) && !(flags&kCGEventFlagMaskControl),"Windows redo lost Command/Shift or retained Control on Mac");
+          for(const auto& event:mapper.apply(Input{},true,true))input.apply(event);
         }
         for(auto event:events)CFRelease(event);events.clear();
       }
