@@ -231,6 +231,7 @@ std::optional<Input> decodeInput(const Bytes& b) {
   if (b.size() != 10 || b[0] > Input::Reset || b[1] > 1) return std::nullopt;
   Input input{static_cast<Input::Kind>(b[0]), r16(b.data()+2), r16(b.data()+4), r16(b.data()+6), static_cast<std::int16_t>(r16(b.data()+8)), b[1] != 0};
   if ((input.kind == Input::Key && (input.code < 4 || input.code > 231)) || (input.kind == Input::Button && input.code > 2)) return std::nullopt;
+  if(input.kind==Input::Scroll && input.code>1)return std::nullopt;
   return input;
 }
 PacketCodec::PacketCodec(const std::string& token, bool host) {
@@ -270,10 +271,13 @@ bool ReplayWindow::accept(std::uint64_t sequence) {
   if (offset >= seen_.size() || seen_[static_cast<std::size_t>(offset)]) return false;
   seen_.set(static_cast<std::size_t>(offset)); return true;
 }
+static std::chrono::milliseconds videoSerializationTime(std::size_t bytes,std::uint32_t bitrate) {
+  return std::chrono::milliseconds(static_cast<std::int64_t>(std::ceil(static_cast<double>(bytes)*8000.0/(std::max(1U,bitrate)*1.2))));
+}
 std::chrono::milliseconds videoSendBudget(std::size_t bytes,std::uint32_t bitrate,bool ultra,bool mobileKeyframe) {
   // 1.2 is the same wire-overhead allowance used by sendLoop. Include already
   // queued video when admitting a frame, but never permit a multi-second queue.
-  const auto serialization=static_cast<std::int64_t>(std::ceil(static_cast<double>(bytes)*8000.0/(std::max(1U,bitrate)*1.2)));
+  const auto serialization=videoSerializationTime(bytes,bitrate).count();
   // A narrowly paced IDR can take longer than the normal desktop queue cap.
   // This is an expiry bound, never a playout delay. Raw capture admission
   // prevents dependent pictures building up behind it on mobile hosts.
@@ -307,6 +311,11 @@ std::optional<Frame> Reassembler::push(const snv2::Header& h, const Bytes& b) {
   // only when a unique retransmission repairs it, or it expires/is evicted.
   if(h.flags&snv2::kFlagRetransmitted) ++lostFragments_;
   std::copy(b.begin()+8, b.end(), p.data.begin()+static_cast<std::ptrdiff_t>(offset)); p.seen[index]=true; ++p.received;
+  // Three retries bound a period with NO progress, not this entire picture.
+  // Early requests may name originals still waiting in the sender's pacer.
+  // Once unique fragments arrive, a later real hole needs a fresh repair chance.
+  // Keep lastRepair and started: neither retry spacing nor hard expiry extends.
+  p.repairAttempts=0;
   p.highestSeen=std::max(p.highestSeen,static_cast<std::size_t>(index)+1);
   if (p.received != count) return std::nullopt;
   const auto width=r32(p.data.data()),height=r32(p.data.data()+4);
@@ -347,8 +356,9 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
     // A missing tail may still be in the sender's pacer. Do not NACK packets
     // that have not been sent yet; interior holes can be repaired immediately.
     const bool gap=partial.received<partial.highestSeen;
-    const auto budget=videoSendBudget(partial.data.size(),bitrate_,ultra_);
-    const auto serialization=budget-std::chrono::milliseconds(ultra_ ? 40 : 100);
+    // Frame expiry is capped, serialization is not. Deriving this from the
+    // capped 500ms expiry budget prematurely NACKed a still-paced mobile IDR.
+    const auto serialization=videoSerializationTime(partial.data.size(),bitrate_);
     const auto reorder=std::clamp((retry-std::chrono::milliseconds(8))/4,std::chrono::milliseconds(3),std::chrono::milliseconds(20));
     const auto tailDue=serialization+reorder;
     // On a slower path, allow the picture's own serialization plus a small
@@ -439,14 +449,14 @@ void Peer::start() {
   catch(...) { running_=false; sendReady_.notify_all(); if(sender_.joinable()) sender_.join(); if(inputWorker_) inputWorker_->stop(); throw; }
 }
 void Peer::stop() { userMailbox_->alive=false; if (running_) { try { transmit(snv2::PacketType::Disconnect, {}); } catch (...) {} } running_=false; sendReady_.notify_all(); if (worker_.joinable()) worker_.join(); if (sender_.joinable()) sender_.join(); audioReceiver_.reset(); if(inputWorker_) inputWorker_->stop(); }
-void Peer::datagram(const Bytes& b) {
+bool Peer::datagram(const Bytes& b) {
   const auto result=io_.send(socket_,b.data(),b.size());
-  if(result.bytes==static_cast<std::ptrdiff_t>(b.size())) return;
+  if(result.bytes==static_cast<std::ptrdiff_t>(b.size())) return true;
   if(result.bytes<0 && udp::transientSendError(result.error)) {
     ++sendTransientErrors_;
     // Reliable input keeps its pending sequence/retry deadline. Missing video
     // fragments use NACK/cache repair; audio expires instead of accumulating.
-    return;
+    return false;
   }
   throw std::runtime_error("UDP send failed, socket error "+std::to_string(result.error));
 }
@@ -470,6 +480,8 @@ bool Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream
   TxScheduler::Packet queued{b,queuedAt,frame,false,false,deadline};
   queued.inputSequence=reliable ? h.sequence : 0;
   queued.input=reliable || type==snv2::PacketType::MouseMove;
+  if(type==snv2::PacketType::Video && !(flags&snv2::kFlagRetransmitted) && body.size()>=8)
+    queued.originalVideoPayloadBytes=body.size()-8;
   if(lane==TxScheduler::UserData) { queued.userMessage=UserMessages::key(body);queued.userFragment=UserMessages::fragment(body); }
   if(originalSent && type==snv2::PacketType::Video && !(flags&snv2::kFlagRetransmitted) && body.size()>=8) {
     queued.originalSent=std::move(originalSent);queued.originalOrdinal=r16(body.data())+1;
@@ -851,7 +863,7 @@ void Peer::process(const Bytes& bytes) {
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
     peerGeneration_=h.keyId; peerFiles_=false;announcedFiles_=-1;
     if(options_.files && std::getenv("SANSER_CONTROL_STDIN")) {std::fprintf(stdout,"SNUSER_FILE_RESET\n");std::fflush(stdout);}
-    peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false; peerUnicode_=false; peerClipboard_=false;
+    peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false; peerUnicode_=false; peerClipboard_=false; peerMacHost_=false;
     peerGamepad_=false;peerGamepadAt_=0;lastGamepad_=lastGamepadCapability_=0;
     { std::lock_guard lock(userMailbox_->mutex);++userMailbox_->epoch;userMailbox_->hostJobs=0;userMailbox_->localJobs=0;userMailbox_->servicing=0;userMailbox_->replies.clear(); }
     std::vector<ClipboardResult> cancelled;
@@ -875,6 +887,7 @@ void Peer::process(const Bytes& bytes) {
       { std::lock_guard lock(videoMutex_); videoCache_.clear(); videoCacheBytes_=0; outgoingNeedsKeyframe_=true; }
       { std::lock_guard lock(feedbackMutex_); feedback_={}; }
       busyWindows_=congestionWindows_=recoveryWindows_=0;peerVideoLimit_=0;lastDelayFeedbackSequence_=0;videoBudget_=options_.bitrate;delayRate_=DelayRatePolicy{};
+      sentVideoPayloadBytes_=0;offeredBytes_=0;deliveryWindow_.reset();lastDelivery_={};lastVideoFeedback_={};lastFeedbackDrops_=videoQueueDrops_.load();
     }
     if(inputWorker_) inputWorker_->submit(Input{});
   }
@@ -896,6 +909,7 @@ void Peer::process(const Bytes& bytes) {
     if(!options_.host && b.size()==5 && !std::memcmp(b.data(),"SVI1",4) && b[4]>0 && b[4]<voice::maxSpeakers) { voiceSlot_=b[4]; return; }
   }
   if(h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
+    if(!options_.host && b==Bytes({'S','H','M','1'})) { peerMacHost_=true; return; }
     if(!options_.host && b.size()==5 && std::memcmp(b.data(),"SGC1",4)==0 && b[4]<=1 && h.sequence>lastGamepadCapability_) {
       lastGamepadCapability_=h.sequence;peerGamepad_=b[4]!=0;
       peerGamepadAt_=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();return;
@@ -1047,12 +1061,17 @@ void Peer::process(const Bytes& bytes) {
     std::uint64_t delivered=0; for(std::size_t i=8;i<16;++i) delivered=(delivered<<8)|b[i];
     const auto packets=r32(b.data()+16), missing=r32(b.data()+20);
     const auto offered=offeredBytes_.exchange(0), drops=videoQueueDrops_.load();
-    // Compare actual offered encoded bytes, never the configured target. An
-    // idle/compressible desktop must not be mistaken for insufficient bandwidth.
-    const bool busy=offered>=32000;
+    const auto sent=sentVideoPayloadBytes_.exchange(0);
+    lastDelivery_=deliveryWindow_.observe({sent,delivered,packets,missing,elapsed});
+    // Mobile pacers can span a feedback boundary. Compare delivered bytes to
+    // originals actually sent over several windows, not newly encoded pictures
+    // still in our queue. Desktop peers retain their existing admission policy.
+    const bool busy=peerVideoLimit_ ? lastDelivery_.busy() : offered>=32000;
     busyWindows_=busy ? std::min(4U,busyWindows_+1) : 0;
     const bool loss=packets>=16 && static_cast<double>(missing)/packets>0.03;
-    const bool congested=busy && (static_cast<double>(delivered)<static_cast<double>(offered)*0.85 || loss || drops>lastFeedbackDrops_);
+    const bool congested=peerVideoLimit_
+      ? busy && (lastDelivery_.shortfall() || (lastDelivery_.ready() && lastDelivery_.loss()) || drops>lastFeedbackDrops_)
+      : busy && (static_cast<double>(delivered)<static_cast<double>(offered)*0.85 || loss || drops>lastFeedbackDrops_);
     bool deliveryStalled=false, liveStalled=false;
     {
       std::lock_guard lock(feedbackMutex_);
@@ -1081,7 +1100,7 @@ void Peer::process(const Bytes& bytes) {
       }
     } else {
       congestionWindows_=0;
-      if(busy && !delayRate_.recovering(Clock::now()) && ++recoveryWindows_>=10) {
+      if(busy && (!peerVideoLimit_ || lastDelivery_.ready()) && !delayRate_.recovering(Clock::now()) && ++recoveryWindows_>=10) {
         videoBudget_=std::min(videoCeiling(),videoBudget_.load()+std::max(peerVideoLimit_ ? 200000U:500000U,videoBudget_.load()/20));
         recoveryWindows_=0;
       }
@@ -1250,7 +1269,10 @@ void Peer::sendLoop() {
           continue;
         }
       }
-      datagram(packet->bytes);
+      const bool sent=datagram(packet->bytes);
+      if(sent) sentVideoPayloadBytes_+=packet->originalVideoPayloadBytes;
+      // The repair fence means attempted, including a transient send failure:
+      // a dropped final datagram must remain eligible for a receiver NACK.
       if(packet->originalSent)packet->originalSent->store(packet->originalOrdinal,std::memory_order_release);
       if (packet->frame || packet->userData) {
         credit-=static_cast<double>(packet->bytes.size());
@@ -1296,6 +1318,8 @@ void Peer::logHealth() {
     <<" keyframeWaitDropped="<<keyframeWaitDropped_<<" nackSent="<<nackSent_
     <<" repaired="<<repairedDatagrams_.load()<<" repairCacheMisses="<<repairCacheMisses_.load()
     <<" repairUnsentIgnored="<<repairUnsentIgnored_.load()<<" videoBudgetBps="<<videoBudget_.load()<<" peerVideoLimitBps="<<peerVideoLimit_.load()
+    <<" videoSentWindowBytes="<<lastDelivery_.sent<<" videoDeliveredWindowBytes="<<lastDelivery_.delivered
+    <<" videoFeedbackWindowMs="<<lastDelivery_.elapsedMs<<" videoDeliveryShortfall="<<lastDelivery_.shortfall()
     <<" sendQueueDrops="<<videoQueueDrops_.load()<<" pending="<<pending<<" stopReason="<<stopReason_.load()
     <<" sendTransientErrors="<<sendTransientErrors_.load()<<" receiveTransientErrors="<<receiveTransientErrors_.load(); writeTelemetry(line);
   if(inputRttSamples_ || work.samples || sendSamples) {
@@ -1380,6 +1404,10 @@ void Peer::loop() {
         if(options_.files && options_.input && !options_.sharing)transmit(snv2::PacketType::Keepalive,Bytes{'S','F','T','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','I','C','1'});
+#if defined(__APPLE__)
+        // Optional authenticated host identity; older clients safely ignore it.
+        if(options_.host) transmit(snv2::PacketType::Keepalive,Bytes{'S','H','M','1'});
+#endif
         if(options_.host && options_.input && !options_.sharing && onInput)
           transmit(snv2::PacketType::Keepalive,Bytes{'S','U','T','1'});
         if(options_.host && options_.input && !options_.sharing && options_.clipboard && onClipboard)

@@ -61,6 +61,10 @@ const SOURCES: &[&str] = &[
     "SNU1_STARTUP",
 ];
 const FIELDS: &[&str] = &[
+    "videoSentWindowBytes",
+    "videoDeliveredWindowBytes",
+    "videoFeedbackWindowMs",
+    "videoDeliveryShortfall",
     "routerExternalReceived",
     "routerExternalProbes",
     "routerPeerPayloads",
@@ -1067,6 +1071,12 @@ mod tests {
         assert_eq!(paced.values["repairUnsentIgnored"], 96.0);
         assert_eq!(paced.values["videoBudgetBps"], 2_000_000.0);
         assert!(!paced.values.contains_key("frameContent"));
+        let delivery=parse_sample(b"SNV2_TRANSPORT_HEALTH videoSentWindowBytes=96000 videoDeliveredWindowBytes=96000 videoFeedbackWindowMs=2000 videoDeliveryShortfall=0 screen=123").unwrap();
+        assert_eq!(delivery.values["videoSentWindowBytes"], 96_000.0);
+        assert_eq!(delivery.values["videoDeliveredWindowBytes"], 96_000.0);
+        assert_eq!(delivery.values["videoFeedbackWindowMs"], 2000.0);
+        assert_eq!(delivery.values["videoDeliveryShortfall"], 0.0);
+        assert!(!delivery.values.contains_key("screen"));
         let io=parse_sample(b"SNUDP_IO_HEALTH sendTransientErrors=3 receiveTransientErrors=2 socketError=10055 endpoint=private token=123").unwrap();
         assert_eq!(io.values.len(), 2);
         assert_eq!(io.values["sendTransientErrors"], 3.0);

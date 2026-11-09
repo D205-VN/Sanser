@@ -118,6 +118,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
     private let fileActions=DispatchQueue(label:"SanserFileActions",qos:.utility)
     private var session:NativeMobileSession?,relay:MobileRelay?,audio:MobileAudio?
     private weak var video:MobileVideoView?
+    private let videoHealth=MobileVideoHealthLog()
     private var sink:FlutterEventSink?,sessionID:String?,generation=0,rendered=false
     private var engineAttempt=0,networkRevision=0
     private var networkMonitor:NWPathMonitor?,networkFingerprint:String?
@@ -191,7 +192,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
         switch call.method {
         case "capabilities":result(["available":true,"audio":true,"voice":false,"files":true,"transport":"auto","direct":true,"video":"h264","networkRecovery":true,"controllerKeys":true,"controllerAnalog":true])
         case "connect":
-            disconnect();generation+=1;let epoch=generation
+            disconnect();videoHealth.reset();generation+=1;let epoch=generation
             guard let id=args["sessionId"] as? String else{return result(FlutterError(code:"configuration",message:"Thiếu thông tin phiên.",details:nil))}
             sessionID=id;engineAttempt=args["engineAttempt"] as? Int ?? 0;rendered=false;inputAllowed=args["inputEnabled"] as? Bool == true && (args["sharingId"] as? String)==nil
             do {
@@ -320,7 +321,9 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             let capture=gamepadCapture;stopController()
             sink?(["state":"controller","sessionId":id,"engineAttempt":engineAttempt,"captureId":capture,"paused":true])
         }
-        var data:[String:Any]=["sessionId":id,"engineAttempt":engineAttempt,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};data["unicodeInput"]=session?.textAvailable() == true;data["clipboard"]=session?.clipboardAvailable() == true;data["gamepad"]=((session?.gamepadStatus() ?? 0)&1) != 0;if let stats=session?.stats(){for(key,value) in stats{data[key]=value}};sink?(data)}
+        var data:[String:Any]=["sessionId":id,"engineAttempt":engineAttempt,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};data["unicodeInput"]=session?.textAvailable() == true;data["clipboard"]=session?.clipboardAvailable() == true;data["gamepad"]=((session?.gamepadStatus() ?? 0)&1) != 0;if let stats=session?.stats(){for(key,value) in stats{data[key]=value}}
+        if let stats=video?.stats(){for(key,value) in stats{data[key]=value}}
+        videoHealth.record(data);sink?(data)}
     private func fail(_ message:String){emit("stopped",message:message);disconnect()}
     private func disconnect(_ completion:(()->Void)?=nil){
         stopController();inputAllowed=false

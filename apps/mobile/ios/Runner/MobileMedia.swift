@@ -3,13 +3,20 @@ import AVFoundation
 import CoreMedia
 import VideoToolbox
 
+private final class MobileVideoDisplayTick:NSObject {
+    weak var view:MobileVideoView?
+    @objc func tick(){view?.presentLatest()}
+}
+
 final class MobileVideoView: UIView {
     private let display=AVSampleBufferDisplayLayer()
     var externalTouch=false
     var dimensions:((Int,Int)->Void)?
     private var videoWidth=0,videoHeight=0
     private var zoom:CGFloat=1,panX:CGFloat=0,panY:CGFloat=0
-    private let decoder=MobileVideoDecoder()
+    private let decoder=MobileVideoDecoder(automaticPresentation:false)
+    private var displayLink:CADisplayLink?
+    private var presented:UInt64=0,displayBusy:UInt64=0,displayFailures:UInt64=0
     private var format:CMVideoFormatDescription?
     var input: ((UInt32,UInt32,Bool?) -> Void)?
     var keyframe: (() -> Void)?
@@ -19,10 +26,18 @@ final class MobileVideoView: UIView {
     override init(frame:CGRect){
         super.init(frame:frame);backgroundColor = .black;clipsToBounds=true;display.videoGravity = .resizeAspect;isMultipleTouchEnabled=false
         layer.addSublayer(display)
-        decoder.output={[weak self] image in self?.present(image)}
+        decoder.imageReady={[weak self] in self?.presentLatest()}
         decoder.keyframe={[weak self] in DispatchQueue.main.async{[weak self] in self?.keyframe?()}}
+        let target=MobileVideoDisplayTick();target.view=self
+        // Retry a busy layer on the display clock; normal frames do not wait
+        // for this tick. The decoded mailbox stays newest-only in either case.
+        let clock=CADisplayLink(target:target,selector:#selector(MobileVideoDisplayTick.tick))
+        clock.preferredFramesPerSecond=60;clock.isPaused=true
+        clock.add(to:.main,forMode:.common);displayLink=clock
     }
     required init?(coder:NSCoder){fatalError("init(coder:) has not been implemented")}
+    override func didMoveToWindow(){super.didMoveToWindow();displayLink?.isPaused=window==nil}
+    deinit{displayLink?.invalidate()}
     override func layoutSubviews(){super.layoutSubviews();layoutVideo()}
     func viewport(_ scale:Double,_ x:Double,_ y:Double){
         guard scale.isFinite,x.isFinite,y.isFinite else{return}
@@ -40,17 +55,22 @@ final class MobileVideoView: UIView {
         let stream=decoder.stream()
         return {[weak decoder] data,_,_,key in decoder?.push(data,key:key,stream:stream)}
     }
+    fileprivate func presentLatest(){
+        if display.status == .failed{displayFailures+=1;display.flush()}
+        guard display.isReadyForMoreMediaData else{displayBusy+=1;return}
+        guard let image=decoder.takeLatest() else{return}
+        present(image)
+    }
     private func present(_ image:CVPixelBuffer){
         let width=CVPixelBufferGetWidth(image),height=CVPixelBufferGetHeight(image)
-        if width != videoWidth || height != videoHeight {videoWidth=width;videoHeight=height;dimensions?(width,height)}
-        if display.status == .failed{display.flush()}
-        // Dropping a decoded image cannot invalidate the H.264 reference chain.
-        guard display.isReadyForMoreMediaData else{return}
-        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator:kCFAllocatorDefault,imageBuffer:image,formatDescriptionOut:&format)==noErr,let format=format else{return}
-        var timing=CMSampleTimingInfo(duration:.invalid,presentationTimeStamp:.zero,decodeTimeStamp:.invalid),sample:CMSampleBuffer?
+        if width != videoWidth || height != videoHeight {videoWidth=width;videoHeight=height;format=nil;dimensions?(width,height)}
+        if format==nil{guard CMVideoFormatDescriptionCreateForImageBuffer(allocator:kCFAllocatorDefault,imageBuffer:image,formatDescriptionOut:&format)==noErr else{return}}
+        guard let format=format else{return}
+        var timing=CMSampleTimingInfo(duration:.invalid,presentationTimeStamp:CMClockGetTime(CMClockGetHostTimeClock()),decodeTimeStamp:.invalid),sample:CMSampleBuffer?
         guard CMSampleBufferCreateReadyWithImageBuffer(allocator:kCFAllocatorDefault,imageBuffer:image,formatDescription:format,sampleTiming:&timing,sampleBufferOut:&sample)==noErr,let sample=sample else{return}
         if let attachments=CMSampleBufferGetSampleAttachmentsArray(sample,createIfNecessary:true) as? [NSMutableDictionary],let attributes=attachments.first {attributes[kCMSampleAttachmentKey_DisplayImmediately]=true}
         display.enqueue(sample)
+        presented+=1
         if !shown && display.status != .failed {shown=true;firstFrame?()}
     }
     private func touch(_ touches:Set<UITouch>,down:Bool?){
@@ -66,7 +86,8 @@ final class MobileVideoView: UIView {
     override func touchesMoved(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:nil)}
     override func touchesEnded(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:false)}
     override func touchesCancelled(_ touches:Set<UITouch>,with event:UIEvent?){input?(lastX,lastY,false)}
-    func reset(){decoder.reset();display.flushAndRemoveImage();format=nil;shown=false}
+    func stats()->[String:UInt64]{decoder.stats().merging(["iOSPresentedFrames":presented,"iOSDisplayBusyTicks":displayBusy,"iOSDisplayFailures":displayFailures]){_,new in new}}
+    func reset(){decoder.reset();display.flushAndRemoveImage();format=nil;shown=false;presented=0;displayBusy=0;displayFailures=0}
 }
 // AVAudioSourceNode continuously pulls PCM at the audio device clock. A single
 // lock-free ring replaces 5ms scheduleBuffer calls and repeated engine restarts.

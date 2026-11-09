@@ -14,6 +14,8 @@
 #include <wrl/client.h>
 #include "transport.h"
 #include "clipboard.h"
+#include "windows_mac_clipboard.h"
+#include "wheel_input.h"
 #include "telemetry.h"
 #include "broadcast.h"
 #include "gamepad.h"
@@ -102,7 +104,7 @@ public:
         static constexpr DWORD up[]={MOUSEEVENTF_LEFTUP,MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_MIDDLEUP};
         input.mi.dwFlags|=event.down?down[event.code]:up[event.code];
       }
-      if(event.kind==Input::Scroll) { input.mi.dwFlags=MOUSEEVENTF_WHEEL; input.mi.mouseData=static_cast<DWORD>(static_cast<int>(event.delta)*WHEEL_DELTA); }
+      if(event.kind==Input::Scroll) { if(event.code>1)return; input.mi.dwFlags=event.code ? MOUSEEVENTF_HWHEEL:MOUSEEVENTF_WHEEL; input.mi.mouseData=static_cast<DWORD>(static_cast<int>(event.delta)*WHEEL_DELTA); }
     }
     // Only track transitions accepted by the OS/helper. A failed release must
     // remain owned so Reset can retry after an elevated app/desktop returns.
@@ -236,6 +238,7 @@ private:
   ComPtr<IMFTransform> decoder_; ComPtr<IMFMediaType> type_; std::function<void(Nv12Image)> output_; LONGLONG time_=0; bool reported_=false,firstInput_=true;
 };
 struct WindowState {
+  static constexpr UINT macClipboardCommand=0x1eb0;
   bool viewOnly=false;
   bool userClosed=false;
   bool inputPaused=false;
@@ -244,6 +247,10 @@ struct WindowState {
   std::unique_ptr<WindowsControllerInput> controller;
   std::function<void(Input)> sendInput; std::mutex mutex; std::shared_ptr<const Image> image;
   bool released=false; RECT video{};
+  std::set<std::uint16_t> capturedButtons;
+  WheelInput wheel;
+  bool macClipboardShortcuts=true;
+  std::function<bool()> macHost=[] {return false;};
   WindowPresenter presenter;
   std::weak_ptr<const Image> lastPresented;
   std::uint64_t painted=0,paintUs=0,decodedToPaintUs=0;
@@ -268,6 +275,13 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   auto* state=reinterpret_cast<WindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE) { state=static_cast<WindowState*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state)); }
   if(!state) return DefWindowProcW(window,message,w,l);
+  if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowState::macClipboardCommand) {
+    if(!state->viewOnly && state->macHost()) {
+      state->sendInput(Input{});state->macClipboardShortcuts=!state->macClipboardShortcuts;
+      if(auto menu=GetSystemMenu(window,FALSE))CheckMenuItem(menu,WindowState::macClipboardCommand,MF_BYCOMMAND|(state->macClipboardShortcuts ? MF_CHECKED:MF_UNCHECKED));
+    }
+    return 0;
+  }
   if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowsControllerInput::menuCommand && state->controller) {state->controller->toggle();return 0;}
   if(message==WM_TIMER && w==WindowsControllerInput::timerId && state->controller) {state->controller->refresh();return 0;}
   if((message==WM_KILLFOCUS || (message==WM_ACTIVATE && LOWORD(w)==WA_INACTIVE) || message==WM_ENTERMENULOOP || message==WM_ENTERSIZEMOVE || message==WM_CLOSE) && state->controller)state->controller->stop();
@@ -277,6 +291,11 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_ACTIVATE && LOWORD(w)==WA_INACTIVE && state->textInput) state->textInput->cancel();
   if(message==WM_NCDESTROY && state->textInput) state->textInput->detach();
   if(message==WM_NCDESTROY && state->shortcuts)state->shortcuts->detach();
+  if(message==WM_CAPTURECHANGED && reinterpret_cast<HWND>(l)!=window && !state->capturedButtons.empty()) {
+    state->capturedButtons.clear();state->wheel.reset();
+    if(!state->viewOnly)state->sendInput(Input{});
+    state->released=true;return 0;
+  }
   if((state->viewOnly || state->inputPaused) && ((message>=WM_KEYFIRST && message<=WM_KEYLAST) || (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST))) return DefWindowProcW(window,message,w,l);
   if(message==WM_CLOSE) { if(state->shortcuts)state->shortcuts->cancel();if(state->textInput) state->textInput->cancel(); state->userClosed=true; DestroyWindow(window); return 0; }
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
@@ -307,6 +326,7 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_TIMER && w==1) { if(WaitForSingleObject(state->frameReady,0)==WAIT_OBJECT_0) InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_SIZE) { if(state->shortcuts)state->shortcuts->resize();if(state->textInput) state->textInput->resize(); InvalidateRect(window,nullptr,FALSE); return 0; }
   if(message==WM_KILLFOCUS) {
+    state->capturedButtons.clear();state->wheel.reset();
     if(state->shortcuts && state->shortcuts->owns(reinterpret_cast<HWND>(w))) {state->released=true;if(GetCapture()==window)ReleaseCapture();return 0;}
     if(state->textInput && state->textInput->owns(reinterpret_cast<HWND>(w))) { state->released=true; if(GetCapture()==window) ReleaseCapture(); return 0; }
     if(state->textInput && !state->textInput->owns(reinterpret_cast<HWND>(w))) state->textInput->cancel();
@@ -323,16 +343,22 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     if(!state->released) { const auto hid=windowsHid(w,l); if(hid) state->sendInput(Input{Input::Key,0,0,hid,0,down}); }
     return 0;
   }
-  if(message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN || message==WM_LBUTTONUP || message==WM_RBUTTONDOWN || message==WM_RBUTTONUP || message==WM_MBUTTONDOWN || message==WM_MBUTTONUP || message==WM_MOUSEWHEEL) {
+  if(message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN || message==WM_LBUTTONUP || message==WM_RBUTTONDOWN || message==WM_RBUTTONUP || message==WM_MBUTTONDOWN || message==WM_MBUTTONUP || message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL) {
     if((message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN || message==WM_MBUTTONDOWN) && state->shortcuts)state->shortcuts->cancel();
     if((message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN || message==WM_MBUTTONDOWN) && state->textInput) state->textInput->cancel();
     if(message==WM_LBUTTONDOWN && state->released) { SetFocus(window); state->released=false; SetWindowTextW(window,L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release"); }
     if(state->released) return 0;
-    POINT point{static_cast<short>(LOWORD(l)),static_cast<short>(HIWORD(l))}; if(message==WM_MOUSEWHEEL) ScreenToClient(window,&point);
+    const bool wheel=message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL;
+    POINT point{static_cast<short>(LOWORD(l)),static_cast<short>(HIWORD(l))}; if(wheel) ScreenToClient(window,&point);
     const auto& r=state->video; if(r.right<=r.left || r.bottom<=r.top) return 0;
     Input event; event.kind=Input::Move; event.x=static_cast<std::uint16_t>(std::clamp((point.x-r.left)/static_cast<double>(r.right-r.left),0.0,1.0)*65535); event.y=static_cast<std::uint16_t>(std::clamp((point.y-r.top)/static_cast<double>(r.bottom-r.top),0.0,1.0)*65535);
-    if(message==WM_MOUSEWHEEL) { event.kind=Input::Scroll; event.delta=static_cast<short>(HIWORD(w))/WHEEL_DELTA; }
-    else if(message!=WM_MOUSEMOVE) { event.kind=Input::Button; event.down=message==WM_LBUTTONDOWN||message==WM_RBUTTONDOWN||message==WM_MBUTTONDOWN; event.code=(message==WM_RBUTTONDOWN||message==WM_RBUTTONUP)?1:(message==WM_MBUTTONDOWN||message==WM_MBUTTONUP)?2:0; if(event.down) SetCapture(window); else ReleaseCapture(); }
+    if(wheel) { event.kind=Input::Scroll; event.code=message==WM_MOUSEHWHEEL ? 1:0; event.delta=state->wheel.steps(event.code,static_cast<short>(HIWORD(w))); if(!event.delta)return 0; }
+    else if(message!=WM_MOUSEMOVE) {
+      event.kind=Input::Button; event.down=message==WM_LBUTTONDOWN||message==WM_RBUTTONDOWN||message==WM_MBUTTONDOWN;
+      event.code=(message==WM_RBUTTONDOWN||message==WM_RBUTTONUP)?1:(message==WM_MBUTTONDOWN||message==WM_MBUTTONUP)?2:0;
+      if(event.down) {state->capturedButtons.insert(event.code);SetCapture(window);}
+      else {state->capturedButtons.erase(event.code);if(state->capturedButtons.empty())ReleaseCapture();}
+    }
     state->sendInput(event); return 0;
   }
   return DefWindowProcW(window,message,w,l);
@@ -401,7 +427,8 @@ void testWindowsInput() {
     require(attempts.back().mi.dx==origin.dx && attempts.back().mi.dy==origin.dy,
       "Unavailable display dimensions must not underflow the input target");
   }
-  WindowState state; std::vector<Input> events; state.sendInput=[&](Input input) { events.push_back(input); };
+  WindowState state; std::vector<Input> events; WindowsMacClipboard clipboardKeys;
+  state.sendInput=[&](Input input) {for(const auto& event:clipboardKeys.apply(std::move(input),state.macHost() && state.macClipboardShortcuts))events.push_back(event);};
   WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=GetModuleHandleW(nullptr); klass.lpszClassName=L"SanserInputRegression"; RegisterClassW(&klass);
   HWND window=CreateWindowW(klass.lpszClassName,L"Input test",WS_OVERLAPPEDWINDOW,0,0,640,480,nullptr,nullptr,klass.hInstance,&state);
   require(window!=nullptr,"Create native input test window");
@@ -434,6 +461,28 @@ void testWindowsInput() {
     "Windows must forward both Shift+A chords in press/release order");
   require(windowsHid(VK_LSHIFT,0)==225 && windowsHid(VK_RSHIFT,0)==229,"Scan-less Shift messages lost their side");
   require(windowsHid(VK_RETURN,(0x1cLL<<16)|(1LL<<24))==88,"Keypad Enter lost its extended scan code");
+  events.clear();state.macHost=[] {return true;};
+  SendMessageW(window,WM_KEYDOWN,VK_CONTROL,0x1dLL<<16);
+  SendMessageW(window,WM_KEYDOWN,'C',0x2eLL<<16);
+  SendMessageW(window,WM_KEYUP,'C',(0x2eLL<<16)|(1LL<<31));
+  SendMessageW(window,WM_KEYUP,VK_CONTROL,(0x1dLL<<16)|(1LL<<31));
+  require(events.size()==8 && events[1].code==224 && !events[1].down && events[2].code==227 && events[2].down && events[3].code==6 && events[3].down && events[5].code==227 && !events[5].down,"Windows messages did not produce the Mac Copy chord");
+  SendMessageW(window,WM_SYSCOMMAND,WindowState::macClipboardCommand,0);events.clear();
+  SendMessageW(window,WM_KEYDOWN,VK_CONTROL,0x1dLL<<16);SendMessageW(window,WM_KEYDOWN,'C',0x2eLL<<16);
+  SendMessageW(window,WM_KEYUP,'C',(0x2eLL<<16)|(1LL<<31));SendMessageW(window,WM_KEYUP,VK_CONTROL,(0x1dLL<<16)|(1LL<<31));
+  require(!state.macClipboardShortcuts && events.size()==4 && events[0].code==224 && events[1].code==6,"Raw Control mode for terminal/game shortcuts was ignored");
+  state.macHost=[] {return false;};events.clear();
+  POINT wheelPoint{100,50};ClientToScreen(window,&wheelPoint);
+  for(unsigned i=0;i<4;++i)SendMessageW(window,WM_MOUSEWHEEL,MAKEWPARAM(0,30),MAKELPARAM(wheelPoint.x,wheelPoint.y));
+  SendMessageW(window,WM_MOUSEHWHEEL,MAKEWPARAM(0,static_cast<WORD>(-120)),MAKELPARAM(wheelPoint.x,wheelPoint.y));
+  require(events.size()==2 && events[0].kind==Input::Scroll && events[0].code==0 && events[0].delta==1 && events[1].code==1 && events[1].delta==-1,"High-resolution vertical/horizontal Windows wheel messages were dropped");
+  events.clear();
+  SendMessageW(window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(100,50));
+  SendMessageW(window,WM_RBUTTONDOWN,MK_LBUTTON|MK_RBUTTON,MAKELPARAM(100,50));
+  SendMessageW(window,WM_RBUTTONUP,MK_LBUTTON,MAKELPARAM(100,50));
+  require(GetCapture()==window && state.capturedButtons==std::set<std::uint16_t>{0},"Releasing one of two buttons broke the remaining drag");
+  SendMessageW(window,WM_CAPTURECHANGED,0,0);
+  require(state.released && state.capturedButtons.empty() && events.back().kind==Input::Reset,"Stolen capture left remote buttons pressed");
   SendMessageW(window,WM_KILLFOCUS,0,0);
   require(state.released && events.back().kind==Input::Reset,"Focus loss did not release remote keys/buttons");
   state.viewOnly=true; const auto before=events.size();
@@ -619,7 +668,15 @@ int runWindows(bool host,int argc,char** argv) {
     }
     peer.stop(); return 0;
   }
-  Peer peer(options);peer.onClipboard=platformClipboard; WindowState state; state.sendInput=[&](Input input) { if(input.kind==Input::Reset && state.controller)state.controller->stop();peer.input(input); }; state.viewOnly=!options.input;
+  Peer peer(options);peer.onClipboard=platformClipboard; WindowState state; WindowsMacClipboard clipboardKeys;
+  state.macHost=[&]{return peer.macHost();};
+  std::uint32_t keyboardGeneration=0;
+  state.sendInput=[&](Input input) {
+    if(input.kind==Input::Reset && state.controller)state.controller->stop();
+    const auto generation=peer.remoteGeneration();
+    if(generation!=keyboardGeneration) { (void)clipboardKeys.apply(Input{},false); keyboardGeneration=generation; }
+    for(const auto& event:clipboardKeys.apply(std::move(input),peer.macHost() && state.macClipboardShortcuts)) peer.input(event);
+  }; state.viewOnly=!options.input;
   VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State value) { peer.setVoiceState(value); });
   VoicePanel voicePanel(options.groupVoice,voice);
   peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
@@ -653,12 +710,14 @@ int runWindows(bool host,int argc,char** argv) {
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
   HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
   if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); SetFocus(window); peer.start();
+  if(options.input)if(auto menu=GetSystemMenu(window,FALSE))AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macClipboardCommand,L"Mac Copy/Paste: Ctrl+C / Ctrl+V (off for raw Control)");
   ControllerSession controllerSession({
     [&]{return options.input && peer.inputAvailable() && peer.gamepadAvailable();},
     [&]{return peer.remoteGeneration();},
     [&](auto epoch){
       if(state.textInput)state.textInput->cancel();if(state.shortcuts)state.shortcuts->cancel();
       if(!peer.releaseForController(epoch))return false;
+      (void)clipboardKeys.apply(Input{},peer.macHost());
       state.released=false;return true;
     },
     [&](auto sample,auto epoch){return peer.gamepad(sample,epoch);}
@@ -679,12 +738,17 @@ int runWindows(bool host,int argc,char** argv) {
     [&] {return !state.viewOnly && !state.inputPaused && peer.inputAvailable() && peer.textAvailable();},
     [&] {const auto focus=GetFocus();return GetForegroundWindow()==window && GetActiveWindow()==window && (focus==window || IsChild(window,focus));},
     [&] {return peer.remoteGeneration();},
-    [&] {if(state.controller)state.controller->stop();if(state.textInput)state.textInput->cancel();state.released=true;if(GetCapture()==window)ReleaseCapture();return peer.releaseForShortcuts(peer.remoteGeneration());},
+    [&] {if(state.controller)state.controller->stop();if(state.textInput)state.textInput->cancel();state.released=true;if(GetCapture()==window)ReleaseCapture();const auto released=peer.releaseForShortcuts(peer.remoteGeneration());if(released)(void)clipboardKeys.apply(Input{},peer.macHost());return released;},
     [&](auto keys,auto epoch){return peer.shortcut(keys,epoch);}
   });
   MSG message{}; bool open=true;
-  auto lastProgress=Clock::now();
+  auto lastProgress=Clock::now();bool macClipboardAvailable=false;
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
+    const bool available=options.input && peer.macHost();
+    if(available!=macClipboardAvailable) {
+      if(auto menu=GetSystemMenu(window,FALSE))EnableMenuItem(menu,WindowState::macClipboardCommand,MF_BYCOMMAND|(available ? MF_ENABLED:MF_GRAYED));
+      macClipboardAvailable=available;
+    }
     if(options.input && state.inputPaused==peer.inputAvailable()) {
       state.inputPaused=!peer.inputAvailable(); state.released=true;
       if(state.textInput) state.textInput->cancel();

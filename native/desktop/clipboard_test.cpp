@@ -49,6 +49,11 @@ void session(bool permission,bool control,bool sharing){
   client->onClipboard=[](bool,std::string,std::function<bool()> current,Peer::ClipboardResult done){done(current()?0:5,"local-only ế");};
   PeerStop a{*host},b{*client};host->start();client->start();
   check(waitFor([&]{return host->ready() && client->ready() && client->clipboardAvailable();}),"clipboard capability did not arrive");
+#ifdef __APPLE__
+  check(waitFor([&]{return client->macHost();}),"authenticated Mac host identity did not arrive");
+#else
+  check(!client->macHost(),"non-Mac host was incorrectly identified as Mac");
+#endif
   std::atomic<bool> done{false};unsigned status=99;std::string received;
   lose=true;duplicate=true;
   check(client->clipboard(false,"",[&](unsigned code,std::string text){status=code;received=std::move(text);done=true;}),"queue clipboard read");

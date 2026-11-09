@@ -7,6 +7,33 @@
 #include <optional>
 
 namespace sanser::desktop {
+// Receiver feedback and the sender's pacer do not share window boundaries.
+// Compare original payloads actually sent, over several feedback windows;
+// encoded bytes still waiting in the local pacer are not network loss.
+class VideoDeliveryWindow {
+public:
+  struct Sample {
+    std::uint64_t sent=0,delivered=0,packets=0,missing=0,elapsedMs=0;
+    bool ready() const { return elapsedMs>=1000; }
+    bool busy() const { return sent>=32000; }
+    bool shortfall() const { return ready() && busy() && static_cast<double>(delivered)<sent*0.85; }
+    bool loss() const { return packets>=16 && static_cast<double>(missing)/packets>0.03; }
+  };
+  Sample observe(Sample sample) {
+    samples_.push_back(sample);
+    while(samples_.size()>4) samples_.pop_front();
+    Sample total;
+    for(const auto& value:samples_) {
+      total.sent+=value.sent;total.delivered+=value.delivered;
+      total.packets+=value.packets;total.missing+=value.missing;total.elapsedMs+=value.elapsedMs;
+    }
+    return total;
+  }
+  void reset() { samples_.clear(); }
+private:
+  std::deque<Sample> samples_;
+};
+
 // Only authenticated, same-clock RTT samples enter this policy. Application
 // queue delay is useful congestion evidence even when no UDP packet is lost.
 class DelayRatePolicy {

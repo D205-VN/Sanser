@@ -39,7 +39,10 @@ physical device verification remain outstanding in this macOS workspace.
 - Device listings block client-only targets and incompatible codecs before starting
   a session. Registration preserves user-renamed device names.
 - Cross-platform sessions currently use H.264 and absolute keyboard/mouse only.
-  Relative mouse, clipboard and gamepad are not implemented in the new path.
+  Relative mouse remains unavailable. Clipboard transfer requires explicit host
+  opt-in; controller support is separately negotiated. Windows → Mac input
+  behavior and verification limits are documented in
+  [the input review](research/windows-to-mac-input-2026-11-09.md).
   2.2.16 carries system sound using the authenticated audio lane, Opus/PCM
   capability negotiation and native Windows/macOS capture/playback. Group viewers
   can mute independently; see [group audio](group-audio.md).

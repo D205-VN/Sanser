@@ -39,16 +39,16 @@ private final class EncodedFrames {
         VTSessionSetProperty(session,key:kVTCompressionPropertyKey_AllowFrameReordering,value:kCFBooleanFalse)
         VTSessionSetProperty(session,key:kVTCompressionPropertyKey_ProfileLevel,value:kVTProfileLevel_H264_Baseline_AutoLevel)
         VTCompressionSessionPrepareToEncodeFrames(session)
-        for frame in 0..<12 {
+        for frame in 0..<24 {
             var image:CVPixelBuffer?
             precondition(CVPixelBufferCreate(kCFAllocatorDefault,64,64,kCVPixelFormatType_32BGRA,nil,&image)==kCVReturnSuccess)
             CVPixelBufferLockBaseAddress(image!,[])
-            memset(CVPixelBufferGetBaseAddress(image!)!,Int32(32+frame*12),CVPixelBufferGetBytesPerRow(image!)*64)
+            memset(CVPixelBufferGetBaseAddress(image!)!,Int32(32+min(frame,17)*12),CVPixelBufferGetBytesPerRow(image!)*64)
             CVPixelBufferUnlockBaseAddress(image!,[])
             precondition(VTCompressionSessionEncodeFrame(session,imageBuffer:image!,presentationTimeStamp:CMTime(value:Int64(frame),timescale:60),duration:CMTime(value:1,timescale:60),frameProperties:nil,sourceFrameRefcon:nil,infoFlagsOut:nil)==noErr)
         }
         VTCompressionSessionCompleteFrames(session,untilPresentationTimeStamp:.invalid);VTCompressionSessionInvalidate(session)
-        precondition(encoded.frames.count==12,"Encoder did not produce the reference chain")
+        precondition(encoded.frames.count==24,"Encoder did not produce the reference chain")
 
         let decoder=MobileVideoDecoder();var presented=0
         decoder.output={image in
@@ -70,6 +70,59 @@ private final class EncodedFrames {
         decoder.push(encoded.frames[0],key:true,stream:decoder.stream());pump(0.15)
         precondition(presented==2,"Decoder did not restart after reset")
         decoder.reset();pump(0.05)
+        // Production iOS presentation polls on its display link. A busy layer
+        // must leave one NEWEST image available without asking for another IDR.
+        let manual=MobileVideoDecoder(automaticPresentation:false);var callbacks=0,requests=0,notifications=0
+        manual.output={_ in callbacks+=1};manual.keyframe={requests+=1}
+        manual.imageReady={notifications+=1}
+        let manualStream=manual.stream()
+        manual.push(encoded.frames[0],key:true,stream:manualStream)
+        let warm=Date(timeIntervalSinceNow:5)
+        while (manual.stats()["iOSDecodedFrames"] ?? 0)<1 && Date()<warm{Thread.sleep(forTimeInterval:0.001)}
+        // A repaired reference can release the entire transport history in one
+        // callback burst. Six queued dispatch jobs used to abort this chain.
+        for frame in encoded.frames.dropFirst(){manual.push(frame,key:false,stream:manualStream)}
+        let until=Date(timeIntervalSinceNow:5)
+        while (manual.stats()["iOSDecodedFrames"] ?? 0)<24 && Date()<until{Thread.sleep(forTimeInterval:0.001)}
+        precondition(manual.stats()["iOSDecodedFrames"]==24 && manual.stats()["iOSDecodedReplaced"]==23,"Repaired frame burst damaged reference decoding or accumulated images")
+        precondition(manual.stats()["iOSDecodeOverflows"]==0,"The transport's bounded repair burst overflowed the decode worker")
+        precondition(notifications==0,"Readiness notifications must execute on main")
+        pump(0.03)
+        precondition(notifications==1,"A stalled main loop accumulated readiness jobs instead of one coalesced notification")
+        precondition(callbacks==0 && requests==0,"A busy presenter must retain its image instead of consuming it or requesting IDRs")
+        guard let newest=manual.takeLatest() else{fatalError("Busy display lost its newest pending image")}
+        CVPixelBufferLockBaseAddress(newest,.readOnly)
+        let luminance=CVPixelBufferGetBaseAddressOfPlane(newest,0)!.load(as:UInt8.self)
+        CVPixelBufferUnlockBaseAddress(newest,.readOnly)
+        precondition(luminance>130,"Presenter retained an old decoded picture instead of the newest")
+        precondition(manual.takeLatest()==nil,"Presenter duplicated the same pending picture")
+        manual.reset();pump(0.05)
+        precondition(manual.takeLatest()==nil && manual.stats()["iOSDecodedFrames"]==0,"Session reset retained an old image or old timing counters")
+
+        let recovery=DispatchSemaphore(value:0)
+        manual.keyframe={requests+=1;recovery.signal()}
+        manual.push(Data(repeating:0,count:8*1024*1024+1),key:false,stream:manual.stream())
+        for _ in 0..<100{manual.push(encoded.frames[1],key:false,stream:manual.stream())}
+        precondition(recovery.wait(timeout:.now()+2) == .success,"A genuinely over-budget decode queue did not request recovery")
+        precondition(manual.stats()["iOSDecodeOverflows"]==1 && requests==1,"One overload episode generated repeated resets/keyframe requests")
+        manual.push(encoded.frames[0],key:true,stream:manual.stream())
+        let restarted=Date(timeIntervalSinceNow:5)
+        while manual.takeLatest()==nil && Date()<restarted{Thread.sleep(forTimeInterval:0.001)}
+        precondition(manual.stats()["iOSDecodedFrames"]==1,"A fresh keyframe did not resume after bounded overflow recovery")
+        manual.reset();pump(0.05)
+
+        let healthURL=FileManager.default.temporaryDirectory.appendingPathComponent("sanser-video-health-test-\(UUID().uuidString).json")
+        defer{try? FileManager.default.removeItem(at:healthURL)}
+        let health=MobileVideoHealthLog(url:healthURL)
+        for i in 0..<125{health.record(["sampleTimeMs":i,"iOSPresentedFrames":i,"rttMs":Double.nan,"token":123,"endpoint":"private","screen":"private"])}
+        health.flush()
+        let document=try! JSONSerialization.jsonObject(with:Data(contentsOf:healthURL)) as! [String:Any]
+        let samples=document["samples"] as! [[String:Double]]
+        precondition(samples.count==120 && samples.first?["sampleTimeMs"]==5,"Video diagnostics must be bounded to 120 numeric samples")
+        precondition(samples.last?.keys.sorted()==["iOSPresentedFrames","sampleTimeMs"],"Video diagnostics retained credentials/content or nonfinite timing")
+        health.reset();health.flush()
         print("VideoToolbox: reference chain, newest-image mailbox, stale-session fence and restart passed")
+        print("Presentation: coalesced immediate readiness, newest-only backpressure, no duplicate/stale image; bounded numeric diagnostics passed")
+        print("Repair burst: 24 ordered references, bounded compressed memory, one reset/request per overload and fresh-IDR recovery passed")
     }
 }

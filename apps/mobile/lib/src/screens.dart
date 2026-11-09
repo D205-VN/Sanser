@@ -166,7 +166,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.6 • Flutter',
+                          'Sanser 2.3.7 • Flutter',
                           style: TextStyle(color: Colors.white54),
                         ),
                         const SizedBox(height: 24),
@@ -1196,7 +1196,7 @@ class _RemoteSessionState extends State<RemoteSession>
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                'Nhận ${(c.telemetry['videoFps'] as num).toStringAsFixed(0)} fps · NACK ${((c.telemetry['nackRequestsPerSecond'] as num?) ?? 0).toStringAsFixed(0)}/s · Bù âm ${((c.telemetry['audioConcealedPerSecond'] as num?) ?? 0).toStringAsFixed(0)} gói/s',
+                'Nhận ${(c.telemetry['videoFps'] as num).toStringAsFixed(0)} fps${c.telemetry['displayFps'] is num ? ' · Hiển thị ${(c.telemetry['displayFps'] as num).toStringAsFixed(0)} fps' : ''} · NACK ${((c.telemetry['nackRequestsPerSecond'] as num?) ?? 0).toStringAsFixed(0)}/s · Bù âm ${((c.telemetry['audioConcealedPerSecond'] as num?) ?? 0).toStringAsFixed(0)} gói/s',
                 style: const TextStyle(fontSize: 11, color: SanserTokens.muted),
               ),
             ),

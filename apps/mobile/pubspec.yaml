@@ -1,7 +1,7 @@
 name: sanser_mobile
 description: Sanser mobile controller and sharing viewer for Android and iOS.
 publish_to: none
-version: 2.3.6+20310
+version: 2.3.7+20315
 environment:
   sdk: '>=3.9.0 <4.0.0'
 dependencies:

@@ -169,6 +169,7 @@ public:
   // True means queued, not that the foreground application accepted the edit.
   bool text(const std::string& utf8,std::uint32_t expectedGeneration=0);
   bool clipboardAvailable() const { return !options_.host && options_.input && !options_.sharing && running_ && ready_ && peerClipboard_; }
+  bool macHost() const { return !options_.host && ready_ && peerMacHost_; }
   using ClipboardResult=std::function<void(unsigned,std::string)>;
   bool clipboard(bool write,const std::string& utf8,ClipboardResult completed);
   bool localClipboardAvailable() const {return !options_.host && options_.input && !options_.sharing && running_ && ready_ && static_cast<bool>(onClipboard);}
@@ -232,7 +233,7 @@ private:
   bool transmit(snv2::PacketType type, const Bytes& payload, std::uint32_t stream = 0,
                 std::uint64_t frame = 0, std::uint16_t flags = 0, bool reliable = false,
                 Clock::time_point deadline = {},std::shared_ptr<std::atomic<std::uint32_t>> originalSent = {});
-  void datagram(const Bytes& bytes);
+  bool datagram(const Bytes& bytes);
   void process(const Bytes& bytes);
   void deliverVideo(std::optional<Frame> frame = {});
   void queueVideoRepair(const Bytes& bytes);
@@ -281,6 +282,9 @@ private:
   std::atomic<std::uint64_t> videoQueueDrops_{0};
   std::atomic<std::uint64_t> repairedDatagrams_{0}, repairCacheMisses_{0},repairUnsentIgnored_{0};
   std::atomic<std::uint64_t> offeredBytes_{0};
+  std::atomic<std::uint64_t> sentVideoPayloadBytes_{0};
+  VideoDeliveryWindow deliveryWindow_;
+  VideoDeliveryWindow::Sample lastDelivery_;
   std::atomic<std::uint32_t> videoBudget_{0},receiveVideoLimit_{0};
   std::atomic<double> receiveBaselineMs_{0};
   std::atomic<std::uint32_t> peerVideoLimit_{0};
@@ -307,6 +311,7 @@ private:
   bool peerInputRecovery_=false, inputRecoveryPending_=false, inputLeaseArmed_=false;
   std::atomic<bool> peerUnicode_{false};
   std::atomic<bool> peerClipboard_{false};
+  std::atomic<bool> peerMacHost_{false};
   std::atomic<bool> peerFiles_{false};
   std::atomic<bool> peerGamepad_{false};
   std::atomic<std::int64_t> peerGamepadAt_{0};

@@ -1,4 +1,6 @@
 #include "input_injector.h"
+#include "windows_mac_clipboard.h"
+#include "keyboard.h"
 #include <IOKit/hidsystem/IOLLEvent.h>
 #include <iostream>
 #include <stdexcept>
@@ -10,6 +12,22 @@ int main() {
     struct Cleanup { std::vector<CGEventRef>& events; ~Cleanup() { for(auto event:events) CFRelease(event); } } cleanup{events};
     try {
       MacInputInjector input(CGRectMake(100,50,1280,832),[&](CGEventRef event) { events.push_back(CGEventCreateCopy(event)); });
+      {
+        WindowsMacClipboard mapper;
+        for(auto code:{6,25}) {
+          const auto before=events.size();
+          for(const auto& edge:std::vector<Input>{{Input::Key,0,0,228,0,true},{Input::Key,0,0,static_cast<std::uint16_t>(code),0,true},
+                {Input::Key,0,0,static_cast<std::uint16_t>(code),0,false},{Input::Key,0,0,228,0,false}})
+            for(const auto& translated:mapper.apply(edge,true)) input.apply(translated);
+          require(events.size()==before+8,"Windows clipboard chord lost an edge before Mac injection");
+          auto pressed=events[before+3];
+          require(CGEventGetIntegerValueField(pressed,kCGKeyboardEventKeycode)==macKey(code) &&
+            (CGEventGetFlags(pressed)&kCGEventFlagMaskCommand) && !(CGEventGetFlags(pressed)&kCGEventFlagMaskControl),
+            "Windows Ctrl+C/V must arrive as native Command+C/V without Control");
+          require(CGEventGetFlags(events.back())==0,"Windows clipboard chord left a Mac modifier pressed");
+        }
+        for(auto event:events)CFRelease(event);events.clear();
+      }
       input.apply({Input::Key,0,0,225,0,true});
       input.apply({Input::Key,0,0,4,0,true});
       require(CGEventGetType(events[0])==kCGEventFlagsChanged,"Shift is not a modifier event");
@@ -64,6 +82,43 @@ int main() {
       require(count==2 && units[0]==0xd83d && units[1]==0xde00,"Emoji surrogate pair was split between Mac key events");
       edit.text="valid\xed\xa0\x80"; const auto unchanged=events.size(); input.apply(edit);
       require(events.size()==unchanged,"Malformed Unicode injected a partial prefix");
+      input.apply({Input::Key,0,0,4,0,true});
+      require(!CGEventGetIntegerValueField(events.back(),kCGKeyboardEventAutorepeat),"First key-down must not be a repeat");
+      input.apply({Input::Key,0,0,4,0,true});
+      require(CGEventGetIntegerValueField(events.back(),kCGKeyboardEventAutorepeat)==1,"Held typing key lost its native autorepeat marker");
+      input.apply(Input{});
+      input.apply({Input::Key,0,0,57,0,true});
+      require(CGEventGetType(events.back())==kCGEventFlagsChanged && (CGEventGetFlags(events.back())&kCGEventFlagMaskAlphaShift),"Caps Lock did not toggle native flags");
+      input.apply({Input::Key,0,0,57,0,true});input.apply({Input::Key,0,0,57,0,false});
+      input.apply({Input::Key,0,0,4,0,true});
+      require(CGEventGetFlags(events.back())&kCGEventFlagMaskAlphaShift,"Caps Lock repeat/up lost the toggle");
+      edit.text="a";input.apply(edit);
+      require(CGEventGetFlags(events.back())==0,"Literal text inherited Caps Lock");
+      input.apply({Input::Key,0,0,57,0,true});input.apply({Input::Key,0,0,57,0,false});
+      require(!(CGEventGetFlags(events.back())&kCGEventFlagMaskAlphaShift),"Second Caps Lock press did not turn it off");
+      input.apply({Input::Scroll,0,0,0,3,false});
+      require(CGEventGetIntegerValueField(events.back(),kCGScrollWheelEventDeltaAxis1)==3,"Vertical scroll changed direction");
+      input.apply({Input::Scroll,0,0,1,2,false});
+      require(CGEventGetIntegerValueField(events.back(),kCGScrollWheelEventDeltaAxis1)==0 && CGEventGetIntegerValueField(events.back(),kCGScrollWheelEventDeltaAxis2)==-2,"Horizontal Windows scroll must preserve rightward direction on Mac");
+      const auto scrollCount=events.size();input.apply({Input::Scroll,0,0,2,1,false});
+      require(events.size()==scrollCount,"Unsupported scroll axis reached native injection");
+      for(const auto& mapping:keys) {
+        input.apply(Input{});
+        input.apply({Input::Key,0,0,mapping.hid,0,true});
+        require(CGEventGetIntegerValueField(events.back(),kCGKeyboardEventKeycode)==mapping.mac,"Supported HID key mapped to the wrong Mac key");
+        input.apply({Input::Key,0,0,mapping.hid,0,false});
+        require(CGEventGetIntegerValueField(events.back(),kCGKeyboardEventKeycode)==mapping.mac,"Key-up used a different Mac key");
+        if(mapping.hid==57) {input.apply({Input::Key,0,0,57,0,true});input.apply({Input::Key,0,0,57,0,false});}
+      }
+      input.apply(Input{});
+      for(std::uint16_t button:{1,2}) {
+        input.apply({Input::Button,20000,30000,button,0,true});
+        require(CGEventGetType(events.back())==(button==1 ? kCGEventRightMouseDown:kCGEventOtherMouseDown),"Right/middle mouse down type differs");
+        input.apply({Input::Move,40000,50000});
+        require(CGEventGetType(events.back())==(button==1 ? kCGEventRightMouseDragged:kCGEventOtherMouseDragged),"Right/middle drag lost the held button");
+        input.apply({Input::Button,40000,50000,button,0,false});
+        require(CGEventGetType(events.back())==(button==1 ? kCGEventRightMouseUp:kCGEventOtherMouseUp),"Right/middle mouse release type differs");
+      }
       std::cout<<"Mac input: modifiers, clicks, Unicode scalar pairs and reset passed without posting OS input\n";
       return 0;
     } catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }

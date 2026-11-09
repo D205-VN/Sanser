@@ -127,6 +127,8 @@ int main() {
     Input key{Input::Key,0,0,4,0,true}; auto decoded=decodeInput(encodeInput(key)); require(decoded && decoded->code==4 && decoded->down,"key round trip");
     require(!decodeInput(Bytes(9)),"truncated input"); key.code=0; require(!decodeInput(encodeInput(key)),"invalid HID key"); key.kind=Input::Button; key.code=3; require(!decodeInput(encodeInput(key)),"invalid mouse button");
     Input scroll{Input::Scroll,100,200,0,-120,false}; decoded=decodeInput(encodeInput(scroll)); require(decoded && decoded->delta==-120,"signed wheel");
+    scroll.code=1;decoded=decodeInput(encodeInput(scroll));require(decoded && decoded->code==1 && decoded->delta==-120,"horizontal wheel round trip");
+    scroll.code=2;require(!decodeInput(encodeInput(scroll)),"unsupported scroll axis accepted");
     require(hidFromMac(macKey(4))==4 && hidFromWindows(windowsKey(4))==4,"keyboard mapping round trip");
     Bytes frame{0,0,7,128,0,0,4,56}; frame.resize(2508,77); h.frameId=1; h.flags=snv2::kFlagKeyFrame;
     Reassembler frames; require(!frames.push(h,fragment(frame,2)),"partial frame"); require(!frames.push(h,fragment(frame,0)),"out of order partial"); require(!frames.push(h,fragment(frame,0)),"duplicate fragment"); auto ready=frames.push(h,fragment(frame,1)); require(ready && ready->width==1920 && ready->height==1080 && ready->keyframe && ready->data==Bytes(2500,77),"reassembled frame");
@@ -249,6 +251,36 @@ int main() {
       require(!expired,"a normal WAN repair RTT must not expire the entire keyframe");
       (void)paced.repairs(expired,began+std::chrono::seconds(1));
       require(expired,"unrepairable pictures retain a bounded deadline");
+    }
+    {
+      Bytes pacedFrame{0,0,7,128,0,0,4,56};pacedFrame.resize(128*1024,0x44);
+      Reassembler receiving(2000000,false,true);auto header=h;header.frameId=1;header.flags=snv2::kFlagKeyFrame;
+      require(!receiving.push(header,fragment(pacedFrame,0)),"start paced repair-progress regression");
+      const auto began=Clock::now();bool deadline=false;
+      // The sender is briefly stalled. Three bounded requests can name tail
+      // fragments that it has not attempted yet and therefore cannot repair.
+      for(unsigned attempt=0;attempt<3;++attempt) {
+        const auto early=receiving.repairs(deadline,began+std::chrono::milliseconds(500+20*attempt),std::chrono::milliseconds(20));
+        require(!deadline && !early.empty(),"repair-progress fixture must consume the no-progress retries");
+      }
+      require(!receiving.push(header,fragment(pacedFrame,0)),"duplicate original must stay incomplete");
+      require(receiving.repairs(deadline,began+std::chrono::milliseconds(580),std::chrono::milliseconds(20)).empty(),"duplicate fragments must not renew an exhausted no-progress repair budget");
+      const auto count=(pacedFrame.size()+999)/1000;
+      for(std::size_t index=1;index+1<count;++index)
+        require(!receiving.push(header,fragment(pacedFrame,static_cast<std::uint16_t>(index))),"tail must remain genuinely missing");
+      const auto actual=receiving.repairs(deadline,began+std::chrono::milliseconds(600),std::chrono::milliseconds(20));
+      require(!deadline && actual.size()==1 && actual[0].missing==std::vector<std::uint16_t>{static_cast<std::uint16_t>(count-1)},"fresh fragment progress must renew repair for the genuinely lost tail");
+      header.flags|=snv2::kFlagRetransmitted;
+      require(receiving.push(header,fragment(pacedFrame,static_cast<std::uint16_t>(count-1))).has_value(),"renewed tail repair must complete the existing IDR without a reset");
+    }
+    {
+      Bytes pacedFrame{0,0,7,128,0,0,4,56};pacedFrame.resize(128*1024,0x44);
+      Reassembler receiving(1000000,false,true);auto header=h;header.frameId=1;header.flags=snv2::kFlagKeyFrame;
+      require(!receiving.push(header,fragment(pacedFrame,0)),"start slow paced IDR");
+      const auto began=Clock::now();bool deadline=false;
+      require(receiving.repairs(deadline,began+std::chrono::milliseconds(500),std::chrono::milliseconds(20)).empty() && !deadline,"tail repair must use actual serialization, not the capped 500ms expiry budget");
+      (void)receiving.repairs(deadline,began+std::chrono::seconds(2));
+      require(deadline && receiving.awaitingReference(),"renewed repair must preserve the hard incomplete-frame deadline");
     }
     std::cout<<"Transport: encryption, tamper, replay, input and reassembly passed\n";
     return 0;

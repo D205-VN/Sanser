@@ -486,6 +486,12 @@ class MobileController extends ChangeNotifier {
                 (current - previous) * 1000 / (now - _lastVideoAt!);
           }
         }
+        final shown = event['iOSPresentedFrames'];
+        final previousShown = _lastMediaCounters['iOSPresentedFrames'];
+        if (shown is num && previousShown is num && shown >= previousShown) {
+          event['displayFps'] =
+              (shown - previousShown) * 1000 / (now - _lastVideoAt!);
+        }
       }
       // Dimension-only events do not advance the one-second sampling clock.
       if (_lastVideoAt == null || now - _lastVideoAt! >= 250) {
@@ -501,6 +507,17 @@ class MobileController extends ChangeNotifier {
       for (final key in [
         'rttMs',
         'videoFps',
+        'displayFps',
+        'iOSDecodedFrames',
+        'iOSDecodedReplaced',
+        'iOSDecodeExpired',
+        'iOSDecodeOverflows',
+        'iOSDecodeAvgUs',
+        'iOSDecodeQueueAvgUs',
+        'iOSPresentWaitAvgUs',
+        'iOSPresentedFrames',
+        'iOSDisplayBusyTicks',
+        'iOSDisplayFailures',
         'videoPackets',
         'videoFrames',
         'nackRequests',

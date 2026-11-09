@@ -49,6 +49,32 @@ DatagramIo::Result receiveDelayed(std::intptr_t fd,std::uint8_t* data,std::size_
 }
 int main(){try{
   {
+    VideoDeliveryWindow delivery;
+    // A paced keyframe straddles feedback boundaries. A single 500ms sample
+    // looks 25% short although the same original bytes arrive next window.
+    auto sample=delivery.observe({200000,150000,160,0,500});
+    require(!sample.shortfall(),"a partial feedback window must not cut video quality");
+    sample=delivery.observe({100000,150000,160,0,500});
+    require(sample.ready() && sample.busy() && !sample.shortfall() && !sample.loss(),"paced boundary skew was mistaken for congestion");
+    for(unsigned i=0;i<20;++i) {
+      sample=delivery.observe({i%2 ? 100000U:200000U,150000,160,0,500});
+      require(!sample.shortfall(),"a lossless paced keyframe repeatedly reduced bitrate");
+    }
+    // The 1Mbps recovery floor can carry under 32KB in one half-second when
+    // capture admission skips raw images. Aggregate activity must still allow
+    // recovery rather than trapping the session at the minimum forever.
+    delivery.reset();
+    for(unsigned i=0;i<4;++i)sample=delivery.observe({24000,24000,24,0,500});
+    require(sample.ready() && sample.busy() && !sample.shortfall(),"low-rate healthy video could not recover from bitrate backoff");
+    delivery.reset();
+    for(unsigned i=0;i<4;++i)sample=delivery.observe({100000,50000,100,12,500});
+    require(sample.shortfall() && sample.loss(),"smoothing must retain sustained delivery loss");
+    for(unsigned i=0;i<4;++i)sample=delivery.observe({100000,100000,100,0,500});
+    require(!sample.shortfall() && !sample.loss(),"old congestion must expire after healthy delivery resumes");
+    delivery.reset();sample=delivery.observe({0,0,0,0,500});
+    require(!sample.ready() && !sample.busy(),"new sessions must not inherit earlier delivery evidence");
+  }
+  {
     DelayRatePolicy policy;const auto t=Clock::now();
     require(!policy.observe(200,10,6000000,6000000,t),"one RTT spike must not cut quality");
     require(policy.observe(210,10,6000000,6000000,t+std::chrono::milliseconds(250))==3600000,"persistent latency must reduce bitrate without packet loss");

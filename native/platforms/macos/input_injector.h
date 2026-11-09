@@ -12,12 +12,13 @@ public:
   void apply(const Input& input);
 private:
   CGEventFlags flags() const;
-  void emit(CGEventRef event);
+  void emit(CGEventRef event,bool literal=false);
   void reset();
   CGRect bounds_; CGPoint point_{};
   CGEventSourceRef source_=nullptr;
   std::function<void(CGEventRef)> post_;
   std::set<std::uint16_t> keys_,buttons_;
+  bool capsLock_=false;
   struct Click { Clock::time_point at{}; CGPoint point{}; unsigned count=0; std::int64_t number=0; };
   std::array<Click,3> clicks_{};
   std::int64_t number_=0;

@@ -14,6 +14,7 @@ using namespace sanser::desktop;
 namespace {
 std::atomic<bool> loseNextOriginal{false};
 std::atomic<unsigned> originalStallMs{0},stallAtPacket{24},originalPackets{0};
+std::atomic<unsigned> dropAtOriginal{0};
 std::atomic<std::uint64_t> delayedPackets{0},senderDelayUs{0};
 DatagramIo::Result sendWithLoss(std::intptr_t socket,const std::uint8_t* data,std::size_t size){
   const auto packet=sanser::snv2::decodePacket({data,size});
@@ -25,6 +26,10 @@ DatagramIo::Result sendWithLoss(std::intptr_t socket,const std::uint8_t* data,st
       senderDelayUs+=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now()-began).count();
     }
   }
+  if(packet && packet.header.packetType==sanser::snv2::PacketType::Video &&
+     !(packet.header.flags&sanser::snv2::kFlagRetransmitted) &&
+     dropAtOriginal.load()!=0 && dropAtOriginal.load()==originalPackets.load() && dropAtOriginal.exchange(0)!=0)
+    return {static_cast<std::ptrdiff_t>(size),0};
   if(packet && packet.header.packetType==sanser::snv2::PacketType::Video &&
      !(packet.header.flags&sanser::snv2::kFlagRetransmitted) && loseNextOriginal.exchange(false))
     return {static_cast<std::ptrdiff_t>(size),0};
@@ -99,7 +104,9 @@ int main(){try{
   }
   std::cout<<"source admission: admitted="<<admitted<<" supersededRaw="<<skipped<<'\n';
   check(admitted>10 && skipped>0,"fixture must exercise source backpressure and resumed capture");
-  check(waitFor([&]{return pictures>=3+admitted;}),"backpressure broke the encoded reference chain");
+  const bool drained=waitFor([&]{return pictures>=3+admitted;});
+  if(!drained)std::cerr<<"overload pictures="<<pictures<<" expected="<<3+admitted<<" queueDrops="<<host->videoQueueDrops()<<" repaired="<<host->repairedDatagrams()<<" budget="<<host->recommendedBitrate()<<'\n';
+  check(drained,"backpressure broke the encoded reference chain");
   check(host->videoQueueDrops()==0,"source overload must not become an IDR/drop loop");
   std::cout<<"overloaded source: admitted="<<admitted<<" supersededRaw="<<skipped<<" encodedQueueDrops="<<host->videoQueueDrops()<<'\n';
   const auto beforeExpiry=pictures.load();
@@ -109,6 +116,18 @@ int main(){try{
   host->video({Bytes(2000,0x65),1920,1080,true});
   check(waitFor([&]{return pictures>beforeExpiry;}),"a fresh IDR must recover after a genuine expiry");
   std::cout<<"Expired IDR discarded; fresh independent picture resumed video\n";
+  // Stall one original long enough for early NACKs to exhaust the old
+  // whole-frame retry budget, then really lose the last fragment. Forward
+  // progress must renew repair, without waiting for another independent IDR.
+  const auto beforeTail=pictures.load();const auto dropsBeforeTail=host->videoQueueDrops();
+  originalPackets=0;stallAtPacket=24;originalStallMs=600;
+  constexpr std::size_t tailBytes=96*1024;
+  dropAtOriginal=(tailBytes+8+999)/1000;
+  host->video({Bytes(tailBytes,0x65),1920,1080,true});
+  check(waitFor([&]{return pictures>beforeTail;}),"paced IDR with a genuinely lost late tail never recovered after early NACKs");
+  check(dropAtOriginal==0,"late-tail fixture did not actually lose its final original datagram");
+  check(host->videoQueueDrops()==dropsBeforeTail,"late-tail repair must not need another expired IDR");
+  std::cout<<"Paced IDR: stalled original plus genuinely lost late tail repaired without restarting the picture\n";
   std::cout<<"Real fragment loss still repairs and resumes dependent pictures\n";
   return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

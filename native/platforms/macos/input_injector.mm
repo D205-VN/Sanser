@@ -14,6 +14,7 @@ MacInputInjector::MacInputInjector(CGRect bounds,std::function<void(CGEventRef)>
 MacInputInjector::~MacInputInjector() { try { reset(); } catch(...) {} CFRelease(source_); }
 CGEventFlags MacInputInjector::flags() const {
   CGEventFlags flags=0;
+  if(capsLock_)flags|=kCGEventFlagMaskAlphaShift;
   if(keys_.contains(224)||keys_.contains(228)) flags|=kCGEventFlagMaskControl;
   if(keys_.contains(225)||keys_.contains(229)) flags|=kCGEventFlagMaskShift;
   if(keys_.contains(226)||keys_.contains(230)) flags|=kCGEventFlagMaskAlternate;
@@ -26,9 +27,9 @@ CGEventFlags MacInputInjector::flags() const {
   for(unsigned i=0;i<8;++i) if(keys_.contains(224+i)) flags|=sided[i];
   return flags;
 }
-void MacInputInjector::emit(CGEventRef event) {
+void MacInputInjector::emit(CGEventRef event,bool literal) {
   if(!event) throw std::runtime_error("Unable to create a remote input event");
-  CGEventSetFlags(event,flags());
+  CGEventSetFlags(event,literal ? 0:flags());
   struct Release { CGEventRef event; ~Release() { CFRelease(event); } } release{event};
   post_(event);
 }
@@ -49,7 +50,8 @@ void MacInputInjector::apply(const Input& input) {
       for(bool down:{true,false}) {
         auto event=CGEventCreateKeyboardEvent(source_,0,down);
         if(event) CGEventKeyboardSetUnicodeString(event,count,scalar);
-        emit(event);
+        // Committed Unicode is literal, independent of a remote Caps Lock toggle.
+        emit(event,true);
       }
       i+=count;
     }
@@ -57,13 +59,18 @@ void MacInputInjector::apply(const Input& input) {
   }
   if(input.kind==Input::Key) {
     const auto key=macKey(input.code); if(key<0) return;
+    const bool repeat=input.down && keys_.contains(input.code);
+    if(input.code==57 && input.down && !repeat)capsLock_=!capsLock_;
     if(input.down) keys_.insert(input.code); else keys_.erase(input.code);
     auto event=CGEventCreateKeyboardEvent(source_,static_cast<CGKeyCode>(key),input.down);
-    if(event && input.code>=224) CGEventSetType(event,kCGEventFlagsChanged);
+    if(event)CGEventSetIntegerValueField(event,kCGKeyboardEventAutorepeat,repeat && input.code<224 && input.code!=57 ? 1:0);
+    if(event && (input.code>=224 || input.code==57)) CGEventSetType(event,kCGEventFlagsChanged);
     emit(event); return;
   }
   if(input.kind==Input::Scroll) {
-    auto event=CGEventCreateScrollWheelEvent(source_,kCGScrollEventUnitLine,1,static_cast<int>(input.delta));
+    if(input.code>1)return;
+    auto event=input.code ? CGEventCreateScrollWheelEvent(source_,kCGScrollEventUnitLine,2,0,-static_cast<int>(input.delta)):
+      CGEventCreateScrollWheelEvent(source_,kCGScrollEventUnitLine,1,static_cast<int>(input.delta));
     if(event) CGEventSetLocation(event,point_);
     emit(event); return;
   }

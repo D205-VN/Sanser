@@ -30,6 +30,7 @@ public:
     std::uint16_t userFragment=0;
     bool userData=false;
     bool gamepad=false;
+    std::size_t originalVideoPayloadBytes=0;
   };
   bool push(Lane lane, Packet packet) {
     packet.repair=lane==Repair;

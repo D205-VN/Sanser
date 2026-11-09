@@ -142,21 +142,25 @@ void main() {
           'videoFrames': frames,
           'nackRequests': nack,
           'audioConcealed': concealed,
+          'iOSPresentedFrames': frames ~/ 2,
         });
       }
 
       sample(1000, 30, 812, 3100);
       sample(2000, 60, 822, 3120);
       expect(c.telemetry['videoFps'], 30);
+      expect(c.telemetry['displayFps'], 15);
       expect(c.telemetry['nackRequestsPerSecond'], 10);
       expect(c.telemetry['audioConcealedPerSecond'], 20);
       // Flutter can poll the same one-second snapshot twice. It is not a stall.
       sample(2000, 60, 822, 3120);
       expect(c.telemetry['videoFps'], 30);
+      expect(c.telemetry['displayFps'], 15);
       expect(c.telemetry['nackRequestsPerSecond'], 10);
       // A genuinely newer native snapshot without progress must still show 0.
       sample(3000, 60, 822, 3120);
       expect(c.telemetry['videoFps'], 0);
+      expect(c.telemetry['displayFps'], 0);
       expect(c.telemetry['nackRequestsPerSecond'], 0);
       expect(c.telemetry['audioConcealedPerSecond'], 0);
       await c.disconnect();
