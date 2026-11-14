@@ -225,6 +225,49 @@ int main() {
       require(expired && gap.awaitingReference(),"an unrecovered whole-picture gap eventually requires a fresh IDR");
     }
     {
+      Reassembler whole; auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      Bytes predicted{0,0,7,128,0,0,4,56}; predicted.resize(900,0x55);
+      require(whole.push(header,fragment(predicted,0)).has_value(),"establish a reference before a whole-picture loss");
+      header.frameId=3; header.flags=0;
+      const auto began=Clock::now();
+      require(!whole.push(header,fragment(predicted,0),began),"a later picture reveals a wholly missing reference");
+      bool timeout=false;
+      require(whole.repairs(timeout,began).empty() && !timeout,"a wholly missing picture gets a reorder grace before repair");
+      const auto request=whole.repairs(timeout,began+std::chrono::milliseconds(4));
+      require(!timeout && request.size()==1 && request.front().frame==2 && request.front().missing==std::vector<std::uint16_t>{0},
+        "a wholly missing picture requests its first fragment instead of waiting for expiry");
+      require(whole.repairs(timeout,began+std::chrono::milliseconds(6)).empty(),"whole-picture repair respects retry spacing");
+      header.frameId=2; header.flags=snv2::kFlagRetransmitted;
+      const auto recovered=whole.push(header,fragment(predicted,0),began+std::chrono::milliseconds(8));
+      const auto dependent=whole.take();
+      require(recovered && recovered->id==2 && dependent && dependent->id==3,"a repaired whole picture releases its dependent picture without an IDR");
+      require(whole.repairs(timeout,began+std::chrono::milliseconds(40)).empty() && !timeout,"no repair remains after the chain is restored");
+      header.frameId=5; header.flags=0;
+      require(!whole.push(header,fragment(predicted,0),began+std::chrono::milliseconds(50)),"hold behind another missing picture");
+      header.frameId=6; header.flags=snv2::kFlagKeyFrame;
+      require(!whole.push(header,fragment(frame,0),began+std::chrono::milliseconds(50)),"a fresh IDR starts behind the gap");
+      (void)whole.repairs(timeout,began+std::chrono::milliseconds(50));
+      for(const auto& repair:whole.repairs(timeout,began+std::chrono::milliseconds(60)))
+        require(repair.frame==6,"an arriving IDR supersedes whole-picture repair");
+    }
+    {
+      // 1 Mbps makes the timed tail estimate ~20 ms, so only the later picture can explain an earlier NACK.
+      Reassembler tail(1000000); auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
+      Bytes predicted{0,0,7,128,0,0,4,56}; predicted.resize(900,0x22);
+      const auto began=Clock::now();
+      require(tail.push(header,fragment(predicted,0),began).has_value(),"establish a reference before a tail loss");
+      header.frameId=2; header.flags=0;
+      require(!tail.push(header,fragment(frame,0),began) && !tail.push(header,fragment(frame,1),began),"a picture is missing only its tail");
+      bool timeout=false;
+      require(tail.repairs(timeout,began+std::chrono::milliseconds(5)).empty(),"a possibly still-paced tail is not requested early");
+      header.frameId=3;
+      require(!tail.push(header,fragment(predicted,0),began+std::chrono::milliseconds(5)),"a later picture arrives behind the missing tail");
+      require(tail.repairs(timeout,began+std::chrono::milliseconds(6)).empty(),"a later picture still allows a reorder grace");
+      const auto request=tail.repairs(timeout,began+std::chrono::milliseconds(9));
+      require(!timeout && request.size()==1 && request.front().frame==2 && request.front().missing==std::vector<std::uint16_t>{2},
+        "a later picture proves the earlier tail was sent and lost");
+    }
+    {
       Reassembler repaired; auto header=h; header.frameId=1; header.flags=snv2::kFlagKeyFrame;
       require(!repaired.push(header,fragment(frame,0)) && !repaired.push(header,fragment(frame,2)),"start a reference with one genuinely missing fragment");
       header.flags|=snv2::kFlagRetransmitted;

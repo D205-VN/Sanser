@@ -111,6 +111,9 @@ private:
   std::uint64_t lostFragments_=0;
   std::uint64_t receivedBytes_=0;
   bool haveReference_=false;
+  // A picture with no received fragment has no Partial to NACK from.
+  struct MissingFrame { Clock::time_point noticed; Clock::time_point lastRepair{}; unsigned attempts=0; };
+  std::map<std::uint64_t, MissingFrame> missingFrames_;
   void discardThrough(std::uint64_t id,bool lost=false);
 };
 class Peer {

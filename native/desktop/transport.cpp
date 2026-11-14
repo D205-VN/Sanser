@@ -368,7 +368,11 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
       const auto remaining=partial.data.size()-std::min(partial.data.size(),partial.highestSeen*chunkSize);
       tailAt=std::max(tailAt,partial.progressed+videoSerializationTime(remaining,bitrate_)+reorder);
     }
-    const bool tailDue=now>=tailAt;
+    // The sender's video lane is FIFO: a fragment of a later picture means
+    // every original of this one already left the pacer. After the reorder
+    // grace the tail is lost, not pending; do not wait out the time estimate.
+    const bool passed=std::any_of(std::next(it),frames_.end(),[&](const auto& later) { return now-later.second.started>=reorder; });
+    const bool tailDue=passed || now>=tailAt;
     // On a slower path, allow the picture's own serialization plus a small
     // reorder window before declaring holes. Complete frames are never held.
     // Otherwise harmless packet reordering can fill the repair lane and starve
@@ -383,6 +387,24 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
     }
     ++it;
   }
+  // A later picture proves the sender already passed every earlier id. If one
+  // of those has no fragment at all, there is no Partial to NACK and its
+  // dependents would otherwise wait for expiry and a fresh IDR. Request its
+  // first fragment (always a valid index for old hosts); the reply creates the
+  // assembly and normal selective repair completes it. A pending IDR already
+  // bypasses the chain, and a host cache miss still answers with a keyframe.
+  if(haveReference_ && lastFrame_ && !frames_.empty() && !assemblingKeyframe()) {
+    const auto newest=frames_.rbegin()->first;
+    const auto reorder=std::clamp((retry-std::chrono::milliseconds(8))/4,std::chrono::milliseconds(3),std::chrono::milliseconds(20));
+    std::erase_if(missingFrames_,[&](const auto& entry) { return entry.first<=lastFrame_ || entry.first>=newest || frames_.contains(entry.first); });
+    for(auto id=lastFrame_+1;id<newest && id-lastFrame_<=4;++id) {
+      if(frames_.contains(id)) continue;
+      auto& missing=missingFrames_.try_emplace(id,MissingFrame{now}).first->second;
+      if(missing.attempts<3 && now-missing.noticed>=reorder && now-missing.lastRepair>=retry && result.size()<4) {
+        result.push_back({id,{0}}); missing.lastRepair=now; ++missing.attempts;
+      }
+    }
+  } else missingFrames_.clear();
   return result;
 }
 

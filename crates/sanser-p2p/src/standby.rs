@@ -668,9 +668,10 @@ pub async fn run(
     let mut initial = monitor.snapshot(Instant::now());
     initial.router = router;
     observe(initial);
-    let result = loop {
+    const BURST: usize = 16;
+    let result = 'run: loop {
         tokio::select! {
-            _=&mut stop=>{router.stop_reason=1;break Ok(());},
+            _=&mut stop=>{router.stop_reason=1;break 'run Ok(());},
             _=tick.tick()=> {
                 let now=Instant::now();monitor.tick(&external,now);
                 if fec_route!=monitor.config.active {fec.path_changed(now);fec_route=monitor.config.active;baseline_rtt=None;}
@@ -686,12 +687,23 @@ pub async fn run(
                 for packet in fec.tick(now) {if external.try_send_to(&packet,monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}}
             },
             result=external.recv_from(&mut incoming)=> {
+                // One wake drains a bounded burst: a frame's datagrams do not
+                // each pay a full select/timer round. The cap keeps the other
+                // direction (input, ACKs) from waiting behind video.
+                let mut result=result;
+                for burst in 0..BURST {
+                if burst>0 {
+                    result=match external.try_recv_from(&mut incoming) {
+                        Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>break,
+                        other=>other,
+                    };
+                }
                 let (n,source)=match result {
                     Ok(value)=>value,
                     Err(error)=>{
                         router.external_receive_errors+=1;
-                        if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset) {continue;}
-                        router.stop_reason=2;break Err(error);
+                        if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset) {continue 'run;}
+                        router.stop_reason=2;break 'run Err(error);
                     }
                 };
                 let now=Instant::now();
@@ -708,16 +720,27 @@ pub async fn run(
                     let (_,recovered)=fec.receive(&incoming[..n],now);
                     for packet in recovered {if local.try_send_to(&packet,engine).is_err() {router.to_native_drops+=1;monitor.drops+=1;fec.local_drop(now);}else {router.to_native+=1;}}
                 }else if !probe {router.external_rejected+=1;}
+                result=Err(std::io::ErrorKind::WouldBlock.into());
+                }
             },
             result=local.recv_from(&mut outgoing)=> {
+                let mut result=result;
+                for burst in 0..BURST {
+                if burst>0 {
+                    result=match local.try_recv_from(&mut outgoing) {
+                        Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>break,
+                        other=>other,
+                    };
+                }
                 let (n,source)=match result {
                     Ok(value)=>value,
                     Err(error)=>{
                         router.native_receive_errors+=1;
-                        if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset) {continue;}
-                        router.stop_reason=3;break Err(error);
+                        if matches!(error.kind(),std::io::ErrorKind::ConnectionRefused|std::io::ErrorKind::ConnectionReset) {continue 'run;}
+                        router.stop_reason=3;break 'run Err(error);
                     }
                 };
+                result=Err(std::io::ErrorKind::WouldBlock.into());
                 if source!=engine {router.native_rejected+=1;continue;}
                 router.native_received+=1;
                 let now=Instant::now();
@@ -725,6 +748,7 @@ pub async fn run(
                 else {
                     router.to_peer+=1;
                     if let Some(parity)=fec.outgoing(&outgoing[..n],now) && external.try_send_to(&parity,monitor.config.active).is_err() {monitor.drops+=1;fec.local_drop(now);}
+                }
                 }
             },
         }
