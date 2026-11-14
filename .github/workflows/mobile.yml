@@ -109,12 +109,12 @@ jobs:
         if: matrix.sdk == 'iphonesimulator'
         run: |
           mkdir -p artifacts
-          ditto -c -k --keepParent apps/mobile/build/ios/iphonesimulator/Runner.app artifacts/Sanser-iOS-2.3.7-simulator-unsigned.zip
+          ditto -c -k --keepParent apps/mobile/build/ios/iphonesimulator/Runner.app artifacts/Sanser-iOS-2.3.8-simulator-unsigned.zip
       - uses: actions/upload-artifact@v4
         if: matrix.sdk == 'iphonesimulator'
         with:
           name: sanser-mobile-ios-simulator-unsigned
-          path: artifacts/Sanser-iOS-2.3.7-simulator-unsigned.zip
+          path: artifacts/Sanser-iOS-2.3.8-simulator-unsigned.zip
       - name: Build release iPhone IPA for recipient re-signing
         if: matrix.sdk == 'iphoneos'
         env:
@@ -125,6 +125,6 @@ jobs:
         with:
           name: sanser-mobile-ios-device-unsigned
           path: |
-            artifacts/mobile-2.3.7/*.ipa
-            artifacts/mobile-2.3.7/*.ipa.sha256
-            artifacts/mobile-2.3.7/*.ipa.json
+            artifacts/mobile-2.3.8/*.ipa
+            artifacts/mobile-2.3.8/*.ipa.sha256
+            artifacts/mobile-2.3.8/*.ipa.json
