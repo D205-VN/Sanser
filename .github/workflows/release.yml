@@ -136,8 +136,33 @@ jobs:
               exit 1
             fi
             unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD
-            export APPLE_SIGNING_IDENTITY=-
-            echo '::warning::Ad-hoc Mac build: Screen Recording permission may need to be removed and granted again after an update.'
+            if [[ -n "$MACOS_SELF_SIGNED_CERTIFICATE" ]]; then
+              if [[ -z "$MACOS_SELF_SIGNED_CERTIFICATE_PASSWORD" || -n "$APPLE_ID" || -n "$APPLE_PASSWORD" || -n "$APPLE_TEAM_ID" ]]; then
+                echo '::error::Self-signed Mac signing needs its certificate password and cannot be notarized.'
+                exit 1
+              fi
+              # A self-signed identity is not a "valid" identity for Tauri's own
+              # certificate import. Keep it in a job-local keychain on the search
+              # list and name it by fingerprint; codesign needs no trust setting.
+              keychain="$RUNNER_TEMP/sanser-signing.keychain-db"
+              keychain_password="$(openssl rand -hex 24)"
+              printf '%s' "$MACOS_SELF_SIGNED_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/sanser-signing.p12"
+              security create-keychain -p "$keychain_password" "$keychain"
+              security set-keychain-settings "$keychain"
+              security unlock-keychain -p "$keychain_password" "$keychain"
+              security import "$RUNNER_TEMP/sanser-signing.p12" -k "$keychain" -P "$MACOS_SELF_SIGNED_CERTIFICATE_PASSWORD" -T /usr/bin/codesign > /dev/null
+              rm -f "$RUNNER_TEMP/sanser-signing.p12"
+              security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+              security list-keychains -d user | sed 's/^ *"//;s/"$//' | { cat; echo "$keychain"; } | tr '\n' '\0' | xargs -0 security list-keychains -d user -s
+              fingerprint="$(security find-certificate -a -Z "$keychain" | awk '/^SHA-1 hash:/ {print $3; exit}')"
+              test -n "$fingerprint"
+              export APPLE_SIGNING_IDENTITY="$fingerprint"
+              echo "SANSER_SIGNING_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+              echo '::warning::Self-signed Mac build: stable permission identity, but not notarized; Gatekeeper still warns on first open.'
+            else
+              export APPLE_SIGNING_IDENTITY=-
+              echo '::warning::Ad-hoc Mac build: Screen Recording permission may need to be removed and granted again after an update.'
+            fi
           fi
           if [[ -n "$APPLE_ID" || -n "$APPLE_PASSWORD" || -n "$APPLE_TEAM_ID" ]]; then
             if [[ -z "$APPLE_ID" || -z "$APPLE_PASSWORD" || -z "$APPLE_TEAM_ID" || "$APPLE_SIGNING_IDENTITY" == - ]]; then
@@ -156,8 +181,24 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_SELF_SIGNED_CERTIFICATE: ${{ secrets.MACOS_SELF_SIGNED_CERTIFICATE }}
+          MACOS_SELF_SIGNED_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SELF_SIGNED_CERTIFICATE_PASSWORD }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Verify stable self-signed identity
+        if: env.SANSER_SIGNING_FINGERPRINT != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find /tmp/sanser-target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          codesign --verify --deep --strict "$app"
+          # The permission identity must be the certificate, never a per-build cdhash.
+          expected="identifier \"com.sanser.desktop\" and certificate leaf = H\"$(printf '%s' "$SANSER_SIGNING_FINGERPRINT" | tr 'A-F' 'a-f')\""
+          actual="$(codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => //p')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Unexpected Mac code requirement: $actual"
+            exit 1
+          fi
       - name: Name artifacts
         shell: bash
         run: |

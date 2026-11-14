@@ -56,6 +56,34 @@ notarization configuration. If no Apple signing secrets exist, it explicitly
 warns and produces the existing ad-hoc build. Merely adding the workflow support
 does not make existing or subsequent releases Developer ID signed.
 
+## Self-signed stable identity (no Apple Developer Program)
+
+Without Developer ID, a self-signed certificate still gives every build the
+same code requirement (`identifier "com.sanser.desktop" and certificate leaf =
+H"…"`) instead of a per-build `cdhash`, so Screen Recording and Accessibility
+grants are meant to survive updates. It does **not** notarize the app:
+Gatekeeper warns on first open exactly as for the ad-hoc build.
+
+1. Run `scripts/create-macos-signing-certificate.sh` once on a trusted Mac. It
+   writes the certificate, its password and a base64 copy to
+   `~/sanser-macos-signing` and refuses to write inside the repository.
+2. Add the repository secrets `MACOS_SELF_SIGNED_CERTIFICATE` (the base64 file)
+   and `MACOS_SELF_SIGNED_CERTIFICATE_PASSWORD`.
+3. Release as usual. The workflow signs with that certificate when no Developer
+   ID certificate is configured, and fails if the built app's code requirement
+   is not the certificate's fingerprint.
+
+Users grant the permissions once more on the first self-signed version, because
+its identity differs from the ad-hoc one. Back up the certificate: replacing it
+(loss, expiry after 20 years, or a later move to Developer ID) changes the
+identity and requires one more grant. Anyone holding the private key can sign
+an app that macOS treats as Sanser for permission purposes.
+
+Signing a copy of the installed 2.3.7 app this way passed `codesign --verify
+--deep --strict` and produced the stable requirement. Tauri invoking codesign
+with a fingerprint in CI, and a real grant surviving a real update, are not yet
+verified.
+
 Keep certificate/private-key material in the Keychain or GitHub Secrets, never
 in the repository or logs. Updater signing is separate from Apple code signing;
 the updater signature alone does not provide a stable macOS permission identity.
