@@ -101,6 +101,23 @@ int main(){try{
     require(!policy.observe(17,14,4000000,6000000,t+std::chrono::milliseconds(500)),"healthy sample after isolated spike");
     require(!policy.observe(100,14,4000000,6000000,t+std::chrono::seconds(2)),"old spikes must expire, not accumulate across a session");
   }
+  {
+    // A phone on Wi-Fi power save reports 15-35 ms above a 6 ms baseline on
+    // roughly every other 250 ms probe without any queue of ours. That must
+    // neither cut the rate nor hold recovery; only a standing rise may.
+    DelayRatePolicy policy;const auto t=Clock::now();
+    const double jitter[]={24,7,30,8,22,6,35,9,26,7,28,8};
+    for(unsigned i=0;i<12;++i) {
+      const auto at=t+std::chrono::milliseconds(250*i);
+      require(!policy.observe(jitter[i],6,4000000,6000000,at),"moderate alternating Wi-Fi jitter reduced the video rate");
+      require(!policy.recovering(at+std::chrono::milliseconds(1)),"moderate isolated jitter blocked rate recovery");
+    }
+    DelayRatePolicy standing;
+    require(!standing.observe(26,6,4000000,6000000,t) && !standing.observe(30,6,4000000,6000000,t+std::chrono::milliseconds(250)),
+      "two moderate samples are not yet a standing queue");
+    require(standing.observe(28,6,4000000,6000000,t+std::chrono::milliseconds(500))==3400000,"a sustained moderate delay rise must still reduce the rate");
+    require(standing.recovering(t+std::chrono::seconds(1)),"a standing rise must hold recovery");
+  }
   const auto token=std::string(48,'r');receiverCodec=std::make_unique<PacketCodec>(token,false);
   std::unique_ptr<Peer> host,client;
   for(unsigned i=0;i<30 && !client;++i){

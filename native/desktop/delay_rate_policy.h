@@ -45,13 +45,22 @@ public:
        rtt<baseline || rtt>3000 || ceiling<1000000) return {};
     // Bursty queues drain between peaks. A good sample must not erase recent
     // congestion, but isolated old spikes must not accumulate indefinitely.
-    while(!elevated_.empty() && now-elevated_.front()>std::chrono::seconds(1)) elevated_.pop_front();
+    while(!elevated_.empty() && now-elevated_.front().at>std::chrono::seconds(1)) elevated_.pop_front();
     const auto delay=rtt-baseline;
     if(delay<=std::max(12.0,baseline*0.5)) return {};
-    quietUntil_=now+std::chrono::seconds(3);
-    elevated_.push_back(now);
+    // A large spike is a queue even if it drains between bursts: two within a
+    // second are enough. A moderate rise on its own is ordinary Wi-Fi/power-
+    // save jitter (probes arrive every 250 ms): it must persist across most of
+    // the second before it reduces the rate or holds recovery.
+    const bool severe=delay>=std::max(40.0,baseline*2.0);
+    elevated_.push_back({now,severe});
     if(elevated_.size()>4) elevated_.pop_front();
-    if(elevated_.size()<2 || (reduced_ && now-lastReduction_<std::chrono::milliseconds(500))) return {};
+    const auto severeCount=std::count_if(elevated_.begin(),elevated_.end(),[](const Sample& sample){return sample.severe;});
+    // Three of the last four 250 ms probes, not every other one.
+    const auto recent=std::count_if(elevated_.begin(),elevated_.end(),[&](const Sample& sample){return now-sample.at<=std::chrono::milliseconds(800);});
+    const bool sustained=severeCount>=2 || recent>=3;
+    if(severe || sustained) quietUntil_=now+std::chrono::seconds(3);
+    if(!sustained || (reduced_ && now-lastReduction_<std::chrono::milliseconds(500))) return {};
     const auto floor=std::min(ceiling,1000000U);
     const auto target=std::clamp(static_cast<std::uint32_t>(current*(delay>=80 ? 0.60:0.85)),floor,ceiling);
     reduced_=true;lastReduction_=now;elevated_.clear();
@@ -59,7 +68,8 @@ public:
   }
   bool recovering(Time::time_point now) const { return now<quietUntil_; }
 private:
-  std::deque<Time::time_point> elevated_;
+  struct Sample { Time::time_point at; bool severe; };
+  std::deque<Sample> elevated_;
   bool reduced_=false;
   Time::time_point quietUntil_{},lastReduction_{};
 };

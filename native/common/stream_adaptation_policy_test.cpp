@@ -59,4 +59,48 @@ int main() {
   require(measured.deliveryEstimateBps() > 16000000, "idle sample cannot erase measured delivery");
   measured.observeDelivery(9, 18000000, NAN, 18000000, NAN, 0);
   require(measured.networkBitrateFactor(9, 0, false) == 1, "invalid measurements cannot poison policy");
+
+  // A mostly static desktop sends far below its target. Random Wi-Fi loss or a
+  // late repair there says nothing about capacity; lowering the target only
+  // makes the next burst of motion blurry.
+  sanser::StreamAdaptationPolicy idle;
+  for (unsigned w = 1; w <= 6; ++w) {
+    idle.observeDelivery(w, 25000000, 3000000, 3000000, 10, 0);
+    require(idle.networkBitrateFactor(w, 2, true) == 1,
+      "loss while app-limited must not lower the target bitrate");
+  }
+  require(idle.networkBitrateFactor(7, 2, true) == 1 && idle.networkBitrateFactor(8, 2, true) == 0.88,
+    "loss without a current delivery sample keeps the conservative reduction");
+
+  // At full rate, light loss with complete delivery and no standing delay is
+  // non-congestive: repair/FEC handle it. Heavy or unrepaired loss still cuts.
+  sanser::StreamAdaptationPolicy lossy;
+  for (unsigned w = 1; w <= 4; ++w) {
+    lossy.observeDelivery(w, 25000000, 24500000, 25000000, 10, 0);
+    require(lossy.networkBitrateFactor(w, 2, false) == 1,
+      "light fully delivered loss must not reduce quality");
+  }
+  lossy.observeDelivery(5, 25000000, 24500000, 25000000, 10, 0);
+  require(lossy.networkBitrateFactor(5, 5, false) == 1, "one heavy-loss window is insufficient");
+  lossy.observeDelivery(6, 25000000, 24500000, 25000000, 10, 0);
+  require(lossy.networkBitrateFactor(6, 5, false) < 1, "sustained heavy loss still reduces bitrate");
+
+  // A short RTT spike is jitter. Only a delay that stays elevated across
+  // several windows is a standing queue.
+  sanser::StreamAdaptationPolicy jitter;
+  const double spikes[] = {10, 25, 40, 10, 30, 55, 12, 11};
+  for (unsigned w = 1; w <= 8; ++w) {
+    jitter.observeDelivery(w, 25000000, 24500000, 25000000, spikes[w - 1], 0);
+    require(jitter.networkBitrateFactor(w, 0, false) == 1, "a brief RTT spike must not reduce bitrate");
+  }
+  sanser::StreamAdaptationPolicy queued;
+  const double standing[] = {10, 40, 42, 45, 44, 46};
+  bool reduced = false;
+  for (unsigned w = 1; w <= 6; ++w) {
+    queued.observeDelivery(w, 25000000, 24500000, 25000000, standing[w - 1], 0);
+    const bool cut = queued.networkBitrateFactor(w, 0, false) < 1;
+    require(!cut || w >= 5, "a standing queue needs sustained evidence");
+    reduced = reduced || cut;
+  }
+  require(reduced, "a standing delay queue must still reduce bitrate");
 }

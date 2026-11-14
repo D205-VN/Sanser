@@ -5978,9 +5978,9 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
   constexpr std::uint64_t feedbackFreshWindowLimit = 3;
   constexpr std::uint64_t feedbackStaleLogIntervalWindows = 3;
   constexpr std::uint32_t recoveryCrossClearWindows = 2;
-  constexpr std::uint32_t udpRepairBitrateClearWindows = 5;
+  constexpr std::uint32_t udpRepairBitrateClearWindows = 3;
   constexpr std::uint32_t udpRepairFrameClearWindows = 7;
-  constexpr std::uint32_t streamBitrateClearWindows = 4;
+  constexpr std::uint32_t streamBitrateClearWindows = 3;
   constexpr std::uint32_t streamFrameClearWindows = 5;
   constexpr std::uint32_t startupBitrateClearWindows = 2;
   constexpr std::uint32_t startupFrameClearWindows = 3;
@@ -7043,7 +7043,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
             if (wantsBitrateRecovery || wantsFrameRecovery) {
               if (recoveryGateOpen(true)) {
                 if (wantsBitrateRecovery) {
-                  const double factor = warmupRecovering ? 1.18 : 1.05;
+                  const double factor = warmupRecovering ? 1.18 : 1.10;
                   nextBitrate = static_cast<std::uint32_t>(
                     static_cast<double>(currentAdaptiveBitrate) * factor);
                 }
@@ -7240,7 +7240,7 @@ int runEncodedPipeMode(DesktopDuplicator& duplicator, const Options& options) {
             if (wantsBitrateRecovery || wantsFrameRecovery) {
               if (recoveryGateOpen(false)) {
                 if (wantsBitrateRecovery) {
-                  const double factor = warmupRecovering ? 1.22 : 1.08;
+                  const double factor = warmupRecovering ? 1.22 : 1.12;
                   nextBitrate = static_cast<std::uint32_t>(
                     static_cast<double>(currentAdaptiveBitrate) * factor);
                   clearFeedbackWindows = 0;

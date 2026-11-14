@@ -1130,8 +1130,12 @@ void Peer::process(const Bytes& bytes) {
       }
     } else {
       congestionWindows_=0;
-      if(busy && (!peerVideoLimit_ || lastDelivery_.ready()) && !delayRate_.recovering(Clock::now()) && ++recoveryWindows_>=10) {
-        videoBudget_=std::min(videoCeiling(),videoBudget_.load()+std::max(peerVideoLimit_ ? 200000U:500000U,videoBudget_.load()/20));
+      // A mobile ceiling is at most a few Mbps and already delivery-checked.
+      // Climbing 200 kbps per five seconds left sessions near the 1 Mbps
+      // floor for minutes after one backoff; desktop peers keep their pace.
+      if(busy && (!peerVideoLimit_ || lastDelivery_.ready()) && !delayRate_.recovering(Clock::now()) && ++recoveryWindows_>=(peerVideoLimit_ ? 4U:10U)) {
+        const auto budget=videoBudget_.load();
+        videoBudget_=std::min(videoCeiling(),budget+(peerVideoLimit_ ? std::max(300000U,budget/10):std::max(500000U,budget/20)));
         recoveryWindows_=0;
       }
     }

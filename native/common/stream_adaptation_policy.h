@@ -20,6 +20,10 @@ public:
     targetBps_ = std::isfinite(targetBps) ? std::max(0.0, targetBps) : 0;
     deliveryLimited_ = false;
     delayPressure_ = false;
+    appLimited_ = false;
+    fullyDelivered_ = false;
+    (void)socketWaitMs;
+    if (!consecutive) recentRttCount_ = 0;
     if (std::isfinite(rttMs) && rttMs >= 0 && rttMs < 5000) {
       // Periodically refresh the baseline so a route change cannot remain
       // classified as a permanently growing queue.
@@ -27,18 +31,26 @@ public:
         minRttMs_ = rttMs; baselineWindow_ = window;
       }
       minRttMs_ = std::min(minRttMs_, rttMs);
-      const double trend = previousRttMs_ < 0 || !consecutive ? 0 : rttMs - previousRttMs_;
-      delayPressure_ = rttMs - minRttMs_ > std::max(8.0, minRttMs_ * 0.25) &&
-        (trend > 2.0 || socketWaitMs > 2.0);
-      previousRttMs_ = rttMs;
+      // One sample per window on Wi-Fi is mostly jitter: a 9 ms path
+      // routinely reports 20-40 ms. A queue we filled keeps even the LOWEST
+      // of several consecutive samples elevated; a spike does not.
+      recentRtt_[recentRttCount_ % recentRttSize] = rttMs;
+      ++recentRttCount_;
+      if (recentRttCount_ >= recentRttSize) {
+        const double standing = std::min({recentRtt_[0], recentRtt_[1], recentRtt_[2]});
+        delayPressure_ = standing - minRttMs_ > std::max(12.0, minRttMs_ * 0.5);
+      }
+    } else {
+      recentRttCount_ = 0;
     }
     if (!std::isfinite(deliveredBps) || !std::isfinite(offeredBps) ||
         deliveredBps <= 0 || offeredBps <= 0 || targetBps_ <= 0) return;
     // App-limited samples do not set a capacity ceiling or drag it downward.
-    if (offeredBps < targetBps_ * 0.65) return;
+    if (offeredBps < targetBps_ * 0.65) { appLimited_ = true; return; }
     const double sample = std::min(deliveredBps, offeredBps * 1.25);
     deliveryBps_ = deliveryBps_ <= 0 || !consecutive ? sample : 0.6 * sample + 0.4 * deliveryBps_;
     deliveryLimited_ = deliveredBps < offeredBps * 0.95;
+    fullyDelivered_ = !deliveryLimited_;
   }
 
   double deliveryEstimateBps() const { return deliveryBps_; }
@@ -48,8 +60,17 @@ public:
     // Jitter, wall-clock frame age, and a high but stable RTT are not proof of
     // congestion. Keep quality unless loss/repair failure/send work persists.
     const bool currentDelivery = window == deliveryWindow_;
-    if (window == 0 || !(lossPercent >= 1.0 || failedRepairs || sendOverBudget ||
-                        (currentDelivery && delayPressure_))) return 1.0;
+    bool lossPressure = lossPercent >= 1.0 || failedRepairs;
+    if (currentDelivery && lossPressure) {
+      // A stream sending far below its target is not what the path is short
+      // of; lowering the target only blurs the next burst of motion.
+      if (appLimited_) lossPressure = false;
+      // Light loss that was fully delivered without a standing queue is
+      // radio loss, not congestion. Repair handles it at full quality.
+      else if (fullyDelivered_ && !delayPressure_ && !failedRepairs && lossPercent < 4.0) lossPressure = false;
+    }
+    const bool delayPressure = currentDelivery && delayPressure_ && !appLimited_;
+    if (window == 0 || !(lossPressure || sendOverBudget || delayPressure)) return 1.0;
     if (window < lastPressureWindow_) return 1.0;
     if (window != lastPressureWindow_) {
       pressureWindows_ = lastPressureWindow_ != 0 && window - lastPressureWindow_ == 1
@@ -85,8 +106,12 @@ public:
 private:
   std::uint64_t deliveryWindow_ = 0, baselineWindow_ = 0;
   double targetBps_ = 0, deliveryBps_ = 0;
-  double minRttMs_ = -1, previousRttMs_ = -1;
+  double minRttMs_ = -1;
+  static constexpr unsigned recentRttSize = 3;
+  double recentRtt_[recentRttSize] = {0, 0, 0};
+  unsigned recentRttCount_ = 0;
   bool deliveryLimited_ = false, delayPressure_ = false;
+  bool appLimited_ = false, fullyDelivered_ = false;
   std::uint64_t lastPressureWindow_ = 0;
   unsigned pressureWindows_ = 0;
   std::uint64_t bitrateReducedWindow_ = 0;
