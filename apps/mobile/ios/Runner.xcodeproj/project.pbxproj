@@ -21,9 +21,9 @@
 		A30200000000000000000000 /* MobileRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30100000000000000000000 /* MobileRelay.swift */; };
 		A30200000000000000000001 /* MobileMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30100000000000000000001 /* MobileMedia.swift */; };
 		A30200000000000000000002 /* MobileEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30100000000000000000002 /* MobileEngine.swift */; };
+		A30200000000000000000003 /* MobileVideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30100000000000000000003 /* MobileVideoDecoder.swift */; };
 		A30300000000000000000001 /* Clibsodium in Frameworks */ = {isa = PBXBuildFile; productRef = A30300000000000000000002 /* Clibsodium */; };
 		A30400000000000000000001 /* libSanserMobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A30400000000000000000002 /* libSanserMobile.a */; };
-		A30200000000000000000003 /* MobileVideoDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30100000000000000000003 /* MobileVideoDecoder.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -74,12 +74,12 @@
 		A30100000000000000000000 /* MobileRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileRelay.swift; sourceTree = "<group>"; };
 		A30100000000000000000001 /* MobileMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileMedia.swift; sourceTree = "<group>"; };
 		A30100000000000000000002 /* MobileEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileEngine.swift; sourceTree = "<group>"; };
+		A30100000000000000000003 /* MobileVideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileVideoDecoder.swift; sourceTree = "<group>"; };
 		A30400000000000000000002 /* libSanserMobile.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; name = libSanserMobile.a; path = "Native/$(PLATFORM_NAME)/libSanserMobile.a"; sourceTree = SOURCE_ROOT; };
 		B5882D702B20DD784E93C329 /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		C1B5907B0EA44319E4A6AD82 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		DECDF5BD19C7AFD4E911453B /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
 		FEBE9A221D84DDB868C9C6D8 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
-		A30100000000000000000003 /* MobileVideoDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileVideoDecoder.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -276,7 +276,7 @@
 			mainGroup = 97C146E51CF9000F007C117D;
 			packageReferences = (
 				A30300000000000000000003 /* XCRemoteSwiftPackageReference "swift-sodium" */,
-				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */,
+				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "FlutterGeneratedPluginSwiftPackage" */,
 			);
 			productRefGroup = 97C146EF1CF9000F007C117D /* Products */;
 			projectDirPath = "";
@@ -356,13 +356,9 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
-			inputPaths = (
-			);
 			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -801,7 +797,7 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */ = {
+		781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "FlutterGeneratedPluginSwiftPackage" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage;
 		};
