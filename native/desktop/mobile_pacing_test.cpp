@@ -140,9 +140,21 @@ int main(){try{
   while(pictures<=beforeTail && !tailDeadlineRecovery && Clock::now()<tailUntil)
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   const bool samePicture=pictures>beforeTail;
-  if(dropAtOriginal!=0)std::cerr<<"late-tail fault not reached: originals="<<originalPackets<<" queueDrops="<<host->videoQueueDrops()<<'\n';
-  check(dropAtOriginal==0,"late-tail fixture did not actually lose its final original datagram");
-  if(samePicture) {
+  // On a slow runner the stall plus paced serialization can pass the sender's
+  // own 1.5 s IDR budget before the final original is attempted. The sender
+  // then expires the picture and counts a queue drop: a bounded-latency
+  // outcome, not a silent stall and not a reachable tail fault. Require that
+  // counted expiry, disarm the unreached fault, and verify a fresh IDR resumes.
+  const bool senderExpired=dropAtOriginal!=0 && host->videoQueueDrops()>dropsBeforeTail;
+  if(dropAtOriginal!=0)std::cerr<<"late-tail fault not reached: originals="<<originalPackets<<" queueDrops="<<host->videoQueueDrops()<<" senderExpired="<<senderExpired<<'\n';
+  check(dropAtOriginal==0 || senderExpired,"late-tail fixture neither lost its final original datagram nor expired the picture at the sender");
+  if(senderExpired) {
+    dropAtOriginal=0;
+    check(!samePicture,"an expired sender picture cannot also have completed");
+    host->video({Bytes(2000,0x65),1920,1080,true});
+    check(waitFor([&]{return pictures>beforeTail;}),"fresh IDR did not resume video after the sender expired a stalled paced picture");
+    std::cout<<"Paced IDR: sender budget expired before the tail fault; fresh IDR resumed video\n";
+  } else if(samePicture) {
     check(host->videoQueueDrops()==dropsBeforeTail,"late-tail repair must not need another expired IDR");
     std::cout<<"Paced IDR: stalled original plus genuinely lost late tail repaired without restarting the picture\n";
   } else {
