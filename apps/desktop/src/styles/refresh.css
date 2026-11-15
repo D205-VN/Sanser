@@ -245,3 +245,15 @@ body {
   .brand strong, .auth-brand strong { background: none; color: var(--sn-text); }
 }
 @media (forced-colors: active) { .brand strong, .auth-brand strong { background: none; color: CanvasText; } }
+
+/* ── 2.3.10 layout fixes ────────────────────────────────────────────────────
+   A short settings section has a tall minimum height; its grid rows must stay
+   at their natural size instead of stretching (huge gaps, a 90 px select). */
+.stack, .settings-card, .field { align-content: start; }
+.select { height: 44px; }
+/* A transformed card becomes its own stacking context, so its open device menu
+   was painted underneath the next card. Lift without a transform, and keep the
+   card that owns an open menu above its neighbours. */
+.computer-card:hover { transform: none; }
+.computer-card:has(.device-menu[open]) { z-index: 20; }
+.device-menu-items { z-index: 30; backdrop-filter: none; background: var(--sn-raised); }
