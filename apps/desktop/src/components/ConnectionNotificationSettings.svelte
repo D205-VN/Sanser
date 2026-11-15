@@ -12,4 +12,4 @@
   {#if $connectionAlerts.permission === 'granted'}<span role="status">Desktop alerts enabled</span>
   {:else}<button class="button small" disabled={busy || $connectionAlerts.permission === 'unavailable'} onclick={enable}>{busy ? 'Enabling…' : 'Enable notifications'}</button>{/if}
 </div>
-<style>.notification-settings { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 20px; } p { margin: 6px 0 0; font-size: 12px; line-height: 1.6; } span { color: var(--accent); font-size: 12px; white-space: nowrap; }</style>
+<style>.notification-settings { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 20px; } p { margin: 6px 0 0; font-size: 13px; line-height: 1.6; } span { color: var(--accent); font-size: 13px; white-space: nowrap; }</style>

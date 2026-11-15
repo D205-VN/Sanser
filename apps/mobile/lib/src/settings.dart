@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'design_tokens.dart';
 import 'package:flutter/services.dart';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -143,7 +144,7 @@ class MobileSettings extends StatelessWidget {
                   const SizedBox(height: 10),
                   const Text(
                     'Auto thử Direct trước rồi chuyển Relay nếu mạng chặn. Direct chỉ dùng khi hai máy xác minh được đường UDP.',
-                    style: TextStyle(color: Colors.white60, fontSize: 12),
+                    style: TextStyle(color: SanserTokens.muted, fontSize: 12),
                   ),
                   const SizedBox(height: 16),
                   DropdownButtonFormField<int>(
@@ -175,7 +176,7 @@ class MobileSettings extends StatelessWidget {
                   const SizedBox(height: 8),
                   const Text(
                     'Áp dụng cho phiên tiếp theo. Mức thấp hơn giảm tải mạng; Host có thể tự giảm thêm khi RTT tăng.',
-                    style: TextStyle(color: Colors.white60, fontSize: 12),
+                    style: TextStyle(color: SanserTokens.muted, fontSize: 12),
                   ),
                 ],
               ),
@@ -288,7 +289,7 @@ class MobileSettings extends StatelessWidget {
             ),
           const Text(
             'Cài đặt được lưu trên điện thoại này.',
-            style: TextStyle(color: Colors.white54),
+            style: TextStyle(color: SanserTokens.muted),
           ),
           TextButton.icon(
             icon: const Icon(Icons.content_copy_rounded),

@@ -66,7 +66,8 @@
 namespace {
 
 sanser::LatencyPolicy gLatencyPolicy;
-std::atomic<bool> gShowLatencyOverlay{false};
+// 0 hidden, 1 compact one-line status, 2 full stage table. Control+Option+8 cycles.
+std::atomic<int> gOverlayMode{0};
 bool gViewOnly = false;
 bool gShortcutInputReleased = false; // Main-thread physical input/focus gate.
 std::atomic<bool> gHostCapturePaused{false};
@@ -6718,7 +6719,7 @@ int listenSnvTcp(std::uint16_t port, std::uint64_t maxPackets) {
   if ([event keyCode] == kOverlayShortcutKeyCode && ([event modifierFlags] & NSEventModifierFlagControl) &&
       ([event modifierFlags] & NSEventModifierFlagOption)) {
     gOverlayShortcutDown = true;
-    if (![event isARepeat]) gShowLatencyOverlay = !gShowLatencyOverlay.load();
+    if (![event isARepeat]) gOverlayMode = (gOverlayMode.load() + 1) % 3;
     return;
   }
   if (sendCommandShortcut(event)) return;
@@ -7013,7 +7014,7 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
   _latencyOverlay.textColor = NSColor.whiteColor;
   _latencyOverlay.backgroundColor = [NSColor colorWithWhite:0.05 alpha:0.88];
   _latencyOverlay.drawsBackground = YES;
-  _latencyOverlay.hidden = !gShowLatencyOverlay.load();
+  _latencyOverlay.hidden = gOverlayMode.load() == 0;
   [view addSubview:_latencyOverlay];
 
   CVReturn cacheResult = CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device, nullptr, &_textureCache);
@@ -7537,7 +7538,9 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
               << " maxPresentLateMs=" << maxPresentLateMs
               << "\n";
 
-    _latencyOverlay.hidden = !gShowLatencyOverlay.load();
+    const int overlayMode = gOverlayMode.load();
+    bool overlayFull = overlayMode == 2;
+    _latencyOverlay.hidden = overlayMode == 0;
     const auto now = steadyMicros();
     const bool hostFresh = now - gLiveLatency.hostUpdated.load() < 3000000;
     const bool decodeFresh = now - gLiveLatency.decodeUpdated.load() < 3000000;
@@ -7580,8 +7583,24 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
       [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"⚠ CPU FALLBACK — higher latency\n" attributes:
         @{NSForegroundColorAttributeName:NSColor.systemOrangeColor, NSFontAttributeName:[NSFont boldSystemFontOfSize:15]}]];
       _latencyOverlay.hidden = NO;
+      overlayFull = true;
     }
     [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:@"* Includes OS queues / receive scheduling\nLocal timings; excludes display scan-out"]];
+    if (!overlayFull) {
+      // Everyday view: three numbers a person can act on, red only when over
+      // the same budgets as the full table.
+      overlay = [[NSMutableAttributedString alloc] initWithString:@" "];
+      auto item = [&](NSString* name, double value, double budget, bool last) {
+        NSString* text = value >= 0 && std::isfinite(value)
+          ? [NSString stringWithFormat:@"%@ %.0f ms%@", name, value, last ? @" " : @"  ·  "]
+          : [NSString stringWithFormat:@"%@ —%@", name, last ? @" " : @"  ·  "];
+        [overlay appendAttributedString:[[NSAttributedString alloc] initWithString:text attributes:
+          @{NSForegroundColorAttributeName: value > budget ? NSColor.systemRedColor : NSColor.whiteColor}]];
+      };
+      item(@"Ping", timingFresh ? gLiveLatency.controlApp.load() : (hostFresh ? gLiveLatency.rtt.load() : -1), 30, false);
+      item(@"Jitter", decodeFresh ? gLiveLatency.jitter.load() : -1, 4, false);
+      item(@"Decode", decodeFresh ? gLiveLatency.decode.load() : -1, 5, true);
+    }
     _latencyOverlay.attributedStringValue = overlay;
     if (hostFresh && gHostCapturePaused.load()) {
       HostHelperFailure failure;
@@ -7591,6 +7610,11 @@ std::uint64_t videoPacingMaxLateMicros(std::uint64_t durationMicros) {
         initWithString:[NSString stringWithUTF8String:text.c_str()]
         attributes:@{NSForegroundColorAttributeName:NSColor.systemOrangeColor}];
       _latencyOverlay.hidden = NO;
+      overlayFull = true;
+    }
+    if (NSView* overlayParent = _latencyOverlay.superview) {
+      const CGFloat top = overlayParent.bounds.size.height;
+      _latencyOverlay.frame = overlayFull ? NSMakeRect(16, top - 570, 420, 552) : NSMakeRect(16, top - 42, 400, 24);
     }
 
     const ControlRttWindow controlRtt = takeControlRttWindow();
@@ -9213,9 +9237,10 @@ Options parseOptions(int argc, char** argv) {
       gViewOnly = true;
     } else if (arg == "--ultra-low-latency") {
       gLatencyPolicy.ultra = true;
-      gShowLatencyOverlay = true;
+      // Ultra shows only the compact status; the full table stays one shortcut away.
+      if (gOverlayMode.load() == 0) gOverlayMode = 1;
     } else if (arg == "--stats-overlay") {
-      gShowLatencyOverlay = true;
+      gOverlayMode = 2;
     } else if (arg == "--probe") {
       options.probe = true;
     } else if (arg == "--decode-snv") {

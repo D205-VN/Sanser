@@ -1,11 +1,19 @@
 import 'package:flutter/material.dart';
 import 'design_tokens.dart';
 
+/// Second stop of the brand gradient; the first is [SanserTokens.accent].
+const sanserViolet = Color(0xffb59cff);
+const sanserAccentGradient = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [SanserTokens.accent, sanserViolet],
+);
+
 ThemeData sanserTheme() {
-  const t = SanserTokens.controlRadius;
+  const t = 14.0;
   final outline = OutlineInputBorder(
     borderRadius: BorderRadius.circular(t),
-    borderSide: const BorderSide(color: SanserTokens.border),
+    borderSide: const BorderSide(color: SanserTokens.borderStrong),
   );
   return ThemeData(
     brightness: Brightness.dark,
@@ -30,6 +38,30 @@ ThemeData sanserTheme() {
       surfaceTintColor: Colors.transparent,
       elevation: 0,
       scrolledUnderElevation: 0,
+      titleTextStyle: TextStyle(
+        fontSize: 22,
+        fontWeight: FontWeight.w800,
+        color: SanserTokens.text,
+      ),
+    ),
+    textTheme: const TextTheme(
+      headlineMedium: TextStyle(
+        fontSize: 28,
+        fontWeight: FontWeight.w700,
+        letterSpacing: -.6,
+        color: SanserTokens.text,
+      ),
+      titleLarge: TextStyle(
+        fontSize: 20,
+        fontWeight: FontWeight.w700,
+        letterSpacing: -.3,
+        color: SanserTokens.text,
+      ),
+      bodyMedium: TextStyle(
+        fontSize: 15,
+        height: 1.45,
+        color: SanserTokens.text,
+      ),
     ),
     dividerTheme: const DividerThemeData(
       color: SanserTokens.border,
@@ -38,7 +70,7 @@ ThemeData sanserTheme() {
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
-      fillColor: SanserTokens.background,
+      fillColor: SanserTokens.raised,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
       border: outline,
       enabledBorder: outline,
@@ -52,14 +84,16 @@ ThemeData sanserTheme() {
       elevation: 0,
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(SanserTokens.cardRadius),
+        borderRadius: BorderRadius.circular(20),
         side: const BorderSide(color: SanserTokens.border),
       ),
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
         minimumSize: const Size(48, SanserTokens.touchTarget),
-        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+        disabledBackgroundColor: SanserTokens.raised,
+        disabledForegroundColor: SanserTokens.mutedLow,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(t)),
       ),
     ),
@@ -80,12 +114,20 @@ ThemeData sanserTheme() {
     navigationBarTheme: NavigationBarThemeData(
       backgroundColor: SanserTokens.background,
       surfaceTintColor: Colors.transparent,
-      indicatorColor: SanserTokens.selected,
+      indicatorColor: SanserTokens.accent.withValues(alpha: .18),
+      indicatorShape: const StadiumBorder(),
       height: 72,
       labelTextStyle: WidgetStateProperty.resolveWith(
         (states) => TextStyle(
-          fontSize: 11,
+          fontSize: 12,
           fontWeight: FontWeight.w600,
+          color: states.contains(WidgetState.selected)
+              ? SanserTokens.accent
+              : SanserTokens.muted,
+        ),
+      ),
+      iconTheme: WidgetStateProperty.resolveWith(
+        (states) => IconThemeData(
           color: states.contains(WidgetState.selected)
               ? SanserTokens.accent
               : SanserTokens.muted,
@@ -97,9 +139,7 @@ ThemeData sanserTheme() {
       surfaceTintColor: Colors.transparent,
       showDragHandle: true,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(
-          top: Radius.circular(SanserTokens.cardRadius),
-        ),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
         side: const BorderSide(color: SanserTokens.border),
       ),
     ),

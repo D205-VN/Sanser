@@ -10,6 +10,7 @@ import 'settings.dart';
 import 'mobile_input.dart';
 import 'touch_surface.dart';
 import 'design_tokens.dart';
+import 'theme.dart';
 import 'session_actions.dart';
 import 'clipboard_sheet.dart';
 import 'files.dart';
@@ -124,7 +125,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                   'Điều chỉnh trải nghiệm trên điện thoại.',
                   'Sanser trên điện thoại của bạn.',
                 ][tab],
-                style: const TextStyle(color: Colors.white60),
+                style: const TextStyle(color: SanserTokens.muted),
               ),
               const SizedBox(height: 24),
               if (tab == 0) ...[
@@ -166,8 +167,8 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.8 • Flutter',
-                          style: TextStyle(color: Colors.white54),
+                          'Sanser 2.3.9',
+                          style: TextStyle(color: SanserTokens.muted),
                         ),
                         const SizedBox(height: 24),
                         TextButton(
@@ -190,7 +191,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                 const SizedBox(height: 18),
                 const Text(
                   'Khi rời ứng dụng, kết nối từ xa được đóng và phím đang giữ được thả.',
-                  style: TextStyle(color: Colors.white54),
+                  style: TextStyle(color: SanserTokens.muted),
                 ),
               ],
             ],
@@ -231,7 +232,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                   const SizedBox(height: 8),
                   const Text(
                     'Chỉ xem • Không điều khiển chuột hoặc bàn phím',
-                    style: TextStyle(color: Colors.white60),
+                    style: TextStyle(color: SanserTokens.muted),
                   ),
                   const SizedBox(height: 20),
                   Row(
@@ -284,11 +285,45 @@ class Brand extends StatelessWidget {
     children: [
       Image.asset('assets/sanser-mark.png', width: 32, height: 32),
       SizedBox(width: 10),
-      Text(
-        'Sanser',
-        style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: -.7),
+      ShaderMask(
+        blendMode: BlendMode.srcIn,
+        shaderCallback: (bounds) => sanserAccentGradient.createShader(bounds),
+        child: const Text(
+          'Sanser',
+          style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: -.7),
+        ),
       ),
     ],
+  );
+}
+
+/// The rounded accent tile behind device and empty-state icons.
+class GlyphTile extends StatelessWidget {
+  final IconData icon;
+  final double size, iconSize;
+  const GlyphTile({
+    super.key,
+    required this.icon,
+    this.size = 52,
+    this.iconSize = 24,
+  });
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          SanserTokens.accent.withValues(alpha: .24),
+          sanserViolet.withValues(alpha: .12),
+        ],
+      ),
+      borderRadius: BorderRadius.circular(size * .32),
+      border: Border.all(color: SanserTokens.accent.withValues(alpha: .28)),
+    ),
+    child: Icon(icon, size: iconSize, color: SanserTokens.accent),
   );
 }
 
@@ -300,10 +335,27 @@ class ErrorNote extends StatelessWidget {
     margin: const EdgeInsets.only(bottom: 18),
     padding: const EdgeInsets.all(16),
     decoration: BoxDecoration(
-      color: const Color(0xff38252c),
+      color: SanserTokens.danger.withValues(alpha: .12),
       borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: SanserTokens.danger.withValues(alpha: .45)),
     ),
-    child: Text(message, style: const TextStyle(color: Color(0xffffb4bc))),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Icon(
+          Icons.error_outline_rounded,
+          size: 20,
+          color: SanserTokens.danger,
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            message,
+            style: const TextStyle(color: SanserTokens.text, height: 1.45),
+          ),
+        ),
+      ],
+    ),
   );
 }
 
@@ -322,14 +374,14 @@ class EmptyCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 38),
       child: Column(
         children: [
-          Icon(icon, size: 48, color: SanserTokens.accent),
+          GlyphTile(icon: icon, size: 72, iconSize: 34),
           const SizedBox(height: 18),
           Text(title, style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 10),
           Text(
             message,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white60, height: 1.5),
+            style: const TextStyle(color: SanserTokens.muted, height: 1.5),
           ),
         ],
       ),
@@ -352,34 +404,51 @@ class DeviceCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: SanserTokens.raised,
-                    borderRadius: BorderRadius.circular(17),
-                  ),
-                  child: Icon(
-                    (device['platform'] as String? ?? '')
-                            .toLowerCase()
-                            .contains('mac')
-                        ? Icons.laptop_mac_rounded
-                        : Icons.desktop_windows_rounded,
-                    color: SanserTokens.accent,
-                  ),
+                GlyphTile(
+                  icon:
+                      (device['platform'] as String? ?? '')
+                          .toLowerCase()
+                          .contains('mac')
+                      ? Icons.laptop_mac_rounded
+                      : Icons.desktop_windows_rounded,
                 ),
                 const Spacer(),
-                Icon(
-                  Icons.circle,
-                  size: 8,
-                  color: online ? SanserTokens.success : Colors.white38,
-                ),
-                const SizedBox(width: 7),
                 Flexible(
-                  child: Text(
-                    online ? 'Trực tuyến' : 'Ngoại tuyến',
-                    textAlign: TextAlign.end,
-                    style: TextStyle(
-                      color: online ? SanserTokens.success : Colors.white38,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color:
+                          (online ? SanserTokens.success : SanserTokens.muted)
+                              .withValues(alpha: .12),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.circle,
+                          size: 8,
+                          color: online
+                              ? SanserTokens.success
+                              : SanserTokens.mutedLow,
+                        ),
+                        const SizedBox(width: 7),
+                        Flexible(
+                          child: Text(
+                            online ? 'Trực tuyến' : 'Ngoại tuyến',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: online
+                                  ? SanserTokens.success
+                                  : SanserTokens.muted,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -395,7 +464,7 @@ class DeviceCard extends StatelessWidget {
             const SizedBox(height: 5),
             Text(
               device['platform'] as String? ?? '',
-              style: const TextStyle(color: Colors.white54),
+              style: const TextStyle(color: SanserTokens.muted),
             ),
             const SizedBox(height: 22),
             Row(
@@ -497,7 +566,7 @@ class _SignInState extends State<SignIn> {
                   const SizedBox(height: 14),
                   const Text(
                     'Dùng cùng tài khoản Sanser trên điện thoại và máy tính.',
-                    style: TextStyle(color: Colors.white60, height: 1.5),
+                    style: TextStyle(color: SanserTokens.muted, height: 1.5),
                   ),
                   const SizedBox(height: 30),
                   if (widget.controller.error != null)
@@ -568,7 +637,7 @@ class _SignInState extends State<SignIn> {
                     tilePadding: EdgeInsets.zero,
                     title: const Text(
                       'Máy chủ riêng',
-                      style: TextStyle(fontSize: 13, color: Colors.white54),
+                      style: TextStyle(fontSize: 13, color: SanserTokens.muted),
                     ),
                     children: [
                       TextFormField(
@@ -935,7 +1004,7 @@ class _RemoteSessionState extends State<RemoteSession>
                 ? 'Chụm để zoom · kéo để di chuyển hình'
                 : 'Chạm để nhấp · kéo để di chuyển · giữ để nhấp phải',
             textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 11, color: SanserTokens.muted),
+            style: const TextStyle(fontSize: 12, color: SanserTokens.muted),
           ),
         ),
       ],
@@ -1040,7 +1109,7 @@ class _RemoteSessionState extends State<RemoteSession>
           padding: EdgeInsets.only(top: 8),
           child: Text(
             'Bấm vào hình để gửi phím USB/Bluetooth. Ctrl+Alt+Esc để nhả.',
-            style: TextStyle(fontSize: 11, color: SanserTokens.muted),
+            style: TextStyle(fontSize: 12, color: SanserTokens.muted),
           ),
         ),
       if (controllerKeys && !viewOnly)
@@ -1053,7 +1122,7 @@ class _RemoteSessionState extends State<RemoteSession>
                     : !gamepadInput.armed
                     ? 'Đã nhận tay cầm. Thả nút và đưa cần về giữa để bắt đầu.'
                     : 'WASD · mũi tên · A: Space, B: Esc, X: E, Y: R · LB/RB: Q/F · LT/RT: Shift/Ctrl · Start/Select: Enter/Tab. Giữ Start+Select để nhả. Không giả lập Xbox.'),
-            style: const TextStyle(fontSize: 11, color: SanserTokens.muted),
+            style: const TextStyle(fontSize: 12, color: SanserTokens.muted),
           ),
         ),
       if (controllerAnalog && !viewOnly)
@@ -1066,7 +1135,7 @@ class _RemoteSessionState extends State<RemoteSession>
                     : !gamepadInput.armed
                     ? 'Thả các nút, cò và đưa cần về giữa để bật analog.'
                     : 'Analog · cần và cò giữ mức lực · Start+Select để nhả. Chưa hỗ trợ rung.'),
-            style: const TextStyle(fontSize: 11, color: SanserTokens.muted),
+            style: const TextStyle(fontSize: 12, color: SanserTokens.muted),
           ),
         ),
       if (!viewOnly &&
@@ -1076,7 +1145,7 @@ class _RemoteSessionState extends State<RemoteSession>
           padding: EdgeInsets.only(top: 8),
           child: Text(
             'Analog cần host Windows hỗ trợ tay cầm ảo. Bạn vẫn có thể dùng Tay cầm → phím.',
-            style: TextStyle(fontSize: 11, color: SanserTokens.muted),
+            style: TextStyle(fontSize: 12, color: SanserTokens.muted),
           ),
         ),
       if (c.capabilities['audio'] != true)
@@ -1084,7 +1153,7 @@ class _RemoteSessionState extends State<RemoteSession>
           padding: EdgeInsets.only(top: 8),
           child: Text(
             'Bản engine này chưa hỗ trợ âm thanh.',
-            style: TextStyle(fontSize: 11, color: SanserTokens.muted),
+            style: TextStyle(fontSize: 12, color: SanserTokens.muted),
           ),
         ),
       const SizedBox(height: 8),
@@ -1176,7 +1245,7 @@ class _RemoteSessionState extends State<RemoteSession>
                 padding: EdgeInsets.symmetric(vertical: 8),
                 child: Text(
                   'WASD + phím bàn phím · không phải tay cầm Xbox',
-                  style: TextStyle(color: SanserTokens.muted, fontSize: 11),
+                  style: TextStyle(color: SanserTokens.muted, fontSize: 12),
                 ),
               ),
           ],
@@ -1197,7 +1266,7 @@ class _RemoteSessionState extends State<RemoteSession>
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
                 'Nhận ${(c.telemetry['videoFps'] as num).toStringAsFixed(0)} fps${c.telemetry['displayFps'] is num ? ' · Hiển thị ${(c.telemetry['displayFps'] as num).toStringAsFixed(0)} fps' : ''} · NACK ${((c.telemetry['nackRequestsPerSecond'] as num?) ?? 0).toStringAsFixed(0)}/s · Bù âm ${((c.telemetry['audioConcealedPerSecond'] as num?) ?? 0).toStringAsFixed(0)} gói/s',
-                style: const TextStyle(fontSize: 11, color: SanserTokens.muted),
+                style: const TextStyle(fontSize: 12, color: SanserTokens.muted),
               ),
             ),
           const SizedBox(height: 8),

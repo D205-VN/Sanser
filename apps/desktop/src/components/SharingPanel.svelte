@@ -68,7 +68,7 @@
   .sharing-panel { margin: 0 0 24px; }
   .sharing-heading, .viewer-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   .viewer-row { padding: 14px 0; border-bottom: 1px solid var(--border); }
-  .viewer-row p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+  .viewer-row p { margin: 5px 0 0; color: var(--muted); font-size: 14px; }
   .sharing-count { color: var(--accent); margin: 0; }
   .invite-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .invite-row select { flex: 1; min-width: 200px; }

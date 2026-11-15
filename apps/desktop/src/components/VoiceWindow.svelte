@@ -73,12 +73,12 @@
   header { display:flex; align-items:center; gap:8px; }
   .identity { display:flex; align-items:center; gap:10px; flex:1; min-width:0; cursor:grab; }
   .identity :global(svg) { width:22px; height:22px; color:var(--sn-success); }
-  strong,span { display:block; } span { font-size:11px; color:var(--sn-muted); margin-top:4px; }
+  strong,span { display:block; } span { font-size:12px; color:var(--sn-muted); margin-top:4px; }
   button { display:grid; place-items:center; width:38px; height:36px; padding:0; border:1px solid var(--sn-border); border-radius:9px; background:var(--sn-surface); color:var(--sn-text); cursor:pointer; }
   button :global(svg) { width:18px; height:18px; } button:disabled { opacity:.4; cursor:default; }
   button:focus-visible { outline:2px solid var(--sn-accent); outline-offset:2px; }
   .live { color:var(--sn-success); background:var(--sn-success-soft); } .leave,.failure { color:var(--sn-danger); }
-  p { margin:15px 0 8px; line-height:1.4; color:var(--sn-muted); } small { display:block; color:var(--sn-muted); font-size:10px; }
+  p { margin:15px 0 8px; line-height:1.4; color:var(--sn-muted); } small { display:block; color:var(--sn-muted); font-size:12px; }
   .resume { display:block; width:auto; padding:5px 10px; height:auto; margin-bottom:7px; }
   .audio-sink { display:none; }
 </style>

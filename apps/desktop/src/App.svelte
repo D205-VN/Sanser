@@ -260,7 +260,7 @@
 
 <style>
   .welcome-update { position: fixed; top: 16px; right: 20px; z-index: 10; }
-  .sharing-indicator { display: inline-flex; align-items: center; gap: 10px; color: var(--accent); font-size: 13px; }
+  .sharing-indicator { display: inline-flex; align-items: center; gap: 10px; color: var(--accent); font-size: 14px; }
   .sharing-invitation { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
   .sharing-invitation p { margin: 6px 0 0; }
 </style>

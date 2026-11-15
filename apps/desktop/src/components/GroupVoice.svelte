@@ -78,12 +78,12 @@
   .voice-heading p { margin: 4px 0 0; }
   .voice-glyph { display: grid; place-items: center; flex-shrink: 0; width: 38px; height: 38px; border: 1px solid var(--border); border-radius: 11px; color: var(--accent); background: var(--surface); }
   .voice-glyph :global(svg) { width: 19px; height: 19px; }
-  .voice-state { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+  .voice-state { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 12px; line-height: 1.4; }
   .voice-state :global(svg) { width: 14px; height: 14px; flex-shrink: 0; }
   .voice-state.live { color: var(--green); border-color: var(--green); background: var(--green-soft); }
   .voice-state.pending { color: var(--yellow); }
   .voice-actions { margin-top: 16px; gap: 8px; }
   .voice-actions .button { min-height: 36px; }
   .voice-actions .mic-live { color: var(--green); border-color: var(--green); background: var(--green-soft); }
-  p { margin: 6px 0 12px; font-size: 13px; }
+  p { margin: 6px 0 12px; font-size: 14px; }
 </style>

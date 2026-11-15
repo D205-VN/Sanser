@@ -81,8 +81,11 @@ error if unavailable. The Mac SNV2 presenter also limits GPU work to one submiss
 
 ## Measurements
 
-The Mac→Windows native overlay starts visible in Ultra. **Control+Option+8**
-toggles it; plain 8 and F8 remain available to the remote app. It displays:
+In Ultra the Mac→Windows native overlay starts as a compact one-line status
+(Ping, Jitter, Decode; red when over budget). **Control+Option+8** cycles
+compact → full table → hidden; plain 8 and F8 remain available to the remote
+app. `--stats-overlay` starts with the full table. A capture-paused or CPU
+fallback warning always uses the full panel. The full table displays:
 
 | Field | Meaning |
 | --- | --- |

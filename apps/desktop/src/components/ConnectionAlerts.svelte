@@ -49,8 +49,8 @@
   .connection-alert { display: flex; align-items: flex-start; gap: 12px; padding: 18px; background: var(--surface, #19212e); border: 1px solid var(--border, #334257); border-radius: 16px; box-shadow: 0 16px 48px #0005; }
   .alert-icon { width: 36px; height: 36px; flex-shrink: 0; padding: 8px; color: var(--accent); background: #61d4b51a; border-radius: 10px; }
   .alert-content { min-width: 0; flex: 1; } strong { display: block; overflow-wrap: anywhere; font-size: 14px; }
-  p { margin: 5px 0 12px; font-size: 12px; color: var(--muted); line-height: 1.6; }
-  button { cursor: pointer; font: inherit; } .stop-access, .enable-alerts { border: 0; background: none; padding: 0; font-size: 12px; }
+  p { margin: 5px 0 12px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+  button { cursor: pointer; font: inherit; } .stop-access, .enable-alerts { border: 0; background: none; padding: 0; font-size: 13px; }
   .stop-access { color: #ff9ca5; } .enable-alerts { color: var(--accent); margin-left: 12px; }
   .dismiss-alert { border: 0; color: var(--muted); background: none; padding: 0 3px; font-size: 22px; line-height: 20px; }
   .alert-error { padding: 12px; background: var(--surface); border-radius: 10px; color: #ff9ca5; }

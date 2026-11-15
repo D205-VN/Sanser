@@ -3,6 +3,7 @@ import App from './App.svelte';
 import './app.css';
 import './styles/tokens.css';
 import './styles/workspace.css';
+import './styles/refresh.css';
 
 const target = document.getElementById('app');
 if (!target) throw new Error('Sanser application root is missing');

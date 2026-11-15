@@ -165,7 +165,7 @@
   .update-dialog::backdrop { background: #05090fc9; backdrop-filter: blur(6px); }
   .update-heading h2 { margin: 0 0 16px; font-size: 25px; letter-spacing: -.03em; }
   p { color: var(--muted); font-size: 14px; line-height: 1.7; }
-  .update-notes { max-height: 180px; overflow: auto; margin-block: 16px; padding: 16px; border-radius: 10px; background: var(--bg); color: var(--text-soft); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .update-notes { max-height: 180px; overflow: auto; margin-block: 16px; padding: 16px; border-radius: 10px; background: var(--bg); color: var(--text-soft); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
   progress { width: 100%; height: 8px; accent-color: var(--accent); }
   .update-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; padding-top: 20px; border-top: 1px solid var(--border); }
 </style>
