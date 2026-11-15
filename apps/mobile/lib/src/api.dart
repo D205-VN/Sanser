@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
 typedef Json = Map<String, dynamic>;
-const mobileVersion = '2.3.10';
+const mobileVersion = '2.3.11';
 
 abstract interface class SecretStore {
   Future<String?> read(String key);
