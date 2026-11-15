@@ -157,6 +157,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/sharing/{id}/members/{member}/remove",
             post(routes::sharing::remove),
         )
+        .route("/api/docs", get(routes::docs::page))
+        .route("/api/openapi.json", get(routes::docs::openapi))
         .route("/api/v2/health", get(routes::system::health))
         .route("/api/v2/readiness", get(routes::system::readiness))
         .route("/api/v2/events", get(websocket::events_socket))

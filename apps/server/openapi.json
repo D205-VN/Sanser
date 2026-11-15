@@ -1,0 +1,3196 @@
+{
+ "openapi": "3.0.3",
+ "info": {
+  "title": "Sanser API",
+  "version": "2",
+  "description": "Control-plane API used by the Sanser desktop and mobile apps. Media never flows through these endpoints. Request bodies reject unknown fields. Timestamps are Unix seconds."
+ },
+ "servers": [
+  {
+   "url": "/",
+   "description": "This server"
+  }
+ ],
+ "tags": [
+  {
+   "name": "Auth"
+  },
+  {
+   "name": "Account"
+  },
+  {
+   "name": "Devices"
+  },
+  {
+   "name": "Sessions"
+  },
+  {
+   "name": "Sharing"
+  },
+  {
+   "name": "Voice"
+  },
+  {
+   "name": "Network"
+  },
+  {
+   "name": "System"
+  },
+  {
+   "name": "Realtime"
+  }
+ ],
+ "paths": {
+  "/api/v2/auth/register": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Create an account and sign in",
+    "operationId": "post_api_v2_auth_register",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RegisterRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthTokens"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/api/v2/auth/login": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Sign in",
+    "operationId": "post_api_v2_auth_login",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/LoginRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthTokens"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/api/v2/auth/refresh": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Rotate the refresh token",
+    "operationId": "post_api_v2_auth_refresh",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RefreshRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthTokens"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/api/v2/auth/logout": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Sign out this login session",
+    "operationId": "post_api_v2_auth_logout",
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/account": {
+   "get": {
+    "tags": [
+     "Account"
+    ],
+    "summary": "Current account",
+    "operationId": "get_api_v2_account",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Account"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/account/password": {
+   "post": {
+    "tags": [
+     "Account"
+    ],
+    "summary": "Change password and revoke all sessions",
+    "operationId": "post_api_v2_account_password",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ChangePasswordRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/account/sessions": {
+   "get": {
+    "tags": [
+     "Account"
+    ],
+    "summary": "List login sessions",
+    "operationId": "get_api_v2_account_sessions",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "array",
+         "items": {
+          "type": "object"
+         }
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/account/sessions/{id}": {
+   "delete": {
+    "tags": [
+     "Account"
+    ],
+    "summary": "Revoke a login session",
+    "operationId": "delete_api_v2_account_sessions_id",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/devices": {
+   "get": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "List computers",
+    "operationId": "get_api_v2_devices",
+    "parameters": [
+     {
+      "name": "cursor",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/DevicePage"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/devices/register": {
+   "post": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "Register or update this computer",
+    "operationId": "post_api_v2_devices_register",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RegisterDeviceRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Device"
+        }
+       }
+      }
+     },
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Device"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/devices/heartbeat": {
+   "post": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "Report that a computer is online",
+    "operationId": "post_api_v2_devices_heartbeat",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/HeartbeatRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Device"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/devices/offline": {
+   "post": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "Mark a computer offline",
+    "operationId": "post_api_v2_devices_offline",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/DeviceIdRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Device"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/devices/{id}": {
+   "patch": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "Rename or pin a computer",
+    "operationId": "patch_api_v2_devices_id",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/UpdateDeviceRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Device"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   },
+   "delete": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "Remove a computer",
+    "operationId": "delete_api_v2_devices_id",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions": {
+   "get": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "List sessions for a host",
+    "operationId": "get_api_v2_sessions",
+    "parameters": [
+     {
+      "name": "hostDeviceId",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "state",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/SessionPage"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   },
+   "post": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Request a connection",
+    "operationId": "post_api_v2_sessions",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CreateSessionRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "Created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ConnectionSession"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions/{id}": {
+   "get": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Get a session",
+    "operationId": "get_api_v2_sessions_id",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ConnectionSession"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions/{id}/credentials": {
+   "get": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Native media credentials for one device",
+    "operationId": "get_api_v2_sessions_id_credentials",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "deviceId",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Not allowed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions/{id}/native-ready": {
+   "post": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Requester engine is ready",
+    "operationId": "post_api_v2_sessions_id_native_ready",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/DeviceIdRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ConnectionSession"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions/{id}/native-started": {
+   "post": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Host engine started",
+    "operationId": "post_api_v2_sessions_id_native_started",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/NativeStartedRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions/{id}/accept": {
+   "post": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Host accepts the request",
+    "operationId": "post_api_v2_sessions_id_accept",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ConnectionSession"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions/{id}/reject": {
+   "post": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Host rejects the request",
+    "operationId": "post_api_v2_sessions_id_reject",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sessions/{id}/disconnect": {
+   "post": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "End a session",
+    "operationId": "post_api_v2_sessions_id_disconnect",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing": {
+   "get": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "List sharing groups",
+    "operationId": "get_api_v2_sharing",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   },
+   "post": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "Start sharing a screen",
+    "operationId": "post_api_v2_sharing",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CreateSharingRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing/{id}": {
+   "get": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "Get a sharing group",
+    "operationId": "get_api_v2_sharing_id",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing/{id}/invite": {
+   "post": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "Invite a viewer",
+    "operationId": "post_api_v2_sharing_id_invite",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/InviteViewerRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing/{id}/members/{member}/respond": {
+   "post": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "Accept or decline an invitation",
+    "operationId": "post_api_v2_sharing_id_members_member_respond",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "member",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RespondInvitationRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing/{id}/members/{member}/remove": {
+   "post": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "Remove a viewer",
+    "operationId": "post_api_v2_sharing_id_members_member_remove",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "member",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing/{id}/stop": {
+   "post": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "Stop sharing",
+    "operationId": "post_api_v2_sharing_id_stop",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing/{id}/heartbeat": {
+   "post": {
+    "tags": [
+     "Sharing"
+    ],
+    "summary": "Keep a sharing group alive",
+    "operationId": "post_api_v2_sharing_id_heartbeat",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/SharingHeartbeatRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/sharing/{id}/voice-lab/credentials": {
+   "post": {
+    "tags": [
+     "Voice"
+    ],
+    "summary": "Group voice credentials (when the gateway is configured)",
+    "operationId": "post_api_v2_sharing_id_voice_lab_credentials",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Not allowed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Temporarily unavailable.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/voice-lab/capabilities": {
+   "get": {
+    "tags": [
+     "Voice"
+    ],
+    "summary": "Whether group voice is available",
+    "operationId": "get_api_v2_voice_lab_capabilities",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/network/ice": {
+   "get": {
+    "tags": [
+     "Network"
+    ],
+    "summary": "STUN/relay configuration",
+    "operationId": "get_api_v2_network_ice",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/health": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Liveness, version and feature flags",
+    "operationId": "get_api_v2_health",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Health"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/api/v2/readiness": {
+   "get": {
+    "tags": [
+     "System"
+    ],
+    "summary": "Database readiness",
+    "operationId": "get_api_v2_readiness",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Temporarily unavailable.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/api/v2/events": {
+   "get": {
+    "tags": [
+     "Realtime"
+    ],
+    "summary": "Account event stream",
+    "operationId": "get_api_v2_events",
+    "description": "WebSocket upgrade. Not callable from this page.",
+    "x-websocket": true,
+    "responses": {
+     "101": {
+      "description": "Switching protocols"
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/signaling": {
+   "get": {
+    "tags": [
+     "Realtime"
+    ],
+    "summary": "Peer-to-peer signaling",
+    "operationId": "get_api_v2_signaling",
+    "description": "WebSocket upgrade. Not callable from this page.",
+    "x-websocket": true,
+    "responses": {
+     "101": {
+      "description": "Switching protocols"
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/relay": {
+   "get": {
+    "tags": [
+     "Realtime"
+    ],
+    "summary": "Encrypted TCP media relay",
+    "operationId": "get_api_v2_relay",
+    "description": "WebSocket upgrade. Not callable from this page.",
+    "x-websocket": true,
+    "responses": {
+     "101": {
+      "description": "Switching protocols"
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/relay/udp": {
+   "get": {
+    "tags": [
+     "Realtime"
+    ],
+    "summary": "UDP relay allocation",
+    "operationId": "get_api_v2_relay_udp",
+    "description": "WebSocket upgrade. Not callable from this page.",
+    "x-websocket": true,
+    "responses": {
+     "101": {
+      "description": "Switching protocols"
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  }
+ },
+ "components": {
+  "securitySchemes": {
+   "bearerAuth": {
+    "type": "http",
+    "scheme": "bearer",
+    "description": "accessToken from /api/v2/auth/login"
+   }
+  },
+  "schemas": {
+   "Error": {
+    "type": "object",
+    "properties": {
+     "error": {
+      "type": "object",
+      "properties": {
+       "code": {
+        "type": "string"
+       },
+       "message": {
+        "type": "string"
+       }
+      },
+      "additionalProperties": false,
+      "required": [
+       "code",
+       "message"
+      ]
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "error"
+    ]
+   },
+   "Account": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "email": {
+      "type": "string"
+     },
+     "displayName": {
+      "type": "string"
+     },
+     "createdAt": {
+      "type": "integer",
+      "format": "int64"
+     }
+    },
+    "additionalProperties": false
+   },
+   "AuthTokens": {
+    "type": "object",
+    "properties": {
+     "tokenType": {
+      "type": "string"
+     },
+     "accessToken": {
+      "type": "string"
+     },
+     "accessExpiresAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "refreshToken": {
+      "type": "string"
+     },
+     "refreshExpiresAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "account": {
+      "$ref": "#/components/schemas/Account"
+     },
+     "sessionId": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false
+   },
+   "Device": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "computerId": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "deviceRole": {
+      "type": "string"
+     },
+     "crossPlatform": {
+      "type": "boolean"
+     },
+     "osVersion": {
+      "type": "string"
+     },
+     "gpu": {
+      "type": "string"
+     },
+     "sanserVersion": {
+      "type": "string"
+     },
+     "protocolVersion": {
+      "type": "integer"
+     },
+     "online": {
+      "type": "boolean"
+     },
+     "streaming": {
+      "type": "boolean"
+     },
+     "pinned": {
+      "type": "boolean"
+     },
+     "routeAddress": {
+      "type": "string"
+     },
+     "networkQuality": {
+      "type": "string"
+     },
+     "latencyMs": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "codecs": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "nativeTransport": {
+      "type": "boolean"
+     },
+     "webrtc": {
+      "type": "boolean"
+     },
+     "audio": {
+      "type": "boolean"
+     },
+     "gamepad": {
+      "type": "boolean"
+     },
+     "lastSeenAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "createdAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "updatedAt": {
+      "type": "integer",
+      "format": "int64"
+     }
+    },
+    "additionalProperties": false
+   },
+   "DevicePage": {
+    "type": "object",
+    "properties": {
+     "items": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/Device"
+      }
+     },
+     "nextCursor": {
+      "type": "string",
+      "nullable": true
+     }
+    },
+    "additionalProperties": false
+   },
+   "ConnectionSession": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "requesterDeviceId": {
+      "type": "string"
+     },
+     "hostDeviceId": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string"
+     },
+     "accessMode": {
+      "type": "string",
+      "enum": [
+       "control",
+       "view-only"
+      ]
+     },
+     "sharingId": {
+      "type": "string"
+     },
+     "networkMode": {
+      "type": "string",
+      "enum": [
+       "auto",
+       "direct",
+       "relay",
+       "manual"
+      ],
+      "description": "Route preference."
+     },
+     "qualityProfile": {
+      "type": "string"
+     },
+     "requestedCodec": {
+      "type": "string"
+     },
+     "selectedTransport": {
+      "type": "string"
+     },
+     "createdAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "updatedAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "acceptedAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "requesterReadyAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "endedAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "disconnectReason": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false
+   },
+   "SessionPage": {
+    "type": "object",
+    "properties": {
+     "items": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/ConnectionSession"
+      }
+     },
+     "nextCursor": {
+      "type": "string",
+      "nullable": true
+     }
+    },
+    "additionalProperties": false
+   },
+   "Health": {
+    "type": "object",
+    "properties": {
+     "status": {
+      "type": "string"
+     },
+     "version": {
+      "type": "string"
+     },
+     "protocolVersion": {
+      "type": "integer"
+     },
+     "features": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    },
+    "additionalProperties": false
+   },
+   "RegisterRequest": {
+    "type": "object",
+    "properties": {
+     "email": {
+      "type": "string",
+      "format": "email"
+     },
+     "password": {
+      "type": "string",
+      "format": "password"
+     },
+     "displayName": {
+      "type": "string"
+     },
+     "deviceName": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "installationId": {
+      "type": "string",
+      "format": "uuid"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "email",
+     "password"
+    ]
+   },
+   "LoginRequest": {
+    "type": "object",
+    "properties": {
+     "email": {
+      "type": "string",
+      "format": "email"
+     },
+     "password": {
+      "type": "string",
+      "format": "password"
+     },
+     "deviceName": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "installationId": {
+      "type": "string",
+      "format": "uuid"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "email",
+     "password"
+    ]
+   },
+   "RefreshRequest": {
+    "type": "object",
+    "properties": {
+     "refreshToken": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "refreshToken"
+    ]
+   },
+   "ChangePasswordRequest": {
+    "type": "object",
+    "properties": {
+     "currentPassword": {
+      "type": "string",
+      "format": "password"
+     },
+     "newPassword": {
+      "type": "string",
+      "format": "password"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "currentPassword",
+     "newPassword"
+    ]
+   },
+   "RegisterDeviceRequest": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "computerId": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "deviceRole": {
+      "type": "string",
+      "enum": [
+       "host",
+       "client"
+      ]
+     },
+     "crossPlatform": {
+      "type": "boolean"
+     },
+     "osVersion": {
+      "type": "string"
+     },
+     "gpu": {
+      "type": "string"
+     },
+     "sanserVersion": {
+      "type": "string"
+     },
+     "protocolVersion": {
+      "type": "integer"
+     },
+     "codecs": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "nativeTransport": {
+      "type": "boolean"
+     },
+     "webrtc": {
+      "type": "boolean"
+     },
+     "audio": {
+      "type": "boolean"
+     },
+     "gamepad": {
+      "type": "boolean"
+     },
+     "routeAddress": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "name",
+     "platform"
+    ]
+   },
+   "HeartbeatRequest": {
+    "type": "object",
+    "properties": {
+     "deviceId": {
+      "type": "string"
+     },
+     "streaming": {
+      "type": "boolean"
+     },
+     "routeAddress": {
+      "type": "string"
+     },
+     "networkQuality": {
+      "type": "string"
+     },
+     "latencyMs": {
+      "type": "integer",
+      "format": "int64"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "deviceId"
+    ]
+   },
+   "DeviceIdRequest": {
+    "type": "object",
+    "properties": {
+     "deviceId": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "deviceId"
+    ]
+   },
+   "UpdateDeviceRequest": {
+    "type": "object",
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "pinned": {
+      "type": "boolean"
+     }
+    },
+    "additionalProperties": false
+   },
+   "CreateSessionRequest": {
+    "type": "object",
+    "properties": {
+     "accessMode": {
+      "type": "string",
+      "enum": [
+       "control",
+       "view-only"
+      ]
+     },
+     "requesterDeviceId": {
+      "type": "string"
+     },
+     "hostDeviceId": {
+      "type": "string"
+     },
+     "networkMode": {
+      "type": "string",
+      "enum": [
+       "auto",
+       "direct",
+       "relay",
+       "manual"
+      ],
+      "description": "Route preference."
+     },
+     "qualityProfile": {
+      "type": "string"
+     },
+     "requestedCodec": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "hostDeviceId"
+    ]
+   },
+   "NativeStartedRequest": {
+    "type": "object",
+    "properties": {
+     "deviceId": {
+      "type": "string"
+     },
+     "requesterReadyAt": {
+      "type": "integer",
+      "format": "int64"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "deviceId",
+     "requesterReadyAt"
+    ]
+   },
+   "CreateSharingRequest": {
+    "type": "object",
+    "properties": {
+     "hostDeviceId": {
+      "type": "string"
+     },
+     "maxViewers": {
+      "type": "integer"
+     },
+     "networkMode": {
+      "type": "string",
+      "enum": [
+       "auto",
+       "direct",
+       "relay",
+       "manual"
+      ],
+      "description": "Route preference."
+     },
+     "qualityProfile": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "hostDeviceId"
+    ]
+   },
+   "InviteViewerRequest": {
+    "type": "object",
+    "properties": {
+     "viewerDeviceId": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "viewerDeviceId"
+    ]
+   },
+   "RespondInvitationRequest": {
+    "type": "object",
+    "properties": {
+     "viewerDeviceId": {
+      "type": "string"
+     },
+     "accept": {
+      "type": "boolean"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "viewerDeviceId",
+     "accept"
+    ]
+   },
+   "SharingHeartbeatRequest": {
+    "type": "object",
+    "properties": {
+     "hostDeviceId": {
+      "type": "string"
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "hostDeviceId"
+    ]
+   }
+  }
+ }
+}

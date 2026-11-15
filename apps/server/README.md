@@ -214,3 +214,14 @@ kill or test panic can interrupt asynchronous cleanup, in which case stale
 See [UDP relay setup](../../docs/udp-relay.md) for `RELAY_UDP_BIND` and
 `RELAY_UDP_PUBLIC`. Both must point to this server process through reachable UDP
 ingress. Leave them unset where only HTTP/WSS ingress is available.
+
+## API reference
+
+`GET /api/docs` serves a self-contained, Swagger-style reference with a
+**Send request** button per operation; `GET /api/openapi.json` is the OpenAPI
+3.0 document behind it. Both are static and unauthenticated: they describe
+routes, never data. The page loads no third-party scripts and its
+Content-Security-Policy only allows requests to this origin, so a pasted access
+token stays between the browser tab and this server. A unit test fails when the
+document and the router's `/api/v2` routes differ, so update
+`apps/server/openapi.json` together with `src/lib.rs`.
