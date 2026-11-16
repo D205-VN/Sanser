@@ -149,7 +149,12 @@ jobs:
               # A pasted secret often carries line breaks or spaces; none are
               # part of base64. Fail with the cause, never with the value.
               if ! printf '%s' "$MACOS_SELF_SIGNED_CERTIFICATE" | tr -d '[:space:]' | base64 --decode > "$RUNNER_TEMP/sanser-signing.p12" 2>/dev/null; then
-                echo '::error::MACOS_SELF_SIGNED_CERTIFICATE is not valid base64. Set it to the exact contents of sanser-signing.p12.base64.'
+                # Shape only, never content: a PKCS#12 file always encodes to
+                # text starting with MII, and the value is public-length.
+                cleaned="$(printf '%s' "$MACOS_SELF_SIGNED_CERTIFICATE" | tr -d '[:space:]')"
+                invalid="$(printf '%s' "$cleaned" | LC_ALL=C tr -d 'A-Za-z0-9+/=' | wc -c | tr -d ' ')"
+                starts="$([[ "$cleaned" == MII* ]] && echo yes || echo no)"
+                echo "::error::MACOS_SELF_SIGNED_CERTIFICATE is not valid base64 (length ${#cleaned}, characters outside base64: ${invalid}, starts like a certificate: ${starts}). It must be the exact contents of sanser-signing.p12.base64 (4464 characters starting MII), not the pbcopy command or the .p12 file."
                 exit 1
               fi
               if [[ "$(wc -c < "$RUNNER_TEMP/sanser-signing.p12")" -lt 1024 ]]; then
