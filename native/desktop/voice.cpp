@@ -30,21 +30,48 @@ std::optional<State> command(const std::string& line) {
   if(state.deafened) state.microphone=false;
   return state;
 }
-bool isPacket(std::span<const std::uint8_t> bytes) { return bytes.size()>=4 && !std::memcmp(bytes.data(),"SVO1",4); }
-Bytes pack(const Packet& packet) {
+bool isPacket(std::span<const std::uint8_t> bytes) {
+  return bytes.size()>=4 && (!std::memcmp(bytes.data(),"SVO1",4) || !std::memcmp(bytes.data(),"SVO2",4));
+}
+namespace {
+Bytes header(const Packet& packet,char version) {
   if(packet.speaker>=maxSpeakers || !packet.epoch || !validSequence(packet.sequence) || !validOpus(packet.opus)) throw std::runtime_error("Invalid voice packet");
-  Bytes bytes{'S','V','O','1',static_cast<std::uint8_t>(packet.speaker)};
+  Bytes bytes{'S','V','O',static_cast<std::uint8_t>(version),static_cast<std::uint8_t>(packet.speaker)};
   for(int i=3;i>=0;--i) bytes.push_back(static_cast<std::uint8_t>(packet.epoch>>(i*8)));
   for(int i=7;i>=0;--i) bytes.push_back(static_cast<std::uint8_t>(packet.sequence>>(i*8)));
+  return bytes;
+}
+}
+Bytes pack(const Packet& packet) {
+  auto bytes=header(packet,'1');
   bytes.insert(bytes.end(),packet.opus.begin(),packet.opus.end()); return bytes;
 }
+Bytes packRedundant(const Packet& packet) {
+  auto bytes=header(packet,'2');
+  const bool redundant=packet.sequence>1 && validOpus(packet.redundant);
+  bytes.push_back(static_cast<std::uint8_t>(packet.opus.size()>>8)); bytes.push_back(static_cast<std::uint8_t>(packet.opus.size()));
+  bytes.insert(bytes.end(),packet.opus.begin(),packet.opus.end());
+  if(redundant) bytes.insert(bytes.end(),packet.redundant.begin(),packet.redundant.end());
+  return bytes;
+}
 std::optional<Packet> unpack(std::span<const std::uint8_t> bytes) {
-  if(bytes.size()<=17 || bytes.size()>417 || !isPacket(bytes) || bytes[4]>=maxSpeakers) return {};
+  if(bytes.size()<=17 || bytes.size()>maxPacketBytes || !isPacket(bytes) || bytes[4]>=maxSpeakers) return {};
   Packet packet; packet.speaker=bytes[4];
   for(unsigned i=5;i<9;++i) packet.epoch=(packet.epoch<<8)|bytes[i];
   for(unsigned i=9;i<17;++i) packet.sequence=(packet.sequence<<8)|bytes[i];
-  if(!packet.epoch || !validSequence(packet.sequence) || !validOpus(bytes.subspan(17))) return {};
-  packet.opus.assign(bytes.begin()+17,bytes.end()); return packet;
+  if(!packet.epoch || !validSequence(packet.sequence)) return {};
+  if(bytes[3]=='1') {
+    if(bytes.size()>417 || !validOpus(bytes.subspan(17))) return {};
+    packet.opus.assign(bytes.begin()+17,bytes.end()); return packet;
+  }
+  if(bytes.size()<20) return {};
+  const std::size_t primary=(static_cast<std::size_t>(bytes[17])<<8)|bytes[18];
+  if(primary>bytes.size()-19 || !validOpus(bytes.subspan(19,primary))) return {};
+  const auto rest=bytes.subspan(19+primary);
+  if(!rest.empty() && (packet.sequence<2 || !validOpus(rest))) return {};
+  packet.opus.assign(bytes.begin()+19,bytes.begin()+19+static_cast<std::ptrdiff_t>(primary));
+  packet.redundant.assign(rest.begin(),rest.end());
+  return packet;
 }
 struct Encoder::Impl {
   OpusEncoder* codec=nullptr;
@@ -53,6 +80,7 @@ struct Encoder::Impl {
   std::uint32_t generation=0;
   std::uint64_t sequence=0;
   Clock::time_point previous{};
+  Bytes last; // previous payload, carried as redundancy in the next packet
   ~Impl() { if(codec) opus_encoder_destroy(codec); }
 };
 Encoder::Encoder():impl_(std::make_unique<Impl>()) {
@@ -71,7 +99,7 @@ Encoder::Encoder():impl_(std::make_unique<Impl>()) {
   reset();
 }
 Encoder::~Encoder()=default;
-void Encoder::reset() { opus_encoder_ctl(impl_->codec,OPUS_RESET_STATE); impl_->used=0; impl_->sequence=0; impl_->generation=epoch(); impl_->previous={}; }
+void Encoder::reset() { opus_encoder_ctl(impl_->codec,OPUS_RESET_STATE); impl_->used=0; impl_->sequence=0; impl_->generation=epoch(); impl_->previous={}; impl_->last.clear(); }
 std::optional<Packet> Encoder::push(const desktop::AudioSamples& samples,Clock::time_point now) {
   if(impl_->previous!=Clock::time_point{} && now-impl_->previous>std::chrono::milliseconds(40)) reset();
   impl_->previous=now;
@@ -82,39 +110,67 @@ std::optional<Packet> Encoder::push(const desktop::AudioSamples& samples,Clock::
   const auto n=opus_encode(impl_->codec,impl_->pending.data(),packetFrames,payload.data(),static_cast<opus_int32>(payload.size()));
   if(n<=0) throw std::runtime_error("Unable to encode voice packet");
   payload.resize(static_cast<std::size_t>(n));
-  return Packet{0,impl_->generation,++impl_->sequence,std::move(payload)};
+  Packet packet{0,impl_->generation,++impl_->sequence,payload,std::move(impl_->last)};
+  impl_->last=std::move(payload);
+  return packet;
 }
 struct Mixer::Impl {
   struct Source {
+    // Adaptive playout reserve: 20 ms start, +20 ms when a packet arrives
+    // after its slot was concealed (by inserting one concealed packet, so no
+    // speech is skipped), and -20 ms after 10 calm seconds by skipping one
+    // quiet packet. Bounded to 100 ms.
+    static constexpr unsigned minReserveMs=20,maxReserveMs=100;
     OpusDecoder* decoder=nullptr;
     std::uint32_t generation=0;
     std::set<std::uint32_t> previous;
     struct Entry { Packet packet; Clock::time_point at; };
     std::map<std::uint64_t,Entry> packets;
+    std::set<std::uint64_t> heard; // recent sequences, to tell duplicates from late arrivals
     std::array<opus_int16,packetFrames> pcm{};
     std::uint64_t expected=0,last=0;
-    unsigned chunk=4,missing=0;
+    unsigned chunk=4,missing=0,reserveMs=minReserveMs,stretch=0;
     bool started=false,muted=false;
-    Clock::time_point first{},due{};
+    Clock::time_point first{},due{},lastLate{},lastGrow{},lastShrink{};
     Stats stats;
     Source() { int error=0; decoder=opus_decoder_create(48000,1,&error); if(error!=OPUS_OK || !decoder) throw std::runtime_error("Unable to create voice decoder"); }
     ~Source() { if(decoder) opus_decoder_destroy(decoder); }
-    void reset() { packets.clear(); pcm.fill(0); expected=last=0; chunk=4; missing=0; started=false; opus_decoder_ctl(decoder,OPUS_RESET_STATE); }
+    void reset() { packets.clear(); heard.clear(); pcm.fill(0); expected=last=0; chunk=4; missing=0; stretch=0; started=false; opus_decoder_ctl(decoder,OPUS_RESET_STATE); }
+    void late(Clock::time_point now) {
+      lastLate=now;
+      if(now-lastGrow<std::chrono::milliseconds(300) || reserveMs>=maxReserveMs) return;
+      lastGrow=now; reserveMs+=20; if(started) ++stretch;
+    }
+    void hear(std::uint64_t sequence) { heard.insert(sequence); while(heard.size()>64) heard.erase(heard.begin()); }
+    int decode(std::uint64_t sequence) {
+      const auto current=packets.find(sequence);
+      const auto& payload=current->second.packet.opus;
+      const int n=opus_decode(decoder,payload.data(),static_cast<opus_int32>(payload.size()),pcm.data(),packetFrames,0);
+      packets.erase(current); if(n==packetFrames) ++stats.decoded;
+      return n;
+    }
     std::optional<desktop::AudioSamples> poll(Clock::time_point now) {
-      while(!packets.empty() && now-packets.begin()->second.at>std::chrono::milliseconds(80)) { packets.erase(packets.begin()); ++stats.dropped; }
-      if(started && now-due>std::chrono::milliseconds(60)) { started=false; chunk=4; opus_decoder_ctl(decoder,OPUS_RESET_STATE); first=now; }
+      const auto freshness=std::chrono::milliseconds(reserveMs+60);
+      while(!packets.empty() && now-packets.begin()->second.at>freshness) { packets.erase(packets.begin()); ++stats.dropped; }
+      if(started && now-due>std::chrono::milliseconds(60)) { started=false; chunk=4; stretch=0; opus_decoder_ctl(decoder,OPUS_RESET_STATE); first=now; }
       if(!started) {
-        if(packets.empty() || now-first<std::chrono::milliseconds(20)) return {};
-        started=true; expected=packets.begin()->first; due=now; chunk=4; missing=0;
+        if(packets.empty() || now-first<std::chrono::milliseconds(reserveMs)) return {};
+        started=true; expected=packets.begin()->first; due=now; chunk=4; missing=0; stretch=0;
       }
       if(now<due) return {};
       if(chunk==4) {
-        int n=0;
-        const auto current=packets.find(expected);
-        if(current!=packets.end()) {
-          const auto& payload=current->second.packet.opus;
-          n=opus_decode(decoder,payload.data(),static_cast<opus_int32>(payload.size()),pcm.data(),packetFrames,0);
-          packets.erase(current); missing=0; if(n==packetFrames) ++stats.decoded;
+        int n=0; bool advance=true;
+        if(stretch) {
+          // Grow the delay in place: one concealed packet, timeline unchanged.
+          --stretch; advance=false; n=opus_decode(decoder,nullptr,0,pcm.data(),packetFrames,0);
+        } else if(packets.contains(expected)) {
+          n=decode(expected); missing=0;
+          const bool calm=reserveMs>minReserveMs && now-lastLate>=std::chrono::seconds(10) && now-lastShrink>=std::chrono::seconds(10);
+          if(calm && n==packetFrames && packets.contains(expected+1)) {
+            int peak=0; for(auto sample:pcm) peak=std::max(peak,std::abs(static_cast<int>(sample)));
+            // Give back 20 ms only across a pause in speech.
+            if(peak<600) { lastShrink=now; reserveMs-=20; last=expected; ++expected; n=decode(expected); }
+          }
         } else {
           if(missing>=3) { started=false; first=now; opus_decoder_ctl(decoder,OPUS_RESET_STATE); return {}; }
           const auto next=packets.find(expected+1);
@@ -126,7 +182,8 @@ struct Mixer::Impl {
           ++missing; ++stats.concealed;
         }
         if(n!=packetFrames) { pcm.fill(0); ++stats.invalid; }
-        last=expected; ++expected; chunk=0;
+        if(advance) { last=expected; ++expected; }
+        chunk=0;
       }
       desktop::AudioSamples out{};
       for(unsigned i=0;i<desktop::audioFrames;++i) out[i*2]=out[i*2+1]=pcm[chunk*desktop::audioFrames+i];
@@ -156,10 +213,23 @@ bool Mixer::receive(Packet packet,Clock::time_point now) {
     }
     source.reset(); source.generation=packet.epoch; source.first=now;
   }
-  if(packet.sequence<=source.last || source.packets.contains(packet.sequence)) { ++source.stats.late; return false; }
+  // Previous payload carried in this datagram fills a lost predecessor.
+  if(!packet.redundant.empty() && packet.sequence>1) {
+    const auto previous=packet.sequence-1;
+    if(previous>source.last && !source.packets.contains(previous) && (!source.started || previous>=source.expected)) {
+      Packet copy{packet.speaker,packet.epoch,previous,std::move(packet.redundant),{}};
+      if(source.packets.empty() && !source.started) source.first=now;
+      source.packets.emplace(previous,Mixer::Impl::Source::Entry{std::move(copy),now});
+      source.hear(previous); ++source.stats.redundantFilled;
+    }
+    packet.redundant.clear();
+  }
+  if(source.packets.contains(packet.sequence) || source.heard.contains(packet.sequence)) return false; // duplicate
+  if(packet.sequence<=source.last) { ++source.stats.late; source.late(now); return false; }
   if(source.packets.empty() && !source.started) source.first=now;
+  source.hear(packet.sequence);
   source.packets.emplace(packet.sequence,Mixer::Impl::Source::Entry{std::move(packet),now});
-  if(source.packets.size()>6) { while(source.packets.size()>3) { source.packets.erase(source.packets.begin()); ++source.stats.dropped; } source.started=false; source.chunk=4; source.first=now; opus_decoder_ctl(source.decoder,OPUS_RESET_STATE); }
+  if(source.packets.size()>source.reserveMs/20+5) { while(source.packets.size()>3) { source.packets.erase(source.packets.begin()); ++source.stats.dropped; } source.started=false; source.chunk=4; source.stretch=0; source.first=now; opus_decoder_ctl(source.decoder,OPUS_RESET_STATE); }
   return true;
 }
 std::optional<desktop::AudioSamples> Mixer::poll(Clock::time_point now) {
@@ -199,6 +269,6 @@ std::vector<desktop::AudioSamples> Mixer::drain(Clock::time_point now) {
 }
 void Mixer::clear() { for(auto& source:impl_->sources) source.reset(); impl_->outputDue.reset(); impl_->softClip.fill(0); }
 Stats Mixer::stats() const {
-  Stats out; for(const auto& source:impl_->sources) { const auto& s=source.stats; out.decoded+=s.decoded; out.concealed+=s.concealed; out.fecAttempts+=s.fecAttempts; out.late+=s.late; out.dropped+=s.dropped; out.invalid+=s.invalid; } out.limitedFrames=impl_->limitedFrames; return out;
+  Stats out; for(const auto& source:impl_->sources) { const auto& s=source.stats; out.decoded+=s.decoded; out.concealed+=s.concealed; out.fecAttempts+=s.fecAttempts; out.late+=s.late; out.dropped+=s.dropped; out.invalid+=s.invalid; out.redundantFilled+=s.redundantFilled; if(source.generation) out.reserveMs=std::max(out.reserveMs,source.reserveMs); } out.limitedFrames=impl_->limitedFrames; return out;
 }
 } // namespace sanser::voice

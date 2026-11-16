@@ -856,6 +856,8 @@ void Peer::setVoiceState(voice::State state) {
   voiceJoined_=state.joined; voiceMic_=state.microphone; voiceDeaf_=state.deafened;
   { std::lock_guard lock(sendMutex_); if(!state.joined || !state.microphone) tx_.clearVoice(); }
   if(running_) transmit(snv2::PacketType::Keepalive,Bytes{'S','V','C','1',static_cast<std::uint8_t>(state.joined),static_cast<std::uint8_t>(state.microphone),static_cast<std::uint8_t>(state.deafened)});
+  // Advertise SVO2 (redundant voice) support; older engines ignore it.
+  if(running_) transmit(snv2::PacketType::Keepalive,Bytes{'S','V','R','1'});
 }
 bool Peer::voiceListening() const {
   const auto now=std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count();
@@ -870,11 +872,11 @@ void Peer::voicePacket(voice::Packet packet) {
   // forwarding viewer microphones. A viewer can only transmit its assigned ID.
   packet.speaker=voiceSlot_.load();
   if(packet.speaker>=voice::maxSpeakers) return;
-  transmit(snv2::PacketType::Audio,voice::pack(packet));
+  transmit(snv2::PacketType::Audio,peerVoiceRedundant_ ? voice::packRedundant(packet) : voice::pack(packet));
 }
 void Peer::forwardVoice(const voice::Packet& packet) {
   if(!options_.host || !voiceListening()) return;
-  transmit(snv2::PacketType::Audio,voice::pack(packet));
+  transmit(snv2::PacketType::Audio,peerVoiceRedundant_ ? voice::packRedundant(packet) : voice::pack(packet));
 }
 void Peer::requestKeyframe() {
   std::lock_guard lock(keyframeRequestMutex_);
@@ -903,7 +905,7 @@ void Peer::process(const Bytes& bytes) {
     for(auto& callback:cancelled)callback(5,{});
     receivedRecoverySerial_=receivedRecoveryFence_=0; inputLeaseArmed_=false;
     lastAudio_=0; lastAudioPreference_=0; receivingOpus_=false; peerAudioOpus_=false; peerAudioMuted_=false;
-    peerVoiceJoined_=peerVoiceMic_=peerVoiceDeaf_=false; peerVoiceAt_=0; lastVoicePreference_=0;
+    peerVoiceJoined_=peerVoiceMic_=peerVoiceDeaf_=peerVoiceRedundant_=false; peerVoiceAt_=0; lastVoicePreference_=0;
     if(!options_.host) voiceSlot_=255;
     if(audioReceiver_) audioReceiver_->reset(h.keyId);
     if(onAudioReset) onAudioReset();
@@ -937,6 +939,7 @@ void Peer::process(const Bytes& bytes) {
       return;
     }
     if(!options_.host && b.size()==5 && !std::memcmp(b.data(),"SVI1",4) && b[4]>0 && b[4]<voice::maxSpeakers) { voiceSlot_=b[4]; return; }
+    if(b==Bytes({'S','V','R','1'})) { peerVoiceRedundant_=true; return; }
   }
   if(h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
     if(!options_.host && b==Bytes({'S','H','M','1'})) { peerMacHost_=true; return; }
@@ -1432,6 +1435,7 @@ void Peer::loop() {
         }
         if(options_.groupVoice) {
           transmit(snv2::PacketType::Keepalive,Bytes{'S','V','C','1',static_cast<std::uint8_t>(voiceJoined_.load()),static_cast<std::uint8_t>(voiceMic_.load()),static_cast<std::uint8_t>(voiceDeaf_.load())});
+          transmit(snv2::PacketType::Keepalive,Bytes{'S','V','R','1'});
           if(options_.host && options_.voiceSlot>0 && options_.voiceSlot<voice::maxSpeakers)
             transmit(snv2::PacketType::Keepalive,Bytes{'S','V','I','1',static_cast<std::uint8_t>(options_.voiceSlot)});
         }

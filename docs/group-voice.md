@@ -88,8 +88,24 @@ prevent an indefinitely stale permission after a lost toggle. `SVI1` assigns the
 viewer slot. Local mute gates capture/queues without waiting for remote ACKs.
 
 Every listener has one Opus decoder and bounded jitter queue per remote source.
-A 20 ms initial reserve permits reorder/FEC attempts, missing deadlines use PLC
-for at most three packets, and old speech is discarded. The output mixes decoded
+The reserve starts at 20 ms and adapts up to 100 ms: a packet arriving after its
+slot was concealed adds 20 ms (by inserting one concealed packet, so no speech is
+skipped), and ten calm seconds give 20 ms back by skipping one quiet packet.
+Missing deadlines use PLC for at most three packets, and old speech is discarded.
+
+Since 2.3.15 engines advertise `SVR1`. Toward such a peer each voice datagram is
+`SVO2`: the current 20 ms Opus payload plus the previous one, so a single lost
+datagram is replaced by real speech instead of concealment (RED-style time
+redundancy, roughly doubling voice bandwidth to ~128 kbps per talker). Older
+peers keep receiving `SVO1`.
+
+Microphone clean-up (2.3.15) runs after echo cancellation and before Opus:
+RNNoise 0.2 (Xiph, BSD) noise suppression on 10 ms frames, an automatic gate
+driven by RNNoise's voice-activity estimate (opens on speech, holds 300 ms, then
+fades to -30 dB) and a peak limiter that keeps the signal below -1 dBFS. It adds
+10 ms of capture latency. Set `SANSER_VOICE_RAW=1` to send the echo-cancelled
+microphone unprocessed. A microphone that clips at the input (an input volume set
+too high) cannot be repaired afterwards; lower it in the system sound settings. The output mixes decoded
 speakers with a smooth limiter. The independent bounded voice TX lane follows
 control/input and precedes screen audio/video/repair, with a 40 ms send freshness
 limit. Video pause/repair does not gate voice. These budgets are software policy,

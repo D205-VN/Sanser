@@ -24,7 +24,8 @@ add_library(sanser-speex-echo STATIC
 target_compile_definitions(sanser-speex-echo PRIVATE FLOATING_POINT USE_KISS_FFT EXPORT=)
 target_include_directories(sanser-speex-echo PUBLIC
   ${sanser_speexdsp_SOURCE_DIR}/include ${_speex_generated})
-add_library(sanser-voice-echo STATIC ${CMAKE_CURRENT_LIST_DIR}/voice_echo.cpp)
+include(${CMAKE_CURRENT_LIST_DIR}/rnnoise.cmake)
+add_library(sanser-voice-echo STATIC ${CMAKE_CURRENT_LIST_DIR}/voice_echo.cpp ${CMAKE_CURRENT_LIST_DIR}/voice_cleaner.cpp)
 target_compile_features(sanser-voice-echo PUBLIC cxx_std_20)
 target_include_directories(sanser-voice-echo PUBLIC ${CMAKE_CURRENT_LIST_DIR})
-target_link_libraries(sanser-voice-echo PUBLIC sanser-speex-echo)
+target_link_libraries(sanser-voice-echo PUBLIC sanser-speex-echo PRIVATE sanser-rnnoise)

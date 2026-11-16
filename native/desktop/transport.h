@@ -265,7 +265,7 @@ private:
   std::atomic<bool> peerAudioOpus_{false};
   std::atomic<bool> peerAudioMuted_{false}, audioMuted_{false};
   std::atomic<bool> voiceJoined_{false},voiceMic_{false},voiceDeaf_{false};
-  std::atomic<bool> peerVoiceJoined_{false},peerVoiceMic_{false},peerVoiceDeaf_{false};
+  std::atomic<bool> peerVoiceJoined_{false},peerVoiceMic_{false},peerVoiceDeaf_{false},peerVoiceRedundant_{false};
   std::atomic<std::int64_t> peerVoiceAt_{0};
   std::atomic<unsigned> voiceSlot_{255};
   std::uint64_t lastVoicePreference_=0;

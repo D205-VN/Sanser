@@ -2,6 +2,7 @@
 #include "tx_scheduler.h"
 #include "voice_capture_policy.h"
 #include <opus.h>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -91,11 +92,46 @@ int main() {
     for(unsigned i=1;i<4;++i) require(mixer.poll(t+std::chrono::milliseconds(20+5*i)).has_value(),"20ms is delivered as four5ms blocks");
     // Sequence2 is lost; sequence3 can repair/conceal it without waiting on video.
     (void)packet(encoder,t+std::chrono::milliseconds(20));
-    const auto third=packet(encoder,t+std::chrono::milliseconds(40));
+    auto third=packet(encoder,t+std::chrono::milliseconds(40));
+    third.redundant.clear(); // an SVO1 peer: no redundant copy of sequence 2
     require(mixer.receive(third,t+std::chrono::milliseconds(39)),"out-of-order next packet accepted");
     require(mixer.poll(t+std::chrono::milliseconds(40)).has_value() && mixer.stats().fecAttempts==1,"attempt Opus FEC for isolated loss");
     for(unsigned i=1;i<8;++i) (void)mixer.poll(t+std::chrono::milliseconds(40+5*i));
     require(mixer.stats().decoded==2,"decode next speech packet after gap");
+    {
+      // SVO2: the next datagram carries the lost packet's real speech.
+      v::Encoder red; v::Mixer room;
+      const auto a=packet(red,t),b=packet(red,t+std::chrono::milliseconds(20)),c=packet(red,t+std::chrono::milliseconds(40));
+      require(b.redundant==a.opus && c.redundant==b.opus && a.redundant.empty(),"encoder carries the previous payload");
+      const auto wire=v::packRedundant(c); const auto parsed=v::unpack(wire);
+      require(wire.size()<=v::maxPacketBytes && parsed && parsed->opus==c.opus && parsed->redundant==b.opus,"SVO2 wire roundtrip");
+      require(!v::unpack(Bytes(wire.begin(),wire.begin()+20)),"truncated SVO2 rejected");
+      require(v::unpack(v::pack(c))->redundant.empty(),"SVO1 never carries redundancy");
+      require(room.receive(a,t),"first redundant packet");
+      for(unsigned i=0;i<4;++i) (void)room.poll(t+std::chrono::milliseconds(20+5*i));
+      require(room.receive(c,t+std::chrono::milliseconds(39)),"packet after a loss");
+      for(unsigned i=0;i<8;++i) (void)room.poll(t+std::chrono::milliseconds(40+5*i));
+      const auto stats=room.stats();
+      require(stats.redundantFilled==1 && stats.concealed==0 && stats.decoded==3,"redundancy replaced concealment for a single loss");
+    }
+    {
+      // Wi-Fi jitter: every 5th packet 45 ms late. The reserve grows instead
+      // of concealing every such packet for the whole call.
+      v::Encoder jitter; v::Mixer room; std::vector<std::pair<Clock::time_point,v::Packet>> arrivals;
+      for(unsigned i=0;i<150;++i) { auto p=packet(jitter,t+std::chrono::milliseconds(i*20)); p.redundant.clear(); arrivals.push_back({t+std::chrono::milliseconds(i*20+(i%5==4 ? 45 : 0)),std::move(p)}); }
+      std::sort(arrivals.begin(),arrivals.end(),[](const auto& x,const auto& y){return x.first<y.first;});
+      std::size_t next=0; std::uint64_t concealedAtHalf=0,concealedBeforeEnd=0;
+      for(unsigned ms=0;ms<3100;++ms) {
+        const auto now=t+std::chrono::milliseconds(ms);
+        while(next<arrivals.size() && arrivals[next].first<=now) { room.receive(arrivals[next].second,now); ++next; }
+        (void)room.drain(now);
+        if(ms==1500) concealedAtHalf=room.stats().concealed;
+        if(ms==2900) concealedBeforeEnd=room.stats().concealed; // the stream ends at 3 s
+      }
+      const auto stats=room.stats();
+      require(stats.reserveMs>=60,"voice reserve did not grow under periodic jitter");
+      require(concealedBeforeEnd==concealedAtHalf && stats.late<=4,"adapted voice reserve still concealed late packets");
+    }
     mixer.mute(0,true);
     require(!mixer.receive(packet(encoder,t+std::chrono::milliseconds(60)),t),"per-source local mute rejects queued voice");
     mixer.mute(0,false); encoder.reset();

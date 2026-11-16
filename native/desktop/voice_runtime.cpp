@@ -5,7 +5,9 @@
 #include "microphone_capture.h"
 #include "audio_player.h"
 #include "voice_echo.h"
+#include "voice_cleaner.h"
 #include <algorithm>
+#include <cstdlib>
 #include <atomic>
 #include <deque>
 #include <iostream>
@@ -48,6 +50,10 @@ struct VoiceRuntime::Impl {
     std::unique_ptr<voice::Encoder> encoder;
     std::unique_ptr<voice::Mixer> mixer;
     std::unique_ptr<voice::EchoCanceller> echo;
+    std::unique_ptr<voice::VoiceCleaner> cleaner;
+    // Noise suppression, gate and limiter are on by default, as in common
+    // voice-chat apps. SANSER_VOICE_RAW=1 sends the echo-cancelled mic as is.
+    const bool cleanVoice=!std::getenv("SANSER_VOICE_RAW");
     std::string code="idle";
     bool capturing=false;
     auto lastStatus=Clock::time_point{};
@@ -85,7 +91,7 @@ struct VoiceRuntime::Impl {
             ++captureToken;++healthEpoch;wakeGapWindowMax=0;
             state(); // Revoke transport permission before potentially waiting for a device to close.
             mic.reset(); capturing=false;
-            echo.reset(); // Revoking mic consent destroys its adaptation history.
+            echo.reset(); cleaner.reset(); // Revoking mic consent destroys adaptation history.
             { std::lock_guard lock(mutex); captured.clear(); pendingStatus.clear(); if(!joined || deafened) incoming.clear(); }
             if(encoder) encoder->reset();
             if(!joined || deafened) { player.reset(); if(mixer) mixer->clear(); }
@@ -102,6 +108,7 @@ struct VoiceRuntime::Impl {
             if(joined && microphone && !deafened) {
               if(!encoder) encoder=std::make_unique<voice::Encoder>();
               echo=std::make_unique<voice::EchoCanceller>();
+              if(cleanVoice) cleaner=std::make_unique<voice::VoiceCleaner>();
               const auto token=captureToken.load();
               mic=std::make_unique<MicrophoneCapture>(true,[this,token](const AudioSamples& pcm,Clock::time_point at) {
                 if(!running || !joined || !microphone || deafened || token!=captureToken) return;
@@ -144,6 +151,7 @@ struct VoiceRuntime::Impl {
             if(skipped) { encoder->reset(); skipped=false; }
             capturedFrames+=audioFrames; signalLevel(item.pcm,rawPeak,rawClipped);
             if(echo) echo->process(item.pcm,item.at);
+            if(cleaner) cleaner->process(item.pcm);
             signalLevel(item.pcm,cleanPeak,cleanClipped);
             if(auto packet=encoder->push(item.pcm,item.at)) if(send) { send(std::move(*packet)); ++sentPackets; }
           }
@@ -164,7 +172,10 @@ struct VoiceRuntime::Impl {
               <<" voicePcmUnderflows="<<output.underflows<<" voicePcmCapacityDrops="<<output.capacityDrops
               <<" voicePcmStaleDrops="<<output.staleDrops<<" voicePcmReprimes="<<output.reprimes
               <<" voiceAecBlocks="<<aec.blocks<<" voiceAecMissingReference="<<aec.missingReference
-              <<" voiceAecDryBlocks="<<aec.dryBlocks<<" voiceAecResets="<<aec.resets<<'\n';
+              <<" voiceAecDryBlocks="<<aec.dryBlocks<<" voiceAecResets="<<aec.resets
+              <<" voiceRedundantFilled="<<mix.redundantFilled<<" voiceReserveMs="<<mix.reserveMs;
+            if(cleaner) { const auto clean=cleaner->stats(); line<<" voiceDenoisedFrames="<<clean.frames<<" voiceGatedBlocks="<<clean.gatedBlocks<<" voiceLimitedBlocks="<<clean.limitedBlocks; }
+            line<<'\n';
             const auto text=line.str(); std::fwrite(text.data(),1,text.size(),stdout); std::fflush(stdout);wakeGapWindowMax=0;
           }
         }

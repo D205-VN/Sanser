@@ -17,10 +17,18 @@ using Bytes=std::vector<std::uint8_t>;
 inline constexpr unsigned maxSpeakers=4,packetFrames=960;
 struct State { bool joined=false,microphone=false,deafened=false; };
 std::optional<State> command(const std::string& line);
-struct Packet { unsigned speaker=0; std::uint32_t epoch=0; std::uint64_t sequence=0; Bytes opus; };
+// `redundant` optionally carries the previous sequence's Opus payload (RED-
+// style time redundancy): one lost datagram is replaced by real speech from
+// the next one instead of a concealment guess.
+struct Packet { unsigned speaker=0; std::uint32_t epoch=0; std::uint64_t sequence=0; Bytes opus; Bytes redundant; };
+// SVO1: primary only, understood by every voice engine.
 Bytes pack(const Packet& packet);
+// SVO2: primary plus the previous payload. Send only to a peer that
+// advertised SVR1; older engines would not recognise it as voice.
+Bytes packRedundant(const Packet& packet);
 std::optional<Packet> unpack(std::span<const std::uint8_t> packet);
 bool isPacket(std::span<const std::uint8_t> packet);
+inline constexpr std::size_t maxPacketBytes=17+2+400+400;
 class Encoder {
 public:
   Encoder(); ~Encoder();
@@ -30,7 +38,7 @@ public:
 private:
   struct Impl; std::unique_ptr<Impl> impl_;
 };
-struct Stats { std::uint64_t decoded=0,concealed=0,fecAttempts=0,late=0,dropped=0,invalid=0,limitedFrames=0; };
+struct Stats { std::uint64_t decoded=0,concealed=0,fecAttempts=0,late=0,dropped=0,invalid=0,limitedFrames=0,redundantFilled=0; unsigned reserveMs=0; };
 // One decoder/reorder timeline per speaker and one shared output sample clock.
 // No global sequence number with screen sound, video, control or another talker.
 class Mixer {
