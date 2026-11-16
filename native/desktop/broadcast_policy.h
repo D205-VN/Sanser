@@ -21,7 +21,7 @@ public:
     if(!initialized_) { initialized_=true; previous_=sample; sampledAt_=now; return; }
     if(state_==Paused) {
       if(now>=retryAt_) {
-        state_=Probing; probeAt_=now; cleanFeedback_=0; delivered_=false;
+        state_=Probing; probeAt_=now; cleanFeedback_=0; delivered_=false; probePressure_=0;
         probeAfterFrame_=sample.sentFrame;
         previous_=sample; sampledAt_=now;
       }
@@ -32,14 +32,21 @@ public:
     if(now-sampledAt_>std::chrono::seconds(2)) { bad_=false; backoff_=false; cleanFeedback_=0; }
     const auto delta=[](auto current,auto old) { return current>=old ? current-old : 0; };
     const auto submitted=delta(sample.submitted,previous_.submitted);
-    const auto dropped=delta(sample.replaced,previous_.replaced)+delta(sample.referenceDrops,previous_.referenceDrops);
+    // Only queue overflow is evidence of a slow viewer. Reference drops are
+    // pictures we skip ourselves while the viewer waits for an IDR; counting
+    // them turned every recoverable Wi-Fi loss into a 5-30 s video pause.
+    // Persistent IDR waits are still handled by the backoff rule below.
+    const auto dropped=delta(sample.replaced,previous_.replaced);
     const bool localBad=submitted>=10 && (dropped*100>=submitted*35 || sample.queueDrops>previous_.queueDrops);
     const bool newFeedback=sample.feedbackFresh && sample.feedbackSerial>previous_.feedbackSerial;
     const bool recovered=newFeedback && !sample.feedbackCongested && sample.deliveredBytes>0 && sample.completedFrame>previous_.completedFrame;
     const bool pressure=localBad || (sample.feedbackFresh && sample.feedbackCongested);
     previous_=sample; sampledAt_=now;
     if(state_==Probing) {
-      if(pressure) { ++failedProbes_; pause(now,1); return; }
+      // The probe opens with an IDR burst, so one congested window is expected.
+      // Fail only on pressure in two consecutive samples.
+      if(pressure) { if(++probePressure_>=2) { ++failedProbes_; pause(now,1); } return; }
+      probePressure_=0;
       if(newFeedback) { ++cleanFeedback_; delivered_=delivered_ || sample.deliveredBytes>0; }
       if(delivered_ && sample.completedFrame>probeAfterFrame_ && cleanFeedback_>=3 && now-probeAt_>=std::chrono::milliseconds(1500)) {
         state_=Active; failedProbes_=0; bad_=false; backoff_=false; pauseReason_=0; return;
@@ -66,11 +73,12 @@ private:
   void pause(Clock::time_point now,unsigned reason) {
     pauseReason_=reason;
     state_=Paused; ++pauses_; bad_=false; backoff_=false;
-    retryAt_=now+std::chrono::seconds(std::min(30U,5U*(1U<<std::min(3U,failedProbes_))));
+    // 3, 6, then at most 10 s: a paused viewer shows a frozen picture.
+    retryAt_=now+std::chrono::seconds(std::min(10U,3U*(1U<<std::min(2U,failedProbes_))));
   }
   State state_=Active;
   bool initialized_=false, bad_=false, backoff_=false, delivered_=false;
-  unsigned failedProbes_=0, cleanFeedback_=0;
+  unsigned failedProbes_=0, cleanFeedback_=0, probePressure_=0;
   unsigned pauseReason_=0;
   std::uint64_t pauses_=0;
   std::uint64_t probeAfterFrame_=0;
