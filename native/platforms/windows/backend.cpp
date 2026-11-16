@@ -12,6 +12,7 @@
 #include <wmcodecdsp.h>
 #include <codecapi.h>
 #include <wrl/client.h>
+#include "nv12_convert.h"
 #include "transport.h"
 #include "clipboard.h"
 #include "windows_mac_clipboard.h"
@@ -150,16 +151,8 @@ Image convertNv12(const Nv12Image& source) {
       || source.pixels.size()<static_cast<std::size_t>(stride)*source.rows*3/2)
     throw std::runtime_error("Invalid NV12 display aperture");
   Image image{Bytes(static_cast<std::size_t>(width)*height*4),width,height,source.decodedAt};
-  const auto* data=source.pixels.data();
-  auto clamp=[](int n) { return static_cast<std::uint8_t>(std::clamp(n,0,255)); };
-  for(std::uint32_t y=0;y<height;++y) for(std::uint32_t x=0;x<width;++x) {
-    const auto px=x+source.left,py=y+source.top;
-    const int luminance=static_cast<int>(data[static_cast<std::size_t>(py)*stride+px])-16;
-    const auto uv=static_cast<std::size_t>(stride)*source.rows+static_cast<std::size_t>(py/2)*stride+(px&~1U);
-    const int u=static_cast<int>(data[uv])-128,v=static_cast<int>(data[uv+1])-128;
-    const auto offset=(static_cast<std::size_t>(y)*width+x)*4;
-    image.pixels[offset]=clamp((298*luminance+516*u+128)>>8); image.pixels[offset+1]=clamp((298*luminance-100*u-208*v+128)>>8); image.pixels[offset+2]=clamp((298*luminance+409*v+128)>>8); image.pixels[offset+3]=255;
-  }
+  // Banded across a few threads: this runs on every displayed frame.
+  convertNv12ToBgra(source.pixels.data(),stride,source.rows,source.left,source.top,width,height,image.pixels.data());
   return image;
 }
 void setDisplayAperture(IMFMediaType* type,Nv12Image& image,std::uint32_t codedWidth,std::uint32_t codedHeight) {
@@ -251,7 +244,9 @@ struct WindowState {
   std::set<std::uint16_t> capturedButtons;
   WheelInput wheel;
   bool macClipboardShortcuts=true;
-  bool macEditingShortcuts=false;
+  // On by default: a Windows user expects Ctrl+X/A/Z/S to work on a Mac.
+  // The window menu restores raw Control for Terminal and games.
+  bool macEditingShortcuts=true;
   std::function<bool()> macHost=[] {return false;};
   WindowPresenter presenter;
   std::weak_ptr<const Image> lastPresented;
@@ -734,7 +729,7 @@ int runWindows(bool host,int argc,char** argv) {
   if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); SetFocus(window); peer.start();
   if(options.input)if(auto menu=GetSystemMenu(window,FALSE)) {
     AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macClipboardCommand,L"Mac Copy/Paste (Ctrl+C / Ctrl+V)");
-    AppendMenuW(menu,MF_STRING|MF_GRAYED,WindowState::macEditingCommand,L"Use Windows editing shortcuts on Mac");
+    AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macEditingCommand,L"Use Windows editing shortcuts on Mac (Ctrl+X/A/Z/S…)");
   }
   ControllerSession controllerSession({
     [&]{return options.input && peer.inputAvailable() && peer.gamepadAvailable();},

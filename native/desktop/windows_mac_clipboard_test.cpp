@@ -15,6 +15,23 @@ int main() {try {
     auto copy=defaults.apply({Input::Key,0,0,6,0,true},true);
     check(copy.size()==3 && copy[1].code==227,"Default mode did not translate Copy");
   }
+  {
+    // The editing profile (the Windows viewer's default) covers the everyday
+    // Ctrl chords a Windows user expects on a Mac, and never Command+Q.
+    for(auto code:{4,5,9,12,17,18,19,21,22,23,24,26,27,29}) {
+      WindowsMacClipboard editing;
+      editing.apply({Input::Key,0,0,224,0,true},true,true);
+      const auto mapped=editing.apply({Input::Key,0,0,static_cast<std::uint16_t>(code),0,true},true,true);
+      check(mapped.size()==3 && mapped[0].code==224 && !mapped[0].down && mapped[1].code==227 && mapped[1].down && mapped[2].code==code,
+        "Editing profile did not send a Windows Ctrl chord as Command");
+    }
+    for(auto code:{20,28,7}) { // Q, Y, D stay physical Control.
+      WindowsMacClipboard editing;
+      editing.apply({Input::Key,0,0,224,0,true},true,true);
+      const auto raw=editing.apply({Input::Key,0,0,static_cast<std::uint16_t>(code),0,true},true,true);
+      check(raw.size()==1 && raw[0].code==code,"Editing profile remapped a chord it must leave alone");
+    }
+  }
   WheelInput wheel;
   for(unsigned i=0;i<3;++i)check(wheel.steps(0,30)==0,"High-resolution wheel emitted too soon");
   check(wheel.steps(0,30)==1 && wheel.steps(1,-60)==0 && wheel.steps(0,60)==0 && wheel.steps(1,-60)==-1 && wheel.steps(0,60)==1,"Wheel axes lost signed fractions or shared remainders");
@@ -43,7 +60,7 @@ int main() {try {
     auto events=key(6,true);check(events.size()==1 && events[0].code==6,"Shift/Alt/Command chord was remapped");
   }
   mapper.apply(Input{},true,true);key(224,true);
-  auto events=key(5,true);check(events.size()==1 && events[0].code==5,"Unrelated Control chord changed");
+  auto events=key(7,true);check(events.size()==1 && events[0].code==7,"Unrelated Control chord changed");
   mapper.apply(Input{},true,true);key(224,true);key(225,true);events=key(29,true);
   check(events.size()==3 && events[1].code==227 && events[1].down && events[2].code==29,"Ctrl+Shift+Z did not become Mac redo");
   mapper.apply(Input{},true,true);key(224,true);key(25,true);

@@ -39,8 +39,15 @@ public:
       return result;
     }
     const auto editingKey=[editing](unsigned code) {
-      return code==6 || code==25 || (editing && (code==4 || code==9 || code==22 || code==26 || code==27 || code==29));
-    }; // A/C/F/S/V/W/X/Z, plus Shift+Z for native Mac redo.
+      if(code==6 || code==25) return true;
+      if(!editing) return false;
+      switch(code) {
+        case 4: case 5: case 9: case 12: case 17: case 18: case 19: case 21:
+        case 22: case 23: case 24: case 26: case 27: case 29: return true;
+        default: return false;
+      }
+    }; // C/V always; with editing A/B/F/I/N/O/P/R/S/T/U/W/X/Z, plus Shift+Z
+       // for native Mac redo. Never Q: Command+Q would quit the remote app.
     bool plainControl=held_.contains(224) || held_.contains(228);
     for(auto code:held_) if(code!=224 && code!=228 && !editingKey(code) && !(editing && input.code==29 && (code==225 || code==229))) plainControl=false;
     if(macHost && input.down && editingKey(input.code) && plainControl) {
