@@ -67,7 +67,7 @@ microphone. Capture converts/resamples to 48 kHz and hands bounded 5 ms PCM bloc
 to a voice worker; real-time device callbacks do not encode or send network data.
 
 Each talker owns one mono Opus speech encoder (64 kbps fullband, complexity 10,
-20 ms / 960 samples, constrained VBR, in-band FEC requested, DTX). 2.3.11 raised
+20 ms / 960 samples, constrained VBR, in-band FEC requested, DTX). 2.3.12 raised
 this from 32 kbps, matching common voice-chat defaults; a packet stays well
 under the 400-byte limit. There is no third-party voice service,
 new listening port, cloud recording, or extra codec installation. No microphone
