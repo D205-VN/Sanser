@@ -15,6 +15,7 @@
   NSPoint _candidateAnchor;
   std::uint32_t _compositionGeneration;
   std::set<std::uint16_t> _textKeys, _textModifiers;
+  id _commandKeyUpMonitor;
 }
 @property(nonatomic,assign) sanser::desktop::Peer* peer;
 @property(nonatomic,assign) BOOL inputEnabled;

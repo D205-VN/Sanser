@@ -26,6 +26,21 @@ bool navigation(std::uint16_t hid) {
 
 @implementation SanserSnv2RemoteView
 @synthesize inputEnabled=_inputEnabled, released=_released;
+// AppKit does not deliver keyUp to a view while Command is held, so a key
+// pressed inside a Command chord was sent down and never released on the
+// host. A local monitor sees every dequeued keyUp; route those to keyUp:.
+- (void)viewDidMoveToWindow {
+  [super viewDidMoveToWindow];
+  if(_commandKeyUpMonitor) { [NSEvent removeMonitor:_commandKeyUpMonitor]; _commandKeyUpMonitor=nil; }
+  if(!self.window) return;
+  __weak SanserSnv2RemoteView* weakSelf=self;
+  _commandKeyUpMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp handler:^NSEvent*(NSEvent* event) {
+    SanserSnv2RemoteView* view=weakSelf;
+    if(view && event.window==view.window && (event.modifierFlags&NSEventModifierFlagCommand)) [view keyUp:event];
+    return event;
+  }];
+}
+- (void)dealloc { if(_commandKeyUpMonitor) [NSEvent removeMonitor:_commandKeyUpMonitor]; }
 - (BOOL)acceptsFirstResponder { return self.inputEnabled; }
 - (BOOL)textMode { return _textMode; }
 - (BOOL)unicodeAvailable { return self.inputEnabled && !self.released && self.window.isKeyWindow && NSApp.active && self.peer && self.peer->inputAvailable() && self.peer->textAvailable(); }

@@ -9019,6 +9019,18 @@ int runVideoRenderTcp(std::uint16_t port,
                                                                          [view clearActiveMouseButtons];
                                                                          restoreRelativeMouseGrab();
                                                                        }];
+    // AppKit does not deliver keyUp to the view while Command is held. Keys
+    // pressed inside a Command chord (Cmd+Z, Cmd+S, Cmd+arrow...) were sent
+    // down to the host but never up, leaving them stuck. Local monitors see
+    // every dequeued keyUp, so forward those here. A duplicate release is
+    // harmless on the host.
+    id commandKeyUpMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyUp handler:^NSEvent*(NSEvent* event) {
+      if (event.window == window && ([event modifierFlags] & NSEventModifierFlagCommand) &&
+          !([event keyCode] == kOverlayShortcutKeyCode && gOverlayShortcutDown)) {
+        logKeyEvent("key-up", event);
+      }
+      return event;
+    }];
     id activeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidBecomeActiveNotification
                                                                           object:nil
                                                                            queue:[NSOperationQueue mainQueue]
@@ -9119,6 +9131,7 @@ int runVideoRenderTcp(std::uint16_t port,
               << "\n";
     [NSApp run];
     [[NSNotificationCenter defaultCenter] removeObserver:resignObserver];
+    [NSEvent removeMonitor:commandKeyUpMonitor];
     [[NSNotificationCenter defaultCenter] removeObserver:activeObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:gamepadConnectObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:gamepadDisconnectObserver];
