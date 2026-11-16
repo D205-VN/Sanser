@@ -66,8 +66,10 @@ WASAPI eCapture/eCommunications on Windows. Neither path uses system loopback as
 microphone. Capture converts/resamples to 48 kHz and hands bounded 5 ms PCM blocks
 to a voice worker; real-time device callbacks do not encode or send network data.
 
-Each talker owns one mono Opus speech encoder (32 kbps, 20 ms / 960 samples,
-constrained VBR, in-band FEC requested, DTX). There is no third-party voice service,
+Each talker owns one mono Opus speech encoder (64 kbps fullband, complexity 10,
+20 ms / 960 samples, constrained VBR, in-band FEC requested, DTX). 2.3.11 raised
+this from 32 kbps, matching common voice-chat defaults; a packet stays well
+under the 400-byte limit. There is no third-party voice service,
 new listening port, cloud recording, or extra codec installation. No microphone
 PCM or encoded speech is written to diagnostics or disk by this feature.
 

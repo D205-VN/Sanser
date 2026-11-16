@@ -58,13 +58,15 @@ struct Encoder::Impl {
 Encoder::Encoder():impl_(std::make_unique<Impl>()) {
   int error=0; impl_->codec=opus_encoder_create(48000,1,OPUS_APPLICATION_VOIP,&error);
   if(error!=OPUS_OK || !impl_->codec) throw std::runtime_error("Unable to create voice Opus encoder");
-  if(opus_encoder_ctl(impl_->codec,OPUS_SET_BITRATE(32000))!=OPUS_OK
+  if(opus_encoder_ctl(impl_->codec,OPUS_SET_BITRATE(64000))!=OPUS_OK
       || opus_encoder_ctl(impl_->codec,OPUS_SET_VBR(1))!=OPUS_OK
       || opus_encoder_ctl(impl_->codec,OPUS_SET_VBR_CONSTRAINT(1))!=OPUS_OK
       || opus_encoder_ctl(impl_->codec,OPUS_SET_INBAND_FEC(1))!=OPUS_OK
       || opus_encoder_ctl(impl_->codec,OPUS_SET_PACKET_LOSS_PERC(10))!=OPUS_OK
       || opus_encoder_ctl(impl_->codec,OPUS_SET_DTX(1))!=OPUS_OK
-      || opus_encoder_ctl(impl_->codec,OPUS_SET_COMPLEXITY(5))!=OPUS_OK)
+      || opus_encoder_ctl(impl_->codec,OPUS_SET_COMPLEXITY(10))!=OPUS_OK
+      || opus_encoder_ctl(impl_->codec,OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND))!=OPUS_OK
+      || opus_encoder_ctl(impl_->codec,OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE))!=OPUS_OK)
     throw std::runtime_error("Unable to configure voice Opus encoder");
   reset();
 }
