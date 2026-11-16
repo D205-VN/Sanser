@@ -60,6 +60,8 @@ public:
     if(input.down) restore();
     result.push_back(std::move(input)); return result;
   }
+  // True while a Control chord is being sent as Command.
+  bool commandActive() const { return command_; }
 private:
   bool macHost_=false,command_=false,editing_=false;
   std::set<std::uint16_t> held_,mapped_;

@@ -16,6 +16,7 @@
 #include "transport.h"
 #include "clipboard.h"
 #include "windows_mac_clipboard.h"
+#include "clipboard_paste_gate.h"
 #include "wheel_input.h"
 #include "telemetry.h"
 #include "broadcast.h"
@@ -37,6 +38,8 @@
 #include "mf_video_packet_encoder.h"
 #include <algorithm>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -687,12 +690,43 @@ int runWindows(bool host,int argc,char** argv) {
   }
   Peer peer(options);peer.onClipboard=platformClipboard; WindowState state; WindowsMacClipboard clipboardKeys;
   state.macHost=[&]{return peer.macHost();};
+  // Text clipboard follows the Mac editing chords: Ctrl+V first copies the
+  // Windows text to the Mac, Ctrl+C/X brings the Mac text back afterwards.
+  // Callbacks run on detached clipboard/peer threads and may outlive this
+  // function, so they only touch this shared state, guarded by its mutex.
+  struct ClipboardSync {
+    std::mutex mutex; Peer* peer=nullptr; HWND window=nullptr;
+    ClipboardPasteGate gate;
+    void wake() { std::lock_guard lock(mutex); if(window) PostMessageW(window,WM_NULL,0,0); }
+  };
+  const auto clipboardSync=std::make_shared<ClipboardSync>();
+  clipboardSync->peer=&peer;
+  struct ClipboardSyncStop { std::shared_ptr<ClipboardSync> sync; ~ClipboardSyncStop() { std::lock_guard lock(sync->mutex); sync->peer=nullptr; sync->window=nullptr; } } clipboardSyncStop{clipboardSync};
+  std::optional<Clock::time_point> macClipboardReadAt;
   std::uint32_t keyboardGeneration=0;
   state.sendInput=[&](Input input) {
     if(input.kind==Input::Reset && state.controller)state.controller->stop();
     const auto generation=peer.remoteGeneration();
     if(generation!=keyboardGeneration) { (void)clipboardKeys.apply(Input{},false); keyboardGeneration=generation; }
-    for(const auto& event:clipboardKeys.apply(std::move(input),peer.macHost() && state.macClipboardShortcuts,state.macEditingShortcuts)) peer.input(event);
+    const bool copyRelease=clipboardKeys.commandActive() && input.kind==Input::Key && !input.down && (input.code==6 || input.code==27);
+    auto batch=clipboardKeys.apply(std::move(input),peer.macHost() && state.macClipboardShortcuts,state.macEditingShortcuts);
+    if(copyRelease && peer.clipboardAvailable()) macClipboardReadAt=Clock::now()+std::chrono::milliseconds(250);
+    if(peer.clipboardAvailable() && !clipboardSync->gate.waiting() && ClipboardPasteGate::startsPaste(batch,clipboardKeys.commandActive())) {
+      const auto ticket=clipboardSync->gate.hold(std::move(batch),Clock::now());
+      const std::weak_ptr<ClipboardSync> weak=clipboardSync;
+      const auto finish=[weak,ticket] { if(const auto sync=weak.lock()) { sync->gate.complete(ticket); sync->wake(); } };
+      platformClipboard(false,{},[] { return true; },[weak,finish](unsigned status,std::string text) {
+        const auto sync=weak.lock(); if(!sync) return;
+        bool queued=false;
+        if(status==0 && !text.empty()) {
+          std::lock_guard lock(sync->mutex);
+          if(sync->peer) queued=sync->peer->clipboard(true,text,[finish](unsigned,std::string) { finish(); });
+        }
+        if(!queued) finish();
+      });
+      return;
+    }
+    for(const auto& event:clipboardSync->gate.route(std::move(batch))) peer.input(event);
   }; state.viewOnly=!options.input;
   VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State value) { peer.setVoiceState(value); });
   VoicePanel voicePanel(options.groupVoice,voice);
@@ -727,6 +761,7 @@ int runWindows(bool host,int argc,char** argv) {
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
   HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
   if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); SetFocus(window); peer.start();
+  { std::lock_guard lock(clipboardSync->mutex); clipboardSync->window=window; }
   if(options.input)if(auto menu=GetSystemMenu(window,FALSE)) {
     AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macClipboardCommand,L"Mac Copy/Paste (Ctrl+C / Ctrl+V)");
     AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macEditingCommand,L"Use Windows editing shortcuts on Mac (Ctrl+X/A/Z/S…)");
@@ -778,6 +813,13 @@ int runWindows(bool host,int argc,char** argv) {
       if(state.textInput) state.textInput->cancel();
       if(GetCapture()==window) ReleaseCapture();
       SetWindowTextW(window,state.inputPaused ? peer.capturePaused() ? L"Sanser · Host capture temporarily unavailable · Check UAC on the host" : L"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists" : L"Sanser · Input restored · Click to resume");
+    }
+    for(const auto& event:clipboardSync->gate.release(Clock::now())) peer.input(event);
+    if(macClipboardReadAt && Clock::now()>=*macClipboardReadAt) {
+      macClipboardReadAt.reset();
+      if(peer.clipboardAvailable()) (void)peer.clipboard(false,{},[](unsigned status,std::string text) {
+        if(status==0 && !text.empty()) platformClipboard(true,std::move(text),[] { return true; },[](unsigned,std::string) {});
+      });
     }
     if(state.controller)state.controller->refresh();
     if(state.textInput) state.textInput->refresh();

@@ -1,4 +1,5 @@
 #include "windows_mac_clipboard.h"
+#include "clipboard_paste_gate.h"
 #include "wheel_input.h"
 #include <iostream>
 #include <stdexcept>
@@ -75,6 +76,29 @@ int main() {try {
   check(key(224,false).empty(),"One-sided Control release disturbed mapped chord");
   events=key(25,false);
   check(events.size()==3 && events[1].code==227 && !events[1].down && events[2].code==228 && events[2].down,"Both Control sides did not restore independently");
-  std::cout<<"Windows-to-Mac copy/paste: modifier sides, repeats, reset, native chords and host identity passed\n";
+  {
+    // Ctrl+V on a Mac host waits for the Windows text to reach the Mac.
+    WindowsMacClipboard paste; ClipboardPasteGate gate; const auto t0=ClipboardPasteGate::Clock::now();
+    const auto down=[&](std::uint16_t code,bool isDown) { return paste.apply({Input::Key,0,0,code,0,isDown},true,false); };
+    check(gate.route(down(224,true)).size()==1,"Control alone must pass through");
+    auto chord=down(25,true);
+    check(ClipboardPasteGate::startsPaste(chord,paste.commandActive()),"Command+V was not recognised as a paste");
+    const auto ticket=gate.hold(std::move(chord),t0);
+    check(gate.route(down(25,false)).empty() && gate.route(down(224,false)).empty(),"Input after a pending paste overtook it");
+    check(gate.release(t0+std::chrono::milliseconds(100)).empty(),"Paste released before the clipboard write");
+    gate.complete(ticket+1);
+    check(gate.release(t0+std::chrono::milliseconds(100)).empty(),"A stale completion released the paste");
+    gate.complete(ticket);
+    const auto released=gate.release(t0+std::chrono::milliseconds(120));
+    // Control up, Command down, V down, then the queued V up / Command up.
+    check(released.size()>=5 && released[0].code==224 && !released[0].down && released[1].code==227 && released[1].down &&
+      released[2].code==25 && released[2].down && released[3].code==25 && !released[3].down,"Held paste lost order");
+    check(!gate.waiting() && gate.route(down(4,true)).size()==1,"Gate stayed closed after release");
+    gate.hold({{Input::Key,0,0,25,0,true}},t0);
+    check(gate.release(t0+ClipboardPasteGate::timeout).size()==1,"A failed clipboard write must not block typing");
+    WindowsMacClipboard plain; auto ctrlV=(plain.apply({Input::Key,0,0,224,0,true},false),plain.apply({Input::Key,0,0,25,0,true},false));
+    check(!ClipboardPasteGate::startsPaste(ctrlV,plain.commandActive()),"Windows host paste must not wait for a Mac clipboard");
+  }
+  std::cout<<"Windows-to-Mac copy/paste: modifier sides, repeats, reset, native chords, host identity and clipboard-synced paste passed\n";
   return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
