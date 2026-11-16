@@ -1,6 +1,7 @@
 #include "opus_audio.h"
 #include <cmath>
 #include <atomic>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 using namespace sanser::audio;
@@ -35,11 +36,14 @@ int main() {
   check(plcSignal,"Packet loss concealment was replaced by silence");
   auto recovered=jitter.poll(now+std::chrono::milliseconds(30)); check(recovered && recovered->sequence==5 && !recovered->concealed,"Audio did not resume after PLC");
   check(!jitter.push(packets[3],now+std::chrono::milliseconds(31)),"Expired audio replayed after PLC");
-  for(unsigned i=0;i<6;++i) check(jitter.poll(now+std::chrono::milliseconds(35+i*5)).has_value(),"Bounded PLC ended early");
-  check(!jitter.poll(now+std::chrono::milliseconds(65)),"PLC continued indefinitely after source stopped");
-  check(!jitter.push(packets[3],now+std::chrono::milliseconds(70)),"Retired audio replayed after PLC became idle");
+  check(jitter.reserveMs()==20,"A late packet must grow the playout reserve");
+  // Two stretch blocks for the grown reserve, then at most six PLC blocks.
+  for(unsigned i=0;i<8;++i) check(jitter.poll(now+std::chrono::milliseconds(35+i*5)).has_value(),"Bounded PLC ended early");
+  check(!jitter.poll(now+std::chrono::milliseconds(75)),"PLC continued indefinitely after source stopped");
+  check(!jitter.push(packets[3],now+std::chrono::milliseconds(80)),"Retired audio replayed after PLC became idle");
   jitter.reset(); check(jitter.push(packets[0],now+std::chrono::seconds(1)),"Restart sequence rejected");
-  auto fresh=jitter.poll(now+std::chrono::seconds(1)+std::chrono::milliseconds(10)); check(fresh && fresh->sequence==1 && !fresh->concealed,"Restart retained old decoder sequence");
+  check(!jitter.poll(now+std::chrono::seconds(1)+std::chrono::milliseconds(10)),"Restart ignored the learned reserve");
+  auto fresh=jitter.poll(now+std::chrono::seconds(1)+std::chrono::milliseconds(20)); check(fresh && fresh->sequence==1 && !fresh->concealed,"Restart retained old decoder sequence");
   Jitter stalled; stalled.push(packets[0],now); check(!stalled.poll(now+std::chrono::milliseconds(50)),"Stale audio survived 40ms age limit");
   Jitter backlog;
   backlog.push(packets[0],now); backlog.push(packets[1],now);
@@ -55,6 +59,38 @@ int main() {
     backlog.push(packets[i],at);
     auto block=backlog.poll(at);
     check(block && block->sequence==i+1 && !block->concealed,"Fresh audio remained stuck behind an expired backlog");
+  }
+  {
+    // Wi-Fi jitter: every 4th block arrives 25ms late. A fixed 10ms reserve
+    // concealed each of them; the adaptive reserve stops concealing.
+    Jitter wifi; unsigned lateAfterWarmup=0;
+    const auto make=[&](unsigned i) { return Packet{i+1,std::uint64_t{i}*frames,0,packets[i%40].payload}; };
+    auto arrival=[&](unsigned i) { return now+std::chrono::milliseconds(i*5+(i%4==3 ? 25 : 0)); };
+    std::vector<std::pair<Jitter::Clock::time_point,unsigned>> schedule;
+    for(unsigned i=0;i<600;++i) schedule.push_back({arrival(i),i});
+    std::sort(schedule.begin(),schedule.end());
+    std::size_t next=0; auto clock=now;
+    for(unsigned tick=0;tick<3200;++tick,clock+=std::chrono::milliseconds(1)) {
+      while(next<schedule.size() && schedule[next].first<=clock) {
+        const auto before=wifi.stats().late; wifi.push(make(schedule[next].second),clock);
+        if(schedule[next].second>=300 && wifi.stats().late>before) ++lateAfterWarmup; ++next;
+      }
+      (void)wifi.poll(clock);
+    }
+    check(wifi.reserveMs()>=30 && lateAfterWarmup==0,"Adaptive reserve did not absorb periodic 25ms jitter");
+    // A calm path gives the delay back gradually, without PLC.
+    Jitter calm; calm.push(packets[0],now);
+    for(unsigned i=0;i<4;++i) (void)calm.poll(now+std::chrono::milliseconds(10+i*5));
+    calm.push(packets[1],now+std::chrono::milliseconds(30));
+    const auto grown=calm.reserveMs(); check(grown>10,"Late arrival did not grow the reserve");
+    Jitter::Clock::time_point t=now+std::chrono::seconds(10); calm.reset();
+    std::uint64_t base=0;
+    for(unsigned i=0;i<3;++i) calm.push(packets[i],t);
+    for(unsigned i=0;i<2000 && calm.reserveMs()==grown;++i,t+=std::chrono::milliseconds(5)) {
+      calm.push({packets[0].sequence+base+3+i,(base+3+i)*frames,0,packets[(i+3)%40].payload},t);
+      (void)calm.poll(t);
+    }
+    check(calm.reserveMs()==grown-5,"Calm playout did not shrink the reserve");
   }
   Samples silence{}; Encoder quiet; Jitter silent;
   check(silent.push({1,0,0,quiet.encode(silence)},now),"Valid Opus silence/mono coding rejected for stereo output");

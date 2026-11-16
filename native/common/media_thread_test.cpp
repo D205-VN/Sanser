@@ -13,12 +13,14 @@ int main(){try{
 #ifdef __APPLE__
     qos_class_t qos=QOS_CLASS_UNSPECIFIED;int relative=0;
     verified=pthread_get_qos_class_np(pthread_self(),&qos,&relative)==0 && qos==QOS_CLASS_USER_INTERACTIVE;
+#elif defined(_WIN32)
+    verified=GetThreadPriority(GetCurrentThread())==THREAD_PRIORITY_HIGHEST;
 #else
     verified=true;
 #endif
   });
   worker.join();
   if(!applied || !verified)throw std::runtime_error("media worker remained in inherited background QoS");
-  std::cout<<"Media thread scheduling: explicit interactive QoS on Apple, existing policy elsewhere\n";
+  std::cout<<"Media thread scheduling: interactive QoS on Apple, highest thread priority on Windows\n";
   return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

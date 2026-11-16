@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <avrt.h>
 #include <ks.h>
 #include <ksmedia.h>
 #include <wrl/client.h>
@@ -70,7 +71,9 @@ struct MicrophoneCapture::State {
        wave.nBlockAlign!=wave.nChannels*(wave.wBitsPerSample/8)) throw std::runtime_error("Unsupported microphone mix format");
     // Capture endpoint, never AUDCLNT_STREAMFLAGS_LOOPBACK: this stream must
     // contain only the selected microphone, not remote voice/system playback.
-    check(client->Initialize(AUDCLNT_SHAREMODE_SHARED,AUDCLNT_STREAMFLAGS_EVENTCALLBACK,200000,0,format.value,nullptr),"Initialize microphone");
+    // 100 ms endpoint buffer (was 20 ms): a capture thread delayed by a busy
+    // video decoder overflowed it, dropping samples heard as crackle by others.
+    check(client->Initialize(AUDCLNT_SHAREMODE_SHARED,AUDCLNT_STREAMFLAGS_EVENTCALLBACK,1000000,0,format.value,nullptr),"Initialize microphone");
     Event event;
     if(!event.value) throw std::runtime_error("Microphone event");
     check(client->SetEventHandle(event.value),"Microphone event handle");
@@ -83,6 +86,9 @@ struct MicrophoneCapture::State {
     });
     std::vector<float> stereo;
     if(!running) return;
+    DWORD mmcssIndex=0; HANDLE mmcss=AvSetMmThreadCharacteristicsW(L"Pro Audio",&mmcssIndex);
+    if(mmcss) AvSetMmThreadPriority(mmcss,AVRT_PRIORITY_HIGH);
+    struct Mmcss { HANDLE task; ~Mmcss() { if(task) AvRevertMmThreadCharacteristics(task); } } revert{mmcss};
     check(client->Start(),"Start microphone"); Stop stop{client.Get()};
     report("running");
     auto deviceCheck=Clock::now();

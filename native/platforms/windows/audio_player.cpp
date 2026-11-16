@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
+#include <avrt.h>
 #include <wrl/client.h>
 #include "audio_player.h"
 #include "audio_playout.h"
@@ -20,6 +21,14 @@ struct ComRuntime {
   ~ComRuntime() { CoUninitialize(); }
 };
 struct AudioStop { IAudioClient* client; ~AudioStop() { client->Stop(); } };
+// Register the render thread with MMCSS like other Windows audio apps. Without
+// it a busy video decoder could delay the 10 ms refill and the device played
+// a gap, heard as stutter/crackle in system sound and group voice.
+struct ProAudioThread {
+  HANDLE task=nullptr; DWORD index=0;
+  ProAudioThread() { task=AvSetMmThreadCharacteristicsW(L"Pro Audio",&index); if(task) AvSetMmThreadPriority(task,AVRT_PRIORITY_HIGH); }
+  ~ProAudioThread() { if(task) AvRevertMmThreadCharacteristics(task); }
+};
 struct AudioEvent { HANDLE value=CreateEventW(nullptr,FALSE,FALSE,nullptr); ~AudioEvent() { if(value) CloseHandle(value); } };
 std::wstring endpointId(IMMDevice* device) {
   LPWSTR value=nullptr; checkAudio(device->GetId(&value),"Audio endpoint ID");
@@ -31,6 +40,7 @@ AudioPlayer::~AudioPlayer() { running_=false; if(worker_.joinable()) worker_.joi
 void AudioPlayer::run() {
   // Endpoint activation, rendering and COM teardown all stay on this worker.
   // USB/Bluetooth removal must not stop video or the authenticated input peer.
+  ProAudioThread priority;
   while(running_) {
     try {
       ComRuntime com;
@@ -53,7 +63,9 @@ void AudioPlayer::run() {
       ComPtr<IAudioRenderClient> render;
       checkAudio(client->GetService(IID_PPV_ARGS(&render)),"Audio renderer");
       queue_.clear();
-      const auto targetFrames=std::min<UINT32>(capacity,audioFrames*4);
+      // 30 ms of device-side cushion (was 20 ms): one late wake no longer
+      // drains the endpoint buffer during a 10 ms shared-mode period.
+      const auto targetFrames=std::min<UINT32>(capacity,audioFrames*6);
       BYTE* prime=nullptr; checkAudio(render->GetBuffer(targetFrames,&prime),"Prime audio output");
       checkAudio(render->ReleaseBuffer(targetFrames,AUDCLNT_BUFFERFLAGS_SILENT),"Submit priming silence");
       checkAudio(client->Start(),"Start audio output"); AudioStop stop{client.Get()};
@@ -64,7 +76,7 @@ void AudioPlayer::run() {
       while(running_) {
         UINT32 padding=0; checkAudio(client->GetCurrentPadding(&padding),"Audio output padding");
         // Device events replace sleep_for(2ms), which can oversleep a whole
-        // Windows timer tick. Refill all available blocks up to 20ms, so a
+        // Windows timer tick. Refill all available blocks up to 30ms, so a
         // normal 10ms device period cannot underrun a one-block 5ms queue.
         while(padding+audioFrames<=targetFrames) {
           auto samples=queue_.popBlock(); BYTE* target=nullptr;

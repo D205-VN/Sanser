@@ -44,7 +44,11 @@ struct Decoded { Samples samples; std::uint64_t sequence=0,unixMicros=0,generati
 struct Stats { std::uint64_t decoded=0,concealed=0,late=0,reordered=0,dropped=0,errors=0,freshnessResets=0; };
 
 // Pure playout policy, called under ReceiveWorker's mutex (or with a virtual
-// clock in tests). 10ms reorder reserve, 40ms freshness, <=30ms consecutive PLC.
+// clock in tests). Adaptive 10-60ms reserve, reserve+30ms freshness, <=30ms
+// consecutive PLC. A packet arriving after its slot was concealed grows the
+// reserve by 10ms (two extra PLC blocks, no skipped audio); 8s without late
+// packets shrinks it by 5ms by skipping one buffered block.
+// Measured: on Wi-Fi a fixed 10ms reserve concealed 8-27 of 200 blocks/s.
 class Jitter {
 public:
   using Clock=std::chrono::steady_clock;
@@ -53,13 +57,18 @@ public:
   void reset();
   Stats stats() const { return stats_; }
   bool active() const { return started_ || !packets_.empty(); }
+  unsigned reserveMs() const { return reserveMs_; }
+  static constexpr unsigned minReserveMs=10,maxReserveMs=60;
 private:
+  void late(Clock::time_point now);
   struct Entry { Packet packet; Clock::time_point received; };
   Decoder decoder_;
   std::map<std::uint64_t,Entry> packets_;
   Clock::time_point first_{},due_{};
   std::uint64_t expected_=0,lastSequence_=0,lastUnix_=0;
   unsigned missing_=0; bool started_=false;
+  unsigned reserveMs_=minReserveMs,stretch_=0;
+  Clock::time_point lastLate_{},lastGrow_{},lastShrink_{};
   Stats stats_;
 };
 class ReceiveWorker {

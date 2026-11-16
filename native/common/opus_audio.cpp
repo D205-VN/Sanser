@@ -55,7 +55,7 @@ bool Jitter::push(Packet packet,Clock::time_point now) {
   if(!packet.sequence || packet.sequence>UINT64_MAX/frames || packet.timestamp!=(packet.sequence-1)*frames ||
      packet.payload.empty() || packet.payload.size()>1000 ||
      opus_packet_get_nb_samples(packet.payload.data(),static_cast<opus_int32>(packet.payload.size()),rate)!=frames) { ++stats_.errors; return false; }
-  if(packet.sequence<=lastSequence_ || (started_ && packet.sequence<expected_)) { ++stats_.late; return false; }
+  if(packet.sequence<=lastSequence_ || (started_ && packet.sequence<expected_)) { ++stats_.late; late(now); return false; }
   if(packets_.contains(packet.sequence)) return false;
   if(!packets_.empty() && packet.sequence<packets_.rbegin()->first) ++stats_.reordered;
   if(packets_.empty() && !started_) first_=now;
@@ -63,9 +63,17 @@ bool Jitter::push(Packet packet,Clock::time_point now) {
   if(packets_.size()>12) { stats_.dropped+=packets_.size()-3; while(packets_.size()>3) packets_.erase(packets_.begin()); started_=false; decoder_.reset(); first_=now; }
   return true;
 }
+void Jitter::late(Clock::time_point now) {
+  lastLate_=now;
+  // One jitter episode often delivers several late blocks together.
+  if(now-lastGrow_<std::chrono::milliseconds(200) || reserveMs_>=maxReserveMs) return;
+  lastGrow_=now; reserveMs_=std::min(maxReserveMs,reserveMs_+10);
+  if(started_) stretch_+=2;
+}
 std::optional<Decoded> Jitter::poll(Clock::time_point now) {
   bool expired=false;
-  while(!packets_.empty() && now-packets_.begin()->second.received>std::chrono::milliseconds(40)) { packets_.erase(packets_.begin()); ++stats_.dropped; expired=true; }
+  const auto freshness=std::chrono::milliseconds(reserveMs_+30);
+  while(!packets_.empty() && now-packets_.begin()->second.received>freshness) { packets_.erase(packets_.begin()); ++stats_.dropped; expired=true; }
   if(expired) {
     ++stats_.freshnessResets;
     // These samples were deliberately retired, not lost on the wire. Keeping
@@ -77,10 +85,22 @@ std::optional<Decoded> Jitter::poll(Clock::time_point now) {
   }
   if(started_ && now-due_>std::chrono::milliseconds(40)) { started_=false; decoder_.reset(); first_=now; }
   if(!started_) {
-    if(packets_.empty() || now-first_<std::chrono::milliseconds(10)) return {};
-    expected_=packets_.begin()->first; due_=now; missing_=0; started_=true;
+    if(packets_.empty() || now-first_<std::chrono::milliseconds(reserveMs_)) return {};
+    expected_=packets_.begin()->first; due_=now; missing_=0; started_=true; stretch_=0;
   }
   if(now<due_) return {};
+  if(stretch_) {
+    // Grow the playout delay without discarding audio: conceal in place.
+    --stretch_; due_+=std::chrono::milliseconds(5);
+    Decoded out{}; out.sequence=lastSequence_; out.unixMicros=lastUnix_;
+    out.samples=decoder_.conceal(); out.concealed=true; return out;
+  }
+  if(reserveMs_>minReserveMs && now-lastLate_>=std::chrono::seconds(8) && now-lastShrink_>=std::chrono::seconds(8) &&
+     packets_.size()>=2 && packets_.contains(expected_)) {
+    // Calm path: give back 5ms by skipping one buffered block.
+    lastShrink_=now; reserveMs_-=5;
+    packets_.erase(expected_); lastSequence_=expected_; ++expected_; ++stats_.dropped;
+  }
   Decoded out{}; out.sequence=expected_;
   const auto it=packets_.find(expected_);
   if(it!=packets_.end()) {
@@ -96,7 +116,7 @@ std::optional<Decoded> Jitter::poll(Clock::time_point now) {
   }
   lastSequence_=expected_; lastUnix_=out.unixMicros; ++expected_; due_+=std::chrono::milliseconds(5); return out;
 }
-void Jitter::reset() { packets_.clear(); decoder_.reset(); started_=false; expected_=lastSequence_=lastUnix_=0; missing_=0; first_=due_={}; }
+void Jitter::reset() { packets_.clear(); decoder_.reset(); started_=false; expected_=lastSequence_=lastUnix_=0; missing_=0; first_=due_={}; stretch_=0; }
 ReceiveWorker::ReceiveWorker(Sink sink):sink_(std::move(sink)),worker_([this] { run(); }) {}
 ReceiveWorker::~ReceiveWorker() { { std::lock_guard lock(mutex_); stopped_=true; } wake_.notify_all(); if(worker_.joinable()) worker_.join(); }
 bool ReceiveWorker::push(Packet packet,std::uint64_t generation) {
