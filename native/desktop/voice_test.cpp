@@ -1,5 +1,6 @@
 #include "broadcast.h"
 #include "tx_scheduler.h"
+#include "voice_capture_policy.h"
 #include <opus.h>
 #include <array>
 #include <cmath>
@@ -216,6 +217,14 @@ int main() {
     }
     require(viewers[0].total()==legacyBefore,"old/nonvoice viewers receive no voice payload");
     group.stop();
+    {
+      // A Mac microphone stamps blocks with device time ~30-50 ms in the past.
+      // That latency alone must not discard speech; a real backlog still does.
+      using C=std::chrono::steady_clock; const auto now=C::now();
+      require(!v::staleCapture(now-std::chrono::milliseconds(45),now-std::chrono::milliseconds(35),now),"device input latency discarded live speech");
+      require(v::staleCapture(now-std::chrono::milliseconds(130),now-std::chrono::milliseconds(35),now),"a worker backlog was sent late");
+      require(v::staleCapture(now-std::chrono::seconds(2),now-std::chrono::seconds(2),now),"an invalid capture timestamp was accepted");
+    }
     std::cout<<"Voice: consent, Opus20, loss/FEC/PLC, epoch, bounded jitter, mixing, priority, encrypted three-viewer SFU and compatibility passed\n";
   } catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
 }

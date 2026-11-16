@@ -1,4 +1,5 @@
 #include "voice_runtime.h"
+#include "voice_capture_policy.h"
 #include "transport.h"
 #include "broadcast.h"
 #include "microphone_capture.h"
@@ -134,8 +135,13 @@ struct VoiceRuntime::Impl {
           for(auto& samples:mixer->drain(began)) player->submit(std::move(samples));
         }
         if(joined && microphone && !deafened && encoder) {
+          const auto newest=pcm.empty() ? Clock::time_point{} : pcm.back().at;
+          bool skipped=false;
           for(auto& item:pcm) {
-            if(Clock::now()-item.at>std::chrono::milliseconds(40)) { ++staleCapture; encoder->reset(); continue; }
+            if(voice::staleCapture(item.at,newest,Clock::now())) { ++staleCapture; skipped=true; continue; }
+            // Reset once after a skipped run, not per block: every reset was
+            // an audible discontinuity.
+            if(skipped) { encoder->reset(); skipped=false; }
             capturedFrames+=audioFrames; signalLevel(item.pcm,rawPeak,rawClipped);
             if(echo) echo->process(item.pcm,item.at);
             signalLevel(item.pcm,cleanPeak,cleanClipped);
