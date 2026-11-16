@@ -78,6 +78,8 @@ public:
   bool ready() const;
   bool running() const;
   bool acceptsCapture() const;
+  // Single bandwidth-limited (mobile) viewer; never true for multi-viewer share.
+  bool videoLimited() const;
   void video(Frame frame);
   void audio(const AudioSamples& samples);
   void setCapturePaused(bool paused);

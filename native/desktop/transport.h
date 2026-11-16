@@ -218,6 +218,8 @@ public:
   struct SocketStats { std::uint64_t sendTransientErrors,receiveTransientErrors; };
   SocketStats socketStats() const { return {sendTransientErrors_.load(),receiveTransientErrors_.load()}; }
   std::uint32_t recommendedBitrate() const { return videoBudget_.load(); }
+  // True once the viewer declared a receive limit (mobile clients).
+  bool videoLimited() const { return peerVideoLimit_.load()!=0; }
   struct ReceiveHealth {
     std::uint64_t videoPackets=0,videoFrames=0,nackRequests=0,lostFragments=0,referenceDrops=0;
     std::uint64_t audioDecoded=0,audioConcealed=0,audioLate=0;

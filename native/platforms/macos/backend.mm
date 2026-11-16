@@ -18,6 +18,7 @@
 #include "latest_frame_worker.h"
 #include "decode_worker.h"
 #include "h264_low_delay.h"
+#include "resolution_policy.h"
 #import "metal_presenter.h"
 #import "ime_view.h"
 #import "shortcuts_panel.h"
@@ -30,6 +31,7 @@
 #include <random>
 #include <fstream>
 #include <cstdlib>
+#include <cstring>
 
 using namespace sanser::desktop;
 namespace {
@@ -53,18 +55,8 @@ public:
   Encoder(const Options& options,Peer& peer) : Encoder(options,[&peer] { return peer.acceptsCapture(); },[&peer](Frame frame) { peer.video(frame); }) {}
   Encoder(const Options& options,HostOutput& output) : Encoder(options,[&output] { return output.acceptsCapture(); },[&output](Frame frame) { output.video(std::move(frame)); }) {}
   Encoder(const Options& options,std::function<bool()> ready,std::function<void(Frame)> publish)
-      : options_(options),ready_(std::move(ready)),publish_(std::move(publish)) {
-    requireStatus(VTCompressionSessionCreate(nullptr,options.width,options.height,kCMVideoCodecType_H264,nullptr,nullptr,nullptr,output,this,&session_),"Create H.264 encoder");
-    VTSessionSetProperty(session_,kVTCompressionPropertyKey_RealTime,kCFBooleanTrue);
-    requireStatus(VTSessionSetProperty(session_,kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse),"Disable H.264 frame reordering");
-    // RealTime alone is a recommendation. Explicitly disable the compression
-    // window as well; the per-picture completion below bounds older encoders
-    // that reject this optional property.
-    const auto delayStatus=VTSessionSetProperty(session_,kVTCompressionPropertyKey_MaxFrameDelayCount,(__bridge CFNumberRef)@0);
-    requireStatus(VTSessionSetProperty(session_,kVTCompressionPropertyKey_ProfileLevel,kVTProfileLevel_H264_Baseline_AutoLevel),"Select H.264 Baseline");
-    NSDictionary* values=@{(__bridge NSString*)kVTCompressionPropertyKey_AverageBitRate:@(options.bitrate),(__bridge NSString*)kVTCompressionPropertyKey_ExpectedFrameRate:@(options.fps),(__bridge NSString*)kVTCompressionPropertyKey_MaxKeyFrameInterval:@(options.fps)};
-    requireStatus(VTSessionSetProperties(session_,(__bridge CFDictionaryRef)values),"Configure H.264 encoder");
-    requireStatus(VTCompressionSessionPrepareToEncodeFrames(session_),"Prepare encoder");
+      : options_(options),ready_(std::move(ready)),publish_(std::move(publish)),bitrate_(options.bitrate) {
+    const auto delayStatus=createSession();
     std::cout<<"SNV2_ENCODER maxFrameDelay="<<(delayStatus==noErr ? 0 : -1)<<" pendingCaptureLimit=1 completionPerFrame=1"<<std::endl;
     frames_=std::make_unique<LatestFrameWorker<CapturedFrame>>([this](CapturedFrame frame) {
       @autoreleasepool {
@@ -72,9 +64,11 @@ public:
       }
     });
   }
-  ~Encoder() { if(frames_) frames_->stop(); if(session_) { VTCompressionSessionCompleteFrames(session_,kCMTimeInvalid); VTCompressionSessionInvalidate(session_); CFRelease(session_); } if(lastPixels_) CVPixelBufferRelease(lastPixels_); }
+  ~Encoder() { if(frames_) frames_->stop(); destroySession(); if(lastPixels_) CVPixelBufferRelease(lastPixels_); }
   void encode(CVPixelBufferRef pixels,CMTime time) {
     std::lock_guard lock(encodeMutex_);
+    // Captures queued before a resize still carry the previous size.
+    if(!matchesSize(pixels)) return;
     if(lastPixels_) CVPixelBufferRelease(lastPixels_);
     lastPixels_=CVPixelBufferRetain(pixels);
     if(CMTimeCompare(time,lastTime_)<=0) time=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
@@ -95,6 +89,7 @@ public:
     queueUs_+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(began-frame.captured).count());
     ++submitted_;
     std::lock_guard sessionLock(sessionMutex_);
+    if(!matchesSize(frame.pixels.get())) { pendingRefresh_=true; return; }
     const bool force=force_.exchange(false);
     const auto properties=force ? (__bridge CFDictionaryRef)@{(__bridge NSString*)kVTEncodeFrameOptionKey_ForceKeyFrame:@YES} : nullptr;
     requireStatus(VTCompressionSessionEncodeFrame(session_,frame.pixels.get(),frame.time,CMTimeMake(1,options_.fps),properties,nullptr,nullptr),"Encode screen frame");
@@ -108,7 +103,21 @@ public:
   void keyframe() { force_=true; }
   bool setBitrate(std::uint32_t bitrate) {
     std::lock_guard lock(sessionMutex_);
-    return VTSessionSetProperty(session_,kVTCompressionPropertyKey_AverageBitRate,(__bridge CFNumberRef)@(bitrate))==noErr;
+    if(VTSessionSetProperty(session_,kVTCompressionPropertyKey_AverageBitRate,(__bridge CFNumberRef)@(bitrate))!=noErr) return false;
+    bitrate_=bitrate; return true;
+  }
+  // Re-create the H.264 session at a new picture size. The next picture is an
+  // IDR carrying new SPS/PPS; viewers size their decoder from each frame.
+  void resize(std::uint32_t width,std::uint32_t height) {
+    std::lock_guard lock(encodeMutex_);
+    std::lock_guard sessionLock(sessionMutex_);
+    if(width==options_.width && height==options_.height) return;
+    destroySession();
+    options_.width=width; options_.height=height; resized_=true;
+    (void)createSession();
+    if(lastPixels_) { CVPixelBufferRelease(lastPixels_); lastPixels_=nullptr; }
+    force_=true;
+    std::cout<<"SNV2_ENCODER resized="<<width<<"x"<<height<<std::endl;
   }
   bool failed() const { return failed_; }
   bool takeRetryRequest() { return retry_.exchange(false); }
@@ -122,6 +131,29 @@ public:
     writeTelemetry(line);
   }
 private:
+  // Before any resize, sources keep the original behaviour (VideoToolbox
+  // scales a mismatched buffer). After one, drop captures of the old size.
+  bool matchesSize(CVPixelBufferRef pixels) const {
+    return !resized_ || CVPixelBufferGetWidth(pixels)==options_.width && CVPixelBufferGetHeight(pixels)==options_.height;
+  }
+  OSStatus createSession() {
+    requireStatus(VTCompressionSessionCreate(nullptr,options_.width,options_.height,kCMVideoCodecType_H264,nullptr,nullptr,nullptr,output,this,&session_),"Create H.264 encoder");
+    VTSessionSetProperty(session_,kVTCompressionPropertyKey_RealTime,kCFBooleanTrue);
+    requireStatus(VTSessionSetProperty(session_,kVTCompressionPropertyKey_AllowFrameReordering,kCFBooleanFalse),"Disable H.264 frame reordering");
+    // RealTime alone is a recommendation. Explicitly disable the compression
+    // window as well; the per-picture completion below bounds older encoders
+    // that reject this optional property.
+    const auto delayStatus=VTSessionSetProperty(session_,kVTCompressionPropertyKey_MaxFrameDelayCount,(__bridge CFNumberRef)@0);
+    requireStatus(VTSessionSetProperty(session_,kVTCompressionPropertyKey_ProfileLevel,kVTProfileLevel_H264_Baseline_AutoLevel),"Select H.264 Baseline");
+    NSDictionary* values=@{(__bridge NSString*)kVTCompressionPropertyKey_AverageBitRate:@(bitrate_),(__bridge NSString*)kVTCompressionPropertyKey_ExpectedFrameRate:@(options_.fps),(__bridge NSString*)kVTCompressionPropertyKey_MaxKeyFrameInterval:@(options_.fps)};
+    requireStatus(VTSessionSetProperties(session_,(__bridge CFDictionaryRef)values),"Configure H.264 encoder");
+    requireStatus(VTCompressionSessionPrepareToEncodeFrames(session_),"Prepare encoder");
+    return delayStatus;
+  }
+  void destroySession() {
+    if(!session_) return;
+    VTCompressionSessionCompleteFrames(session_,kCMTimeInvalid); VTCompressionSessionInvalidate(session_); CFRelease(session_); session_=nullptr;
+  }
   static void output(void* context,void*,OSStatus status,VTEncodeInfoFlags flags,CMSampleBufferRef sample) {
     auto& self=*static_cast<Encoder*>(context);
     if(status==noErr && (flags&kVTEncodeInfo_FrameDropped)) { ++self.encoderDropped_; self.retry_=true; return; }
@@ -147,6 +179,7 @@ private:
     } catch(...) { self.failed_=true; }
   }
   Options options_; std::function<bool()> ready_; std::function<void(Frame)> publish_;
+  std::uint32_t bitrate_=0; bool resized_=false;
   VTCompressionSessionRef session_=nullptr;
   CVPixelBufferRef lastPixels_=nullptr; CMTime lastTime_=kCMTimeZero; std::mutex encodeMutex_;
   std::mutex sessionMutex_;
@@ -318,6 +351,38 @@ void testMacEncoderBackpressure() {
       recovery.stop();
     }
     std::cout<<"Mac encoder: blocked delivery retained only newest raw capture; reference chain and final idle picture verified\n";
+  }
+}
+void testMacEncoderResize() {
+  @autoreleasepool {
+    Options options; options.width=640; options.height=360;
+    const auto image=[](unsigned width,unsigned height) {
+      CVPixelBufferRef value=nullptr;
+      requireStatus(CVPixelBufferCreate(nullptr,width,height,kCVPixelFormatType_32BGRA,nullptr,&value),"Create resize image");
+      std::shared_ptr<__CVBuffer> owner(value,[](CVPixelBufferRef p) { CVPixelBufferRelease(p); });
+      CVPixelBufferLockBaseAddress(value,0);
+      std::memset(CVPixelBufferGetBaseAddress(value),90,CVPixelBufferGetBytesPerRow(value)*height);
+      CVPixelBufferUnlockBaseAddress(value,0); return owner;
+    };
+    const auto full=image(640,360),reduced=image(426,240);
+    std::mutex mutex; std::vector<Frame> delivered;
+    Encoder encoder(options,[] { return true; },[&](Frame frame) { std::lock_guard lock(mutex); delivered.push_back(std::move(frame)); });
+    encoder.encode(full.get(),CMTimeMake(1,60)); encoder.flush();
+    encoder.resize(426,240);
+    encoder.encode(full.get(),CMTimeMake(2,60)); encoder.flush(); // stale size: dropped
+    encoder.encode(reduced.get(),CMTimeMake(3,60)); encoder.flush();
+    encoder.resize(640,360);
+    encoder.encode(full.get(),CMTimeMake(4,60)); encoder.flush();
+    std::lock_guard lock(mutex);
+    if(encoder.failed() || delivered.size()!=3) throw std::runtime_error("Resized encoder delivered "+std::to_string(delivered.size())+" frames, expected 3");
+    const auto expect=[&](const Frame& frame,unsigned width,unsigned height) {
+      if(frame.width!=width || frame.height!=height || !frame.keyframe) throw std::runtime_error("Resized picture is not a keyframe at the new size");
+      Decoder decoder; decoder.decode(frame); auto picture=decoder.take();
+      if(!picture || CVPixelBufferGetWidth(picture)!=width || CVPixelBufferGetHeight(picture)!=height) { if(picture) CVPixelBufferRelease(picture); throw std::runtime_error("Resized keyframe did not decode at the new size"); }
+      CVPixelBufferRelease(picture);
+    };
+    expect(delivered[0],640,360); expect(delivered[1],426,240); expect(delivered[2],640,360);
+    std::cout<<"Mac encoder: resize mid-stream emits decodable keyframes at each size and drops stale captures\n";
   }
 }
 void writeMacInteropFixture(const char* path) {
@@ -639,11 +704,26 @@ int runMac(bool host,int argc,char** argv) {
         HostOutputStop shutdown{peer}; peer.start();
         auto bitrate=options.bitrate;
         auto lastProgress=Clock::now();
+        // Mobile viewers only: at a low budget, fast motion at full size limits
+        // the paced sender to ~15-20 fps. Trade size for frame rate.
+        ResolutionPolicy resolution; bool reduced=false;
+        const auto fullWidth=options.width,fullHeight=options.height;
         while(peer.running() && !capture.failed && !encoder.failed()) {
           peer.pumpControl();
           voicePanel.pump(); if(!peer.running()) break;
           const auto target=peer.bitrate();
           if(target!=bitrate && encoder.setBitrate(target)) bitrate=target;
+          if(peer.videoLimited() && resolution.update(target,Clock::now())!=reduced) {
+            reduced=resolution.reduced();
+            const auto width=reduced ? ResolutionPolicy::reducedDimension(fullWidth) : fullWidth;
+            const auto height=reduced ? ResolutionPolicy::reducedDimension(fullHeight) : fullHeight;
+            encoder.resize(width,height);
+            config.width=width; config.height=height;
+            [stream updateConfiguration:config completionHandler:^(NSError* error) {
+              if(error) std::cerr<<captureFailure(error,"Resize screen capture")<<std::endl;
+            }];
+            std::cout<<"SNV2_RESOLUTION "<<(reduced ? "reduced" : "restored")<<"="<<width<<"x"<<height<<" targetBps="<<target<<std::endl;
+          }
           const bool retry=encoder.takeRetryRequest();
           if(peer.takeKeyframeRequest() || retry) { encoder.keyframe(); encoder.refresh(); }
           encoder.refreshPending();
