@@ -100,6 +100,8 @@ export interface HostPreferences {
   privacyBlockInput: boolean;
   /** Opt-in: share this computer's adapter MACs so a computer on the same LAN can wake it. */
   wakeOnLan: boolean;
+  /** Viewers may record this screen; the host is always told. */
+  allowRecording: boolean;
 }
 
 export interface InputPreferences {
@@ -427,3 +429,28 @@ export const unavailableCapability = (reason: string, state: CapabilityState = '
   state,
   reason
 });
+
+export type RecordingConsentState = 'none' | 'requested' | 'allowed' | 'denied' | 'stopped';
+export type RecordingConsentAction = 'request' | 'stop' | 'allow' | 'deny';
+export interface RecordingConsent {
+  state: RecordingConsentState;
+  viewerName?: string;
+  viewerDeviceId?: string;
+}
+
+/** Viewer-local recording state reported by the native engine via the shell. */
+export interface RecordingStatus {
+  capable: boolean;
+  state: 'idle' | 'waiting' | 'recording' | 'stopped' | 'error';
+  audio: boolean;
+  reason: string | null;
+  bytes: number;
+  durationMs: number;
+  parts: number;
+  path: string | null;
+}
+
+export interface ProblemReport {
+  path: string;
+  folder: string;
+}

@@ -5,6 +5,7 @@ pub mod docs;
 pub mod guest;
 pub mod history;
 pub mod network;
+pub mod recording;
 pub mod sessions;
 pub mod sharing;
 pub mod system;

@@ -11,6 +11,7 @@
   import Computers from './pages/Computers.svelte';
   import Host from './pages/Host.svelte';
   import History from './pages/History.svelte';
+  import HostRecordingNotice from './components/HostRecordingNotice.svelte';
   import Settings from './pages/Settings.svelte';
   import Welcome from './pages/Welcome.svelte';
   import GuestSession from './pages/GuestSession.svelte';
@@ -256,6 +257,7 @@
         {#each invitations as invitation (invitation.member.id)}
           <div class="notice sharing-invitation" role="status"><div><strong>{$t('{name} invited you to view its screen.', { name: $sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? $t('A computer in your account') })}</strong><p>{$t('View only · Your keyboard and mouse remain on this computer.')}</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? $t('Open shared screen') : $t('Join')}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>{$t('Decline')}</button>{/if}</span></div>
         {/each}
+        <HostRecordingNotice />
         {#if !browserOnline}<div class="notice warning" role="status">{$t('You are offline. Check your connection; your saved settings are still available.')}</div>{/if}
         <div class="persistent-session" hidden={page !== 'session'}><ActiveSession {runtime} {navigate} /></div>
         {#if page === 'computers'}<Computers {runtime} {navigate} />

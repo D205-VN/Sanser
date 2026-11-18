@@ -27,6 +27,7 @@ pub struct AppState {
     pub guest_redeem_limiter: RateLimiter,
     /// Guest code redemption attempts across all clients.
     pub guest_redeem_global_limiter: RateLimiter,
+    pub recording_consents: Arc<crate::recording_consent::RecordingConsents>,
 }
 
 impl AppState {
@@ -48,6 +49,7 @@ impl AppState {
             two_factor_limiter: RateLimiter::new(10, Duration::from_secs(600)),
             guest_redeem_limiter: RateLimiter::new(20, Duration::from_secs(600)),
             guest_redeem_global_limiter: RateLimiter::new(600, Duration::from_secs(60)),
+            recording_consents: Arc::default(),
         }
     }
 }

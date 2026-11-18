@@ -734,6 +734,8 @@ fn validated_guest_device(
         audio: device.audio,
         gamepad: device.gamepad,
         last_seen_at: Some(now),
+        // Guests are temporary viewers and never report Wake-on-LAN details.
+        wake_on_lan: None,
         created_at: now,
         updated_at: now,
     })

@@ -11,6 +11,7 @@ mod error;
 mod fec_health;
 mod file_transfer;
 mod models;
+mod problem_report;
 mod relay;
 mod sharing_engine;
 mod storage;
@@ -164,6 +165,13 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         commands::get_engine_status,
         commands::route_recovery_plan,
         commands::export_diagnostics,
+        commands::create_problem_report,
+        commands::start_session_recording,
+        commands::stop_session_recording,
+        commands::session_recording_status,
+        commands::open_recordings_folder,
+        commands::open_problem_report_folder,
+        commands::open_github_issue,
         commands::p2p_stop,
         commands::p2p_gather,
         commands::p2p_punch,

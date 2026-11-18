@@ -275,6 +275,13 @@ pub struct HostPreferences {
     /// Opt-in: report this computer's adapter MACs so others can wake it.
     #[serde(default)]
     pub wake_on_lan: bool,
+    /// Viewers may record this computer's screen (they always show a notice).
+    #[serde(default = "default_true")]
+    pub allow_recording: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 const fn default_direct_udp_port() -> u16 {

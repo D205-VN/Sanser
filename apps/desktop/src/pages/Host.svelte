@@ -52,7 +52,7 @@
   }
 
   async function updateHost(
-    key: 'audioEnabled' | 'inputEnabled' | 'autoOnline' | 'autoAcceptOwnDevices',
+    key: 'audioEnabled' | 'inputEnabled' | 'autoOnline' | 'autoAcceptOwnDevices' | 'allowRecording',
     value: boolean
   ): Promise<void> {
     actionError = null;
@@ -141,6 +141,7 @@
       {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('System audio')} description={$t('Share sound from this computer.')} onchange={(value) => updateHost('audioEnabled', value)} />{/if}
       <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('Remote input')} description={$t('Allow the other computer to use your keyboard and mouse.')} onchange={(value) => updateHost('inputEnabled', value)} />
       <HostPrivacySettings {runtime} onerror={(message) => { actionError = message; }} />
+      <Toggle checked={$preferences.host.allowRecording} label={$t('Allow viewers to record')} description={$t('Viewers can save this screen to their own computer. You are always told when someone is recording, and turning this off stops it.')} onchange={(value) => updateHost('allowRecording', value)} />
     </article>
 
     <article class="card card-body stack">

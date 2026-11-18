@@ -3624,6 +3624,206 @@
      }
     ]
    }
+  },
+  "/api/v2/sessions/{id}/recording": {
+   "get": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Recording consent state",
+    "operationId": "get_api_v2_sessions_id_recording",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Consent state",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/RecordingConsent"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Forbidden.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   },
+   "post": {
+    "tags": [
+     "Sessions"
+    ],
+    "summary": "Recording consent request, heartbeat, stop or host decision",
+    "operationId": "post_api_v2_sessions_id_recording",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/RecordingRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Consent state",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/RecordingConsent"
+        }
+       }
+      }
+     },
+     "403": {
+      "description": "Forbidden.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
   }
  },
  "components": {
@@ -4728,6 +4928,52 @@
       "type": "string"
      }
     }
+   },
+   "RecordingRequest": {
+    "type": "object",
+    "properties": {
+     "deviceId": {
+      "type": "string"
+     },
+     "action": {
+      "type": "string",
+      "enum": [
+       "request",
+       "stop",
+       "allow",
+       "deny"
+      ]
+     }
+    },
+    "additionalProperties": false,
+    "required": [
+     "deviceId",
+     "action"
+    ]
+   },
+   "RecordingConsent": {
+    "type": "object",
+    "properties": {
+     "state": {
+      "type": "string",
+      "enum": [
+       "none",
+       "requested",
+       "allowed",
+       "denied",
+       "stopped"
+      ]
+     },
+     "viewerName": {
+      "type": "string"
+     },
+     "viewerDeviceId": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "state"
+    ]
    }
   }
  }

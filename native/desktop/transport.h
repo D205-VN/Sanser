@@ -229,6 +229,8 @@ public:
   std::optional<display::List> displays() const { std::lock_guard lock(displayMutex_); return peerDisplays_; }
   bool selectDisplay(std::uint8_t index);
   std::function<void(Frame)> onFrame;
+  // Viewer-local stdin commands (e.g. recording) handled outside the peer.
+  std::function<bool(const std::string&)> onNativeCommand;
   std::function<void(Input)> onInput;
   std::function<void(AudioSamples)> onAudio;
   std::function<void()> onAudioReset;

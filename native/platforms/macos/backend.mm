@@ -19,6 +19,7 @@
 #include "clipboard.h"
 #include "latest_frame_worker.h"
 #include "decode_worker.h"
+#include "recording_tap.h"
 #include "h264_low_delay.h"
 #include "resolution_policy.h"
 #import "metal_presenter.h"
@@ -812,13 +813,17 @@ int runMac(bool host,int argc,char** argv) {
     VoicePanel voicePanel(options.groupVoice,voice);
     peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
     AudioPlayer audio(options.audio);
-    if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };
+    // Viewer-side recording of the already-received stream (no re-encode).
+    RecordingTap recording([&] { peer.requestKeyframe(); });
+    peer.onNativeCommand=[&](const std::string& line) { return recording.command(line); };
+    if(std::getenv("SANSER_CONTROL_STDIN")) recording.announce();
+    if(options.audio) peer.onAudio=[&](AudioSamples samples) { recording.audio(samples); audio.submit(std::move(samples)); };
     if(options.audio) peer.onAudioReset=[&] { audio.reset(); };
     std::uint64_t decodedBase=decoder.decoded();
     DecodeWorker decode([&](Frame frame) { @autoreleasepool { decoder.decode(frame); } },
       [&] { decoder.reset(); decodedBase=decoder.decoded(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency,
       [] { return Clock::now(); },[&] { return decoder.decoded()>decodedBase; });
-    peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
+    peer.onFrame=[&](Frame frame) { recording.frame(frame); decode.submit(std::move(frame)); };
     NSWindow* window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,720) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     window.releasedWhenClosed=NO; window.title=options.input ? @"Sanser · Remote desktop · Ctrl+Option+I: text input · Ctrl+Option+Escape: release" : @"Sanser · View only";
     SanserSnv2RemoteView* view=[[SanserSnv2RemoteView alloc] initWithFrame:window.contentView.bounds]; view.peer=&peer; view.inputEnabled=options.input; view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;

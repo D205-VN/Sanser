@@ -6,6 +6,7 @@
   import LanguageToggle from '../components/LanguageToggle.svelte';
   import Toggle from '../components/Toggle.svelte';
   import HostPrivacySettings from '../components/HostPrivacySettings.svelte';
+  import ReportProblem from '../components/ReportProblem.svelte';
   import { normalizeServerUrl } from '../lib/api';
   import type { LoginSession, NetworkMode, Preferences, QualityProfile, RuntimeStatus, SettingsSection, VideoCodec } from '../lib/types';
   import { exportDiagnostics } from '../lib/platform';
@@ -296,6 +297,7 @@
             <button class="button" onclick={exportEvents}>{$t('Export diagnostics')}</button>
             <button class="button danger" onclick={() => diagnostics.clear()}>{$t('Clear events')}</button>
           </div>
+          <ReportProblem {runtime} />
           <button class="button ghost" aria-expanded={showDetails} aria-controls="connection-details" onclick={() => (showDetails = !showDetails)}>{showDetails ? $t('Hide connection details') : $t('Show connection details')}</button>
         </article>
         {#if showDetails}<div id="connection-details"><Diagnostics {runtime} /></div>{/if}

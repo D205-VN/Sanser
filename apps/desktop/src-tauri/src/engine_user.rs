@@ -75,6 +75,65 @@ fn parse_displays(selected: &str, list: &str) -> Option<DisplayList> {
         displays,
     })
 }
+/// Viewer recording state reported by the native engine. The file path is
+/// known only to the shell; native output never echoes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingStatus {
+    pub capable: bool,
+    /// idle | waiting | recording | stopped | error
+    pub state: &'static str,
+    pub audio: bool,
+    pub reason: Option<String>,
+    pub bytes: u64,
+    pub duration_ms: u64,
+    pub parts: u32,
+    pub path: Option<String>,
+}
+fn parse_recording(fields: &[&str], status: &mut RecordingStatus) {
+    let reason_ok = |value: &str| {
+        matches!(
+            value,
+            "user"
+                | "size-limit"
+                | "duration-limit"
+                | "write-error"
+                | "unsupported"
+                | "session-ended"
+                | "none"
+                | "bad-command"
+                | "unsupported-codec"
+        )
+    };
+    match fields {
+        ["SNUSER_RECORD", "capable"] => status.capable = true,
+        ["SNUSER_RECORD", "waiting"] => {
+            status.state = "waiting";
+            status.reason = None;
+            status.bytes = 0;
+            status.duration_ms = 0;
+            status.parts = 1;
+        }
+        ["SNUSER_RECORD", "recording", audio @ ("0" | "1")] => {
+            status.state = "recording";
+            status.audio = *audio == "1";
+        }
+        ["SNUSER_RECORD", "stopped", reason, bytes, duration, parts] if reason_ok(reason) => {
+            if status.state != "error" {
+                status.state = "stopped";
+                status.reason = Some((*reason).to_owned());
+            }
+            status.bytes = bytes.parse().unwrap_or(0);
+            status.duration_ms = duration.parse().unwrap_or(0);
+            status.parts = parts.parse().unwrap_or(1);
+        }
+        ["SNUSER_RECORD", "error", code] if reason_ok(code) => {
+            status.state = "error";
+            status.reason = Some((*code).to_owned());
+        }
+        _ => {}
+    }
+}
 struct Reply {
     status: u8,
     text: String,
@@ -83,6 +142,7 @@ struct Reply {
 struct State {
     capabilities: Capabilities,
     displays: DisplayList,
+    recording: RecordingStatus,
     pending: HashMap<Uuid, mpsc::SyncSender<Reply>>,
 }
 #[derive(Default)]
@@ -184,6 +244,45 @@ impl UserControl {
         }
         Ok(format!("display\t{index}\n").into_bytes())
     }
+    pub fn recording(&self) -> RecordingStatus {
+        self.state
+            .lock()
+            .map(|s| {
+                let mut status = s.recording.clone();
+                if status.state.is_empty() {
+                    status.state = "idle";
+                }
+                status
+            })
+            .unwrap_or_default()
+    }
+    /// Builds the native command and remembers the destination path.
+    pub fn prepare_recording(
+        &self,
+        path: Option<(&str, u64, u64)>,
+    ) -> Result<Vec<u8>, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("Native controls unavailable".into()))?;
+        let Some((path, max_bytes, max_seconds)) = path else {
+            return Ok(b"record\tstop\n".to_vec());
+        };
+        if !state.recording.capable {
+            return Err(DesktopError::Unavailable(
+                "This viewer engine cannot record; update Sanser or use an SNV2 session".into(),
+            ));
+        }
+        if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+            return Err(DesktopError::InvalidRequest(
+                "Invalid recording path".into(),
+            ));
+        }
+        state.recording.path = Some(path.to_owned());
+        state.recording.state = "waiting";
+        state.recording.reason = None;
+        Ok(format!("record\tstart\t{max_bytes}\t{max_seconds}\t{path}\n").into_bytes())
+    }
     pub fn capabilities(&self) -> Capabilities {
         self.state
             .lock()
@@ -273,6 +372,10 @@ impl UserControl {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        if fields.first() == Some(&"SNUSER_RECORD") {
+            parse_recording(&fields, &mut state.recording);
+            return;
+        }
         if fields.len() == 3 && fields[0] == "SNUSER_DISPLAY" {
             if let Some(displays) = parse_displays(fields[1], fields[2]) {
                 state.displays = displays;
@@ -312,6 +415,11 @@ impl UserControl {
         if let Ok(mut state) = self.state.lock() {
             state.capabilities = Capabilities::default();
             state.displays = DisplayList::default();
+            state.recording.capable = false;
+            if matches!(state.recording.state, "waiting" | "recording") {
+                state.recording.state = "stopped";
+                state.recording.reason = Some("session-ended".into());
+            }
             for (_, sender) in state.pending.drain() {
                 let _ = sender.try_send(Reply {
                     status: 3,
@@ -558,6 +666,56 @@ mod tests {
         old.observe(format!("SNUSER_REPLY\t{id}\t0\t61\n").as_bytes());
         assert!(!next.capabilities().clipboard);
         assert!(next.prepare("clipboard-read", "").is_err());
+        Ok(())
+    }
+    #[test]
+    fn recording_status_follows_private_native_reports() -> Result<(), Box<dyn std::error::Error>> {
+        let control = Arc::new(UserControl::default());
+        assert_eq!(control.recording().state, "idle");
+        assert!(
+            control
+                .prepare_recording(Some(("/tmp/a.mp4", 1, 1)))
+                .is_err()
+        );
+        // Reports never reach public stdout (logs, connection reports).
+        let mut output = PrivateOutput::new(
+            &b"SNUSER_RECORD\tcapable\nvisible\n"[..],
+            Arc::new(UserControl::default()),
+        );
+        let mut public = String::new();
+        output.read_to_string(&mut public)?;
+        assert_eq!(public, "visible\n");
+        control.observe(b"SNUSER_RECORD\tcapable\n");
+        assert!(control.recording().capable);
+        assert!(
+            control
+                .prepare_recording(Some(("/tmp/a\nb.mp4", 1, 1)))
+                .is_err()
+        );
+        let command =
+            String::from_utf8(control.prepare_recording(Some(("/tmp/My Movie.mp4", 9, 7)))?)?;
+        assert_eq!(command, "record\tstart\t9\t7\t/tmp/My Movie.mp4\n");
+        assert_eq!(control.prepare_recording(None)?, b"record\tstop\n");
+        control.observe(b"SNUSER_RECORD\twaiting\n");
+        control.observe(b"SNUSER_RECORD\trecording\t1\n");
+        let status = control.recording();
+        assert_eq!((status.state, status.audio), ("recording", true));
+        assert_eq!(status.path.as_deref(), Some("/tmp/My Movie.mp4"));
+        control.observe(b"SNUSER_RECORD\tstopped\tsize-limit\t1234\t5678\t2\n");
+        let status = control.recording();
+        assert_eq!(status.state, "stopped");
+        assert_eq!(status.reason.as_deref(), Some("size-limit"));
+        assert_eq!(
+            (status.bytes, status.duration_ms, status.parts),
+            (1234, 5678, 2)
+        );
+        control.observe(b"SNUSER_RECORD\tstopped\t<script>\t1\t1\t1\n");
+        assert_eq!(control.recording().reason.as_deref(), Some("size-limit"));
+        control.observe(b"SNUSER_RECORD\twaiting\n");
+        control.close();
+        let status = control.recording();
+        assert!(!status.capable);
+        assert_eq!(status.reason.as_deref(), Some("session-ended"));
         Ok(())
     }
 }
