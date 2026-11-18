@@ -3,6 +3,7 @@
   import { get } from 'svelte/store';
   import Icon from './Icon.svelte';
   import GroupVoice from './GroupVoice.svelte';
+  import SessionChat from './SessionChat.svelte';
   import { sharingViewerCandidates } from '../lib/sharingInvitations';
   import type { SharingMember } from '../lib/types';
   import { host } from '../stores/host';
@@ -68,6 +69,7 @@
       {#if candidates.length === 0}<p class="muted">{$t('Open Sanser and sign in on the other computer. Only online viewers can receive a new invitation.')}</p>{/if}
     {/if}
     <GroupVoice kind="host" sharingId={group.id} />
+    {#if !$sharing.paused}<SessionChat kind="host" selfName={$host.deviceId ? name($host.deviceId) : ''} names={Object.fromEntries(active.map((member) => [member.id, name(member.viewerDeviceId)]))} />{/if}
   {/if}
 </article>
 

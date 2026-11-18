@@ -41,6 +41,8 @@ std::atomic<bool> externalVoice{false};
 std::mutex nativeCommandMutex;
 std::vector<std::string> nativeCommands;
 std::vector<std::string> voiceCommands;
+std::vector<std::string> collabCommands;
+std::atomic<int> collabExclude{-1};
 constexpr std::size_t chunkSize = 1000, maxFrame = 4 * 1024 * 1024;
 void u16(Bytes& b, std::uint16_t n) { b.push_back(static_cast<std::uint8_t>(n >> 8)); b.push_back(static_cast<std::uint8_t>(n)); }
 void u32(Bytes& b, std::uint32_t n) { u16(b, static_cast<std::uint16_t>(n >> 16)); u16(b, static_cast<std::uint16_t>(n)); }
@@ -147,6 +149,7 @@ void externalVoiceActive(bool active) { externalVoice.store(active,std::memory_o
 Options parseOptions(bool host, int argc, char** argv) {
   Options o; o.host = host;
   o.files=std::getenv("SANSER_FILE_TRANSFER") && std::getenv("SANSER_CONTROL_STDIN");
+  o.collab=std::getenv("SANSER_CONTROL_STDIN")!=nullptr;
   if (std::getenv("SANSER_CONTROL_STDIN")) {
     std::thread([] {
       std::string line; bool oversized=false; int c;
@@ -158,6 +161,12 @@ Options parseOptions(bool host, int argc, char** argv) {
           if(line.starts_with("voice-config\t") || line.starts_with("voice-mute\t") || line.starts_with("voice-external\t")) {
             if(voiceCommands.size()>=16) voiceCommands.erase(voiceCommands.begin());
             voiceCommands.push_back(std::move(line));
+          } else if(line=="collab-exclude\t1" || line=="collab-exclude\t0") {
+            collabExclude.store(line.back()=='1' ? 1:0);
+          } else if(isCollabCommand(line)) {
+            // Ephemeral: under pressure the oldest stroke/chat command is dropped.
+            if(collabCommands.size()>=32) collabCommands.erase(collabCommands.begin());
+            collabCommands.push_back(std::move(line));
           } else {
             if(nativeCommands.size()>=32) {
               if(const auto request=parseUserCommand(line)) { if(request->kind==UserCommand::FileMessage) {if(request->body.size()>=4) {std::uint32_t epoch=0;for(unsigned i=0;i<4;++i)epoch=(epoch<<8)|static_cast<std::uint8_t>(request->body[i]);std::fprintf(stdout,"SNUSER_FILE_FAIL\t%u\n",epoch);std::fflush(stdout);}}else userReply(request->request,2);line.clear();oversized=false;continue; }
@@ -213,6 +222,13 @@ Options parseOptions(bool host, int argc, char** argv) {
 std::vector<std::string> takeNativeCommands() {
   std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
   result.swap(nativeCommands); return result;
+}
+std::vector<std::string> takeCollabCommands() {
+  std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
+  result.swap(collabCommands); return result;
+}
+std::optional<bool> takeCollabExclude() {
+  const auto value=collabExclude.exchange(-1); if(value<0) return std::nullopt; return value==1;
 }
 std::vector<std::string> takeVoiceCommands() {
   std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
@@ -759,7 +775,19 @@ bool Peer::fileMessage(const Bytes& body,std::uint32_t expectedGeneration) {
   if(!filesAvailable() || (expectedGeneration && expectedGeneration!=fileGeneration_))return false;
   return userMessages_.queue(body);
 }
+bool Peer::collab(const Bytes& payload) {
+  if(payload.empty() || payload.size()>collabMaxPayload) return false;
+  std::lock_guard lock(userMutex_);
+  if(!collabAvailable() || !collabRate_.take()) return false;
+  return userMessages_.queue(collabBody(payload));
+}
 void Peer::processUserMessage(Bytes body) {
+  if(const auto payload=collabPayload(body)) {
+    if(!options_.collab || !peerCollab_) return;
+    if(onCollab) onCollab(std::move(*payload));
+    else if(std::getenv("SANSER_CONTROL_STDIN")) collabRecord(options_.collabSource,*payload);
+    return;
+  }
   if(body.size()>=21 && body.size()<=8192 && std::equal(body.begin(),body.begin()+4,"SFT1")) {
     if(filesAvailable()) {
       if(onFile)onFile(std::move(body));
@@ -929,7 +957,7 @@ void Peer::process(const Bytes& bytes) {
     if(previousGenerations_.contains(h.keyId)) return;
     if(previousGenerations_.size()>=16) { running_=false; return; }
     if(peerGeneration_) previousGenerations_.insert(peerGeneration_);
-    peerGeneration_=h.keyId; peerFiles_=false;announcedFiles_=-1;
+    peerGeneration_=h.keyId; peerFiles_=false;announcedFiles_=-1;peerCollab_=false;
     if(options_.files && std::getenv("SANSER_CONTROL_STDIN")) {std::fprintf(stdout,"SNUSER_FILE_RESET\n");std::fflush(stdout);}
     peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false; peerUnicode_=false; peerClipboard_=false; peerMacHost_=false;
     peerGamepad_=false;peerGamepadAt_=0;lastGamepad_=lastGamepadCapability_=0;
@@ -967,6 +995,7 @@ void Peer::process(const Bytes& bytes) {
   if((becameReady || generationChanged) && h.packetType!=snv2::PacketType::Disconnect && onReady) onReady();
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','K','1'})) peerSack_=true;
   if (h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','F','T','1'})) peerFiles_=true;
+  if (h.packetType==snv2::PacketType::Keepalive && h.streamId==0 && b==Bytes({'S','C','O','1'})) { peerCollab_=true; return; }
   if(options_.groupVoice && h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
     if(b.size()==7 && !std::memcmp(b.data(),"SVC1",4) && b[4]<=1 && b[5]<=1 && b[6]<=1 && h.sequence>lastVoicePreference_) {
       lastVoicePreference_=h.sequence;
@@ -1452,8 +1481,16 @@ void Peer::loop() {
           }
         }
       }
+      if(!options_.host || !options_.sharing) for(const auto& line:takeCollabCommands()) {
+        // A single peer owns every send; "-" and "*" both mean that peer.
+        if(const auto command=parseCollabCommand(line); command && (command->target=="-" || command->target=="*")) (void)collab(command->payload);
+      }
       const auto now=Clock::now();
       serviceUserMessages(now);
+      if(options_.collab && std::getenv("SANSER_CONTROL_STDIN")) {
+        const int available=collabAvailable()?1:0;
+        if(available!=announcedCollab_) { announcedCollab_=available; collabCapability(options_.collabSource,available!=0); }
+      }
       if(options_.files && std::getenv("SANSER_CONTROL_STDIN")) {const int available=filesAvailable()?1:0;
         if(available!=announcedFiles_) {announcedFiles_=available;std::fprintf(stdout,"SNUSER_FILE_CAP\t%d\t%u\n",available,peerGeneration_);std::fflush(stdout);}
       }
@@ -1492,6 +1529,8 @@ void Peer::loop() {
             transmit(snv2::PacketType::Keepalive,Bytes{'S','V','I','1',static_cast<std::uint8_t>(options_.voiceSlot)});
         }
         if(options_.files && options_.input && !options_.sharing)transmit(snv2::PacketType::Keepalive,Bytes{'S','F','T','1'});
+        // Optional chat/annotation capability; older engines ignore it.
+        if(options_.collab)transmit(snv2::PacketType::Keepalive,Bytes{'S','C','O','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','I','C','1'});
 #if defined(__APPLE__)

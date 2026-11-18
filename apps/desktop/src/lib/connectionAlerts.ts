@@ -44,3 +44,11 @@ export async function showHostConnectionAlert(alert: HostConnectionAlert, curren
   if (!current()) return;
   sendNotification({ title: 'Sanser · Remote access', body: `${alert.deviceName} ${alert.sharingId ? 'joined your screen sharing' : 'is connecting to your computer'}. ${alert.viewOnly ? 'View only.' : 'Mouse and keyboard access approved.'}` });
 }
+/** Optional chat notification while Sanser is in the background. Never prompts. */
+export async function showChatAlert(name: string, text: string, title: string, current: () => boolean): Promise<void> {
+  if (await alertPermission() !== 'granted' || !current()) return;
+  const { sendNotification } = await import('@tauri-apps/plugin-notification');
+  if (!current()) return;
+  const clean = (value: string, limit: number) => value.replace(/\p{Cc}/gu, ' ').trim().slice(0, limit);
+  sendNotification({ title, body: `${clean(name, 64)}: ${clean(text, 140)}` });
+}

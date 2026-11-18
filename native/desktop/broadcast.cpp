@@ -154,6 +154,7 @@ void Broadcaster::add(ViewerSpec viewer) {
   }
   auto options=source_; options.token=viewer.token; options.peer=viewer.endpoint; options.port=viewer.localPort; options.bitrate=viewer.bitrate;
   options.sharedAudioEncoder=true;
+  options.collabSource=viewer.id;
   if(options.groupVoice) {
     for(unsigned slot=1;slot<voice::maxSpeakers;++slot) {
       const bool used=std::any_of(peers_.begin(),peers_.end(),[slot](const auto& item) { return item.second->peer.voiceSpeaker()==slot; });
@@ -181,6 +182,17 @@ void Broadcaster::add(ViewerSpec viewer) {
   delivery->start();
   try { peers_.emplace(delivery->spec.id,delivery); }
   catch(...) { delivery->stop(); throw; }
+}
+unsigned Broadcaster::collab(const std::string& target,const Bytes& payload) {
+  std::vector<std::shared_ptr<Delivery>> destinations;
+  {
+    std::lock_guard lock(peersMutex_);
+    if(!running_) return 0;
+    for(const auto& [id,peer]:peers_) if(target=="*" || id==target) destinations.push_back(peer);
+  }
+  unsigned sent=0;
+  for(const auto& peer:destinations) if(peer->peer.collab(payload)) ++sent;
+  return sent;
 }
 void Broadcaster::remove(const std::string& id) {
   std::lock_guard lifecycle(lifecycleMutex_);
@@ -329,10 +341,16 @@ std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitr
 void HostOutput::setDisplays(display::List list) { if(single_) single_->setDisplays(std::move(list)); }
 std::optional<std::uint8_t> HostOutput::takeDisplayRequest() { return single_ ? single_->takeDisplayRequest() : std::nullopt; }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }
+void HostOutput::pumpCollab() {
+  if(!broadcast_) return;
+  for(const auto& line:takeCollabCommands())
+    if(const auto command=parseCollabCommand(line); command && command->target!="-") (void)broadcast_->collab(command->target,command->payload);
+}
 void HostOutput::pumpControl() {
   // The single peer drains its own private file/input commands on the UDP
   // worker. Do not race it here or reject a file command as a sharing command.
   if(!broadcast_) return;
+  pumpCollab();
   if(broadcast_) broadcast_->updateHealth();
   for(const auto& line:takeNativeCommands()) {
     const auto command=parseSharingCommand(line,options_.bitrate);

@@ -12,6 +12,7 @@
 #include "external_voice.h"
 #include "user_messages.h"
 #include "display_select.h"
+#include "collab.h"
 #include <deque>
 #include <condition_variable>
 #include <cstddef>
@@ -55,6 +56,10 @@ struct Options {
   // no SNV2 message can enable them from the viewer.
   bool privacyScreen = false;
   bool privacyBlockInput = false;
+  // Optional chat/annotation lane. Enabled whenever the shell owns stdin.
+  bool collab = false;
+  // Source label for collab records: the sharing viewer id, or "-" for a single peer.
+  std::string collabSource;
   unsigned voiceSlot = 255;
   std::string viewerId;
   std::string peer;
@@ -64,6 +69,9 @@ struct Options {
 };
 Options parseOptions(bool host, int argc, char** argv);
 std::vector<std::string> takeVoiceCommands();
+std::vector<std::string> takeCollabCommands();
+// Latest macOS host overlay-exclusion request, if any (collab-exclude).
+std::optional<bool> takeCollabExclude();
 Bytes encodeInput(const Input& input);
 std::optional<Input> decodeInput(const Bytes& bytes);
 struct Frame { Bytes data; std::uint32_t width = 0, height = 0; bool keyframe = false; std::uint64_t id = 0; };
@@ -193,6 +201,10 @@ public:
   std::uint32_t remoteGeneration() const {return fileGeneration_.load();}
   std::uint32_t fileGeneration() const {return remoteGeneration();}
   std::function<void(Bytes)> onFile;
+  // Chat/annotation payloads are allowed in view-only sharing and control sessions.
+  bool collabAvailable() const { return options_.collab && running_ && ready_ && peerCollab_; }
+  bool collab(const Bytes& payload);
+  std::function<void(Bytes)> onCollab;
   void audio(const AudioSamples& samples);
   void audioPrepared(const Bytes& packet, bool opus);
   void setAudioMuted(bool muted);
@@ -330,6 +342,9 @@ private:
   std::atomic<bool> peerClipboard_{false};
   std::atomic<bool> peerMacHost_{false};
   std::atomic<bool> peerFiles_{false};
+  std::atomic<bool> peerCollab_{false};
+  int announcedCollab_=-1;
+  CollabRate collabRate_;
   std::atomic<bool> peerGamepad_{false};
   std::atomic<std::int64_t> peerGamepadAt_{0};
   std::uint64_t lastGamepad_=0,lastGamepadCapability_=0;

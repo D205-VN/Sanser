@@ -5,6 +5,7 @@
   import Toggle from '../components/Toggle.svelte';
   import SharingPanel from '../components/SharingPanel.svelte';
   import GuestAccessCard from '../components/GuestAccessCard.svelte';
+  import SessionChat from '../components/SessionChat.svelte';
   import SessionFiles from '../components/SessionFiles.svelte';
   import WindowsUac from '../components/WindowsUac.svelte';
   import HostPrivacySettings from '../components/HostPrivacySettings.svelte';
@@ -198,8 +199,8 @@
       {/if}
     </article>
     {#if canHost}<GuestAccessCard />{/if}
-    {#if activeSession && !activeSession.guest && $host.engineRunning && !$host.sharingActive}
-      {#key activeSession.id}<SessionFiles sessionId={activeSession.id} kind="host" />{/key}
+    {#if activeSession && $host.engineRunning && !$host.sharingActive}
+      {#key activeSession.id}<SessionChat kind="host" names={{ '-': $t('Client {id}', { id: activeSession.requesterDeviceId.slice(0, 8) }) }} />{#if !activeSession.guest}<SessionFiles sessionId={activeSession.id} kind="host" />{/if}{/key}
     {/if}
   </div>
 </section>

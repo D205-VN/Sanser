@@ -1,4 +1,5 @@
 #include "telemetry.h"
+#include <unistd.h>
 #import <Cocoa/Cocoa.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -728,6 +729,13 @@ int runMac(bool host,int argc,char** argv) {
         HostOutputStop shutdown{peer}; peer.start();
         auto bitrate=options.bitrate;
         auto lastProgress=Clock::now();
+        // Annotation overlay: the shell's transparent click-through window is
+        // removed from this capture so its strokes never loop into the video.
+        // NSWindowSharingNone alone is not honoured by every ScreenCaptureKit
+        // release, so the window is excluded from the content filter explicitly.
+        bool excludeOverlay=false; unsigned excludeAttempts=20; auto excludeAt=Clock::time_point{};
+        auto excludeApplied=std::make_shared<std::atomic<std::uint64_t>>(0); std::uint64_t excludeSerial=0;
+        const pid_t shell=getppid();
         // Mobile viewers only: at a low budget, fast motion at full size limits
         // the paced sender to ~15-20 fps. Trade size for frame rate.
         ResolutionPolicy resolution; bool reduced=false;
@@ -749,12 +757,31 @@ int runMac(bool host,int argc,char** argv) {
               awaitCaptureOperation([&](CaptureCompletion complete) { [stream updateConfiguration:config completionHandler:complete]; },"Resize screen capture");
               encoder.resize(width,height);
               injector.setBounds(CGDisplayBounds(target.displayID));
-              displays.selected=*index; peer.setDisplays(displays);
+              displays.selected=*index; peer.setDisplays(displays); display=target;
+              if(excludeOverlay) { excludeAttempts=0; excludeAt={}; ++excludeSerial; } // Re-add the overlay on the new display.
               encoder.keyframe(); encoder.refresh();
               std::cerr<<"SNV2_DISPLAY_SWITCHED index="<<static_cast<unsigned>(*index)<<" size="<<width<<"x"<<height<<" keyframeRequested=1"<<std::endl;
             } catch(const std::exception& error) {
               std::cerr<<"SNV2_DISPLAY_SWITCH_FAILED index="<<static_cast<unsigned>(*index)<<" reason="<<error.what()<<std::endl;
             }
+          }
+          if(const auto exclude=takeCollabExclude()) { excludeOverlay=*exclude; excludeAttempts=0; excludeAt={}; ++excludeSerial; }
+          if(excludeAttempts<20 && excludeApplied->load()!=excludeSerial && Clock::now()>=excludeAt) {
+            ++excludeAttempts; excludeAt=Clock::now()+std::chrono::milliseconds(500);
+            const bool wanted=excludeOverlay; const auto serial=excludeSerial; const auto applied=excludeApplied; SCDisplay* target=display; NSArray<SCWindow*>* privacyWindows=[excluded copy];
+            [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent* value,NSError*) {
+              // Privacy-screen windows stay excluded alongside the overlay.
+              NSMutableArray<SCWindow*>* excluded=[NSMutableArray arrayWithArray:privacyWindows];
+              const NSUInteger privacyCount=privacyWindows.count;
+              if(wanted) for(SCWindow* candidate in value.windows)
+                if(candidate.owningApplication.processID==shell && [candidate.title isEqualToString:@"Sanser Annotations"]) [excluded addObject:candidate];
+              if(wanted && excluded.count==privacyCount) return; // Overlay is not on screen yet; retried.
+              SCContentFilter* next=[[SCContentFilter alloc] initWithDisplay:target excludingWindows:excluded];
+              [stream updateContentFilter:next completionHandler:^(NSError* error) {
+                if(error) { std::cerr<<captureFailure(error,"Exclude annotation overlay")<<std::endl; return; }
+                applied->store(serial); std::cerr<<"SNV2_COLLAB_OVERLAY excluded="<<excluded.count<<std::endl;
+              }];
+            }];
           }
           voicePanel.pump(); if(!peer.running()) break;
           const auto target=peer.bitrate();
@@ -831,6 +858,8 @@ int runMac(bool host,int argc,char** argv) {
     PeerStop shutdown{peer};
     peer.start();
     auto lastHealth=Clock::now(); std::uint64_t presented=0;
+    CollabViewReport viewReport; unsigned videoWidth=0,videoHeight=0;
+    const bool reportView=std::getenv("SANSER_CONTROL_STDIN")!=nullptr;
     while(window.visible && peer.running() && decode.failures()<10) {
       @autoreleasepool {
         if(view.textMode) [view validateTextSession];
@@ -842,8 +871,16 @@ int runMac(bool host,int argc,char** argv) {
         [shortcuts refresh];
         [controller refresh];
         NSEvent* event=[NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:options.ultraLowLatency ? 0.001 : 0.008] inMode:NSDefaultRunLoopMode dequeue:YES]; if(event) [NSApp sendEvent:event];
-        auto pixels=decoder.take(); if(pixels) { [view presentPixels:pixels]; ++presented; CVPixelBufferRelease(pixels); }
+        auto pixels=decoder.take(); if(pixels) { videoWidth=static_cast<unsigned>(CVPixelBufferGetWidth(pixels)); videoHeight=static_cast<unsigned>(CVPixelBufferGetHeight(pixels)); [view presentPixels:pixels]; ++presented; CVPixelBufferRelease(pixels); }
         [window displayIfNeeded];
+        if(reportView && NSScreen.screens.count) {
+          // Top-left origin on the primary screen, in points (Tauri logical units).
+          const NSRect content=[window convertRectToScreen:view.frame];
+          const double primaryHeight=NSScreen.screens[0].frame.size.height;
+          viewReport.publish({static_cast<int>(content.origin.x),static_cast<int>(primaryHeight-(content.origin.y+content.size.height)),
+            static_cast<int>(content.size.width),static_cast<int>(content.size.height),videoWidth,videoHeight,
+            window.visible && !window.miniaturized && (window.occlusionState&NSWindowOcclusionStateVisible)},"pt");
+        }
         if(std::getenv("SANSER_TELEMETRY") && Clock::now()-lastHealth>=std::chrono::seconds(1)) {
           std::ostringstream line; line<<"SNV2_VIDEO_HEALTH decoded="<<decoder.decoded()<<" converted="<<presented
             <<" decoderOutputErrors="<<decoder.outputErrors()<<" decoderOutputDrops="<<decoder.outputDrops()
