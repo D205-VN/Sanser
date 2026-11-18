@@ -4,6 +4,7 @@ endif()
 add_subdirectory(text-input)
 add_library(sanser-native-windows STATIC
   backend.cpp
+  privacy_screen.cpp
   gamepad.cpp
   clipboard.cpp
   audio_player.cpp

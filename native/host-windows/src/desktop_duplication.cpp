@@ -56,6 +56,29 @@ DesktopDuplicator::~DesktopDuplicator() = default;
 ID3D11Device* DesktopDuplicator::gpuDevice() const { return impl_->device.Get(); }
 bool DesktopDuplicator::recovering() const { return impl_->recoveryPending && !brokerCapture_; }
 
+std::vector<DisplayOutput> enumerateDisplayOutputs(std::size_t limit) {
+  std::vector<DisplayOutput> result;
+  ComPtr<IDXGIFactory1> factory;
+  if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(factory.GetAddressOf())))) return result;
+  for (UINT a = 0; a < 8 && result.size() < limit; ++a) {
+    ComPtr<IDXGIAdapter1> adapter;
+    if (factory->EnumAdapters1(a, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
+    if (!adapter) continue;
+    for (UINT o = 0; o < 16 && result.size() < limit; ++o) {
+      ComPtr<IDXGIOutput> output;
+      if (adapter->EnumOutputs(o, output.GetAddressOf()) == DXGI_ERROR_NOT_FOUND) break;
+      DXGI_OUTPUT_DESC desc{};
+      if (!output || FAILED(output->GetDesc(&desc)) || !desc.AttachedToDesktop) continue;
+      const auto& r = desc.DesktopCoordinates;
+      if (r.right <= r.left || r.bottom <= r.top) continue;
+      // The primary monitor's desktop origin is always (0, 0).
+      result.push_back({a, o, r.left, r.top, static_cast<std::uint32_t>(r.right - r.left),
+                        static_cast<std::uint32_t>(r.bottom - r.top), r.left == 0 && r.top == 0});
+    }
+  }
+  return result;
+}
+
 void DesktopDuplicator::initialize(std::uint32_t adapterIndex, std::uint32_t outputIndex) {
   auto next = std::make_unique<Impl>();
   ComPtr<IDXGIFactory1> factory;

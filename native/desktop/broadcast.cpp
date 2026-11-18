@@ -326,6 +326,8 @@ void HostOutput::voicePacket(voice::Packet packet) { if(broadcast_) broadcast_->
 void HostOutput::setVoiceState(voice::State state) { if(broadcast_) broadcast_->setVoiceState(state); }
 void HostOutput::setCapturePaused(bool paused) { if(broadcast_) broadcast_->setCapturePaused(paused); else single_->setCapturePaused(paused); }
 std::uint32_t HostOutput::bitrate() const { return broadcast_ ? broadcast_->bitrate() : single_->recommendedBitrate(); }
+void HostOutput::setDisplays(display::List list) { if(single_) single_->setDisplays(std::move(list)); }
+std::optional<std::uint8_t> HostOutput::takeDisplayRequest() { return single_ ? single_->takeDisplayRequest() : std::nullopt; }
 bool HostOutput::takeKeyframeRequest() { return broadcast_ ? broadcast_->takeKeyframeRequest() : keyframeRequested_.exchange(false); }
 void HostOutput::pumpControl() {
   // The single peer drains its own private file/input commands on the UDP

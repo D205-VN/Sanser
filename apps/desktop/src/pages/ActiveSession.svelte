@@ -5,6 +5,7 @@
   import GroupVoice from '../components/GroupVoice.svelte';
   import SessionTextTools from '../components/SessionTextTools.svelte';
   import SessionFiles from '../components/SessionFiles.svelte';
+  import SessionDisplays from '../components/SessionDisplays.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay, routeRecoveryPlan, type RouteRecoveryEvidence } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
@@ -608,6 +609,9 @@
     <div class="notice">{$t('Sound is available when the host shares system audio. Muting here affects only this viewer.')}</div>
   {:else if sessionState?.wireProtocol === 'snv2' && $connection.engineRunning && !liveSoundControl}
     <div class="notice">{$t('To enable live sound controls, turn on sound in Settings and reconnect.')}</div>
+  {/if}
+  {#if sessionState && !sessionState.sharingId && $connection.engineRunning}
+    {#key sessionState.id}<SessionDisplays sessionId={sessionState.id} legacy={sessionState.wireProtocol !== 'snv2'} />{/key}
   {/if}
   {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && !sessionState.sharingId && $connection.engineRunning}
     {#key sessionState.id}<SessionTextTools sessionId={sessionState.id} /><SessionFiles sessionId={sessionState.id} />{/key}

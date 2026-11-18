@@ -1,4 +1,5 @@
 #pragma once
+#include <mutex>
 #import <ApplicationServices/ApplicationServices.h>
 #include "transport.h"
 #include <array>
@@ -10,10 +11,13 @@ public:
   explicit MacInputInjector(CGRect bounds,std::function<void(CGEventRef)> post={});
   ~MacInputInjector();
   void apply(const Input& input);
+  // Display switch: later absolute pointer events map onto the new display.
+  void setBounds(CGRect bounds) { std::lock_guard lock(boundsMutex_); bounds_=bounds; }
 private:
   CGEventFlags flags() const;
   void emit(CGEventRef event,bool literal=false);
   void reset();
+  std::mutex boundsMutex_;
   CGRect bounds_; CGPoint point_{};
   CGEventSourceRef source_=nullptr;
   std::function<void(CGEventRef)> post_;

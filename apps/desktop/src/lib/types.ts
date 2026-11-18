@@ -94,6 +94,10 @@ export interface HostPreferences {
   audioEnabled: boolean;
   inputEnabled: boolean;
   clipboardEnabled: boolean;
+  /** Host-local black overlay during one-to-one sessions; default off. */
+  privacyScreen: boolean;
+  /** Also block this computer's own keyboard/mouse (Windows helper only). */
+  privacyBlockInput: boolean;
 }
 
 export interface InputPreferences {
@@ -301,6 +305,8 @@ export interface LaunchEngineRequest {
   audioMuted?: boolean;
   inputEnabled?: boolean;
   clipboardEnabled?: boolean;
+  privacyScreen?: boolean;
+  privacyBlockInput?: boolean;
   relativeMouse?: boolean;
   /** Ephemeral server-authorized media credential. Never persist or log this value. */
   sessionToken?: string;

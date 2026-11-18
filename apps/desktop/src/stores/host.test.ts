@@ -109,6 +109,22 @@ it.each([
   expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ wireProtocol: 'snv2', audioEnabled: audio }));
 });
 
+it.each([
+  { screen: false, block: true, expected: { privacyScreen: false, privacyBlockInput: false } },
+  { screen: true, block: false, expected: { privacyScreen: true, privacyBlockInput: false } },
+  { screen: true, block: true, expected: { privacyScreen: true, privacyBlockInput: true } }
+])('passes only the host\'s own privacy preference to the host engine: %j', async ({ screen, block, expected }) => {
+  const settings = structuredClone(DEFAULT_PREFERENCES);
+  settings.host.privacyScreen = screen;
+  settings.host.privacyBlockInput = block;
+  await preferences.save(settings);
+  // A viewer-supplied field on the session must never turn it on.
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, privacyScreen: true, privacyBlockInput: true }] });
+  await host.online(runtime);
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ kind: 'host', ...expected }));
+});
+
 it('keeps unsupported Mac hosting offline and exposes a server upgrade reason', async () => {
   mocks.register.mockRejectedValueOnce(new ApiError('Server update required', 422, 'server_upgrade_required', 'test'));
   await expect(host.online(runtime)).rejects.toMatchObject({ code: 'server_upgrade_required' });

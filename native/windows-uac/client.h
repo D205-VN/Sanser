@@ -29,4 +29,12 @@ struct ServerIdentity { bool trusted=false; DWORD error=0; std::uint32_t check=0
 ServerIdentity verifyServiceEndpoint(HANDLE pipe);
 struct InputDispatch { UINT direct=0,privileged=0; DWORD sourceIntegrity=0,targetIntegrity=0,failureStatus=0,failureError=0; };
 UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch=nullptr);
+// Host privacy screen: ask the helper worker to BlockInput local devices.
+// set... is any-thread; the block is applied on the injecting thread by
+// syncLocalInputBlock()/sendInput(), and while active all remote input goes
+// through that same worker thread (BlockInput is per blocking thread).
+enum class LocalInputBlock : int { Inactive=0, Active=1, Unavailable=2 };
+void setLocalInputBlock(bool block);
+void syncLocalInputBlock();
+LocalInputBlock localInputBlockState();
 } // namespace sanser::uac

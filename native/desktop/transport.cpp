@@ -185,6 +185,8 @@ Options parseOptions(bool host, int argc, char** argv) {
     else if (arg == "--share-peer-id") o.viewerId = value();
     else if (arg == "--disable-input") o.input = false;
     else if (arg == "--enable-clipboard") o.clipboard = true;
+    else if (arg == "--privacy-screen") o.privacyScreen = true;
+    else if (arg == "--privacy-block-input") o.privacyBlockInput = true;
     else if (arg == "--disable-audio") o.audio = false;
     else if (arg == "--mute-audio") o.audioMuted = true;
     else if (arg == "--relative-mouse") throw std::runtime_error("SNV2 currently supports absolute mouse mode; select Auto or Absolute");
@@ -202,6 +204,9 @@ Options parseOptions(bool host, int argc, char** argv) {
   if(o.sharing && (!host || o.input || o.viewerId.empty())) throw std::runtime_error("Sharing requires a host, viewer identifier and disabled input");
   if(!o.sharing && !o.viewerId.empty()) throw std::runtime_error("Viewer identifier requires sharing mode");
   if(o.groupVoice && (o.input || (host && !o.sharing))) throw std::runtime_error("Group voice requires a view-only sharing session");
+  // Privacy is a host-only, one-to-one control feature, never a viewer flag.
+  if((o.privacyScreen || o.privacyBlockInput) && (!host || o.sharing)) throw std::runtime_error("Privacy screen requires a one-to-one host session");
+  if(o.privacyBlockInput && !o.privacyScreen) throw std::runtime_error("Blocking local input requires the privacy screen");
   o.width &= ~1U; o.height &= ~1U;
   return o;
 }
@@ -823,6 +828,37 @@ void Peer::serviceUserMessages(Clock::time_point now) {
   }
   for(auto& callback:expired)callback(5,{});
 }
+void Peer::setDisplays(display::List list) {
+  if(!options_.host || options_.sharing || !list.valid()) return;
+  { std::lock_guard lock(displayMutex_); if(localDisplays_==list) return; localDisplays_=std::move(list); requestedDisplay_.reset(); }
+  if(running_) announceDisplays();
+}
+std::optional<std::uint8_t> Peer::takeDisplayRequest() {
+  std::lock_guard lock(displayMutex_); auto value=requestedDisplay_; requestedDisplay_.reset(); return value;
+}
+bool Peer::selectDisplay(std::uint8_t index) {
+  if(options_.host || !running_ || !ready_) return false;
+  std::optional<std::uint8_t> send;
+  { std::lock_guard lock(displayMutex_);
+    if(!displayRequest_.choose(index,peerDisplays_,Clock::now())) return false;
+    send=displayRequest_.pending(); }
+  if(send) transmit(snv2::PacketType::Keepalive,display::encodeSelect(*send));
+  return true;
+}
+void Peer::announceDisplays() {
+  if(options_.host) {
+    Bytes list;
+    { std::lock_guard lock(displayMutex_); if(!options_.sharing && localDisplays_) list=display::encodeList(*localDisplays_); }
+    if(!list.empty()) transmit(snv2::PacketType::Keepalive,list);
+    return;
+  }
+  std::optional<std::uint8_t> due; std::string record;
+  { std::lock_guard lock(displayMutex_); due=displayRequest_.due(peerDisplays_,Clock::now()); record=display::formatRecord(peerDisplays_); }
+  if(due) transmit(snv2::PacketType::Keepalive,display::encodeSelect(*due));
+  if(std::getenv("SANSER_CONTROL_STDIN") && record!=announcedDisplay_) {
+    announcedDisplay_=record; std::fputs(record.c_str(),stdout); std::fflush(stdout);
+  }
+}
 void Peer::setCapturePaused(bool paused) {
   if(!options_.host || localCapturePaused_.exchange(paused)==paused) return;
   // Retry release on resume too: Secure Desktop may reject an earlier SendInput.
@@ -897,6 +933,7 @@ void Peer::process(const Bytes& bytes) {
     if(options_.files && std::getenv("SANSER_CONTROL_STDIN")) {std::fprintf(stdout,"SNUSER_FILE_RESET\n");std::fflush(stdout);}
     peerSack_=false; peerAudio_=false; peerVideoProgress_=false; peerInputRecovery_=false; peerUnicode_=false; peerClipboard_=false; peerMacHost_=false;
     peerGamepad_=false;peerGamepadAt_=0;lastGamepad_=lastGamepadCapability_=0;
+    { std::lock_guard lock(displayMutex_); peerDisplays_.reset(); requestedDisplay_.reset(); displayRequest_.reset(); lastDisplaySequence_=0; }
     { std::lock_guard lock(userMailbox_->mutex);++userMailbox_->epoch;userMailbox_->hostJobs=0;userMailbox_->localJobs=0;userMailbox_->servicing=0;userMailbox_->replies.clear(); }
     std::vector<ClipboardResult> cancelled;
     { std::lock_guard lock(userMutex_);fileGeneration_=h.keyId;userMessages_=UserMessages{};
@@ -943,6 +980,20 @@ void Peer::process(const Bytes& bytes) {
   }
   if(h.packetType==snv2::PacketType::Keepalive && h.streamId==0) {
     if(!options_.host && b==Bytes({'S','H','M','1'})) { peerMacHost_=true; return; }
+    if(!options_.host && display::isList(b)) {
+      std::lock_guard lock(displayMutex_);
+      if(h.sequence>lastDisplaySequence_) if(auto list=display::decodeList(b)) { lastDisplaySequence_=h.sequence; peerDisplays_=std::move(*list); }
+      return;
+    }
+    if(options_.host && !options_.sharing) if(const auto index=display::decodeSelect(b)) {
+      std::lock_guard lock(displayMutex_);
+      // Validate against the host's own list; never trust a viewer index.
+      if(h.sequence>lastDisplaySequence_ && localDisplays_ && *index<localDisplays_->displays.size()) {
+        lastDisplaySequence_=h.sequence;
+        if(*index!=localDisplays_->selected) requestedDisplay_=*index;
+      }
+      return;
+    }
     if(!options_.host && b.size()==5 && std::memcmp(b.data(),"SGC1",4)==0 && b[4]<=1 && h.sequence>lastGamepadCapability_) {
       lastGamepadCapability_=h.sequence;peerGamepad_=b[4]!=0;
       peerGamepadAt_=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();return;
@@ -1384,6 +1435,7 @@ void Peer::loop() {
       // one of its per-viewer peers. A single host owns its file commands here.
       if(!options_.host || !options_.sharing) for(const auto& command:takeNativeCommands()) {
         if(command=="audio-muted\t1" || command=="audio-muted\t0") setAudioMuted(command.back()=='1');
+        else if(const auto index=display::parseCommand(command)) { if(!options_.host) (void)selectDisplay(*index); }
         else if(const auto request=parseUserCommand(command)) {
           if(request->kind==UserCommand::FileMessage) {
             const auto bytes=userFileBody(request->body,peerGeneration_);
@@ -1453,6 +1505,7 @@ void Peer::loop() {
         if(options_.host)transmit(snv2::PacketType::Keepalive,Bytes{'S','G','C','1',
           static_cast<std::uint8_t>(options_.input && !options_.sharing && onGamepadAvailable && onGamepadAvailable())});
         if(options_.host) transmit(snv2::PacketType::Keepalive,Bytes{'S','C','P','1',static_cast<std::uint8_t>(localCapturePaused_.load())});
+        announceDisplays();
         if(!options_.host && inputAvailable()) transmit(snv2::PacketType::Keepalive,Bytes{'S','I','E','1'});
         // Optional authenticated capability. Old engines safely ignore it;
         // hosts never send audio until a receiving client explicitly opts in.

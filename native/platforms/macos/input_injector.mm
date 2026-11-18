@@ -74,8 +74,9 @@ void MacInputInjector::apply(const Input& input) {
     if(event) CGEventSetLocation(event,point_);
     emit(event); return;
   }
-  point_=CGPointMake(bounds_.origin.x+input.x/65535.0*std::max(0.0,bounds_.size.width-1),
-                     bounds_.origin.y+input.y/65535.0*std::max(0.0,bounds_.size.height-1));
+  CGRect bounds; { std::lock_guard lock(boundsMutex_); bounds=bounds_; }
+  point_=CGPointMake(bounds.origin.x+input.x/65535.0*std::max(0.0,bounds.size.width-1),
+                     bounds.origin.y+input.y/65535.0*std::max(0.0,bounds.size.height-1));
   CGMouseButton button=kCGMouseButtonLeft; CGEventType type=kCGEventMouseMoved;
   if(input.kind==Input::Button) {
     if(input.code>2) return;

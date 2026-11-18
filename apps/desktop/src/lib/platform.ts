@@ -162,6 +162,17 @@ export async function sessionUserAction(sessionId: string, operation: SessionUse
   return invoke('session_user_action', { sessionId, operation, text });
 }
 
+/** Host-validated display list; `available` stays false for older hosts and shares. */
+export interface SessionDisplay { index: number; width: number; height: number; primary: boolean }
+export interface SessionDisplays { available: boolean; selected: number; displays: SessionDisplay[] }
+export async function sessionDisplays(sessionId: string): Promise<SessionDisplays> {
+  return isTauriRuntime() ? invoke('session_displays', { sessionId }) : { available: false, selected: 0, displays: [] };
+}
+export async function selectSessionDisplay(sessionId: string, index: number): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('Display switching requires the Sanser desktop app');
+  await invoke('select_session_display', { sessionId, index });
+}
+
 export interface RouteRecoveryEvidence {
   cause: 'peer-timeout' | 'relay-lost' | 'control-unresponsive' | 'sustained-wire-delay' | 'application-delay';
   automaticAttempts: number;

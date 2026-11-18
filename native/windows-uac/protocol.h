@@ -7,7 +7,9 @@ inline constexpr wchar_t serviceName[]=L"SanserUac";
 inline constexpr wchar_t pipeName[]=L"\\\\.\\pipe\\Sanser.Uac.v1";
 inline constexpr std::uint32_t magic=0x31435553; // SUC1, local IPC only.
 inline constexpr std::uint32_t maxPixelsBytes=64*1024*1024;
-enum class Operation : std::uint32_t { Capture=1, Input=2, Probe=3 };
+// Block: BlockInput(data) on the worker's input thread, for the host-enabled
+// privacy screen. Worker exit (engine exit/crash) always releases it.
+enum class Operation : std::uint32_t { Capture=1, Input=2, Probe=3, Block=4 };
 enum class Status : std::uint32_t { Unavailable=0, Frame=1, Idle=2, Applied=3,
   ConsoleUnavailable=4, DesktopUnavailable=5, InputUnavailable=6, Ready=7, CaptureUnavailable=8,
   ClientRejected=9, WorkerUnavailable=10 };
@@ -41,6 +43,8 @@ inline bool valid(const Request& r) {
   if(r.signature!=magic) return false;
   if(r.operation==Operation::Probe)
     return !r.adapter && !r.output && !r.type && !r.flags && !r.data && !r.x && !r.y;
+  if(r.operation==Operation::Block)
+    return !r.adapter && !r.output && !r.type && !r.flags && r.data<=1 && !r.x && !r.y;
   if(r.operation==Operation::Capture)
     return r.adapter<8 && r.output<16 && !r.type && !r.flags && !r.data && !r.x && !r.y;
   if(r.operation!=Operation::Input || r.adapter || r.output) return false;

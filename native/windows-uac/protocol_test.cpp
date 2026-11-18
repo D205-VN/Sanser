@@ -12,6 +12,10 @@ int main() {
   request.flags=0; request.adapter=1; check(!valid(request));
   request.adapter=0; request.type=1; check(!valid(request));
   request=Request{}; request.signature=0; check(!valid(request));
+  request=Request{}; request.operation=Operation::Block; check(valid(request));
+  request.data=1; check(valid(request)); request.data=2; check(!valid(request));
+  request.data=1; request.flags=1; check(!valid(request)); request.flags=0; request.x=1; check(!valid(request));
+  request.x=0; request.type=1; check(!valid(request)); request.type=0; request.output=1; check(!valid(request));
   request=Request{}; request.operation=Operation::Input; request.type=1; request.flags=8; request.data=0x2a;
   check(valid(request)); request.flags=4; request.data=0x1ebf; check(valid(request));
   request.flags=6; check(valid(request)); request.data=0xd83d; check(valid(request));
@@ -49,5 +53,5 @@ int main() {
   }
   check(shifts==2 && buttons==1);
   state.release([&](const Request&) { throw std::runtime_error("Disconnect released input twice"); });
-  std::cout<<"UAC IPC: bounded frames, operation allowlist, scan keys, coordinates and malformed requests passed\n";
+  std::cout<<"UAC IPC: bounded frames, operation allowlist, input block, scan keys, coordinates and malformed requests passed\n";
 }

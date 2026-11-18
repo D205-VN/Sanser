@@ -53,6 +53,8 @@ bool elevatedForeground(InputDispatch* dispatch) {
 }
 class Connection {
 public:
+  // Incremented whenever a new helper worker is connected.
+  std::uint64_t opened() const { return opened_; }
   bool exchange(Request request,Response& response,FrameBgra* frame=nullptr) {
     if(GetTickCount64()<retryAt_) return false;
     try {
@@ -73,6 +75,7 @@ public:
         if(ready.status!=Status::Ready || ready.bytes)
           return failed(Stage::Ready,static_cast<DWORD>(ready.left),ready.status,static_cast<std::uint32_t>(ready.top));
         { std::lock_guard lock(healthMutex); ++brokerHealth.readyConnections; }
+        ++opened_;
       }
       const auto timeout=request.operation==Operation::Capture && firstCapture_ ? captureStartupTimeoutMs : responseTimeoutMs;
       if(request.operation==Operation::Capture) firstCapture_=false;
@@ -118,8 +121,18 @@ private:
   ULONGLONG retryAt_=0;
   bool firstCapture_=true;
   DWORD failureError_=0,failureStatus_=0;
+  std::uint64_t opened_=0;
 };
 Connection& inputConnection() { thread_local Connection connection; return connection; }
+std::atomic<bool> wantLocalBlock{false};
+std::atomic<int> localBlockState{static_cast<int>(LocalInputBlock::Inactive)};
+// Per injecting thread: the worker generation that holds our block, if any.
+thread_local std::uint64_t blockedWorker=0;
+thread_local ULONGLONG blockRetryAt=0;
+bool blockedHere() {
+  // A reconnected worker is a new process: the old block was released.
+  return blockedWorker && blockedWorker==inputConnection().opened();
+}
 }
 ServerIdentity verifyServiceEndpoint(HANDLE pipe) {
   ULONG pid=0;
@@ -173,16 +186,41 @@ bool CaptureClient::capture(FrameBgra& frame,unsigned adapter,unsigned output,bo
 }
 bool active() { return GetTickCount64()<servedUntil.load(); }
 void resumed() { servedUntil=0; }
+void setLocalInputBlock(bool block) { wantLocalBlock=block; }
+LocalInputBlock localInputBlockState() { return static_cast<LocalInputBlock>(localBlockState.load()); }
+void syncLocalInputBlock() {
+  const bool want=wantLocalBlock.load();
+  if(want==blockedHere()) return;
+  if(!want && !blockedWorker) return;
+  const auto now=GetTickCount64();
+  if(want && now<blockRetryAt) return;
+  Request request; request.operation=Operation::Block; request.data=want ? 1 : 0; Response response;
+  auto& connection=inputConnection();
+  if(connection.exchange(request,response) && response.status==Status::Applied) {
+    blockedWorker=want ? connection.opened() : 0;
+    localBlockState=static_cast<int>(want ? LocalInputBlock::Active : LocalInputBlock::Inactive);
+    std::cerr<<"SNUAC_BLOCK_INPUT active="<<(want ? 1 : 0)<<'\n';
+    return;
+  }
+  blockedWorker=0;
+  if(want) {
+    // Not installed, not elevated, or rejected: say so; never pretend.
+    blockRetryAt=now+5000;
+    localBlockState=static_cast<int>(LocalInputBlock::Unavailable);
+    std::cerr<<"SNUAC_BLOCK_INPUT active=0 unavailable=1 status="<<static_cast<std::uint32_t>(response.status)<<" win32="<<response.left<<'\n';
+  } else localBlockState=static_cast<int>(LocalInputBlock::Inactive);
+}
 UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
   if(dispatch) *dispatch={};
   if(size!=sizeof(INPUT) || count>16) return 0;
+  syncLocalInputBlock();
   auto& connection=inputConnection();
   // Ordinary input remains in-process. The helper is also needed for a high-
   // integrity installer window after its UAC prompt returns to Default.
   // An elevated installer on Default is also privileged, even though capture
   // has already returned from Winlogon. Route it deliberately, rather than
   // interpreting a low-integrity SendInput result as permission to control it.
-  UINT sent=(active() || elevatedForeground(dispatch)) ? 0 : ::SendInput(count,inputs,size);
+  UINT sent=(blockedHere() || active() || elevatedForeground(dispatch)) ? 0 : ::SendInput(count,inputs,size);
   if(dispatch) dispatch->direct=sent;
   if(sent==count) return sent;
   for(;sent<count;++sent) {
@@ -195,7 +233,7 @@ UINT sendInput(UINT count,INPUT* inputs,int size,InputDispatch* dispatch) {
       if(dispatch) { dispatch->failureStatus=connection.failureStatus();dispatch->failureError=connection.failureError(); }
       break;
     }
-    if(response.status==Status::Unavailable) {
+    if(response.status==Status::Unavailable && !blockedHere()) {
       if(dispatch) dispatch->failureStatus=static_cast<DWORD>(response.status);
       // UAC closed between capture and input. A positively rejected event can
       // safely use the normal desktop; never replay a timed-out transaction.
