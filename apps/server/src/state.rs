@@ -21,6 +21,12 @@ pub struct AppState {
     pub general_limiter: RateLimiter,
     pub login_limiter: RateLimiter,
     pub voice_lab_limiter: RateLimiter,
+    /// Second-step code attempts per account (login, confirm, disable).
+    pub two_factor_limiter: RateLimiter,
+    /// Guest code redemption attempts per client address.
+    pub guest_redeem_limiter: RateLimiter,
+    /// Guest code redemption attempts across all clients.
+    pub guest_redeem_global_limiter: RateLimiter,
 }
 
 impl AppState {
@@ -39,6 +45,9 @@ impl AppState {
             general_limiter: RateLimiter::new(general_limit, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(login_limit, Duration::from_secs(600)),
             voice_lab_limiter: RateLimiter::new(12, Duration::from_secs(60)),
+            two_factor_limiter: RateLimiter::new(10, Duration::from_secs(600)),
+            guest_redeem_limiter: RateLimiter::new(20, Duration::from_secs(600)),
+            guest_redeem_global_limiter: RateLimiter::new(600, Duration::from_secs(60)),
         }
     }
 }

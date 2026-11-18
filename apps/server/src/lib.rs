@@ -80,7 +80,40 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v2/auth/login", post(routes::auth::login))
         .route("/api/v2/auth/logout", post(routes::auth::logout))
         .route("/api/v2/auth/refresh", post(routes::auth::refresh))
+        .route(
+            "/api/v2/auth/login/two-factor",
+            post(routes::two_factor::complete_login),
+        )
         .route("/api/v2/account", get(routes::account::get_account))
+        .route(
+            "/api/v2/account/two-factor",
+            get(routes::two_factor::status),
+        )
+        .route(
+            "/api/v2/account/two-factor/enroll",
+            post(routes::two_factor::enroll),
+        )
+        .route(
+            "/api/v2/account/two-factor/confirm",
+            post(routes::two_factor::confirm),
+        )
+        .route(
+            "/api/v2/account/two-factor/disable",
+            post(routes::two_factor::disable),
+        )
+        .route(
+            "/api/v2/account/two-factor/recovery-codes",
+            post(routes::two_factor::regenerate_recovery_codes),
+        )
+        .route(
+            "/api/v2/guest/grants",
+            get(routes::guest::list).post(routes::guest::create),
+        )
+        .route(
+            "/api/v2/guest/grants/{id}/revoke",
+            post(routes::guest::revoke),
+        )
+        .route("/api/v2/guest/redeem", post(routes::guest::redeem))
         .route(
             "/api/v2/account/password",
             post(routes::account::change_password),
@@ -259,6 +292,8 @@ fn spawn_cleanup(state: AppState, cancellation: CancellationToken) -> tokio::tas
                         i64::try_from(state.config.pending_session_ttl.as_secs()).unwrap_or(i64::MAX)
                     );
                     db::cleanup(&state.pool, now, offline_before, pending_before).await;
+                    routes::two_factor::cleanup(&state.pool, now).await;
+                    routes::guest::cleanup(&state.pool, now).await;
                 }
             }
         }

@@ -1,5 +1,6 @@
 use axum::{
     Json,
+    body::Bytes,
     extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -13,7 +14,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthContext, audit},
+    auth::{AuthContext, SessionAuth, audit},
     error::{ApiJson, AppError},
     events,
     models::{ConnectionSession, Device, Page, SessionAccess},
@@ -36,6 +37,17 @@ pub struct CreateSessionRequest {
     quality_profile: String,
     #[serde(default = "default_codec")]
     requested_codec: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcceptSessionRequest {
+    /// The host saw that the requester is a guest and accepted on purpose.
+    #[serde(default)]
+    guest_confirmed: bool,
+    /// Guests default to view-only; the host may grant control here.
+    #[serde(default)]
+    access_mode: Option<SessionAccess>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,21 +322,24 @@ pub async fn create(
 
 pub async fn get(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SessionAuth(auth): SessionAuth,
     Path(id): Path<String>,
 ) -> Result<Json<ConnectionSession>, AppError> {
     let id = validate_uuid(&id, "id")?;
+    auth.require_session(&id)?;
     Ok(Json(fetch_owned(&state, &auth.user_id, &id).await?))
 }
 
 pub async fn credentials(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SessionAuth(auth): SessionAuth,
     Path(id): Path<String>,
     Query(query): Query<NativeCredentialsQuery>,
 ) -> Result<Response, AppError> {
     let id = validate_uuid(&id, "id")?;
     let device_id = validate_uuid(&query.device_id, "deviceId")?;
+    auth.require_session(&id)?;
+    auth.require_device(&device_id)?;
     let session = fetch_owned(&state, &auth.user_id, &id).await?;
     if session.state != "accepted" {
         return Err(AppError::Conflict(
@@ -344,8 +359,8 @@ pub async fn credentials(
     } else {
         return Err(AppError::Forbidden);
     };
-    let device = devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
-    let peer = devices::fetch_owned(&state, &auth.user_id, &peer_device_id).await?;
+    let device = devices::fetch_session_device(&state, &auth.user_id, &device_id).await?;
+    let peer = devices::fetch_session_device(&state, &auth.user_id, &peer_device_id).await?;
     if !device.native_transport || !peer.native_transport {
         return Err(AppError::Conflict(
             "both session devices must support the native transport".into(),
@@ -429,12 +444,14 @@ pub async fn credentials(
 
 pub async fn native_ready(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SessionAuth(auth): SessionAuth,
     Path(id): Path<String>,
     ApiJson(request): ApiJson<NativeReadyRequest>,
 ) -> Result<Json<ConnectionSession>, AppError> {
     let id = validate_uuid(&id, "id")?;
     let device_id = validate_uuid(&request.device_id, "deviceId")?;
+    auth.require_session(&id)?;
+    auth.require_device(&device_id)?;
     let current = fetch_owned(&state, &auth.user_id, &id).await?;
     if current.state != "accepted" {
         return Err(AppError::Conflict(format!(
@@ -450,7 +467,7 @@ pub async fn native_ready(
     if device_id != current.requester_device_id {
         return Err(AppError::Forbidden);
     }
-    let requester = devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
+    let requester = devices::fetch_session_device(&state, &auth.user_id, &device_id).await?;
     let host = devices::fetch_owned(&state, &auth.user_id, &current.host_device_id).await?;
     ensure_device_online(&state, &requester)?;
     ensure_device_online(&state, &host)?;
@@ -507,30 +524,61 @@ pub async fn accept(
     State(state): State<AppState>,
     auth: AuthContext,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> Result<Json<ConnectionSession>, AppError> {
     let id = validate_uuid(&id, "id")?;
+    // Older hosts send no body. Only a guest session needs one.
+    let request: AcceptSessionRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        AcceptSessionRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|error| AppError::Validation(format!("invalid JSON payload: {error}")))?
+    };
     let current = fetch_owned(&state, &auth.user_id, &id).await?;
     if current.state != "pending" {
         return Err(AppError::Conflict(
             "only a pending session can be accepted".into(),
         ));
     }
+    let access_mode = if current.guest.is_some() {
+        // A guest is never accepted implicitly: an older host (or any
+        // auto-accept rule) that does not confirm the guest is refused.
+        if !request.guest_confirmed {
+            return Err(AppError::Conflict(
+                "This request is from a guest. Update Sanser on this computer to review and accept it."
+                    .into(),
+            ));
+        }
+        request.access_mode.unwrap_or(SessionAccess::ViewOnly)
+    } else {
+        if request
+            .access_mode
+            .is_some_and(|mode| mode != current.access_mode)
+        {
+            return Err(AppError::Validation(
+                "accessMode can only be chosen when accepting a guest".into(),
+            ));
+        }
+        current.access_mode
+    };
     let host = devices::fetch_owned(&state, &auth.user_id, &current.host_device_id).await?;
     let requester =
-        devices::fetch_owned(&state, &auth.user_id, &current.requester_device_id).await?;
+        devices::fetch_session_device(&state, &auth.user_id, &current.requester_device_id).await?;
     ensure_device_online(&state, &host)?;
     ensure_device_online(&state, &requester)?;
     let selected_transport = select_transport(None, current.network_mode, &host, &requester)?;
     let now = now_unix();
     let updated = sqlx::query(
         "UPDATE connection_sessions SET state = 'accepted', selected_transport = $1, \
-         accepted_at = $2, updated_at = $3 WHERE id = $4 AND user_id = $5 AND state = 'pending'",
+         accepted_at = $2, updated_at = $3, access_mode = $6 \
+         WHERE id = $4 AND user_id = $5 AND state = 'pending'",
     )
     .bind(&selected_transport)
     .bind(now)
     .bind(now)
     .bind(&id)
     .bind(&auth.user_id)
+    .bind(access_mode.as_str())
     .execute(&state.pool)
     .await
     .map_err(AppError::from_db)?;
@@ -577,10 +625,11 @@ pub async fn reject(
 
 pub async fn disconnect(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SessionAuth(auth): SessionAuth,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let id = validate_uuid(&id, "id")?;
+    auth.require_session(&id)?;
     let current = fetch_owned(&state, &auth.user_id, &id).await?;
     if matches!(
         current.state.as_str(),
@@ -592,7 +641,7 @@ pub async fn disconnect(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn transition_to_ended(
+pub(crate) async fn transition_to_ended(
     state: &AppState,
     auth: &AuthContext,
     current: &ConnectionSession,
@@ -653,6 +702,11 @@ async fn transition_to_ended(
     .execute(&mut *tx)
     .await
     .map_err(AppError::from_db)?;
+    if let Some(guest) = &current.guest {
+        // A support session ends with its connection: the guest token and the
+        // temporary guest device stop working immediately.
+        super::guest::end_guest_access(&mut tx, &auth.user_id, &guest.grant_id, now).await?;
+    }
     tx.commit().await.map_err(AppError::from_db)?;
     events::publish(
         state,
@@ -724,6 +778,19 @@ fn row_to_session(row: sqlx::postgres::PgRow) -> Result<ConnectionSession, AppEr
         disconnect_reason: row
             .try_get("disconnect_reason")
             .map_err(AppError::from_db)?,
+        guest: row
+            .try_get::<Option<String>, _>("guest_grant_id")
+            .map_err(AppError::from_db)?
+            .map(|grant_id| {
+                Ok::<_, AppError>(crate::models::SessionGuest {
+                    grant_id,
+                    name: row
+                        .try_get::<Option<String>, _>("guest_name")
+                        .map_err(AppError::from_db)?
+                        .unwrap_or_else(|| "Guest".into()),
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -733,7 +800,7 @@ async fn most_recent_requester(
     host_id: &str,
 ) -> Result<String, AppError> {
     sqlx::query_scalar::<_, String>(
-        "SELECT id FROM devices WHERE user_id = $1 AND id != $2 AND online = TRUE AND device_role = 'client' \
+        "SELECT id FROM devices WHERE user_id = $1 AND id != $2 AND online = TRUE AND device_role = 'client' AND guest_grant_id IS NULL \
          ORDER BY last_seen_at DESC, id DESC LIMIT 1",
     )
     .bind(user_id)
@@ -748,7 +815,10 @@ async fn most_recent_requester(
     })
 }
 
-fn native_wire_protocol(host: &Device, requester: &Device) -> Result<&'static str, AppError> {
+pub(crate) fn native_wire_protocol(
+    host: &Device,
+    requester: &Device,
+) -> Result<&'static str, AppError> {
     if host.device_role != "host" || requester.device_role != "client" {
         return Err(AppError::Conflict(
             "The target must be a host and the requester must be a client".into(),
@@ -785,7 +855,7 @@ pub(crate) fn supports_view_only(version: &str) -> bool {
     parts.is_ok_and(|parts| parts.len() == 3 && (parts[0], parts[1], parts[2]) >= (2, 1, 22))
 }
 
-fn select_transport(
+pub(crate) fn select_transport(
     requested: Option<&str>,
     mode: NetworkMode,
     host: &Device,
@@ -884,7 +954,7 @@ pub(crate) const fn network_mode_str(mode: NetworkMode) -> &'static str {
     }
 }
 
-fn validate_uuid(value: &str, field: &str) -> Result<String, AppError> {
+pub(crate) fn validate_uuid(value: &str, field: &str) -> Result<String, AppError> {
     Uuid::parse_str(value.trim())
         .map(|id| id.to_string())
         .map_err(|_| AppError::Validation(format!("{field} must be a UUID")))

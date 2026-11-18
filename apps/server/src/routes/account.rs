@@ -60,7 +60,7 @@ pub async fn list_login_sessions(
 ) -> Result<Json<Vec<LoginSession>>, AppError> {
     let rows = sqlx::query(
         "SELECT id, device_name, platform, created_at, last_seen_at, expires_at \
-         FROM auth_sessions WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > $2 \
+         FROM auth_sessions WHERE user_id = $1 AND scope = 'account' AND revoked_at IS NULL AND expires_at > $2 \
          ORDER BY last_seen_at DESC LIMIT 100",
     )
     .bind(&auth.user_id)
@@ -92,7 +92,7 @@ pub async fn revoke_login_session(
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let owned = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM auth_sessions WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+        "SELECT COUNT(*) FROM auth_sessions WHERE id = $1 AND user_id = $2 AND scope = 'account' AND revoked_at IS NULL",
     )
     .bind(&session_id)
     .bind(&auth.user_id)

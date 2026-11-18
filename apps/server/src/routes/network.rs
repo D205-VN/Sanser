@@ -5,7 +5,7 @@ use serde::Serialize;
 use sha1::Sha1;
 
 use crate::{
-    auth::AuthContext, config::NetworkMode, error::AppError, state::AppState, time::expires_at,
+    auth::SessionAuth, config::NetworkMode, error::AppError, state::AppState, time::expires_at,
 };
 
 #[derive(Serialize)]
@@ -30,7 +30,7 @@ struct IceServer {
 
 pub async fn ice(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SessionAuth(auth): SessionAuth,
 ) -> Result<Json<IceConfiguration>, AppError> {
     let mut servers = Vec::with_capacity(2);
     if !state.config.stun_urls.is_empty() && state.config.network_mode != NetworkMode::Manual {

@@ -39,6 +39,9 @@ pub struct Config {
     pub native_base_port: u16,
     pub session_credential_ttl: Duration,
     pub(crate) session_credential_key: Arc<Zeroizing<Vec<u8>>>,
+    /// Optional dedicated key for TOTP secrets at rest. Without it the key is
+    /// derived from `SESSION_CREDENTIAL_KEY` (see docs/two-factor.md).
+    pub(crate) two_factor_key: Option<Arc<Zeroizing<Vec<u8>>>>,
 }
 
 #[derive(Debug, Error)]
@@ -75,6 +78,17 @@ impl Config {
         let database_url = required_env("DATABASE_URL")?;
         validate_neon_database_url(&database_url, false)?;
         let session_credential_key = session_credential_key_from_env()?;
+        let two_factor_key = match env::var("TWO_FACTOR_ENCRYPTION_KEY").map(Zeroizing::new) {
+            Ok(encoded) if !encoded.trim().is_empty() => {
+                Some(decode_session_credential_key(encoded.trim()).map_err(|_| {
+                    ConfigError::Invalid(
+                        "TWO_FACTOR_ENCRYPTION_KEY must be base64 that decodes to 32–128 bytes"
+                            .into(),
+                    )
+                })?)
+            }
+            _ => None,
+        };
         let allowed_origins = parse_origins(&env_or(
             "ALLOWED_ORIGINS",
             "http://127.0.0.1:5174,http://localhost:5174,tauri://localhost,http://tauri.localhost",
@@ -158,6 +172,7 @@ impl Config {
                 "60",
             )?),
             session_credential_key,
+            two_factor_key,
         };
         config.validate()?;
         Ok(config)
@@ -194,6 +209,7 @@ impl Config {
             native_base_port: 50_000,
             session_credential_ttl: Duration::from_secs(60),
             session_credential_key: Arc::new(Zeroizing::new(vec![0xA5; 32])),
+            two_factor_key: None,
         };
         config.validate()?;
         Ok(config)
