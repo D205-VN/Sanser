@@ -5,6 +5,7 @@
   import GroupVoice from '../components/GroupVoice.svelte';
   import SessionTextTools from '../components/SessionTextTools.svelte';
   import SessionFiles from '../components/SessionFiles.svelte';
+  import SessionRecording from '../components/SessionRecording.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay, routeRecoveryPlan, type RouteRecoveryEvidence } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
@@ -17,6 +18,7 @@
   import { preferences } from '../stores/preferences';
   import { presence } from '../stores/presence';
   import { session } from '../stores/session';
+  import { viewerRecording } from '../stores/recording';
   import { viewerAudio, prepareViewerAudio, muteViewerAudio, forgetViewerAudio } from '../stores/viewerAudio';
 
   let { runtime, navigate }: { runtime: RuntimeStatus; navigate: (page: Page) => void } = $props();
@@ -384,6 +386,8 @@
     connection.setBusy(true);
     localError = null;
     try {
+      // Finalize the recording file before the viewer engine exits.
+      if ($viewerRecording.sessionId === targetId) await viewerRecording.stop().catch(() => undefined);
       if (runtime.capabilities.desktopShell.state === 'available') {
         // A failed local cleanup must not prevent revoking server consent.
         await Promise.allSettled([stopEngine('client', targetId), stopRelay('client', targetId)]);
@@ -611,6 +615,13 @@
   {/if}
   {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && !sessionState.sharingId && $connection.engineRunning}
     {#key sessionState.id}<SessionTextTools sessionId={sessionState.id} /><SessionFiles sessionId={sessionState.id} />{/key}
+  {/if}
+  {#if sessionState?.status === 'accepted' && $connection.engineRunning}
+    {#if sessionState.wireProtocol === 'snv2'}
+      {#key sessionState.id}<SessionRecording sessionId={sessionState.id} />{/key}
+    {:else}
+      <div class="notice">{$t('Recording needs an SNV2 (H.264) connection. It is unavailable for this Mac-to-Mac HEVC session.')}</div>
+    {/if}
   {/if}
   {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && $preferences.input.mouseMode === 'relative'}
     <div class="notice">{$t('This connection uses absolute mouse control. Relative mouse capture is not supported yet.')}</div>

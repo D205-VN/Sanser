@@ -9,6 +9,8 @@ import type {
   NativeSessionCredentials,
   NetworkMode,
   QualityProfile,
+  RecordingConsent,
+  RecordingConsentAction,
   SharingGroup
 } from './types';
 import type { LoginDevice } from './platform';
@@ -398,6 +400,18 @@ export class ApiClient {
         body: { deviceId }
       })
     );
+  }
+
+  /** Recording consent relay; no media or file names pass through the server. */
+  async recordingConsent(id: string): Promise<RecordingConsent> {
+    return this.request<RecordingConsent>(`/api/v2/sessions/${encodeURIComponent(id)}/recording`);
+  }
+
+  async updateRecordingConsent(id: string, deviceId: string, action: RecordingConsentAction): Promise<RecordingConsent> {
+    return this.request<RecordingConsent>(`/api/v2/sessions/${encodeURIComponent(id)}/recording`, {
+      method: 'POST',
+      body: { deviceId, action }
+    });
   }
 
   async iceConfiguration(): Promise<IceConfiguration> {

@@ -121,42 +121,44 @@ fn normalize_key(key: &str) -> String {
         .collect()
 }
 
+const SENSITIVE_PARTS: [&str; 12] = [
+    "password",
+    "passphrase",
+    "token",
+    "credential",
+    "secret",
+    "authorization",
+    "privatekey",
+    "databaseurl",
+    "apikey",
+    "cookie",
+    "email",
+    "signature",
+];
+const SENSITIVE_KEYS: [&str; 14] = [
+    "name",
+    "username",
+    "displayname",
+    "devicename",
+    "hostname",
+    "computername",
+    "viewername",
+    "accountname",
+    "account",
+    "nonce",
+    "mac",
+    "proof",
+    "key",
+    "sessionkey",
+];
+
 /// Keys whose value is always removed regardless of content: secrets and
 /// personal identifiers (account e-mail, user/device names, addresses).
 #[must_use]
 pub fn sensitive_key(key: &str) -> bool {
     let key = normalize_key(key);
-    const CONTAINS: [&str; 12] = [
-        "password",
-        "passphrase",
-        "token",
-        "credential",
-        "secret",
-        "authorization",
-        "privatekey",
-        "databaseurl",
-        "apikey",
-        "cookie",
-        "email",
-        "signature",
-    ];
-    const EXACT: [&str; 14] = [
-        "name",
-        "username",
-        "displayname",
-        "devicename",
-        "hostname",
-        "computername",
-        "viewername",
-        "accountname",
-        "account",
-        "nonce",
-        "mac",
-        "proof",
-        "key",
-        "sessionkey",
-    ];
-    CONTAINS.iter().any(|needle| key.contains(needle)) || EXACT.contains(&key.as_str())
+    SENSITIVE_PARTS.iter().any(|needle| key.contains(needle))
+        || SENSITIVE_KEYS.contains(&key.as_str())
 }
 
 fn is_trim(character: char) -> bool {
@@ -261,6 +263,7 @@ fn is_email(text: &str) -> bool {
 
 /// Returns `Some(port)` when the text is an IP literal, optionally with a
 /// port (`1.2.3.4:5000`, `[fe80::1]:5000`, `fe80::1%en0`).
+#[allow(clippy::option_option)] // None = not an IP, Some(None) = IP without port
 fn ip_with_port(text: &str) -> Option<Option<u16>> {
     if let Some(rest) = text.strip_prefix('[') {
         let (address, tail) = rest.split_once(']')?;
@@ -343,7 +346,7 @@ fn is_uuid(text: &str) -> bool {
 /// Long opaque credentials (JWTs, base64/hex keys). UUIDs remain because
 /// session identifiers are needed to correlate reports and are not secret.
 fn is_opaque_token(text: &str) -> bool {
-    if text.len() < 32 || is_uuid(text) || text.starts_with('/') || text.contains("\\") {
+    if text.len() < 32 || is_uuid(text) || text.starts_with('/') || text.contains('\\') {
         return false;
     }
     let allowed = text
@@ -410,7 +413,7 @@ impl ZipWriter {
         self.entries = self.entries.checked_add(1).ok_or_else(too_large)?;
         let crc = crc32(contents);
         // DOS date 2026-01-01 00:00; exact times are not needed in a report.
-        let (time, date) = (0_u16, ((2026 - 1980) << 9 | 1 << 5 | 1) as u16);
+        let (time, date): (u16, u16) = (0, ((2026 - 1980) << 9) | (1 << 5) | 1);
         let mut local = Vec::with_capacity(30 + name.len());
         local.extend_from_slice(&0x0403_4b50_u32.to_le_bytes());
         local.extend_from_slice(&20_u16.to_le_bytes());

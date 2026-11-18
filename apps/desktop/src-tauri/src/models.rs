@@ -260,6 +260,13 @@ pub struct HostPreferences {
     pub audio_enabled: bool,
     pub input_enabled: bool,
     pub clipboard_enabled: bool,
+    /// Viewers may record this computer's screen (they always show a notice).
+    #[serde(default = "default_true")]
+    pub allow_recording: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 const fn default_direct_udp_port() -> u16 {
