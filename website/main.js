@@ -228,26 +228,31 @@
     applyOS();
   }
 
+  function getJSON(url, headers) {
+    return fetch(url, { headers: headers || {}, cache: 'no-cache' })
+      .then(function (res) { if (!res.ok) throw new Error(res.status); return res.json(); });
+  }
+
+  function slimReleases(data) {
+    return data.map(function (r) {
+      return {
+        tag_name: r.tag_name, draft: r.draft, prerelease: r.prerelease,
+        assets: (r.assets || []).map(function (a) { return { name: a.name, size: a.size, browser_download_url: a.browser_download_url }; })
+      };
+    });
+  }
+
+  // The links baked into index.html at deploy time are already current.
+  // Then check the GitHub API directly, so a release published after the
+  // last deploy still shows up. Its 60 requests/hour per network can run
+  // out; releases.json (written by the deploy, no quota) covers that case.
   function loadReleases() {
-    var cacheKey = 'sanser-releases-v1';
-    try {
-      var cached = JSON.parse(sessionStorage.getItem(cacheKey) || 'null');
-      if (cached && Date.now() - cached.at < 10 * 60 * 1000) { applyReleases(cached.data); return; }
-    } catch (e) {}
     if (!window.fetch) return;
-    fetch('https://api.github.com/repos/' + REPO + '/releases?per_page=30', { headers: { Accept: 'application/vnd.github+json' } })
-      .then(function (res) { if (!res.ok) throw new Error(res.status); return res.json(); })
-      .then(function (data) {
-        var slim = data.map(function (r) {
-          return {
-            tag_name: r.tag_name, draft: r.draft, prerelease: r.prerelease,
-            assets: (r.assets || []).map(function (a) { return { name: a.name, size: a.size, browser_download_url: a.browser_download_url }; })
-          };
-        });
-        try { sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), data: slim })); } catch (e) {}
-        applyReleases(slim);
-      })
-      .catch(function () { /* Static fallback links in the HTML stay in place. */ });
+    getJSON('https://api.github.com/repos/' + REPO + '/releases?per_page=30', { Accept: 'application/vnd.github+json' })
+      .then(slimReleases)
+      .catch(function () { return getJSON('releases.json'); })
+      .then(function (list) { if (list && list.length) applyReleases(list); })
+      .catch(function () { /* Baked-in links in the HTML stay in place. */ });
   }
 
   /* ---------- nav + reveal ---------- */

@@ -15,10 +15,20 @@ website/
 
 ## Download links
 
-Each button has a working fallback `href` pinned to a real GitHub release asset
-(desktop `v2.3.15`, mobile `v2.3.7`, the latest release that has APK/IPA files).
-On load, `main.js` reads `https://api.github.com/repos/D205-VN/Sanser/releases`
-and swaps in the newest matching asset by file name:
+Download links stay current in three layers:
+
+1. **At deploy time** the Pages workflow runs `scripts/website-release-links.py`,
+   which reads the releases with the workflow token (no visitor quota) and
+   rewrites every download link, size and version in the published
+   `index.html`. It also writes `releases.json` next to it.
+2. **After each release** the `publish` job in `release.yml` starts the Pages
+   workflow (`gh workflow run pages.yml`), because a release published with
+   `GITHUB_TOKEN` does not trigger other workflows by itself.
+3. **In the browser** `main.js` asks the GitHub API for the newest assets, and
+   falls back to `releases.json` when the API's 60 requests/hour per network
+   are used up.
+
+Assets are matched by file name:
 
 | Button | Asset name pattern |
 | --- | --- |
@@ -27,11 +37,10 @@ and swaps in the newest matching asset by file name:
 | Android | `Sanser-Android-<ver>-arm64[-preview].apk` |
 | iOS | `Sanser-iOS-<ver>-device-unsigned.ipa` |
 
-So a new release appears on the site without editing it. If the API is
-unreachable or rate-limited (60 requests/hour per visitor IP), the pinned links
-are used. After a release, update the fallback `href`s and the `v2.3.15`
-text in `index.html` so no-JS visitors also get the new version, and refresh the
-"What's new" section from `docs/releases/`.
+The links in the repository's `index.html` are only a starting point; there is
+no need to edit them per release. The "What's new" text still comes from
+`docs/releases/` by hand. If a deploy did not happen after a release, run
+*Actions → Website (GitHub Pages) → Run workflow*.
 
 ## Preview locally
 

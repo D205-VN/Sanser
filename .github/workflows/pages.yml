@@ -6,6 +6,8 @@ on:
     paths:
       - "website/**"
       - ".github/workflows/pages.yml"
+      - "scripts/website-release-links.py"
+  # release.yml starts this after publishing, so new versions reach the site.
   workflow_dispatch:
 
 permissions:
@@ -31,6 +33,10 @@ jobs:
         run: |
           mkdir -p _site
           rsync -a --exclude README.md website/ _site/
+      - name: Bake newest release links into the site
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/website-release-links.py _site
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
