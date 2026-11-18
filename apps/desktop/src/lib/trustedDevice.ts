@@ -14,6 +14,8 @@ export function trustedPendingSession(
   const trusted = new Set(trustedDeviceIds);
   return sessions.find((item) =>
     item.status === 'pending' &&
+    // Guests are never accepted automatically, whatever the trust list says.
+    !item.guest &&
     item.hostDeviceId === hostDeviceId &&
     item.requesterDeviceId !== hostDeviceId &&
     trusted.has(item.requesterDeviceId)

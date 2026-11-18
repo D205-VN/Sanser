@@ -2,6 +2,7 @@
   import { t, tk } from '../lib/i18n';
   import { onDestroy } from 'svelte';
   import LoginSessions from '../components/LoginSessions.svelte';
+  import TwoFactorCard from '../components/TwoFactorCard.svelte';
   import LanguageToggle from '../components/LanguageToggle.svelte';
   import Toggle from '../components/Toggle.svelte';
   import { normalizeServerUrl } from '../lib/api';
@@ -255,6 +256,7 @@
           <Toggle checked={$preferences.host.clipboardEnabled} disabled={runtime.capabilities.clipboard.state !== 'available' || !$preferences.host.inputEnabled} label={$t('Text clipboard')} description={$t('Allow manual text clipboard requests in control sessions. Reconnect after changing this setting.')} onchange={(value) => saveHost({ clipboardEnabled: value })} />
         </article>
       {:else if active === 'security'}
+        <TwoFactorCard />
         <article class="card card-body settings-card stack"><form class="password-form" onsubmit={changePassword}><h3>{$t('Change password')}</h3><p>{$t('All signed-in sessions are revoked after this change.')}</p><div class="field"><label for="current-password">{$t('Current password')}</label><input id="current-password" class="input" type="password" bind:value={currentPassword} required minlength="12" maxlength="256" autocomplete="current-password" /></div><div class="grid two"><div class="field"><label for="new-password">{$t('New password')}</label><input id="new-password" class="input" type="password" bind:value={newPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div><div class="field"><label for="confirm-password">{$t('Confirm new password')}</label><input id="confirm-password" class="input" type="password" bind:value={confirmPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div></div><button class="button" type="submit" disabled={securityBusy}>{securityBusy ? $t('Updating…') : $t('Update password')}</button></form></article>
       {:else if active === 'diagnostics'}
         <article class="card card-body stack">

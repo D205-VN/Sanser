@@ -12,6 +12,7 @@
   import Host from './pages/Host.svelte';
   import Settings from './pages/Settings.svelte';
   import Welcome from './pages/Welcome.svelte';
+  import GuestSession from './pages/GuestSession.svelte';
   import { diagnostics, networkDiagnostics, type DirectRouteHealth, type DirectPathsUpdate } from './stores/diagnostics';
   import { nativePerformance, type NativePerformanceUpdate } from './stores/nativePerformance';
   import { connection } from './stores/connection';
@@ -82,7 +83,8 @@
   $effect(() => {
     if (!signingOut && runtime && $session.mode === 'cloud' && runtime.capabilities.clientEngine.state === 'available') {
       void presence.start(runtime);
-    } else {
+    } else if ($session.mode !== 'guest') {
+      // A guest's presence is driven by GuestSession, not by an account sign-in.
       void presence.stop();
     }
   });
@@ -220,9 +222,11 @@
   <main class="fatal-screen"><BrandMark size={68} label="Sanser" /><h1>{$t('Sanser could not start')}</h1><p>{$t(bootError)}</p><button class="button" onclick={() => window.location.reload()}>{$t('Retry')}</button></main>
 {:else if !runtime || !$session.ready}
   <main class="boot-screen"><BrandMark size={68} label="Sanser" /><span>{$t('Starting Sanser…')}</span></main>
+{:else if $session.mode === 'guest'}
+  <GuestSession {runtime} />
 {:else if $session.mode === 'signedOut'}
   {#if updateAvailable}<div class="welcome-update"><button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? $t('Checking…') : $t('Update')}</button></div>{/if}
-  <Welcome />
+  <Welcome {runtime} />
 {:else}
   <ConnectionAlerts />
   <div class="app-shell">

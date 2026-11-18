@@ -136,7 +136,7 @@
         diagnostics.add({ level: 'info', category: 'network', message: `Encrypted relay route is ready (${relayResult.transport === 'udp' ? 'UDP datagrams' : 'WSS/TCP fallback'})` });
       }
 
-      if (signal.aborted || !componentActive || $connection.session?.id !== target.id || $session.mode !== 'cloud') {
+      if (signal.aborted || !componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') {
         if (selectedP2p) await releaseP2pConnection(selectedP2p).catch(() => undefined);
         if (relayResult) await stopRelay('client', target.id).catch(() => undefined);
         return false;
@@ -237,7 +237,7 @@
       const ready = await client.markNativeReady(target.id, localDeviceId);
       if (controller.signal.aborted) return;
       const credentials = await client.sessionCredentials(target.id, localDeviceId);
-      if (isAborted(controller.signal) || !componentActive || $connection.session?.id !== target.id || $session.mode !== 'cloud') return;
+      if (isAborted(controller.signal) || !componentActive || $connection.session?.id !== target.id || $session.mode === 'signedOut') return;
       if ($connection.nativeRecoveryPending && Date.now() > $connection.nativeRecoveryRetryAt + 30_000) {
         connection.blockNativeRetry();
         connection.setError($t('The server did not recover in time. Retry the connection manually.'));
@@ -327,7 +327,7 @@
   async function recoverRoute(target: ConnectionSession, evidence: Omit<RouteRecoveryEvidence, 'automaticAttempts'> | null, manual = false): Promise<boolean> {
     if (recoveryInFlight || nativePreparationInFlight || $connection.busy || disconnecting || (!manual && ($connection.nativeRetryBlocked || $connection.nativeRecoveryPending || $connection.nativeRouteRecoveries >= 2))) return false;
     const api = session.client();
-    const ownsSession = () => !disconnecting && $session.mode === 'cloud' && $connection.session?.id === target.id;
+    const ownsSession = () => !disconnecting && $session.mode !== 'signedOut' && $connection.session?.id === target.id;
     const stillCurrent = () => componentActive && ownsSession();
     if (!api || !stillCurrent()) return false;
     recoveryInFlight = true;
@@ -585,8 +585,8 @@
         <button class="button small" disabled={changingSound || disconnecting || recoveryInFlight} aria-pressed={$viewerAudio[sessionState.id] ?? false} title={$t('Mute or unmute only this viewer')} onclick={toggleSound}><Icon name={($viewerAudio[sessionState.id] ?? false) ? 'volume-off' : 'volume'} />{($viewerAudio[sessionState.id] ?? false) ? $t('Unmute sound') : $t('Mute sound')}</button>
       {/if}
       {#if $connection.engineRunning}<button class="button small" title={$t('Close and reopen the remote window')} disabled={$connection.busy || nativePreparationInFlight || recoveryInFlight || disconnecting} onclick={() => recoverRoute(sessionState, null, true)}><Icon name="refresh" />{$t('Reconnect')}</button>{/if}
-      <button class="button small" onclick={() => navigate('settings')}><Icon name="settings" />{$t('Session settings')}</button>
-      <button class="button small" onclick={() => navigate('diagnostics')}><Icon name="diagnostics" />{$t('Connection details')}</button>
+      {#if $session.mode !== 'guest'}<button class="button small" onclick={() => navigate('settings')}><Icon name="settings" />{$t('Session settings')}</button>
+      <button class="button small" onclick={() => navigate('diagnostics')}><Icon name="diagnostics" />{$t('Connection details')}</button>{/if}
       <button class="button small danger" disabled={disconnecting} onclick={disconnect}><Icon name="leave" />{disconnecting ? $t('Disconnecting…') : nativePreparationInFlight ? $t('Cancel connection') : $connection.nativeRecoveryPending ? $t('Cancel reconnection') : $t('Disconnect')}</button>
     </div>
   </div>{/if}

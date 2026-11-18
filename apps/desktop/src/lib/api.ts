@@ -2,6 +2,13 @@ import type {
   Account,
   AuthResult,
   ConnectionSession,
+  CreatedGuestGrant,
+  GuestDeviceInfo,
+  GuestGrant,
+  GuestRedemption,
+  SecondFactor,
+  TwoFactorEnrollment,
+  TwoFactorStatus,
   Device,
   DeviceRegistration,
   IceConfiguration,
@@ -18,7 +25,9 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly code: string,
-    readonly requestId: string | null
+    readonly requestId: string | null,
+    /** Set with code `two_factor_required`: the second sign-in step. */
+    readonly challenge: { token: string; expiresAt: number } | null = null
   ) {
     super(message);
     this.name = 'ApiError';
@@ -48,7 +57,7 @@ export function normalizeServerUrl(raw: string): string {
 }
 
 interface ErrorEnvelope {
-  error?: { code?: string; message?: string };
+  error?: { code?: string; message?: string; challengeToken?: string; challengeExpiresAt?: number };
   message?: string;
   code?: string;
 }
@@ -76,12 +85,13 @@ interface RawDevice extends Partial<Device> {
   routeAddress?: string | null;
 }
 
-interface RawSession extends Omit<Partial<ConnectionSession>, 'createdAt' | 'updatedAt'> {
+interface RawSession extends Omit<Partial<ConnectionSession>, 'createdAt' | 'updatedAt' | 'guest'> {
   state?: ConnectionSession['status'];
   selectedTransport?: string | null;
   createdAt?: string | number;
   updatedAt?: string | number;
   mediaCredential?: string;
+  guest?: { name?: unknown } | null;
 }
 
 function dateString(value: string | number | null | undefined): string | null {
@@ -138,7 +148,8 @@ function normalizeConnectionSession(raw: RawSession): ConnectionSession {
     requesterReadyAt: dateString(raw.requesterReadyAt) ?? undefined,
     address: raw.address,
     port: raw.port,
-    sessionToken: raw.sessionToken ?? raw.mediaCredential
+    sessionToken: raw.sessionToken ?? raw.mediaCredential,
+    ...(raw.guest && typeof raw.guest.name === 'string' ? { guest: { name: raw.guest.name } } : {})
   };
 }
 
@@ -373,12 +384,63 @@ export class ApiClient {
     return normalizeConnectionSession(await this.request<RawSession>(`/api/v2/sessions/${encodeURIComponent(id)}`));
   }
 
-  async acceptSession(id: string): Promise<ConnectionSession> {
+  /** `guest` must be passed (after the host saw it is a guest) to accept a guest request. */
+  async acceptSession(id: string, guest?: { allowControl: boolean }): Promise<ConnectionSession> {
     return normalizeConnectionSession(
       await this.request<RawSession>(`/api/v2/sessions/${encodeURIComponent(id)}/accept`, {
-        method: 'POST'
+        method: 'POST',
+        ...(guest ? { body: { guestConfirmed: true, accessMode: guest.allowControl ? 'control' : 'view-only' } } : {})
       })
     );
+  }
+
+  async completeTwoFactorLogin(challengeToken: string, factor: SecondFactor): Promise<AuthResult> {
+    return this.request('/api/v2/auth/login/two-factor', {
+      method: 'POST', body: { challengeToken, ...factor }, authenticated: false
+    });
+  }
+
+  async twoFactorStatus(): Promise<TwoFactorStatus> {
+    return this.request('/api/v2/account/two-factor');
+  }
+
+  async enrollTwoFactor(password: string): Promise<TwoFactorEnrollment> {
+    return this.request('/api/v2/account/two-factor/enroll', { method: 'POST', body: { password } });
+  }
+
+  async confirmTwoFactor(code: string): Promise<string[]> {
+    const result = await this.request<{ recoveryCodes: string[] }>('/api/v2/account/two-factor/confirm', { method: 'POST', body: { code } });
+    return result.recoveryCodes;
+  }
+
+  async disableTwoFactor(password: string, factor: SecondFactor): Promise<void> {
+    await this.request('/api/v2/account/two-factor/disable', { method: 'POST', body: { password, ...factor } });
+  }
+
+  async regenerateRecoveryCodes(password: string, factor: SecondFactor): Promise<string[]> {
+    const result = await this.request<{ recoveryCodes: string[] }>('/api/v2/account/two-factor/recovery-codes', {
+      method: 'POST', body: { password, ...factor }
+    });
+    return result.recoveryCodes;
+  }
+
+  async guestGrants(hostDeviceId: string): Promise<GuestGrant[]> {
+    return this.request(`/api/v2/guest/grants?hostDeviceId=${encodeURIComponent(hostDeviceId)}`);
+  }
+
+  async createGuestGrant(hostDeviceId: string): Promise<CreatedGuestGrant> {
+    return this.request('/api/v2/guest/grants', { method: 'POST', body: { hostDeviceId } });
+  }
+
+  async revokeGuestGrant(id: string): Promise<void> {
+    await this.request(`/api/v2/guest/grants/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
+  }
+
+  async redeemGuestCode(accessCode: string, password: string, guestName: string, device: GuestDeviceInfo): Promise<GuestRedemption> {
+    const result = await this.request<Omit<GuestRedemption, 'session'> & { session: RawSession }>('/api/v2/guest/redeem', {
+      method: 'POST', body: { accessCode, password, guestName, device }, authenticated: false
+    });
+    return { ...result, session: normalizeConnectionSession(result.session) };
   }
 
   async rejectSession(id: string): Promise<void> {
@@ -468,7 +530,10 @@ export class ApiClient {
           error?.message ?? payload.message ?? `Request failed (${String(response.status)})`,
           response.status,
           error?.code ?? payload.code ?? 'request_failed',
-          responseRequestId
+          responseRequestId,
+          typeof error?.challengeToken === 'string'
+            ? { token: error.challengeToken, expiresAt: error.challengeExpiresAt ?? 0 }
+            : null
         );
       }
       return (payload.data === undefined ? payload : payload.data) as T;

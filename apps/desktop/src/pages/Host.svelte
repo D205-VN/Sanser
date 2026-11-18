@@ -4,6 +4,7 @@
   import Icon from '../components/Icon.svelte';
   import Toggle from '../components/Toggle.svelte';
   import SharingPanel from '../components/SharingPanel.svelte';
+  import GuestAccessCard from '../components/GuestAccessCard.svelte';
   import SessionFiles from '../components/SessionFiles.svelte';
   import WindowsUac from '../components/WindowsUac.svelte';
   import ConnectionNotificationSettings from '../components/ConnectionNotificationSettings.svelte';
@@ -57,10 +58,15 @@
     catch (error) { actionError = error instanceof Error ? error.message : $t('Unable to save host settings'); }
   }
 
+  // Guests start view-only; the host opts in to control per request.
+  let guestControl = $state<Record<string, boolean>>({});
+
   async function acceptRequest(request: ConnectionSession, trust = false): Promise<void> {
     actionError = null;
     try {
-      const accepted = await host.accept(request.id);
+      const accepted = request.guest
+        ? await host.accept(request.id, { allowControl: guestControl[request.id] === true })
+        : await host.accept(request.id);
       if (trust) {
         try {
           await preferences.save({
@@ -148,6 +154,16 @@
       {:else}
         <div class="security-list">
           {#each pendingSessions as request (request.id)}
+            {#if request.guest}
+            <div>
+              <span><strong>{$t('Guest: {name}', { name: request.guest.name })}</strong><span>{$t('Joined with your support code · no Sanser account')}</span>
+                <label class="remember-sign-in"><input type="checkbox" checked={guestControl[request.id] === true} onchange={(event) => { guestControl = { ...guestControl, [request.id]: (event.currentTarget as HTMLInputElement).checked }; }} /><span>{$t('Allow control of keyboard and mouse')}</span></label></span>
+              <span class="button-row">
+                <button class="button small primary" disabled={$host.actionSessionId !== null} onclick={() => acceptRequest(request)}>{$host.actionSessionId === request.id ? $t('Accepting…') : $t('Accept')}</button>
+                <button class="button small danger" disabled={$host.actionSessionId !== null} onclick={() => rejectRequest(request)}>{$t('Reject')}</button>
+              </span>
+            </div>
+            {:else}
             <div>
               <span><strong>{$t('Client {id}', { id: request.requesterDeviceId.slice(0, 8) })}</strong><span>{$preferences.trustedDeviceIds.includes(request.requesterDeviceId) ? $t('Trusted') + ' · ' : ''}{request.qualityProfile} · {request.requestedCodec === 'hevc' ? 'HEVC' : request.requestedCodec === 'h264' ? 'H.264' : $t('Auto codec')}</span></span>
               <span class="button-row">
@@ -158,6 +174,7 @@
                 <button class="button small danger" disabled={$host.actionSessionId !== null} onclick={() => rejectRequest(request)}>{$t('Reject')}</button>
               </span>
             </div>
+            {/if}
           {/each}
         </div>
       {/if}
@@ -167,7 +184,7 @@
       <div class="panel-heading"><span class="panel-icon"><Icon name="session" /></span><div><h2 class="card-title">{$t('Current client')}</h2><p class="card-subtitle">{$t('The computer currently accessing your screen.')}</p></div></div>
       {#if activeSession}
         <div class="empty compact-empty"><div>
-          <h3>{$t('Client {id}', { id: activeSession.requesterDeviceId.slice(0, 8) })}</h3>
+          <h3>{activeSession.guest ? $t('Guest: {name}', { name: activeSession.guest.name }) : $t('Client {id}', { id: activeSession.requesterDeviceId.slice(0, 8) })}</h3>
           <p>{activeSession.requesterReadyAt ? ($host.engineRunning ? $t('Screen sharing has started.') : $host.failedP2pSessionId === activeSession.id ? $t('Connection failed. You can try again.') : $t('Starting screen sharing…')) : $t('Waiting for the other computer…')}</p>
           <span class="button-row">
             {#if $host.failedP2pSessionId === activeSession.id}<button class="button primary" disabled={$host.actionSessionId !== null || $host.launchingSessionId !== null} onclick={retryActiveSession}>{$t('Retry connection')}</button>{/if}
@@ -178,7 +195,8 @@
         <div class="empty compact-empty"><div><h3>{$t('No active client')}</h3><p>{$t('No computer is accessing your screen.')}</p></div></div>
       {/if}
     </article>
-    {#if activeSession && $host.engineRunning && !$host.sharingActive}
+    {#if canHost}<GuestAccessCard />{/if}
+    {#if activeSession && !activeSession.guest && $host.engineRunning && !$host.sharingActive}
       {#key activeSession.id}<SessionFiles sessionId={activeSession.id} kind="host" />{/key}
     {/if}
   </div>

@@ -46,7 +46,7 @@ export interface HostStore extends Readable<HostState> {
   online(runtime: RuntimeStatus): Promise<void>;
   offline(): Promise<void>;
   refreshRequests(): Promise<void>;
-  accept(sessionId: string): Promise<ConnectionSession>;
+  accept(sessionId: string, guest?: { allowControl: boolean }): Promise<ConnectionSession>;
   reject(sessionId: string): Promise<void>;
   disconnect(sessionId: string): Promise<void>;
   retry(sessionId: string): Promise<void>;
@@ -72,7 +72,7 @@ export function createHostStore(): HostStore {
   let nativeGeneration: { id: string; readyAt: string } | null = null;
   const autoAcceptRetryAfter = new Map<string, number>();
 
-  async function acceptPendingSession(sessionId: string, automatic: boolean): Promise<ConnectionSession> {
+  async function acceptPendingSession(sessionId: string, automatic: boolean, guest?: { allowControl: boolean }): Promise<ConnectionSession> {
     const client = session.client();
     if (!client) throw new Error('Cloud sign-in is required to accept a session');
     const current = get(store);
@@ -83,7 +83,8 @@ export function createHostStore(): HostStore {
     }
     store.update((state) => ({ ...state, actionSessionId: sessionId, error: null }));
     try {
-      const accepted = await client.acceptSession(sessionId);
+      if (automatic && guest) throw new Error('Guest requests always need the host to accept them');
+      const accepted = await client.acceptSession(sessionId, guest);
       if (generation !== lifecycleGeneration) {
         await client.disconnectSession(accepted.id).catch(() => undefined);
         return accepted;
@@ -511,8 +512,8 @@ export function createHostStore(): HostStore {
     async refreshRequests(): Promise<void> {
       await refreshSessions(true);
     },
-    async accept(sessionId: string): Promise<ConnectionSession> {
-      return acceptPendingSession(sessionId, false);
+    async accept(sessionId: string, guest?: { allowControl: boolean }): Promise<ConnectionSession> {
+      return acceptPendingSession(sessionId, false, guest);
     },
     async reject(sessionId: string): Promise<void> {
       const client = session.client();

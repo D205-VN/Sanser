@@ -1,13 +1,14 @@
 import { get, writable } from 'svelte/store';
 import { ApiClient, ApiError } from '../lib/api';
 import { loginDevice, secureDelete, secureGet, secureSet } from '../lib/platform';
-import type { Account, AuthResult } from '../lib/types';
+import type { Account, AuthResult, GuestRedemption, SecondFactor } from '../lib/types';
 import { diagnostics } from './diagnostics';
 
 export const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1_000;
 const ACTIVITY_WRITE_INTERVAL_MS = 60_000;
 const CLOCK_SKEW_MS = 5 * 60_000;
-export type SessionMode = 'signedOut' | 'cloud';
+/** `guest`: a support session joined with a host's code, without an account. */
+export type SessionMode = 'signedOut' | 'cloud' | 'guest';
 
 export interface SessionState {
   ready: boolean;
@@ -16,6 +17,9 @@ export interface SessionState {
   account: Account | null;
   serverUrl: string;
   error: string | null;
+  /** Set after a correct password on an account with two-step verification. */
+  twoFactor: { expiresAt: number } | null;
+  guest: { hostName: string; deviceId: string } | null;
 }
 
 interface SavedAuth {
@@ -33,7 +37,13 @@ let savedAuth: SavedAuth | null = null;
 let rememberSignIn = false;
 let credentialSaved = false;
 let lastActivityWrite = 0;
-const initial: SessionState = { ready: false, busy: false, mode: 'signedOut', account: null, serverUrl: '', error: null };
+const initial: SessionState = { ready: false, busy: false, mode: 'signedOut', account: null, serverUrl: '', error: null, twoFactor: null, guest: null };
+/** The pending second sign-in step; the challenge token lives only in memory. */
+let pendingChallenge: { serverUrl: string; token: string; remember: boolean } | null = null;
+
+class TwoFactorChallenge extends Error {
+  constructor(readonly token: string, readonly expiresAt: number) { super('Two-step verification is required'); }
+}
 let authWrites = Promise.resolve();
 let authGeneration = 0;
 
@@ -158,10 +168,17 @@ function createSessionStore() {
       rememberSignIn = remember;
       const result = await request(client);
       if (!await persistAuth(result, client, generation)) return;
-      store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null });
+      pendingChallenge = null;
+      store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null, twoFactor: null, guest: null });
       diagnostics.add({ level: 'info', category: 'auth', message: success });
     } catch (error) {
       if (generation !== authGeneration) return;
+      if (error instanceof TwoFactorChallenge) {
+        api = null;
+        pendingChallenge = { serverUrl, token: error.token, remember };
+        store.update((state) => ({ ...state, busy: false, error: null, twoFactor: { expiresAt: error.expiresAt } }));
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Unable to sign in';
       store.update((state) => ({ ...state, busy: false, error: message }));
       throw error;
@@ -213,7 +230,7 @@ function createSessionStore() {
         const result = await client.refresh(saved.refreshToken);
         if (isExpired(saved.lastActiveAt)) throw new ApiError('Saved sign-in expired', 401, 'session_expired', null);
         if (!await persistAuth(result, client, generation)) return;
-        store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null });
+        store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null, twoFactor: null, guest: null });
       } catch (error) {
         if (generation !== authGeneration) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -228,7 +245,69 @@ function createSessionStore() {
       }
     },
     login(serverUrl: string, email: string, password: string, remember = false): Promise<void> {
-      return authenticate(serverUrl, async (client) => client.login(email.trim().toLowerCase(), password, await loginDevice()), 'Signed in successfully', remember);
+      pendingChallenge = null;
+      return authenticate(serverUrl, async (client) => {
+        try {
+          return await client.login(email.trim().toLowerCase(), password, await loginDevice());
+        } catch (error) {
+          if (error instanceof ApiError && error.code === 'two_factor_required' && error.challenge) {
+            throw new TwoFactorChallenge(error.challenge.token, error.challenge.expiresAt);
+          }
+          throw error;
+        }
+      }, 'Signed in successfully', remember);
+    },
+    /** Second sign-in step with an authenticator code or a recovery code. */
+    async completeTwoFactor(factor: SecondFactor): Promise<void> {
+      const pending = pendingChallenge;
+      if (!pending) throw new Error('Sign in again to continue.');
+      try {
+        await authenticate(pending.serverUrl, (client) => client.completeTwoFactorLogin(pending.token, factor), 'Signed in successfully', pending.remember);
+      } catch (error) {
+        // 401: the challenge expired or ran out of attempts; start over.
+        if (error instanceof ApiError && error.status === 401) {
+          pendingChallenge = null;
+          store.update((state) => ({ ...state, twoFactor: null, error: 'This sign-in attempt expired. Sign in again.' }));
+        } else {
+          store.update((state) => ({ ...state, error: null }));
+        }
+        throw error;
+      }
+    },
+    cancelTwoFactor(): void {
+      pendingChallenge = null;
+      store.update((state) => ({ ...state, twoFactor: null, error: null, busy: false }));
+    },
+    /** Joins a support session with a host's code. The token stays in memory only. */
+    async startGuest(serverUrl: string, redeem: (client: ApiClient) => Promise<GuestRedemption>): Promise<GuestRedemption> {
+      const generation = ++authGeneration;
+      store.update((state) => ({ ...state, busy: true, error: null }));
+      try {
+        const client = makeClient(serverUrl);
+        const result = await redeem(client);
+        if (generation !== authGeneration) throw new Error('The request was cancelled');
+        api = client;
+        accessToken = result.accessToken;
+        refreshToken = null;
+        savedAuth = null;
+        rememberSignIn = false;
+        pendingChallenge = null;
+        store.set({ ...initial, ready: true, mode: 'guest', serverUrl: client.serverUrl,
+          guest: { hostName: result.hostName, deviceId: result.deviceId } });
+        diagnostics.add({ level: 'info', category: 'auth', message: 'Joined a support session with a code' });
+        return result;
+      } catch (error) {
+        if (generation === authGeneration) store.update((state) => ({ ...state, busy: false }));
+        throw error;
+      }
+    },
+    endGuest(): void {
+      if (get(store).mode !== 'guest') return;
+      ++authGeneration;
+      api = null;
+      accessToken = null;
+      const current = get(store);
+      store.set({ ...initial, ready: true, serverUrl: current.serverUrl });
     },
     register(serverUrl: string, email: string, password: string, displayName: string, remember = false): Promise<void> {
       return authenticate(serverUrl, async (client) => client.register(email.trim().toLowerCase(), password, displayName, await loginDevice()), 'Account created successfully', remember);

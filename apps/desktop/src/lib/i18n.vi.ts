@@ -1,6 +1,9 @@
 // Vietnamese UI strings. Keys are the English source strings used with t()/tk()/translate().
 // Strings that read the same in both languages (brand names, units) are omitted.
+import { VI_SECURITY } from './i18n.vi.security';
+
 export const VI: Record<string, string> = {
+  ...VI_SECURITY,
   "Unable to respond to the invitation": "Không thể phản hồi lời mời",
   "Unable to stop sharing": "Không thể dừng chia sẻ",
   "Workspace": "Làm việc",
