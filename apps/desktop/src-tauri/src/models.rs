@@ -58,6 +58,13 @@ pub struct LaunchEngineRequest {
     pub input_enabled: bool,
     #[serde(default)]
     pub clipboard_enabled: bool,
+    /// Host engine only: black, capture-excluded overlay on the host's own
+    /// monitors during a one-to-one session. Sourced from local host
+    /// preferences; the viewer has no field that reaches this.
+    #[serde(default)]
+    pub privacy_screen: bool,
+    #[serde(default)]
+    pub privacy_block_input: bool,
     #[serde(default)]
     pub relative_mouse: bool,
     #[serde(default)]
@@ -260,6 +267,11 @@ pub struct HostPreferences {
     pub audio_enabled: bool,
     pub input_enabled: bool,
     pub clipboard_enabled: bool,
+    /// Host-only privacy screen; never set from a viewer request.
+    #[serde(default)]
+    pub privacy_screen: bool,
+    #[serde(default)]
+    pub privacy_block_input: bool,
 }
 
 const fn default_direct_udp_port() -> u16 {

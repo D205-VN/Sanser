@@ -6,6 +6,7 @@
   import SharingPanel from '../components/SharingPanel.svelte';
   import SessionFiles from '../components/SessionFiles.svelte';
   import WindowsUac from '../components/WindowsUac.svelte';
+  import HostPrivacySettings from '../components/HostPrivacySettings.svelte';
   import ConnectionNotificationSettings from '../components/ConnectionNotificationSettings.svelte';
   import { sharing } from '../stores/sharing';
   import type { ConnectionSession, RuntimeStatus } from '../lib/types';
@@ -132,6 +133,7 @@
       <div class="panel-heading"><span class="panel-icon"><Icon name="monitor" /></span><div><h2 class="card-title">{$t('Screen sharing')}</h2><p class="card-subtitle">{$t('Choose what a connected computer can use.')}</p></div></div>
       {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('System audio')} description={$t('Share sound from this computer.')} onchange={(value) => updateHost('audioEnabled', value)} />{/if}
       <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('Remote input')} description={$t('Allow the other computer to use your keyboard and mouse.')} onchange={(value) => updateHost('inputEnabled', value)} />
+      <HostPrivacySettings {runtime} onerror={(message) => { actionError = message; }} />
     </article>
 
     <article class="card card-body stack">

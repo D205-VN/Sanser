@@ -64,3 +64,16 @@ private:
 };
 
 std::string hresultMessage(long hr);
+
+// One desktop-attached DXGI output, as DesktopDuplicator::initialize indexes it.
+struct DisplayOutput {
+  std::uint32_t adapter = 0;
+  std::uint32_t output = 0;
+  long left = 0;
+  long top = 0;
+  std::uint32_t width = 0;
+  std::uint32_t height = 0;
+  bool primary = false;
+};
+// Bounded, in DXGI enumeration order; empty if DXGI is unavailable.
+std::vector<DisplayOutput> enumerateDisplayOutputs(std::size_t limit = 16);

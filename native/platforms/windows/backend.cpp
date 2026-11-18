@@ -34,6 +34,7 @@
 #include "shortcuts_panel.h"
 #include "controller_input.h"
 #include "desktop_duplication.h"
+#include "privacy_screen.h"
 #include "../../windows-uac/client.h"
 #include "mf_video_packet_encoder.h"
 #include <algorithm>
@@ -66,6 +67,9 @@ public:
     viewport_={left,top,std::max(1U,width),std::max(1U,height)};
   }
   void apply(const Input& event) {
+    // Privacy screen: apply/release the helper's local-input block on this
+    // injecting thread (session start delivers a Reset here first).
+    sanser::uac::syncLocalInputBlock();
     if(event.kind==Input::Reset) { reset(); return; }
     if(event.kind==Input::Text) {
       const auto text=sanser::textInputUtf16(event.text); if(!text) return;
@@ -616,6 +620,17 @@ int runWindows(bool host,int argc,char** argv) {
   SetProcessDPIAware(); const auto options=parseOptions(host,argc,argv);
   if(host) {
     DesktopDuplicator display; display.initialize(); HostOutput peer(options); Injector injector(display);
+    // Display list for one-to-one control sessions. Index 0/0 stays the
+    // default capture target, exactly as before.
+    const auto outputs=options.sharing ? std::vector<DisplayOutput>{} : enumerateDisplayOutputs(sanser::desktop::display::maxDisplays);
+    sanser::desktop::display::List displays;
+    for(std::size_t i=0;i<outputs.size();++i) {
+      const auto& out=outputs[i];
+      if(out.adapter==0 && out.output==0) displays.selected=static_cast<std::uint8_t>(i);
+      displays.displays.push_back({static_cast<std::uint16_t>(std::min<std::uint32_t>(out.width,65535)),static_cast<std::uint16_t>(std::min<std::uint32_t>(out.height,65535)),out.primary});
+    }
+    if(displays.valid()) peer.setDisplays(displays);
+    WindowsPrivacyScreen privacy(options.privacyScreen,options.privacyBlockInput);
     WindowsGamepad gamepad(options.input && !options.sharing);
     VideoPacketEncodeOptions encoding; encoding.fps=options.fps; encoding.bitrate=options.bitrate; encoding.codec=VideoCodec::H264;
     encoding.live=options.sharing || options.ultraLowLatency;
@@ -647,6 +662,19 @@ int runWindows(bool host,int argc,char** argv) {
       const auto began=Clock::now();
       peer.pumpControl();
       voicePanel.pump(); if(!peer.running()) break;
+      privacy.update(peer.ready());
+      if(const auto index=peer.takeDisplayRequest(); index && displays.valid() && *index<outputs.size() && *index!=displays.selected) {
+        // Re-target Desktop Duplication. A new generation below refreshes the
+        // pointer viewport, rebuilds the encoder on another adapter and forces
+        // an IDR. On failure the previous output stays active.
+        try {
+          display.initialize(outputs[*index].adapter,outputs[*index].output);
+          displays.selected=*index; peer.setDisplays(displays);
+          std::cerr<<"SNV2_DISPLAY_SWITCHED index="<<static_cast<unsigned>(*index)<<" adapter="<<outputs[*index].adapter<<" output="<<outputs[*index].output<<" keyframeRequested=1"<<std::endl;
+        } catch(const std::exception& error) {
+          std::cerr<<"SNV2_DISPLAY_SWITCH_FAILED index="<<static_cast<unsigned>(*index)<<" reason="<<error.what()<<std::endl;
+        }
+      }
       const auto target=peer.bitrate();
       if(target!=bitrate && encoder->setBitrate(target)) bitrate=target;
       force=peer.takeKeyframeRequest() || force;

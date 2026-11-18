@@ -16,6 +16,13 @@ describe('migratePreferences', () => {
     expect(migrated.stream.codec).toBe('auto');
   });
 
+  it('keeps the host privacy screen off by default and blocking tied to it', () => {
+    expect(migratePreferences({}).host).toMatchObject({ privacyScreen: false, privacyBlockInput: false });
+    expect(migratePreferences({ host: { privacyBlockInput: true } }).host.privacyBlockInput).toBe(false);
+    expect(migratePreferences({ host: { privacyScreen: 'yes', privacyBlockInput: true } }).host).toMatchObject({ privacyScreen: false, privacyBlockInput: false });
+    expect(migratePreferences({ host: { privacyScreen: true, privacyBlockInput: true } }).host).toMatchObject({ privacyScreen: true, privacyBlockInput: true });
+  });
+
   it('keeps a safe fixed host UDP port', () => {
     expect(migratePreferences({ host: { directUdpPort: 50_123 } }).host.directUdpPort).toBe(50_123);
     expect(migratePreferences({ host: { directUdpPort: 80 } }).host.directUdpPort).toBe(50_000);

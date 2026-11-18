@@ -3,6 +3,7 @@
 #include "engine.h"
 #include "bmp_writer.h"
 #include "desktop_duplication.h"
+#include "../../platforms/windows/privacy_screen.h"
 #include "../../windows-uac/client.h"
 #include "../../windows-uac/input_test.h"
 #include "mf_video_encoder.h"
@@ -7747,7 +7748,23 @@ int main(int argc, char** argv) {
       return 0;
     }
     makeProcessDpiAware();
-    Options options = parseOptions(argc, argv);
+    // Host-local privacy screen flags (set only from this host's own
+    // preferences). The legacy path has one viewer per engine process, so the
+    // overlay lives for the process: Windows removes it on exit or crash.
+    bool privacyScreen=false, privacyBlockInput=false;
+    std::vector<char*> legacyArgs;
+    for (int i = 0; i < argc; ++i) {
+      const std::string_view arg(argv[i]);
+      if (i > 0 && arg == "--privacy-screen") { privacyScreen = true; continue; }
+      if (i > 0 && arg == "--privacy-block-input") { privacyBlockInput = true; continue; }
+      legacyArgs.push_back(argv[i]);
+    }
+    Options options = parseOptions(static_cast<int>(legacyArgs.size()), legacyArgs.data());
+    std::unique_ptr<sanser::desktop::WindowsPrivacyScreen> privacy;
+    if (privacyScreen && options.encodePipe) {
+      privacy = std::make_unique<sanser::desktop::WindowsPrivacyScreen>(true, privacyBlockInput);
+      privacy->update(true);
+    }
     gRemoteInputAllowed.store(options.remoteInputEnabled, std::memory_order_relaxed);
     if (options.sessionToken.empty()) {
       if (const char* token = std::getenv("SANSER_NATIVE_SESSION_TOKEN")) {

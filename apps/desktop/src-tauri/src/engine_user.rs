@@ -19,6 +19,62 @@ pub struct Capabilities {
     pub clipboard: bool,
     pub local_clipboard: bool,
 }
+/// One display the SNV2 host offers for capture (host-validated list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Display {
+    pub index: u8,
+    pub width: u16,
+    pub height: u16,
+    pub primary: bool,
+}
+/// `available` is false until a capable host announces its displays; older
+/// hosts and multi-viewer shares never do, and keep one display.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayList {
+    pub available: bool,
+    pub selected: u8,
+    pub displays: Vec<Display>,
+}
+const MAX_DISPLAYS: usize = 16;
+fn parse_displays(selected: &str, list: &str) -> Option<DisplayList> {
+    if selected == "-" {
+        return list.is_empty().then(DisplayList::default);
+    }
+    let selected = selected.parse::<u8>().ok()?;
+    let displays = list
+        .split(',')
+        .enumerate()
+        .map(|(index, item)| {
+            let mut parts = item.split('x');
+            let width = parts.next()?.parse::<u16>().ok().filter(|v| *v > 0)?;
+            let height = parts.next()?.parse::<u16>().ok().filter(|v| *v > 0)?;
+            let primary = match parts.next()? {
+                "1" => true,
+                "0" => false,
+                _ => return None,
+            };
+            if parts.next().is_some() {
+                return None;
+            }
+            Some(Display {
+                index: u8::try_from(index).ok()?,
+                width,
+                height,
+                primary,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!displays.is_empty()
+        && displays.len() <= MAX_DISPLAYS
+        && usize::from(selected) < displays.len())
+    .then_some(DisplayList {
+        available: true,
+        selected,
+        displays,
+    })
+}
 struct Reply {
     status: u8,
     text: String,
@@ -26,6 +82,7 @@ struct Reply {
 #[derive(Default)]
 struct State {
     capabilities: Capabilities,
+    displays: DisplayList,
     pending: HashMap<Uuid, mpsc::SyncSender<Reply>>,
 }
 #[derive(Default)]
@@ -104,6 +161,25 @@ impl UserControl {
     pub fn files(&self) -> Option<crate::file_transfer::Service> {
         self.files.lock().ok().and_then(|v| v.clone())
     }
+    pub fn displays(&self) -> DisplayList {
+        self.state
+            .lock()
+            .map(|s| s.displays.clone())
+            .unwrap_or_default()
+    }
+    /// Stdin command for a display the host itself advertised.
+    pub fn display_command(&self, index: u8) -> Result<Vec<u8>, DesktopError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("Native controls unavailable".into()))?;
+        if !state.displays.available || usize::from(index) >= state.displays.displays.len() {
+            return Err(DesktopError::InvalidRequest(
+                "The host does not offer this display".into(),
+            ));
+        }
+        Ok(format!("display\t{index}\n").into_bytes())
+    }
     pub fn capabilities(&self) -> Capabilities {
         self.state
             .lock()
@@ -178,7 +254,11 @@ impl UserControl {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
-        if matches!(fields.len(), 3 | 4)
+        if fields.len() == 3 && fields[0] == "SNUSER_DISPLAY" {
+            if let Some(displays) = parse_displays(fields[1], fields[2]) {
+                state.displays = displays;
+            }
+        } else if matches!(fields.len(), 3 | 4)
             && fields[0] == "SNUSER_CAP"
             && matches!(fields[1], "0" | "1")
             && matches!(fields[2], "0" | "1")
@@ -211,6 +291,7 @@ impl UserControl {
         }
         if let Ok(mut state) = self.state.lock() {
             state.capabilities = Capabilities::default();
+            state.displays = DisplayList::default();
             for (_, sender) in state.pending.drain() {
                 let _ = sender.try_send(Reply {
                     status: 3,
@@ -405,6 +486,43 @@ mod tests {
         let command = String::from_utf8(command)?;
         assert!(!command.contains("Tiếng"));
         assert!(command.starts_with("user-text\t"));
+        Ok(())
+    }
+    #[test]
+    fn host_display_list_bounds_every_selection() -> Result<(), Box<dyn std::error::Error>> {
+        let control = Arc::new(UserControl::default());
+        assert!(!control.displays().available);
+        assert!(control.display_command(0).is_err());
+        control.observe(b"SNUSER_DISPLAY\t1\t2560x1440x1,1080x1920x0\n");
+        let displays = control.displays();
+        assert!(displays.available);
+        assert_eq!(displays.selected, 1);
+        assert_eq!(
+            displays.displays[1],
+            Display {
+                index: 1,
+                width: 1080,
+                height: 1920,
+                primary: false
+            }
+        );
+        assert_eq!(control.display_command(0)?, b"display\t0\n");
+        assert!(control.display_command(2).is_err());
+        for bad in [
+            "SNUSER_DISPLAY\t2\t800x600x1,800x600x0\n",
+            "SNUSER_DISPLAY\t0\t0x600x1\n",
+            "SNUSER_DISPLAY\t0\t800x600x2\n",
+            "SNUSER_DISPLAY\t0\t800x600\n",
+            "SNUSER_DISPLAY\tx\t800x600x1\n",
+        ] {
+            control.observe(bad.as_bytes());
+            assert_eq!(control.displays(), displays, "{bad} must be ignored");
+        }
+        control.observe(b"SNUSER_DISPLAY\t-\t\n");
+        assert!(!control.displays().available);
+        control.observe(b"SNUSER_DISPLAY\t0\t800x600x1\n");
+        control.close();
+        assert!(!control.displays().available);
         Ok(())
     }
     #[test]

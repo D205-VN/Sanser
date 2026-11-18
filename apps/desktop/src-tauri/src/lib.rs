@@ -132,6 +132,8 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         commands::stop_engine,
         commands::set_viewer_audio,
         commands::session_user_capabilities,
+        commands::session_displays,
+        commands::select_session_display,
         commands::session_user_action,
         commands::session_file_status,
         commands::session_file_action,

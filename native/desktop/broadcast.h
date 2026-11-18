@@ -84,6 +84,9 @@ public:
   void audio(const AudioSamples& samples);
   void setCapturePaused(bool paused);
   bool takeKeyframeRequest();
+  // One-to-one control sessions only; a multi-viewer share keeps one display.
+  void setDisplays(display::List list);
+  std::optional<std::uint8_t> takeDisplayRequest();
   void pumpControl();
   void voicePacket(voice::Packet packet);
   void setVoiceState(voice::State state);

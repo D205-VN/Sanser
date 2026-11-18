@@ -810,7 +810,24 @@ export const VI: Record<string, string> = {
   "This invitation belongs to another computer": "Lời mời này thuộc về máy khác",
   "Disconnect the current session before joining": "Hãy ngắt phiên hiện tại trước khi tham gia",
   "Sharing session is unavailable; update the server": "Phiên chia sẻ không khả dụng; hãy cập nhật máy chủ",
-  "Server returned incompatible sharing permissions": "Máy chủ trả về quyền chia sẻ không tương thích"
+  "Server returned incompatible sharing permissions": "Máy chủ trả về quyền chia sẻ không tương thích",
+  "The host did not switch displays. Try again, or keep the current display.": "Máy host chưa chuyển màn hình. Hãy thử lại hoặc giữ màn hình hiện tại.",
+  "Unable to switch displays": "Không thể chuyển màn hình",
+  "This connection shows only the host's main display. Switching displays needs a newer connection between both computers.": "Kết nối này chỉ hiển thị màn hình chính của máy host. Muốn chuyển màn hình, cả hai máy cần dùng kiểu kết nối mới hơn.",
+  "Host displays": "Màn hình của máy host",
+  "Switching…": "Đang chuyển…",
+  "Main display": "Màn hình chính",
+  "Display {number}": "Màn hình {number}",
+  "Main": "Chính",
+  "Privacy screen": "Màn hình riêng tư",
+  "Black out this computer's monitors while someone controls it. The viewer still sees your desktop. Only you can turn this on, here. Applies from the next connection.": "Làm tối đen màn hình của máy này khi có người điều khiển. Người xem vẫn thấy màn hình làm việc của bạn. Chỉ bạn mới bật được tính năng này, tại đây. Áp dụng từ lần kết nối tiếp theo.",
+  "Block local keyboard and mouse": "Khóa bàn phím và chuột tại chỗ",
+  "Ignore this computer's own keyboard and mouse while connected. Press Ctrl+Alt+Del to get them back at any time.": "Bỏ qua bàn phím và chuột của chính máy này khi đang kết nối. Nhấn Ctrl+Alt+Del để dùng lại bất cứ lúc nào.",
+  "Unavailable: turn on Windows administrator prompts support first.": "Không khả dụng: hãy bật hỗ trợ lời nhắc quản trị viên Windows trước.",
+  "Unavailable on this operating system.": "Không khả dụng trên hệ điều hành này.",
+  "To remove the black screen on this computer during a session, press Ctrl+Alt+Shift+P. It also disappears when the session ends.": "Để gỡ màn hình đen trên máy này trong phiên, nhấn Ctrl+Alt+Shift+P. Màn hình đen cũng tự biến mất khi phiên kết thúc.",
+  "To remove the black screen on this computer during a session, press Control+Option+Command+P. It also disappears when the session ends.": "Để gỡ màn hình đen trên máy này trong phiên, nhấn Control+Option+Command+P. Màn hình đen cũng tự biến mất khi phiên kết thúc.",
+  "The black screen disappears when the session ends.": "Màn hình đen sẽ biến mất khi phiên kết thúc."
 };
 
 /** Source strings that are intentionally identical in Vietnamese. */

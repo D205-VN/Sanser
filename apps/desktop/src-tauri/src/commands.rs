@@ -407,6 +407,25 @@ pub fn session_user_capabilities(
     engines.user_capabilities(id)
 }
 #[tauri::command]
+pub fn session_displays(
+    engines: State<'_, EngineManager>,
+    session_id: String,
+) -> Result<crate::engine_user::DisplayList, DesktopError> {
+    let id = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    engines.displays(id)
+}
+#[tauri::command]
+pub fn select_session_display(
+    engines: State<'_, EngineManager>,
+    session_id: String,
+    index: u8,
+) -> Result<(), DesktopError> {
+    let id = uuid::Uuid::parse_str(&session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
+    engines.select_display(id, index)
+}
+#[tauri::command]
 pub fn session_file_status(
     engines: State<'_, EngineManager>,
     kind: crate::models::EngineKind,

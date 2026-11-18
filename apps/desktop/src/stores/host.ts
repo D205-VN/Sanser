@@ -211,6 +211,9 @@ export function createHostStore(): HostStore {
           (credentials.wireProtocol !== 'snv2' || runtimeForHost.capabilities.hostAudio === true),
         inputEnabled: settings.host.inputEnabled && request.accessMode !== 'view-only' && credentials.accessMode !== 'view-only',
         clipboardEnabled: settings.host.clipboardEnabled,
+        // Local host preference only; the request from the viewer cannot set it.
+        privacyScreen: settings.host.privacyScreen,
+        privacyBlockInput: settings.host.privacyScreen && settings.host.privacyBlockInput,
         relativeMouse: false,
         sessionToken: credentials.sessionToken,
         udpBindPort: relayRoute?.enginePort ?? route?.localPort,

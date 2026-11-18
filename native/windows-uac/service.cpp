@@ -126,7 +126,10 @@ INPUT winInput(const Request& request) {
 struct AppliedInput {
   DWORD session; Desktop& desktop;
   InputState state;
+  bool blocked=false;
   ~AppliedInput() {
+    // Thread exit also releases BlockInput; do it explicitly first.
+    if(blocked) BlockInput(FALSE);
     if(!unlockedConsole(session) || !desktop.bind(true)) return;
     state.release([](const Request& event) { INPUT input=winInput(event); SendInput(1,&input,sizeof(input)); });
   }
@@ -171,6 +174,10 @@ int worker(const wchar_t* channelName) {
             response.left=capture->left(); response.top=capture->top();
             if(!validFrame(response)) return 2;
           } else if(!capture->recovering()) response.status=Status::Idle;
+        } else if(request.operation==Operation::Block) {
+          // Same thread as SendInput below, so remote events still pass.
+          if(BlockInput(request.data ? TRUE : FALSE)) { applied.blocked=request.data!=0; response.status=Status::Applied; }
+          else { response.status=Status::InputUnavailable; response.left=static_cast<LONG>(GetLastError()); }
         } else {
           INPUT in=winInput(request);
           if(SendInput(1,&in,sizeof(in))==1) { applied.state.applied(request); response.status=Status::Applied; }

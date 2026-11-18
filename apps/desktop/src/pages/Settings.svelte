@@ -4,6 +4,7 @@
   import LoginSessions from '../components/LoginSessions.svelte';
   import LanguageToggle from '../components/LanguageToggle.svelte';
   import Toggle from '../components/Toggle.svelte';
+  import HostPrivacySettings from '../components/HostPrivacySettings.svelte';
   import { normalizeServerUrl } from '../lib/api';
   import type { LoginSession, NetworkMode, Preferences, QualityProfile, RuntimeStatus, SettingsSection, VideoCodec } from '../lib/types';
   import { exportDiagnostics } from '../lib/platform';
@@ -253,6 +254,7 @@
           {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} label={$t('System audio')} description={$t('Share sound from this computer.')} onchange={(value) => saveHost({ audioEnabled: value })} />{/if}
           <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('Remote input')} description={$t('Allow remote keyboard and mouse control.')} onchange={(value) => saveHost({ inputEnabled: value })} />
           <Toggle checked={$preferences.host.clipboardEnabled} disabled={runtime.capabilities.clipboard.state !== 'available' || !$preferences.host.inputEnabled} label={$t('Text clipboard')} description={$t('Allow manual text clipboard requests in control sessions. Reconnect after changing this setting.')} onchange={(value) => saveHost({ clipboardEnabled: value })} />
+          <HostPrivacySettings {runtime} />
         </article>
       {:else if active === 'security'}
         <article class="card card-body settings-card stack"><form class="password-form" onsubmit={changePassword}><h3>{$t('Change password')}</h3><p>{$t('All signed-in sessions are revoked after this change.')}</p><div class="field"><label for="current-password">{$t('Current password')}</label><input id="current-password" class="input" type="password" bind:value={currentPassword} required minlength="12" maxlength="256" autocomplete="current-password" /></div><div class="grid two"><div class="field"><label for="new-password">{$t('New password')}</label><input id="new-password" class="input" type="password" bind:value={newPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div><div class="field"><label for="confirm-password">{$t('Confirm new password')}</label><input id="confirm-password" class="input" type="password" bind:value={confirmPassword} required minlength="12" maxlength="256" autocomplete="new-password" /></div></div><button class="button" type="submit" disabled={securityBusy}>{securityBusy ? $t('Updating…') : $t('Update password')}</button></form></article>

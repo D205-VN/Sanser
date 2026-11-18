@@ -620,6 +620,18 @@ fn snv2_args(args: &mut Vec<String>, request: &LaunchEngineRequest) {
     }
 }
 
+// Privacy is a host-local, one-to-one control-session feature. Multi-viewer
+// sharing and client engines never receive these flags.
+fn privacy_args(args: &mut Vec<String>, request: &LaunchEngineRequest) {
+    if request.kind != EngineKind::Host || request.sharing_id.is_some() || !request.privacy_screen {
+        return;
+    }
+    args.push("--privacy-screen".into());
+    if request.privacy_block_input {
+        args.push("--privacy-block-input".into());
+    }
+}
+
 fn build_args_with_voice(
     request: &LaunchEngineRequest,
     supported: bool,
@@ -702,6 +714,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             if request.ultra_low_latency {
                 args.push("--ultra-low-latency".into());
             }
+            privacy_args(&mut args, request);
             Ok(args)
         }
         EngineKind::Client => {
@@ -1056,6 +1069,51 @@ impl EngineManager {
             ));
         }
         Ok(child.user.capabilities())
+    }
+    pub fn displays(&self, session: Uuid) -> Result<crate::engine_user::DisplayList, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or_else(|| DesktopError::Unavailable("Viewer is not running".into()))?;
+        if child.session_id != Some(session)
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("Unable to inspect viewer".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "Viewer session is no longer active".into(),
+            ));
+        }
+        Ok(child.user.displays())
+    }
+    pub fn select_display(&self, session: Uuid, index: u8) -> Result<(), DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or_else(|| DesktopError::Unavailable("Viewer is not running".into()))?;
+        if child.session_id != Some(session)
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("Unable to inspect viewer".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "Viewer session is no longer active".into(),
+            ));
+        }
+        let command = child.user.display_command(index)?;
+        child.send_command(command)
     }
     pub fn user_action(
         &self,
@@ -1700,6 +1758,8 @@ mod tests {
             audio_muted: false,
             input_enabled: true,
             clipboard_enabled: false,
+            privacy_screen: false,
+            privacy_block_input: false,
             relative_mouse: false,
             session_token: Some("a".repeat(32)),
             udp_connect: None,
@@ -1739,6 +1799,32 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--enable-clipboard")
         );
+        Ok(())
+    }
+    #[test]
+    fn privacy_flags_are_host_only_one_to_one_and_opt_in() -> Result<(), DesktopError> {
+        let has = |args: &[String], flag: &str| args.iter().any(|arg| arg == flag);
+        for wire in [None, Some("snv2")] {
+            let mut request = request(EngineKind::Host);
+            request.wire_protocol = wire.map(Into::into);
+            assert!(!has(&build_args(&request)?, "--privacy-screen"));
+            request.privacy_block_input = true;
+            assert!(
+                !has(&build_args(&request)?, "--privacy-block-input"),
+                "blocking without the screen is ignored"
+            );
+            request.privacy_screen = true;
+            let args = build_args(&request)?;
+            assert!(has(&args, "--privacy-screen") && has(&args, "--privacy-block-input"));
+            request.privacy_block_input = false;
+            assert!(!has(&build_args(&request)?, "--privacy-block-input"));
+        }
+        let mut viewer = request(EngineKind::Client);
+        viewer.wire_protocol = Some("snv2".into());
+        viewer.privacy_screen = true;
+        viewer.privacy_block_input = true;
+        let args = build_args(&viewer)?;
+        assert!(!has(&args, "--privacy-screen") && !has(&args, "--privacy-block-input"));
         Ok(())
     }
     #[cfg(unix)]

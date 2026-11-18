@@ -25,7 +25,9 @@ export const DEFAULT_PREFERENCES: Preferences = {
     directUdpPort: 50_000,
     audioEnabled: true,
     inputEnabled: true,
-    clipboardEnabled: false
+    clipboardEnabled: false,
+    privacyScreen: false,
+    privacyBlockInput: false
   },
   input: {
     mouseMode: 'auto',
@@ -134,7 +136,9 @@ export function migratePreferences(
       ),
       audioEnabled: pickBoolean(host.audioEnabled, DEFAULT_PREFERENCES.host.audioEnabled),
       inputEnabled: pickBoolean(host.inputEnabled, DEFAULT_PREFERENCES.host.inputEnabled),
-      clipboardEnabled: pickBoolean(host.clipboardEnabled, false)
+      clipboardEnabled: pickBoolean(host.clipboardEnabled, false),
+      privacyScreen: pickBoolean(host.privacyScreen, false),
+      privacyBlockInput: pickBoolean(host.privacyScreen, false) && pickBoolean(host.privacyBlockInput, false)
     },
     input: {
       mouseMode: input.mouseMode === 'absolute' || input.mouseMode === 'relative' ? input.mouseMode : 'auto',

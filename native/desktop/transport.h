@@ -11,6 +11,7 @@
 #include "voice.h"
 #include "external_voice.h"
 #include "user_messages.h"
+#include "display_select.h"
 #include <deque>
 #include <condition_variable>
 #include <cstddef>
@@ -50,6 +51,10 @@ struct Options {
   bool groupVoice = false;
   bool clipboard = false;
   bool files = false;
+  // Host-local privacy screen. Only the host's own launch arguments set these;
+  // no SNV2 message can enable them from the viewer.
+  bool privacyScreen = false;
+  bool privacyBlockInput = false;
   unsigned voiceSlot = 255;
   std::string viewerId;
   std::string peer;
@@ -204,6 +209,13 @@ public:
     receiveVideoLimit_=bitrate>=1000000 && bitrate<=50000000 ? bitrate:0;
     receiveBaselineMs_=std::isfinite(baselineRttMs) && baselineRttMs>0 && baselineRttMs<=3000 ? baselineRttMs:0;
   }
+  // Host: advertise its capturable displays (control sessions only) and take
+  // the latest validated viewer choice. Viewer: the host's last list and a
+  // request to switch; the host remains the authority for what is captured.
+  void setDisplays(display::List list);
+  std::optional<std::uint8_t> takeDisplayRequest();
+  std::optional<display::List> displays() const { std::lock_guard lock(displayMutex_); return peerDisplays_; }
+  bool selectDisplay(std::uint8_t index);
   std::function<void(Frame)> onFrame;
   std::function<void(Input)> onInput;
   std::function<void(AudioSamples)> onAudio;
@@ -356,6 +368,13 @@ private:
   bool needKeyframe_ = true;
   std::uint64_t rawDatagrams_=0, authRejected_=0, videoDatagrams_=0, completedFrames_=0, keyframeWaitDropped_=0, nackSent_=0;
   std::atomic<unsigned> stopReason_{0};
+  mutable std::mutex displayMutex_;
+  std::optional<display::List> localDisplays_, peerDisplays_;
+  std::optional<std::uint8_t> requestedDisplay_;
+  display::Request displayRequest_;
+  std::uint64_t lastDisplaySequence_=0;
+  std::string announcedDisplay_;
+  void announceDisplays();
 };
 struct PeerStop { Peer& peer; ~PeerStop() { peer.stop(); } };
 }

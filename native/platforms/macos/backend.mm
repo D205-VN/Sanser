@@ -14,6 +14,7 @@
 #include "audio_capture.h"
 #include "audio_player.h"
 #include "input_injector.h"
+#include "privacy_screen.h"
 #include "clipboard.h"
 #include "latest_frame_worker.h"
 #include "decode_worker.h"
@@ -653,6 +654,10 @@ int runMac(bool host,int argc,char** argv) {
         // ScreenCaptureKit is the authority for this capture process. A stale
         // CoreGraphics preflight must not abort a newly granted capture or
         // trigger a second permission request before ScreenCaptureKit runs.
+        // Overlay windows must exist on screen before shareable content is
+        // read, so capture can exclude them by window ID.
+        MacPrivacyScreen privacy(options.privacyScreen);
+        if(options.privacyBlockInput) std::cerr<<"SNPRIVACY blockInput=unsupported platform=macos"<<std::endl;
         __block SCShareableContent* content=nil;
         auto readContent=^(CaptureCompletion complete) {
           [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent* value,NSError* error) {
@@ -662,10 +667,28 @@ int runMac(bool host,int argc,char** argv) {
         awaitCaptureOperation([readContent](CaptureCompletion complete) { readContent(complete); },"Read available screens");
         if(!content || content.displays.count==0) throw std::runtime_error("No display is available for capture");
         if(options.input && (!AXIsProcessTrusted() || !CGPreflightPostEventAccess())) { NSDictionary* request=@{(__bridge NSString*)kAXTrustedCheckOptionPrompt:@YES}; AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)request); throw std::runtime_error("On the host Mac, allow Accessibility for Sanser, then quit and reopen Sanser before reconnecting; or turn remote input off"); }
-        SCDisplay* display=content.displays.firstObject; for(SCDisplay* candidate in content.displays) if(candidate.displayID==CGMainDisplayID()) display=candidate;
-        const double scale=std::min(static_cast<double>(options.width)/display.width,static_cast<double>(options.height)/display.height);
-        options.width=std::max(64U,static_cast<std::uint32_t>(display.width*scale)&~1U);
-        options.height=std::max(64U,static_cast<std::uint32_t>(display.height*scale)&~1U);
+        NSArray<SCDisplay*>* screens=content.displays;
+        display::List displays;
+        for(NSUInteger i=0;i<screens.count && i<display::maxDisplays;++i) {
+          SCDisplay* candidate=screens[i];
+          const bool primary=candidate.displayID==CGMainDisplayID();
+          if(primary) displays.selected=static_cast<std::uint8_t>(i);
+          displays.displays.push_back({static_cast<std::uint16_t>(std::clamp<NSInteger>(candidate.width,1,65535)),static_cast<std::uint16_t>(std::clamp<NSInteger>(candidate.height,1,65535)),primary});
+        }
+        SCDisplay* display=screens[displays.selected];
+        NSMutableArray<SCWindow*>* excluded=[NSMutableArray array];
+        if(privacy.enabled()) {
+          NSArray<NSNumber*>* ids=privacy.windowIds();
+          for(SCWindow* window in content.windows) if([ids containsObject:@(window.windowID)]) [excluded addObject:window];
+          // Never show an overlay that capture would include.
+          privacy.setCaptureExcluded(ids.count>0 && excluded.count==ids.count);
+        }
+        const auto requestedWidth=options.width,requestedHeight=options.height;
+        const auto fitted=[&](SCDisplay* target) {
+          const double scale=std::min(static_cast<double>(requestedWidth)/target.width,static_cast<double>(requestedHeight)/target.height);
+          return std::pair{std::max(64U,static_cast<std::uint32_t>(target.width*scale)&~1U),std::max(64U,static_cast<std::uint32_t>(target.height*scale)&~1U)};
+        };
+        std::tie(options.width,options.height)=fitted(display);
         HostOutput peer(options); Encoder encoder(options,peer); MacInputInjector injector(CGDisplayBounds(display.displayID));
         VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
         VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{});
@@ -677,7 +700,7 @@ int runMac(bool host,int argc,char** argv) {
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         capture.audio=&audio;
         capture.originalSound=&originalSound;
-        SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+        SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:excluded];
         SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3;
         // Control viewers already draw an immediate local cursor. Only a
         // view-only capture includes the host pointer in the encoded picture.
@@ -701,15 +724,38 @@ int runMac(bool host,int argc,char** argv) {
         awaitCaptureOperation([&](CaptureCompletion complete) {
           [stream startCaptureWithCompletionHandler:complete];
         },"Start screen capture");
+        if(!options.sharing) peer.setDisplays(displays);
         HostOutputStop shutdown{peer}; peer.start();
         auto bitrate=options.bitrate;
         auto lastProgress=Clock::now();
         // Mobile viewers only: at a low budget, fast motion at full size limits
         // the paced sender to ~15-20 fps. Trade size for frame rate.
         ResolutionPolicy resolution; bool reduced=false;
-        const auto fullWidth=options.width,fullHeight=options.height;
+        auto fullWidth=options.width,fullHeight=options.height;
         while(peer.running() && !capture.failed && !encoder.failed()) {
           peer.pumpControl();
+          privacy.update(peer.ready());
+          if(const auto index=peer.takeDisplayRequest(); index && *index<screens.count && *index!=displays.selected) {
+            // Re-target the same stream: new display, size and pointer bounds,
+            // then a fresh IDR at the new size (stale-size captures are dropped).
+            SCDisplay* target=screens[*index];
+            std::tie(fullWidth,fullHeight)=fitted(target);
+            const auto width=reduced ? ResolutionPolicy::reducedDimension(fullWidth) : fullWidth;
+            const auto height=reduced ? ResolutionPolicy::reducedDimension(fullHeight) : fullHeight;
+            SCContentFilter* next=[[SCContentFilter alloc] initWithDisplay:target excludingWindows:excluded];
+            try {
+              awaitCaptureOperation([&](CaptureCompletion complete) { [stream updateContentFilter:next completionHandler:complete]; },"Switch captured display");
+              config.width=width; config.height=height;
+              awaitCaptureOperation([&](CaptureCompletion complete) { [stream updateConfiguration:config completionHandler:complete]; },"Resize screen capture");
+              encoder.resize(width,height);
+              injector.setBounds(CGDisplayBounds(target.displayID));
+              displays.selected=*index; peer.setDisplays(displays);
+              encoder.keyframe(); encoder.refresh();
+              std::cerr<<"SNV2_DISPLAY_SWITCHED index="<<static_cast<unsigned>(*index)<<" size="<<width<<"x"<<height<<" keyframeRequested=1"<<std::endl;
+            } catch(const std::exception& error) {
+              std::cerr<<"SNV2_DISPLAY_SWITCH_FAILED index="<<static_cast<unsigned>(*index)<<" reason="<<error.what()<<std::endl;
+            }
+          }
           voicePanel.pump(); if(!peer.running()) break;
           const auto target=peer.bitrate();
           if(target!=bitrate && encoder.setBitrate(target)) bitrate=target;
