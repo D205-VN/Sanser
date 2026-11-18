@@ -32,15 +32,15 @@ pub struct Display {
 /// hosts and multi-viewer shares never do, and keep one display.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Displays {
+pub struct DisplayList {
     pub available: bool,
     pub selected: u8,
     pub displays: Vec<Display>,
 }
 const MAX_DISPLAYS: usize = 16;
-fn parse_displays(selected: &str, list: &str) -> Option<Displays> {
+fn parse_displays(selected: &str, list: &str) -> Option<DisplayList> {
     if selected == "-" {
-        return list.is_empty().then(Displays::default);
+        return list.is_empty().then(DisplayList::default);
     }
     let selected = selected.parse::<u8>().ok()?;
     let displays = list
@@ -69,7 +69,7 @@ fn parse_displays(selected: &str, list: &str) -> Option<Displays> {
     (!displays.is_empty()
         && displays.len() <= MAX_DISPLAYS
         && usize::from(selected) < displays.len())
-    .then_some(Displays {
+    .then_some(DisplayList {
         available: true,
         selected,
         displays,
@@ -82,7 +82,7 @@ struct Reply {
 #[derive(Default)]
 struct State {
     capabilities: Capabilities,
-    displays: Displays,
+    displays: DisplayList,
     pending: HashMap<Uuid, mpsc::SyncSender<Reply>>,
 }
 #[derive(Default)]
@@ -161,7 +161,7 @@ impl UserControl {
     pub fn files(&self) -> Option<crate::file_transfer::Service> {
         self.files.lock().ok().and_then(|v| v.clone())
     }
-    pub fn displays(&self) -> Displays {
+    pub fn displays(&self) -> DisplayList {
         self.state
             .lock()
             .map(|s| s.displays.clone())
@@ -291,7 +291,7 @@ impl UserControl {
         }
         if let Ok(mut state) = self.state.lock() {
             state.capabilities = Capabilities::default();
-            state.displays = Displays::default();
+            state.displays = DisplayList::default();
             for (_, sender) in state.pending.drain() {
                 let _ = sender.try_send(Reply {
                     status: 3,

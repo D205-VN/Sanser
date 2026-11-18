@@ -1070,7 +1070,7 @@ impl EngineManager {
         }
         Ok(child.user.capabilities())
     }
-    pub fn displays(&self, session: Uuid) -> Result<crate::engine_user::Displays, DesktopError> {
+    pub fn displays(&self, session: Uuid) -> Result<crate::engine_user::DisplayList, DesktopError> {
         let mut state = self
             .state
             .lock()

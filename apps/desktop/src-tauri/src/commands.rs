@@ -410,7 +410,7 @@ pub fn session_user_capabilities(
 pub fn session_displays(
     engines: State<'_, EngineManager>,
     session_id: String,
-) -> Result<crate::engine_user::Displays, DesktopError> {
+) -> Result<crate::engine_user::DisplayList, DesktopError> {
     let id = uuid::Uuid::parse_str(&session_id)
         .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))?;
     engines.displays(id)
