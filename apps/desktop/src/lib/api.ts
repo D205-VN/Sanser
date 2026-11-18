@@ -11,12 +11,15 @@ import type {
   TwoFactorStatus,
   Device,
   DeviceRegistration,
+  HistoryEntry,
+  HistoryQuery,
   IceConfiguration,
   LoginSession,
   NativeSessionCredentials,
   NetworkMode,
   QualityProfile,
-  SharingGroup
+  SharingGroup,
+  WakeInterface
 } from './types';
 import type { LoginDevice } from './platform';
 
@@ -73,7 +76,7 @@ interface RawLoginSession extends Omit<LoginSession, 'createdAt' | 'lastSeenAt' 
   expiresAt: string | number;
 }
 
-interface RawDevice extends Partial<Device> {
+interface RawDevice extends Omit<Partial<Device>, 'wakeOnLan'> {
   sanserVersion?: string;
   osVersion?: string;
   codecs?: string[];
@@ -83,6 +86,46 @@ interface RawDevice extends Partial<Device> {
   audio?: boolean;
   gamepad?: boolean;
   routeAddress?: string | null;
+  wakeOnLan?: { interfaces?: WakeInterface[] } | WakeInterface[];
+}
+
+interface RawHistoryEntry extends Omit<Partial<HistoryEntry>, 'startedAt' | 'connectedAt' | 'endedAt' | 'route'> {
+  startedAt?: number | string;
+  connectedAt?: number | string | null;
+  endedAt?: number | string | null;
+  route?: string | null;
+}
+
+function wakeInterfaces(raw: RawDevice['wakeOnLan']): WakeInterface[] | undefined {
+  const items = Array.isArray(raw) ? raw : raw?.interfaces;
+  const valid = (items ?? []).filter((item: Partial<WakeInterface> | null): item is WakeInterface =>
+    typeof item?.macAddress === 'string' && typeof item.ipv4Address === 'string' &&
+    typeof item.prefixLength === 'number' && typeof item.broadcastAddress === 'string');
+  return valid.length > 0 ? valid : undefined;
+}
+
+export function normalizeHistoryEntry(raw: RawHistoryEntry): HistoryEntry {
+  const state = raw.state;
+  return {
+    id: raw.id ?? '',
+    requesterDeviceId: raw.requesterDeviceId ?? '',
+    requesterName: raw.requesterName ?? 'Unnamed computer',
+    requesterPlatform: raw.requesterPlatform ?? '',
+    requesterComputerId: raw.requesterComputerId,
+    hostDeviceId: raw.hostDeviceId ?? '',
+    hostName: raw.hostName ?? 'Unnamed computer',
+    hostPlatform: raw.hostPlatform ?? '',
+    hostComputerId: raw.hostComputerId,
+    state: state === 'pending' || state === 'accepted' || state === 'rejected' || state === 'expired' ? state : 'disconnected',
+    accessMode: raw.accessMode === 'view-only' ? 'view-only' : 'control',
+    route: raw.route === 'direct' || raw.route === 'relay' ? raw.route : null,
+    sharedView: raw.sharedView === true,
+    startedAt: dateString(raw.startedAt) ?? new Date(0).toISOString(),
+    connectedAt: dateString(raw.connectedAt),
+    endedAt: dateString(raw.endedAt),
+    durationSeconds: typeof raw.durationSeconds === 'number' ? raw.durationSeconds : null,
+    endReason: raw.endReason ?? null
+  };
 }
 
 interface RawSession extends Omit<Partial<ConnectionSession>, 'createdAt' | 'updatedAt' | 'guest'> {
@@ -125,7 +168,8 @@ function normalizeDevice(raw: RawDevice): Device {
       gamepad: raw.capabilities?.gamepad ?? raw.gamepad === true
     },
     lastSeenAt: dateString(raw.lastSeenAt),
-    pinned: raw.pinned === true
+    pinned: raw.pinned === true,
+    wakeOnLan: wakeInterfaces(raw.wakeOnLan)
   };
 }
 
@@ -292,6 +336,29 @@ export class ApiClient {
       delete legacyDevice.computerId;
       return normalizeDevice(await this.request<RawDevice>('/api/v2/devices/register', { method: 'POST', body: legacyDevice }));
     }
+  }
+
+  /** Shares this host's wakeable adapters. Requires a server with Wake-on-LAN support. */
+  async setWakeOnLan(id: string, interfaces: WakeInterface[]): Promise<Device> {
+    return normalizeDevice(await this.request<RawDevice>(`/api/v2/devices/${encodeURIComponent(id)}/wake-on-lan`, {
+      method: 'PUT',
+      body: { interfaces }
+    }));
+  }
+
+  async clearWakeOnLan(id: string): Promise<void> {
+    await this.request(`/api/v2/devices/${encodeURIComponent(id)}/wake-on-lan`, { method: 'DELETE' });
+  }
+
+  async connectionHistory(query: HistoryQuery = {}): Promise<PageEnvelope<HistoryEntry>> {
+    const params = new URLSearchParams();
+    if (query.cursor) params.set('cursor', query.cursor);
+    if (query.limit) params.set('limit', String(query.limit));
+    if (query.deviceIds?.length) params.set('deviceIds', query.deviceIds.join(','));
+    if (query.direction && query.direction !== 'any') params.set('direction', query.direction);
+    const search = params.toString();
+    const response = await this.request<PageEnvelope<RawHistoryEntry>>(`/api/v2/account/history${search ? `?${search}` : ''}`);
+    return { items: response.items.map(normalizeHistoryEntry), nextCursor: response.nextCursor ?? null };
   }
 
   async heartbeatDevice(id: string, streaming: boolean, routeAddress?: string): Promise<void> {
@@ -488,7 +555,7 @@ export class ApiClient {
   private async request<T = unknown>(
     path: string,
     options: {
-      method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+      method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
       body?: unknown;
       authenticated?: boolean;
     } = {},

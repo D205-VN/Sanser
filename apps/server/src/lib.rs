@@ -21,7 +21,7 @@ use axum::{
     http::{Method, header},
     middleware as axum_middleware,
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     serve::ListenerExt,
 };
 use thiserror::Error;
@@ -55,6 +55,7 @@ pub fn build_router(state: AppState) -> Router {
             Method::GET,
             Method::POST,
             Method::PATCH,
+            Method::PUT,
             Method::DELETE,
             Method::OPTIONS,
         ])
@@ -126,6 +127,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/account/sessions/{id}",
             delete(routes::account::revoke_login_session),
         )
+        .route("/api/v2/account/history", get(routes::history::list))
         .route("/api/v2/devices", get(routes::devices::list))
         .route("/api/v2/devices/register", post(routes::devices::register))
         .route(
@@ -136,6 +138,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/devices/{id}",
             patch(routes::devices::update).delete(routes::devices::remove),
+        )
+        .route(
+            "/api/v2/devices/{id}/wake-on-lan",
+            put(routes::wake::set).delete(routes::wake::clear),
         )
         .route(
             "/api/v2/sessions",

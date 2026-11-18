@@ -137,17 +137,15 @@ pub async fn cleanup(pool: &PgPool, now: i64, offline_before: i64, pending_befor
         .bind(now - 30 * 86_400)
         .execute(pool)
         .await,
-        sqlx::query(
-            "DELETE FROM connection_sessions WHERE ended_at IS NOT NULL AND ended_at < $1",
-        )
-        .bind(now - 30 * 86_400)
-        .execute(pool)
-        .await,
     ];
 
     for result in operations {
         if let Err(error) = result {
             tracing::warn!(error = %error, "database retention operation failed");
         }
+    }
+    // Connection history: 90 days, bounded per account.
+    if let Err(error) = crate::routes::history::prune(pool, now).await {
+        tracing::warn!(error = %error, "connection history retention failed");
     }
 }

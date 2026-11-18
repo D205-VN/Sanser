@@ -272,6 +272,9 @@ pub struct HostPreferences {
     pub privacy_screen: bool,
     #[serde(default)]
     pub privacy_block_input: bool,
+    /// Opt-in: report this computer's adapter MACs so others can wake it.
+    #[serde(default)]
+    pub wake_on_lan: bool,
 }
 
 const fn default_direct_udp_port() -> u16 {

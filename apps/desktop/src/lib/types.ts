@@ -2,7 +2,7 @@ export const SANSER_VERSION = '2.3.16' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
-export type Page = 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about';
+export type Page = 'computers' | 'host' | 'session' | 'history' | 'settings' | 'diagnostics' | 'about';
 export type SettingsSection =
   | 'general'
   | 'stream'
@@ -98,6 +98,8 @@ export interface HostPreferences {
   privacyScreen: boolean;
   /** Also block this computer's own keyboard/mouse (Windows helper only). */
   privacyBlockInput: boolean;
+  /** Opt-in: share this computer's adapter MACs so a computer on the same LAN can wake it. */
+  wakeOnLan: boolean;
 }
 
 export interface InputPreferences {
@@ -167,6 +169,50 @@ export interface Device {
   capabilities: DeviceCapabilities;
   lastSeenAt: string | null;
   pinned: boolean;
+  /** Present only when the host opted in to Wake-on-LAN. */
+  wakeOnLan?: WakeInterface[];
+}
+
+/** One wired or Wi-Fi adapter of a host that can receive a magic packet. */
+export interface WakeInterface {
+  macAddress: string;
+  ipv4Address: string;
+  prefixLength: number;
+  broadcastAddress: string;
+}
+
+export interface WakeResult {
+  sameLan: boolean;
+  packetsSent: number;
+}
+
+/** One connection session in the account access log. Times are ISO strings. */
+export interface HistoryEntry {
+  id: string;
+  requesterDeviceId: string;
+  requesterName: string;
+  requesterPlatform: string;
+  requesterComputerId?: string;
+  hostDeviceId: string;
+  hostName: string;
+  hostPlatform: string;
+  hostComputerId?: string;
+  state: 'pending' | 'accepted' | 'rejected' | 'disconnected' | 'expired';
+  accessMode: 'control' | 'view-only';
+  route: 'direct' | 'relay' | null;
+  sharedView: boolean;
+  startedAt: string;
+  connectedAt: string | null;
+  endedAt: string | null;
+  durationSeconds: number | null;
+  endReason: string | null;
+}
+
+export interface HistoryQuery {
+  cursor?: string;
+  limit?: number;
+  deviceIds?: string[];
+  direction?: 'any' | 'incoming' | 'outgoing';
 }
 
 export interface DeviceRegistration {

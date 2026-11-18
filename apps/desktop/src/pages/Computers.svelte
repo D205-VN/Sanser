@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { t } from '../lib/i18n';
+  import { t, tk } from '../lib/i18n';
+  import { canWake, wakeDevice } from '../lib/wakeOnLan';
   import { groupComputers, isOlderRegistration, type Computer } from '../lib/computers';
   import { nativeCompatibilityReason } from '../lib/nativeCompatibility';
   import { SvelteSet } from 'svelte/reactivity';
@@ -30,6 +31,8 @@
   let connectingId = $state<string | null>(null);
   let loadInFlight = false;
   let layout = $state<'grid' | 'list'>('grid');
+  let wakingId = $state<string | null>(null);
+  let wakeNotice = $state<{ id: string; text: string; error: boolean } | null>(null);
   function platformLabel(platform: string): string {
     const value = platform.toLowerCase();
     return value.includes('mac') ? 'macOS' : value.includes('windows') ? 'Windows' : platform;
@@ -143,6 +146,25 @@
     if ($preferences.networkMode === 'direct' && !nativeCompatible) return $t('A direct connection is unavailable. Try Auto in Settings.');
     if (!nativeCompatible && !relayCompatible) return $t('These computers cannot connect with the current settings');
     return null;
+  }
+
+  async function wake(device: Computer): Promise<void> {
+    if (wakingId) return;
+    wakingId = device.id;
+    wakeNotice = null;
+    try {
+      const result = await wakeDevice(device);
+      wakeNotice = result.sameLan && result.packetsSent > 0
+        ? { id: device.id, text: tk('Wake signal sent. The computer may take up to a minute to come online.'), error: false }
+        : { id: device.id, text: tk('This computer is not on the same local network. Wake-on-LAN only works between computers on one LAN.'), error: true };
+      if (!result.sameLan) return;
+      // Pick up the host as soon as it registers again.
+      window.setTimeout(() => { if (mounted) void loadDevices(false); }, 15_000);
+    } catch (caught) {
+      wakeNotice = { id: device.id, text: caught instanceof Error ? caught.message : tk('Unable to send the wake signal'), error: true };
+    } finally {
+      wakingId = null;
+    }
   }
 
   async function togglePin(device: Computer): Promise<void> {
@@ -294,7 +316,11 @@
           </div>
           <div class="device-availability"><span class="device-last-seen">{availabilityLabel(device, blockReason)}</span>{#if device.requesterId && $preferences.trustedDeviceIds.includes(device.requesterId)}<span class="trusted-label">{$t('Trusted')}</span>{/if}</div>
           <div class="computer-actions">
-            <button class="button primary" disabled={blockReason !== null || connectingId !== null} title={blockReason ?? $t('Request a secure session')} onclick={() => connect(device)}>{connectingId === device.id ? $t('Requesting…') : $t('Connect')}<Icon name="arrow" /></button>
+            {#if canWake(device)}
+              <button class="button primary" disabled={wakingId !== null} title={$t('Send a Wake-on-LAN signal. Works only from a computer on the same local network.')} onclick={() => wake(device)}>{wakingId === device.id ? $t('Waking…') : $t('Wake')}<Icon name="refresh" /></button>
+            {:else}
+              <button class="button primary" disabled={blockReason !== null || connectingId !== null} title={blockReason ?? $t('Request a secure session')} onclick={() => connect(device)}>{connectingId === device.id ? $t('Requesting…') : $t('Connect')}<Icon name="arrow" /></button>
+            {/if}
             <button class="button small ghost" disabled={actionId !== null} aria-pressed={device.pinned} onclick={() => togglePin(device)}><Icon name="pin" />{device.pinned ? $t('Pinned') : $t('Pin')}</button>
             <details class="device-menu">
               <summary class="button small ghost" aria-label={`Manage ${device.name}`}><Icon name="more" /></summary>
@@ -307,6 +333,8 @@
             </details>
           </div>
           {#if blockReason && blockReason !== $t('This computer is offline')}<div class="connect-reason"><Icon name="about" /><span>{blockReason}</span></div>{/if}
+          {#if wakeNotice?.id === device.id}<div class="connect-reason" class:danger-text={wakeNotice.error} role="status"><Icon name="about" /><span>{$t(wakeNotice.text)}</span></div>
+          {:else if canWake(device)}<div class="connect-reason"><Icon name="about" /><span>{$t('Wake works only when this computer is on the same local network.')}</span></div>{/if}
 
         </article>
       {/each}

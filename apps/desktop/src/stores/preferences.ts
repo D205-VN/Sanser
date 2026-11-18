@@ -27,7 +27,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
     inputEnabled: true,
     clipboardEnabled: false,
     privacyScreen: false,
-    privacyBlockInput: false
+    privacyBlockInput: false,
+    wakeOnLan: false
   },
   input: {
     mouseMode: 'auto',
@@ -138,7 +139,8 @@ export function migratePreferences(
       inputEnabled: pickBoolean(host.inputEnabled, DEFAULT_PREFERENCES.host.inputEnabled),
       clipboardEnabled: pickBoolean(host.clipboardEnabled, false),
       privacyScreen: pickBoolean(host.privacyScreen, false),
-      privacyBlockInput: pickBoolean(host.privacyScreen, false) && pickBoolean(host.privacyBlockInput, false)
+      privacyBlockInput: pickBoolean(host.privacyScreen, false) && pickBoolean(host.privacyBlockInput, false),
+      wakeOnLan: pickBoolean(host.wakeOnLan, false)
     },
     input: {
       mouseMode: input.mouseMode === 'absolute' || input.mouseMode === 'relative' ? input.mouseMode : 'auto',

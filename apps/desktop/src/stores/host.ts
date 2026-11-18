@@ -5,6 +5,7 @@ import { engineStatus, getLocalRouteAddress, launchEngine, startRelay, stopEngin
 import { coordinateP2pConnection, directCheckFailure } from '../lib/p2pSignaling';
 import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
 import { trustedPendingSession } from '../lib/trustedDevice';
+import { syncWakeOnLan } from '../lib/wakeOnLan';
 import { PROTOCOL_VERSION, SANSER_VERSION, type ConnectionSession, type RuntimeStatus } from '../lib/types';
 import { diagnostics } from './diagnostics';
 import { preferences } from './preferences';
@@ -432,6 +433,16 @@ export function createHostStore(): HostStore {
       }
       deviceId = registered.id || deviceId;
       store.set({ ...initial, online: true, deviceId, routeAddress });
+      // Opt-in Wake-on-LAN details; best effort so an older server never blocks hosting.
+      void syncWakeOnLan(client, deviceId, get(preferences).host.wakeOnLan, Boolean(registered.wakeOnLan?.length))
+        .then((result) => {
+          if (result === 'no-adapters') diagnostics.add({ level: 'warn', category: 'network', message: 'Wake-on-LAN: no wired or Wi-Fi adapter with a LAN address was found' });
+        })
+        .catch((error: unknown) => diagnostics.add({
+          level: 'warn',
+          category: 'network',
+          message: `Wake-on-LAN details could not be shared: ${error instanceof Error ? error.message : String(error)}`
+        }));
       stopTimers();
       heartbeatTimer = window.setInterval(() => {
         const current = get(store);

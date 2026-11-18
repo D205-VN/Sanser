@@ -1,5 +1,5 @@
 <script lang="ts">
-  let { name }: { name: 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' | 'laptop' | 'windows' | 'refresh' | 'arrow' | 'link' | 'grid' | 'list' | 'pin' | 'more' | 'mic' | 'mic-off' | 'headphones' | 'volume-off' | 'leave' | 'stop' | 'volume' | 'eye' | 'pointer' | 'clipboard' | 'chat' | 'pen' } = $props();
+  let { name }: { name: 'computers' | 'host' | 'session' | 'history' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' | 'laptop' | 'windows' | 'refresh' | 'arrow' | 'link' | 'grid' | 'list' | 'pin' | 'more' | 'mic' | 'mic-off' | 'headphones' | 'volume-off' | 'leave' | 'stop' | 'volume' | 'eye' | 'pointer' | 'clipboard' | 'chat' | 'pen' } = $props();
 </script>
 
 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -9,6 +9,8 @@
     <path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>
   {:else if name === 'pen'}
     <path d="m4 20 1-5L15.5 4.5a2 2 0 0 1 3 3L8 18z"/><path d="m13.5 6.5 3 3"/>
+  {:else if name === 'history'}
+    <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
   {:else if name === 'clipboard'}
     <rect x="5" y="4" width="14" height="18" rx="2"/><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M9 11h6M9 15h6"/>
   {:else if name === 'laptop'}

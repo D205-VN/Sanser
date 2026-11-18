@@ -18,6 +18,7 @@ mod tray;
 mod updater;
 mod voice;
 mod voice_window;
+mod wake_on_lan;
 mod windows_uac;
 
 use engine::EngineManager;
@@ -168,7 +169,9 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         commands::p2p_punch,
         relay::relay_start,
         relay::relay_peer_failure,
-        relay::relay_stop
+        relay::relay_stop,
+        wake_on_lan::get_wake_on_lan_interfaces,
+        wake_on_lan::send_wake_on_lan
     ];
     handler(invoke)
 }

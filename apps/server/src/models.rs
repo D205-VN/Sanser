@@ -53,8 +53,63 @@ pub struct Device {
     pub gamepad: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
+    /// Opt-in LAN wake information reported by the host; absent when not shared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_on_lan: Option<WakeOnLan>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WakeOnLan {
+    pub interfaces: Vec<WakeInterface>,
+    pub updated_at: i64,
+}
+
+/// One wired or Wi-Fi adapter that can receive a magic packet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WakeInterface {
+    /// Lower-case, colon-separated EUI-48 address.
+    pub mac_address: String,
+    /// The adapter's IPv4 address and prefix let a requester tell whether it
+    /// shares that LAN; the broadcast address is the magic packet target.
+    pub ipv4_address: String,
+    pub prefix_length: u8,
+    pub broadcast_address: String,
+}
+
+/// One row of the account access log, derived from `connection_sessions`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntry {
+    pub id: String,
+    pub requester_device_id: String,
+    pub requester_name: String,
+    pub requester_platform: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_computer_id: Option<String>,
+    pub host_device_id: String,
+    pub host_name: String,
+    pub host_platform: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_computer_id: Option<String>,
+    pub state: String,
+    pub access_mode: SessionAccess,
+    /// `direct`, `relay`, or absent when media never started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<&'static str>,
+    pub shared_view: bool,
+    pub started_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connected_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

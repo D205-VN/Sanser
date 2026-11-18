@@ -1056,6 +1056,7 @@ mod tests {
             audio: false,
             gamepad: false,
             last_seen_at: Some(1),
+            wake_on_lan: None,
             created_at: 1,
             updated_at: 1,
         }
