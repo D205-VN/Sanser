@@ -5,6 +5,36 @@
   import { normalizeServerUrl } from '../lib/api';
   import { CONFIGURED_SERVER_URL, preferences } from '../stores/preferences';
   import { session } from '../stores/session';
+  import GuestConnect from '../components/GuestConnect.svelte';
+  import type { RuntimeStatus } from '../lib/types';
+
+  let { runtime }: { runtime?: RuntimeStatus } = $props();
+  let guestMode = $state(false);
+  let secondFactor = $state('');
+  let useRecoveryCode = $state(false);
+  const canVerify = $derived(useRecoveryCode ? secondFactor.replace(/[\s-]/g, '').length === 10 : /^\d{6}$/.test(secondFactor.replace(/\s/g, '')));
+  const canUseCode = $derived(runtime?.capabilities.clientEngine.state === 'available');
+
+  async function verifySecondFactor(event: SubmitEvent): Promise<void> {
+    event.preventDefault();
+    if (!canVerify || $session.busy) return;
+    formError = null;
+    try {
+      await session.completeTwoFactor(useRecoveryCode ? { recoveryCode: secondFactor.trim() } : { code: secondFactor.replace(/\s/g, '') });
+      secondFactor = '';
+    } catch (error) {
+      secondFactor = '';
+      formError = $session.twoFactor ? (error instanceof Error ? error.message : $t('Unable to continue')) : null;
+    }
+  }
+
+  function cancelSecondFactor(): void {
+    secondFactor = '';
+    useRecoveryCode = false;
+    formError = null;
+    password = '';
+    session.cancelTwoFactor();
+  }
 
   let mode = $state<'login' | 'register'>('login');
   let email = $state('');
@@ -69,6 +99,27 @@
 <main class="welcome welcome-simple">
   <div class="welcome-language"><LanguageToggle /></div>
   <section class="welcome-panel" aria-label={$t('Account access')}>
+    {#if $session.twoFactor}
+    <form class="auth-card" onsubmit={verifySecondFactor}>
+      <div class="auth-brand"><BrandMark size={40} label="Sanser" /><strong>{$t('Sanser')}</strong></div>
+      <header>
+        <h2>{$t('Two-step verification')}</h2>
+        <p>{useRecoveryCode ? $t('Enter one of your recovery codes. Each code works only once.') : $t('Enter the 6-digit code from your authenticator app.')}</p>
+      </header>
+      <div class="field">
+        <label for="second-factor">{useRecoveryCode ? $t('Recovery code') : $t('Verification code')}</label>
+        <input id="second-factor" class="input" bind:value={secondFactor} required autocomplete="one-time-code" inputmode={useRecoveryCode ? 'text' : 'numeric'} spellcheck="false" maxlength={useRecoveryCode ? 11 : 7} placeholder={useRecoveryCode ? 'XXXXX-XXXXX' : '123456'} />
+      </div>
+      {#if formError}<div class="notice error" role="alert">{$t(formError)}</div>{/if}
+      <button class="button primary auth-submit" type="submit" disabled={$session.busy || !canVerify}>{$session.busy ? $t('Please wait…') : $t('Verify')}</button>
+      <div class="auth-footer">
+        <button class="text-button" type="button" disabled={$session.busy} onclick={() => { useRecoveryCode = !useRecoveryCode; secondFactor = ''; formError = null; }}>{useRecoveryCode ? $t('Use an authenticator code') : $t('Use a recovery code')}</button>
+        <button class="text-button" type="button" disabled={$session.busy} onclick={cancelSecondFactor}>{$t('Back to sign in')}</button>
+      </div>
+    </form>
+    {:else if guestMode && runtime}
+    <GuestConnect {runtime} serverUrl={persistServerUrl} onCancel={() => { guestMode = false; formError = null; }} />
+    {:else}
     <form class="auth-card" onsubmit={submit}>
       <div class="auth-brand"><BrandMark size={40} label="Sanser" /><strong>{$t('Sanser')}</strong></div>
 
@@ -122,7 +173,9 @@
       </button>
       {#if !showServerSettings && !needsServerSettings}<div class="auth-footer"><button class="text-button" type="button" onclick={() => { showServerSettings = true; }}>{$t('Use a different server')}</button></div>{/if}
       {#if $session.error}<div class="auth-footer"><button class="text-button" type="button" disabled={$session.busy} onclick={retrySavedSignIn}>{$t('Retry saved sign-in')}</button></div>{/if}
+      {#if canUseCode}<div class="auth-footer"><button class="text-button" type="button" disabled={$session.busy} onclick={() => { guestMode = true; formError = null; }}>{$t('Connect with a code')}</button></div>{/if}
     </form>
+    {/if}
   </section>
 </main>
 

@@ -18,7 +18,7 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthContext, authenticate_websocket},
+    auth::{AuthContext, authenticate_websocket_session},
     error::AppError,
     routes::devices,
     state::AppState,
@@ -147,10 +147,12 @@ pub async fn relay_socket(
     Query(query): Query<RelayQuery>,
 ) -> Result<Response, AppError> {
     validate_origin(&state, &headers)?;
-    let auth = authenticate_websocket(&state, &headers).await?;
+    let auth = authenticate_websocket_session(&state, &headers).await?;
     let session_id = normalize_uuid(&query.session_id, "sessionId")?;
     let device_id = normalize_uuid(&query.device_id, "deviceId")?;
-    devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
+    auth.require_session(&session_id)?;
+    auth.require_device(&device_id)?;
+    devices::fetch_session_device(&state, &auth.user_id, &device_id).await?;
     let peer_device_id = authorize_relay(&state, &auth, &session_id, &device_id).await?;
     Ok(ws
         .protocols(["sanser-relay-v1"])
@@ -353,6 +355,7 @@ mod tests {
                                 user_id: "test-user".into(),
                                 auth_session_id: "test-auth".into(),
                                 access_digest: "synthetic".into(),
+                                guest: None,
                             },
                             Uuid::new_v4().to_string(),
                             "test-device".into(),

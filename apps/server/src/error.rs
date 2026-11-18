@@ -27,6 +27,15 @@ pub enum AppError {
     Unavailable,
     #[error("internal server error")]
     Internal,
+    /// The password was correct and the account uses two-step verification.
+    /// Older clients show the message; newer ones read the challenge.
+    #[error(
+        "Two-step verification is turned on for this account. Update Sanser to the latest version to sign in."
+    )]
+    TwoFactorRequired {
+        challenge_token: String,
+        expires_at: i64,
+    },
 }
 
 #[derive(Serialize)]
@@ -35,9 +44,14 @@ struct ErrorResponse {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ErrorDetail {
     code: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    challenge_expires_at: Option<i64>,
 }
 
 impl AppError {
@@ -48,7 +62,7 @@ impl AppError {
 
     pub fn status(&self) -> StatusCode {
         match self {
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Unauthorized | Self::TwoFactorRequired { .. } => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -71,6 +85,7 @@ impl AppError {
             Self::PayloadTooLarge => "payload_too_large",
             Self::Unavailable => "unavailable",
             Self::Internal => "internal_error",
+            Self::TwoFactorRequired { .. } => "two_factor_required",
         }
     }
 }
@@ -79,12 +94,22 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
         let message = self.to_string();
+        let code = self.code();
+        let (challenge_token, challenge_expires_at) = match self {
+            Self::TwoFactorRequired {
+                challenge_token,
+                expires_at,
+            } => (Some(challenge_token), Some(expires_at)),
+            _ => (None, None),
+        };
         (
             status,
             Json(ErrorResponse {
                 error: ErrorDetail {
-                    code: self.code(),
+                    code,
                     message,
+                    challenge_token,
+                    challenge_expires_at,
                 },
             }),
         )

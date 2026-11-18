@@ -132,16 +132,22 @@ pub async fn login(
         display_name: row.try_get("display_name").map_err(AppError::from_db)?,
         created_at: row.try_get("created_at").map_err(AppError::from_db)?,
     };
+    let installation_id = request.installation_id.as_ref().map(Uuid::to_string);
+    // Accounts with two-step verification get a challenge instead of tokens.
+    super::two_factor::require_second_step(
+        &state,
+        &account,
+        &device_name,
+        &platform,
+        installation_id.as_deref(),
+    )
+    .await?;
     let tokens = create_login_session(
         &state,
         account.clone(),
         &device_name,
         &platform,
-        request
-            .installation_id
-            .as_ref()
-            .map(Uuid::to_string)
-            .as_deref(),
+        installation_id.as_deref(),
     )
     .await?;
     audit(

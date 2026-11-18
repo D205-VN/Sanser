@@ -82,6 +82,11 @@ function createPresenceStore() {
 
     deviceId = registered.id || deviceId;
     store.set({ deviceId, online: true, busy: false, routeAddress, error: null });
+    startHeartbeat(generation);
+    diagnostics.add({ level: 'info', category: 'device', message: 'This client is registered', details: { deviceId } });
+  }
+
+  function startHeartbeat(generation: number): void {
     stopTimer();
     heartbeatTimer = window.setInterval(() => {
       const current = get(store);
@@ -96,7 +101,6 @@ function createPresenceStore() {
         store.update((state) => ({ ...state, error: message }));
       });
     }, HEARTBEAT_INTERVAL_MS);
-    diagnostics.add({ level: 'info', category: 'device', message: 'This client is registered', details: { deviceId } });
   }
 
   return {
@@ -117,6 +121,13 @@ function createPresenceStore() {
           if (generation === lifecycleGeneration) starting = null;
         });
       return starting;
+    },
+    /** A guest's temporary device is created by the server when the code is redeemed. */
+    startGuest(deviceId: string, routeAddress: string | null): void {
+      const generation = ++lifecycleGeneration;
+      starting = null;
+      store.set({ deviceId, online: true, busy: false, routeAddress, error: null });
+      startHeartbeat(generation);
     },
     async stop(): Promise<void> {
       lifecycleGeneration += 1;

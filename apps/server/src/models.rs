@@ -82,6 +82,17 @@ pub struct ConnectionSession {
     pub ended_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disconnect_reason: Option<String>,
+    /// Set when the requester is a guest without an account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest: Option<SessionGuest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionGuest {
+    #[serde(skip)]
+    pub grant_id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]

@@ -480,6 +480,7 @@ mod tests {
                 user_id: "u".into(),
                 auth_session_id: "s".into(),
                 access_digest: "d".into(),
+                guest: None,
             },
             Path(Uuid::new_v4().to_string()),
             ApiJson(CredentialRequest {

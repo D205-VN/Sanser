@@ -209,6 +209,63 @@ export interface ConnectionSession {
   /** Ephemeral, memory-only credential returned after media negotiation. */
   sessionToken?: string;
   credentialExpiresAt?: number;
+  /** Present when the requester is a guest without an account. */
+  guest?: { name: string };
+}
+
+export interface TwoFactorStatus {
+  enabled: boolean;
+  enabledAt?: number;
+  recoveryCodesRemaining: number;
+}
+
+export interface TwoFactorEnrollment {
+  secret: string;
+  otpauthUri: string;
+}
+
+/** Exactly one of the two is sent. */
+export type SecondFactor = { code: string } | { recoveryCode: string };
+
+export interface CreatedGuestGrant {
+  id: string;
+  hostDeviceId: string;
+  accessCode: string;
+  password: string;
+  expiresAt: number;
+}
+
+export interface GuestGrant {
+  id: string;
+  hostDeviceId: string;
+  state: 'waiting' | 'redeemed';
+  createdAt: number;
+  expiresAt: number;
+  redeemedAt?: number;
+  sessionId?: string;
+  guestName?: string;
+}
+
+export interface GuestDeviceInfo {
+  platform: string;
+  crossPlatform: boolean;
+  osVersion: string;
+  version: string;
+  protocolVersion: number;
+  codecs: string[];
+  nativeTransport: boolean;
+  webRtc: boolean;
+  audio: boolean;
+  gamepad: boolean;
+  routeAddress?: string;
+}
+
+export interface GuestRedemption {
+  accessToken: string;
+  accessExpiresAt: number;
+  deviceId: string;
+  hostName: string;
+  session: ConnectionSession;
 }
 
 export interface NativeSessionCredentials {

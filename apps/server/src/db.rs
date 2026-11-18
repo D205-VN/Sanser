@@ -115,7 +115,7 @@ pub async fn cleanup(pool: &PgPool, now: i64, offline_before: i64, pending_befor
         .bind(now)
         .execute(pool)
         .await,
-        sqlx::query("UPDATE connection_sessions SET state = 'expired', ended_at = $1, updated_at = $2 WHERE state = 'pending' AND created_at < $3")
+        sqlx::query("UPDATE connection_sessions SET state = 'expired', ended_at = $1, updated_at = $2 WHERE state = 'pending' AND created_at < $3 AND guest_grant_id IS NULL")
             .bind(now)
             .bind(now)
             .bind(pending_before)

@@ -12,7 +12,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthContext, audit, clean_label},
+    auth::{AuthContext, SessionAuth, audit, clean_label},
     config::{PROTOCOL_VERSION, SANSER_VERSION},
     error::{ApiJson, AppError},
     events,
@@ -109,7 +109,7 @@ pub async fn list(
     let cursor = query.cursor.as_deref().map(decode_cursor).transpose()?;
     let rows = if let Some(cursor) = cursor {
         sqlx::query(
-            "SELECT * FROM devices WHERE user_id = $1 AND \
+            "SELECT * FROM devices WHERE user_id = $1 AND guest_grant_id IS NULL AND \
              (updated_at < $2 OR (updated_at = $3 AND id < $4)) \
              ORDER BY updated_at DESC, id DESC LIMIT $5",
         )
@@ -123,7 +123,7 @@ pub async fn list(
         .map_err(AppError::from_db)?
     } else {
         sqlx::query(
-            "SELECT * FROM devices WHERE user_id = $1 \
+            "SELECT * FROM devices WHERE user_id = $1 AND guest_grant_id IS NULL \
              ORDER BY updated_at DESC, id DESC LIMIT $2",
         )
         .bind(&auth.user_id)
@@ -213,12 +213,22 @@ pub async fn register(
             .await
             .map_err(AppError::from_db)?;
     }
-    let mut existing_owner =
-        sqlx::query_scalar::<_, String>("SELECT user_id FROM devices WHERE id = $1")
-            .bind(&id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(AppError::from_db)?;
+    let existing = sqlx::query("SELECT user_id, guest_grant_id FROM devices WHERE id = $1")
+        .bind(&id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AppError::from_db)?;
+    let mut existing_owner = None;
+    if let Some(row) = existing {
+        let guest: Option<String> = row.try_get("guest_grant_id").map_err(AppError::from_db)?;
+        if guest.is_some() {
+            return Err(AppError::Conflict("device id is already registered".into()));
+        }
+        existing_owner = Some(
+            row.try_get::<String, _>("user_id")
+                .map_err(AppError::from_db)?,
+        );
+    }
     if existing_owner
         .as_deref()
         .is_some_and(|owner| owner != auth.user_id)
@@ -228,7 +238,7 @@ pub async fn register(
 
     if let Some(computer) = &computer_id {
         if let Some(canonical_id) = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM devices WHERE user_id = $1 AND computer_id = $2 AND device_role = $3",
+            "SELECT id FROM devices WHERE user_id = $1 AND computer_id = $2 AND device_role = $3 AND guest_grant_id IS NULL",
         )
         .bind(&auth.user_id)
         .bind(computer)
@@ -344,10 +354,11 @@ pub async fn register(
 
 pub async fn heartbeat(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SessionAuth(auth): SessionAuth,
     ApiJson(request): ApiJson<HeartbeatRequest>,
 ) -> Result<Json<Device>, AppError> {
     let id = validate_uuid(&request.device_id, "deviceId")?;
+    auth.require_device(&id)?;
     let route = normalize_route(request.route_address)?;
     let quality = request
         .network_quality
@@ -361,7 +372,7 @@ pub async fn heartbeat(
             "latencyMs must be between 0 and 60000".into(),
         ));
     }
-    let previous = fetch_owned(&state, &auth.user_id, &id).await?;
+    let previous = fetch_session_device(&state, &auth.user_id, &id).await?;
     let now = now_unix();
     let updated = sqlx::query(
         "UPDATE devices SET online = TRUE, streaming = $1, \
@@ -398,16 +409,19 @@ pub async fn heartbeat(
         )
         .await?;
     }
-    Ok(Json(fetch_owned(&state, &auth.user_id, &id).await?))
+    Ok(Json(
+        fetch_session_device(&state, &auth.user_id, &id).await?,
+    ))
 }
 
 pub async fn offline(
     State(state): State<AppState>,
-    auth: AuthContext,
+    SessionAuth(auth): SessionAuth,
     ApiJson(request): ApiJson<OfflineRequest>,
 ) -> Result<Json<Device>, AppError> {
     let id = validate_uuid(&request.device_id, "deviceId")?;
-    let mut device = fetch_owned(&state, &auth.user_id, &id).await?;
+    auth.require_device(&id)?;
+    let mut device = fetch_session_device(&state, &auth.user_id, &id).await?;
     let changed = device.online || device.streaming;
     let now = now_unix();
     let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
@@ -584,7 +598,28 @@ pub async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// An account device. Guest devices are invisible here, so no account-scoped
+/// device, sharing or session-creation path can act on them.
 pub(crate) async fn fetch_owned(
+    state: &AppState,
+    user_id: &str,
+    id: &str,
+) -> Result<Device, AppError> {
+    let row = sqlx::query(
+        "SELECT * FROM devices WHERE id = $1 AND user_id = $2 AND guest_grant_id IS NULL",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from_db)?
+    .ok_or(AppError::NotFound)?;
+    row_to_device(row)
+}
+
+/// Any device that can take part in an existing connection session,
+/// including the temporary guest device of a support session.
+pub(crate) async fn fetch_session_device(
     state: &AppState,
     user_id: &str,
     id: &str,
@@ -633,7 +668,7 @@ fn row_to_device(row: sqlx::postgres::PgRow) -> Result<Device, AppError> {
     })
 }
 
-fn normalize_codecs(values: Vec<String>) -> Result<Vec<String>, AppError> {
+pub(crate) fn normalize_codecs(values: Vec<String>) -> Result<Vec<String>, AppError> {
     let mut codecs = BTreeSet::new();
     for value in values {
         let codec = value.trim().to_ascii_lowercase();
@@ -652,7 +687,7 @@ fn normalize_codecs(values: Vec<String>) -> Result<Vec<String>, AppError> {
     Ok(codecs.into_iter().collect())
 }
 
-fn normalize_route(value: Option<String>) -> Result<Option<String>, AppError> {
+pub(crate) fn normalize_route(value: Option<String>) -> Result<Option<String>, AppError> {
     value
         .map(|value| {
             value
@@ -678,7 +713,11 @@ fn normalize_quality(value: &str) -> Result<String, AppError> {
     }
 }
 
-fn optional_label(value: &str, field: &str, max_length: usize) -> Result<String, AppError> {
+pub(crate) fn optional_label(
+    value: &str,
+    field: &str,
+    max_length: usize,
+) -> Result<String, AppError> {
     if value.trim().is_empty() {
         Ok(String::new())
     } else {
@@ -730,7 +769,7 @@ const fn default_true() -> bool {
 // Product minor releases can share protocol v2. Keep 2.1 desktops registered
 // during the 2.2 rollout; capabilities and session-level feature gates still
 // decide what each peer can use. Future minor/major clients remain unverified.
-fn compatible_client_version(value: &str) -> bool {
+pub(crate) fn compatible_client_version(value: &str) -> bool {
     fn parts(value: &str) -> Option<[u32; 3]> {
         if value.len() > 32 {
             return None;

@@ -17,7 +17,7 @@ use crate::{
     time::{expires_at, now_unix},
 };
 
-const ACCESS_PREFIX: &str = "sn2_a_";
+pub(crate) const ACCESS_PREFIX: &str = "sn2_a_";
 const REFRESH_PREFIX: &str = "sn2_r_";
 pub const SESSION_IDLE_SECONDS: i64 = 7 * 24 * 60 * 60;
 
@@ -30,8 +30,40 @@ pub struct AuthContext {
     pub user_id: String,
     pub auth_session_id: String,
     pub access_digest: String,
+    /// Present only for a guest ("support session") token. Guest tokens are
+    /// rejected by the default extractor and accepted only by [`SessionAuth`].
+    pub guest: Option<GuestScope>,
 }
 
+/// What a guest token may touch: one connection session and one guest device
+/// inside the host account.
+#[derive(Clone, Debug)]
+pub struct GuestScope {
+    pub grant_id: String,
+    pub session_id: String,
+    pub device_id: String,
+}
+
+impl AuthContext {
+    /// Rejects a guest token unless it is scoped to `session_id`.
+    pub fn require_session(&self, session_id: &str) -> Result<(), AppError> {
+        match &self.guest {
+            Some(guest) if guest.session_id != session_id => Err(AppError::NotFound),
+            _ => Ok(()),
+        }
+    }
+
+    /// Rejects a guest token unless it acts as its own guest device.
+    pub fn require_device(&self, device_id: &str) -> Result<(), AppError> {
+        match &self.guest {
+            Some(guest) if guest.device_id != device_id => Err(AppError::NotFound),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Account sign-ins only. Every handler that takes `AuthContext` directly is
+/// closed to guest tokens, so new endpoints are account-only by default.
 impl FromRequestParts<AppState> for AuthContext {
     type Rejection = AppError;
 
@@ -40,11 +72,45 @@ impl FromRequestParts<AppState> for AuthContext {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers).ok_or(AppError::Unauthorized)?;
-        authenticate_access_token(state, token).await
+        let auth = authenticate_access_token(state, token).await?;
+        if auth.guest.is_some() {
+            return Err(AppError::Forbidden);
+        }
+        Ok(auth)
     }
 }
 
+/// An account sign-in or a guest token. Handlers using this extractor must
+/// call [`AuthContext::require_session`] / [`AuthContext::require_device`].
+pub struct SessionAuth(pub AuthContext);
+
+impl FromRequestParts<AppState> for SessionAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = bearer_token(&parts.headers).ok_or(AppError::Unauthorized)?;
+        authenticate_access_token(state, token).await.map(Self)
+    }
+}
+
+/// Account-only WebSocket authentication (account event stream).
 pub async fn authenticate_websocket(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthContext, AppError> {
+    let auth = authenticate_websocket_session(state, headers).await?;
+    if auth.guest.is_some() {
+        return Err(AppError::Forbidden);
+    }
+    Ok(auth)
+}
+
+/// WebSocket authentication that also admits guest tokens; callers must bind
+/// the socket to the guest device with [`AuthContext::require_device`].
+pub async fn authenticate_websocket_session(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<AuthContext, AppError> {
@@ -64,9 +130,12 @@ pub async fn authenticate_access_token(
     let digest = token_digest(token);
     let now = now_unix();
     let row = sqlx::query(
-        "SELECT s.user_id, a.auth_session_id, s.last_seen_at \
+        "SELECT s.user_id, a.auth_session_id, s.last_seen_at, s.scope, \
+                g.id AS guest_grant_id, g.session_id AS guest_session_id, \
+                g.guest_device_id, g.revoked_at AS guest_revoked_at \
          FROM access_tokens a \
          JOIN auth_sessions s ON s.id = a.auth_session_id \
+         LEFT JOIN guest_access_grants g ON g.id = s.guest_grant_id AND g.user_id = s.user_id \
          WHERE a.digest = $1 AND a.revoked_at IS NULL AND a.expires_at > $2 \
            AND s.revoked_at IS NULL AND s.expires_at > $3",
     )
@@ -93,10 +162,35 @@ pub async fn authenticate_access_token(
             .map_err(AppError::from_db)?;
     }
 
+    let scope: String = row.try_get("scope").map_err(AppError::from_db)?;
+    let guest = match scope.as_str() {
+        "account" => None,
+        "guest" => {
+            let revoked: Option<i64> =
+                row.try_get("guest_revoked_at").map_err(AppError::from_db)?;
+            let grant_id: Option<String> =
+                row.try_get("guest_grant_id").map_err(AppError::from_db)?;
+            let session_id: Option<String> =
+                row.try_get("guest_session_id").map_err(AppError::from_db)?;
+            let device_id: Option<String> =
+                row.try_get("guest_device_id").map_err(AppError::from_db)?;
+            match (grant_id, session_id, device_id, revoked) {
+                (Some(grant_id), Some(session_id), Some(device_id), None) => Some(GuestScope {
+                    grant_id,
+                    session_id,
+                    device_id,
+                }),
+                _ => return Err(AppError::Unauthorized),
+            }
+        }
+        _ => return Err(AppError::Unauthorized),
+    };
+
     Ok(AuthContext {
         user_id: row.try_get("user_id").map_err(AppError::from_db)?,
         auth_session_id,
         access_digest: digest,
+        guest,
     })
 }
 
@@ -296,7 +390,7 @@ pub async fn rotate_refresh_token(
     let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
     let row = sqlx::query(
         "SELECT r.auth_session_id, r.expires_at, r.revoked_at, r.rotated_at, \
-                s.user_id, s.revoked_at AS session_revoked_at, s.expires_at AS session_expires_at, s.last_seen_at, \
+                s.user_id, s.revoked_at AS session_revoked_at, s.expires_at AS session_expires_at, s.last_seen_at, s.scope, \
                 u.email, u.display_name, u.created_at \
          FROM refresh_tokens r \
          JOIN auth_sessions s ON s.id = r.auth_session_id \
@@ -328,6 +422,10 @@ pub async fn rotate_refresh_token(
         return Err(AppError::Unauthorized);
     }
     let last_seen_at: i64 = row.try_get("last_seen_at").map_err(AppError::from_db)?;
+    let scope: String = row.try_get("scope").map_err(AppError::from_db)?;
+    if scope != "account" {
+        return Err(AppError::Unauthorized);
+    }
     if token_expiry <= now
         || session_revoked.is_some()
         || session_expiry <= now
@@ -523,17 +621,17 @@ pub async fn audit(
     }
 }
 
-fn new_token(prefix: &str) -> String {
+pub(crate) fn new_token(prefix: &str) -> String {
     let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);
     format!("{prefix}{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn token_digest(token: &str) -> String {
+pub(crate) fn token_digest(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
-fn valid_token_shape(token: &str, prefix: &str) -> bool {
+pub(crate) fn valid_token_shape(token: &str, prefix: &str) -> bool {
     token.starts_with(prefix)
         && token.len() == prefix.len() + 43
         && token[prefix.len()..]

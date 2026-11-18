@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthContext, authenticate_websocket},
+    auth::{AuthContext, authenticate_websocket, authenticate_websocket_session},
     error::AppError,
     events,
     routes::devices,
@@ -418,13 +418,16 @@ pub async fn signaling_socket(
     Query(query): Query<WebSocketQuery>,
 ) -> Result<Response, AppError> {
     validate_origin(&state, &headers)?;
-    let auth = authenticate_websocket(&state, &headers).await?;
+    let auth = authenticate_websocket_session(&state, &headers).await?;
     let device_id = query
         .device_id
         .as_deref()
         .ok_or_else(|| AppError::Validation("deviceId is required".into()))?;
     let device_id = normalize_uuid(device_id, "deviceId")?;
-    devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
+    // A guest token may only signal as its own guest device, which belongs to
+    // exactly one connection session.
+    auth.require_device(&device_id)?;
+    devices::fetch_session_device(&state, &auth.user_id, &device_id).await?;
     Ok(ws
         .protocols(["sanser-v2"])
         .max_message_size(MAX_WS_MESSAGE_BYTES)
