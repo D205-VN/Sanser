@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t } from '../lib/i18n';
   import { onMount } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { invoke } from '@tauri-apps/api/core';
   import { denormalize, normalize, PEN_COLORS, STROKE_FADE_MS, STROKE_HOLD_MS, StrokeBuffer, strokeAlpha, strokeId, videoFit, type CollabEvent, type Fit } from '../lib/collab';
 
@@ -10,7 +11,7 @@
   interface Stroke { key: string; color: number; points: number[]; updated: number }
   let { poll = (after: number) => invoke<Poll>('annotation_overlay_poll', { after }),
     send = (strokeId: string, points: number[], end: boolean, clear = false) => invoke<number>('annotation_overlay_stroke', { strokeId, points, end, clear }),
-    penOff = () => invoke<void>('annotation_overlay_pen_off') }:
+    penOff = () => invoke('annotation_overlay_pen_off').then(() => undefined) }:
     { poll?: (after: number) => Promise<Poll>; send?: (strokeId: string, points: number[], end: boolean, clear?: boolean) => Promise<number>; penOff?: () => Promise<void> } = $props();
 
   let canvas = $state<HTMLCanvasElement | null>(null);
@@ -18,7 +19,8 @@
   let color = $state(0);
   let cursor = 0;
   let video = { width: 0, height: 0 };
-  const strokes = new Map<string, Stroke>();
+  // Drawn from requestAnimationFrame; reactivity is not needed but keeps lint consistent.
+  const strokes = new SvelteMap<string, Stroke>();
   let drawing: { buffer: StrokeBuffer; local: Stroke } | null = null;
   let sending = false;
 
@@ -81,7 +83,7 @@
   function down(event: PointerEvent): void {
     if (!pen || event.button !== 0) return;
     const at = point(event); if (!at) return;
-    canvas?.setPointerCapture?.(event.pointerId);
+    canvas?.setPointerCapture(event.pointerId);
     if (drawing) up();
     const id = strokeId();
     const local: Stroke = { key: `self:${id}`, color, points: [...at], updated: Date.now() };

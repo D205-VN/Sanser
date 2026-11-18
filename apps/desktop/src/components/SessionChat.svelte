@@ -19,11 +19,11 @@
       void showChatAlert(display(message), message.text, $t('Sanser · New message'), () => alive).catch(() => undefined);
     }
   });
-  let open = $state(false);
+  let open = $state<boolean>(false);
   let draft = $state('');
   let composing = $state(false);
   let color = $state(0);
-  let showStrokes = $state(true);
+  let showStrokes = $state<boolean>(true);
   let overlayOpen = $state(false);
   let annotationError = $state<string | null>(null);
   let legacySince = $state<number | null>(null);
@@ -71,7 +71,8 @@
   });
   $effect(() => {
     const count = $collab.messages.length;
-    if (count && list) untrack(() => queueMicrotask(() => { if (list) list.scrollTop = list.scrollHeight; }));
+    const element = list;
+    if (count && element) untrack(() => queueMicrotask(() => { element.scrollTop = element.scrollHeight; }));
   });
 
   function message(error: unknown, fallback: string): string {

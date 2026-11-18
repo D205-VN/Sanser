@@ -3,7 +3,7 @@
 //! The overlay is a transparent, always-on-top, click-through webview. It is
 //! content-protected (Windows `WDA_EXCLUDEFROMCAPTURE`, macOS
 //! `NSWindowSharingNone`) and, on a macOS host, additionally removed from the
-//! ScreenCaptureKit filter by the native engine, so strokes are never baked
+//! `ScreenCaptureKit` filter by the native engine, so strokes are never baked
 //! into the captured video. Pen mode makes it accept the pointer until the
 //! user presses Done or Esc.
 #![allow(clippy::needless_pass_by_value)] // Tauri commands take owned handles.
@@ -115,7 +115,9 @@ pub async fn open_annotation_overlay(
             .0
             .lock()
             .map_err(|_| DesktopError::Process("Annotation overlay unavailable".into()))?;
-        if current.as_ref().is_some_and(|overlay| overlay.scope == scope)
+        if current
+            .as_ref()
+            .is_some_and(|overlay| overlay.scope == scope)
             && app.get_webview_window(LABEL).is_some()
         {
             return Ok(());
@@ -129,25 +131,34 @@ pub async fn open_annotation_overlay(
         });
     }
     close_window(&app);
-    let window = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(
-        if locale == "en" { "annotation.html?lang=en" } else { "annotation.html?lang=vi" }.into(),
-    ))
-        .title(TITLE)
-        .transparent(true)
-        .decorations(false)
-        .shadow(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .content_protected(true)
-        .visible(false)
-        .inner_size(1.0, 1.0)
-        .build()
-        .map_err(|error| {
-            DesktopError::Process(format!("Unable to open the annotation overlay: {error}"))
-        })?;
+    let window = WebviewWindowBuilder::new(
+        &app,
+        LABEL,
+        WebviewUrl::App(
+            if locale == "en" {
+                "annotation.html?lang=en"
+            } else {
+                "annotation.html?lang=vi"
+            }
+            .into(),
+        ),
+    )
+    .title(TITLE)
+    .transparent(true)
+    .decorations(false)
+    .shadow(false)
+    .always_on_top(true)
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .focused(false)
+    .content_protected(true)
+    .visible(false)
+    .inner_size(1.0, 1.0)
+    .build()
+    .map_err(|error| {
+        DesktopError::Process(format!("Unable to open the annotation overlay: {error}"))
+    })?;
     window.set_ignore_cursor_events(true).map_err(|error| {
         let _ = window.close();
         DesktopError::Process(format!("Unable to make the overlay click-through: {error}"))
@@ -159,9 +170,7 @@ pub async fn open_annotation_overlay(
             let _ = window.set_size(*monitor.size());
         }
         let _ = window.show();
-        let _ = app
-            .state::<EngineManager>()
-            .collab_exclude_overlay(true);
+        let _ = app.state::<EngineManager>().collab_exclude_overlay(true);
     }
     tauri::async_runtime::spawn(follow(app.clone(), id, scope));
     Ok(())
@@ -193,7 +202,10 @@ async fn follow(app: AppHandle, id: Uuid, scope: Scope) {
             let _ = window.close();
             break;
         }
-        let Some(session) = scope.session_id.filter(|_| scope.kind == EngineKind::Client) else {
+        let Some(session) = scope
+            .session_id
+            .filter(|_| scope.kind == EngineKind::Client)
+        else {
             continue;
         };
         let view = engines.collab_view(session);
@@ -226,9 +238,7 @@ async fn follow(app: AppHandle, id: Uuid, scope: Scope) {
             *state = None;
         }
         if excluded {
-            let _ = app
-                .state::<EngineManager>()
-                .collab_exclude_overlay(false);
+            let _ = app.state::<EngineManager>().collab_exclude_overlay(false);
         }
     }
 }
@@ -244,9 +254,7 @@ pub fn close_annotation_overlay(app: AppHandle) -> Result<(), DesktopError> {
         .is_some_and(|overlay| overlay.scope.kind == EngineKind::Host);
     close_window(&app);
     if host {
-        let _ = app
-            .state::<EngineManager>()
-            .collab_exclude_overlay(false);
+        let _ = app.state::<EngineManager>().collab_exclude_overlay(false);
     }
     Ok(())
 }
@@ -424,14 +432,41 @@ mod tests {
         ] {
             assert!(!allowed_app_command(LABEL, command), "{command}");
         }
-        assert!(!allowed_app_command("webrtc-voice", "annotation_overlay_poll"));
+        assert!(!allowed_app_command(
+            "webrtc-voice",
+            "annotation_overlay_poll"
+        ));
     }
     #[test]
     fn scopes_require_a_viewer_session() {
         let session = Some(Uuid::new_v4());
-        assert!(scope_valid(Scope { kind: EngineKind::Host, session_id: None }).is_ok());
-        assert!(scope_valid(Scope { kind: EngineKind::Client, session_id: session }).is_ok());
-        assert!(scope_valid(Scope { kind: EngineKind::Client, session_id: None }).is_err());
-        assert!(scope_valid(Scope { kind: EngineKind::LocalServer, session_id: session }).is_err());
+        assert!(
+            scope_valid(Scope {
+                kind: EngineKind::Host,
+                session_id: None
+            })
+            .is_ok()
+        );
+        assert!(
+            scope_valid(Scope {
+                kind: EngineKind::Client,
+                session_id: session
+            })
+            .is_ok()
+        );
+        assert!(
+            scope_valid(Scope {
+                kind: EngineKind::Client,
+                session_id: None
+            })
+            .is_err()
+        );
+        assert!(
+            scope_valid(Scope {
+                kind: EngineKind::LocalServer,
+                session_id: session
+            })
+            .is_err()
+        );
     }
 }

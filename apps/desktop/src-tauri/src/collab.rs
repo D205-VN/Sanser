@@ -179,7 +179,10 @@ impl Limits {
     fn allow(&mut self, wire: &Wire, now: Instant) -> bool {
         match wire {
             Wire::Chat { .. } | Wire::Clear { .. } => self.chat.take(1.0, now),
-            Wire::Stroke { points, .. } => self.points.take((points.len() / 2) as f64, now),
+            Wire::Stroke { points, .. } => self.points.take(
+                f64::from(u32::try_from(points.len() / 2).unwrap_or(u32::MAX)),
+                now,
+            ),
             Wire::Policy { .. } => true,
         }
     }
@@ -424,10 +427,13 @@ impl Hub {
             if !state.peers.contains_key(source) && state.peers.len() >= MAX_PEERS {
                 return;
             }
-            let peer = state.peers.entry(source.to_owned()).or_insert_with(|| Peer {
-                capable: false,
-                limits: Limits::new(Instant::now()),
-            });
+            let peer = state
+                .peers
+                .entry(source.to_owned())
+                .or_insert_with(|| Peer {
+                    capable: false,
+                    limits: Limits::new(Instant::now()),
+                });
             let became = available && !peer.capable;
             peer.capable = available;
             (state.host && became).then_some(state.annotations)
@@ -504,7 +510,17 @@ impl Hub {
     }
     /// Native `SNUSER_COLLAB_VIEW` record from a viewer engine.
     pub fn observe_view(&self, fields: &[&str]) {
-        let [x, y, width, height, video_width, video_height, visible, unit] = fields else {
+        let [
+            x,
+            y,
+            width,
+            height,
+            video_width,
+            video_height,
+            visible,
+            unit,
+        ] = fields
+        else {
             return;
         };
         let (Ok(x), Ok(y), Ok(width), Ok(height), Ok(video_width), Ok(video_height)) = (
@@ -620,9 +636,12 @@ impl Hub {
         }
         // Best effort: viewers that miss it learn the policy on reconnect, and
         // the host drops their strokes regardless.
-        self.send("*", &Wire::Policy {
-            annotations: enabled,
-        });
+        self.send(
+            "*",
+            &Wire::Policy {
+                annotations: enabled,
+            },
+        );
         Ok(())
     }
     pub fn snapshot(&self, after: u64) -> Snapshot {
@@ -726,7 +745,11 @@ mod tests {
         // Each newly capable viewer receives the current policy.
         let policies = commands.try_iter().map(|c| decode(&c)).collect::<Vec<_>>();
         assert_eq!(policies.len(), 3);
-        assert!(policies.iter().all(|(_, wire)| *wire == Wire::Policy { annotations: true }));
+        assert!(
+            policies
+                .iter()
+                .all(|(_, wire)| *wire == Wire::Policy { annotations: true })
+        );
         // A viewer cannot impersonate another sender.
         let forged = Wire::Chat {
             id: "abc".into(),
@@ -740,7 +763,9 @@ mod tests {
         assert_eq!(relayed.len(), 2);
         assert_eq!(relayed[0].0, "b");
         assert_eq!(relayed[1].0, "c");
-        assert!(matches!(&relayed[0].1, Wire::Chat { from: Some(from), text, .. } if from == "a" && text == "hi <b>there</b>"));
+        assert!(
+            matches!(&relayed[0].1, Wire::Chat { from: Some(from), text, .. } if from == "a" && text == "hi <b>there</b>")
+        );
         let snapshot = hub.snapshot(0);
         assert_eq!(snapshot.peers, 3);
         assert_eq!(snapshot.events.len(), 1);
@@ -803,16 +828,28 @@ mod tests {
         let _ = commands.try_iter().count();
         hub.set_annotations(false)?;
         let announced = commands.try_iter().map(|c| decode(&c)).collect::<Vec<_>>();
-        assert_eq!(announced, vec![("*".into(), Wire::Policy { annotations: false })]);
+        assert_eq!(
+            announced,
+            vec![("*".into(), Wire::Policy { annotations: false })]
+        );
         hub.observe_message("a", &encoded(&stroke(vec![1, 1])));
-        hub.observe_message("a", &encoded(&Wire::Clear { name: String::new(), from: None }));
+        hub.observe_message(
+            "a",
+            &encoded(&Wire::Clear {
+                name: String::new(),
+                from: None,
+            }),
+        );
         assert_eq!(commands.try_iter().count(), 0);
         // Chat still flows while annotations are off.
         hub.observe_message("a", &encoded(&chat("still here")));
         assert_eq!(commands.try_iter().count(), 1);
-        assert!(hub
-            .post(Outgoing::Clear { name: "Host".into() })
-            .is_err());
+        assert!(
+            hub.post(Outgoing::Clear {
+                name: "Host".into()
+            })
+            .is_err()
+        );
         // A viewer reconnecting learns the current policy.
         hub.observe_capability("a", false);
         hub.observe_capability("a", true);
@@ -826,22 +863,46 @@ mod tests {
     #[test]
     fn viewer_follows_host_policy_and_posts_to_its_single_peer() -> Result<(), DesktopError> {
         let (hub, commands) = hub(false);
-        assert!(hub.post(Outgoing::Chat { name: "Me".into(), text: "hi".into() }).is_err(), "posted to an older host");
+        assert!(
+            hub.post(Outgoing::Chat {
+                name: "Me".into(),
+                text: "hi".into()
+            })
+            .is_err(),
+            "posted to an older host"
+        );
         hub.observe_capability("-", true);
-        let seq = hub.post(Outgoing::Chat { name: "Me".into(), text: "hi".into() })?;
+        let seq = hub.post(Outgoing::Chat {
+            name: "Me".into(),
+            text: "hi".into(),
+        })?;
         let (target, wire) = decode(&commands.try_recv().map_err(|_| unavailable())?);
         assert_eq!(target, "-");
-        assert!(matches!(wire, Wire::Chat { from: None, .. }), "viewer must not claim a sender");
+        assert!(
+            matches!(wire, Wire::Chat { from: None, .. }),
+            "viewer must not claim a sender"
+        );
         let own = hub.snapshot(0);
         assert_eq!(own.events.len(), 1);
         assert!(own.events[0].own && own.events[0].seq == seq);
         hub.observe_message("-", &encoded(&Wire::Policy { annotations: false }));
         assert!(!hub.snapshot(0).annotations);
-        assert!(hub
-            .post(Outgoing::Stroke { name: "Me".into(), stroke_id: "s".into(), color: 0, points: vec![1, 1], end: true })
-            .is_err());
+        assert!(
+            hub.post(Outgoing::Stroke {
+                name: "Me".into(),
+                stroke_id: "s".into(),
+                color: 0,
+                points: vec![1, 1],
+                end: true
+            })
+            .is_err()
+        );
         hub.observe_message("-", &encoded(&with_from(&stroke(vec![1, 1]), "b")));
-        assert_eq!(hub.snapshot(seq).events.len(), 0, "stroke shown while annotations are off");
+        assert_eq!(
+            hub.snapshot(seq).events.len(),
+            0,
+            "stroke shown while annotations are off"
+        );
         hub.observe_message("-", &encoded(&Wire::Policy { annotations: true }));
         hub.observe_message("-", &encoded(&with_from(&stroke(vec![1, 1]), "b")));
         let events = hub.snapshot(seq).events;
@@ -849,7 +910,10 @@ mod tests {
         assert_eq!(events[0].from, "b");
         assert_eq!(events[0].kind, "stroke");
         hub.close();
-        assert!(hub.snapshot(0).events.is_empty(), "history survived the session");
+        assert!(
+            hub.snapshot(0).events.is_empty(),
+            "history survived the session"
+        );
         Ok(())
     }
 
@@ -860,7 +924,10 @@ mod tests {
         let _ = commands.try_iter().count();
         hub.observe_message("-", &encoded(&chat("from controller")));
         assert_eq!(commands.try_iter().count(), 0);
-        hub.post(Outgoing::Chat { name: "Host".into(), text: "reply".into() })?;
+        hub.post(Outgoing::Chat {
+            name: "Host".into(),
+            text: "reply".into(),
+        })?;
         let (target, wire) = decode(&commands.try_recv().map_err(|_| unavailable())?);
         assert_eq!(target, "*");
         assert!(matches!(wire, Wire::Chat { from: Some(from), .. } if from == "host"));
@@ -873,7 +940,16 @@ mod tests {
         hub.observe_view(&["10", "-20", "1280", "720", "1920", "1080", "1", "pt"]);
         assert_eq!(
             hub.view(),
-            Some(View { x: 10, y: -20, width: 1280, height: 720, video_width: 1920, video_height: 1080, visible: true, unit: "pt" })
+            Some(View {
+                x: 10,
+                y: -20,
+                width: 1280,
+                height: 720,
+                video_width: 1920,
+                video_height: 1080,
+                visible: true,
+                unit: "pt"
+            })
         );
         hub.observe_view(&["1", "2", "3", "4", "5", "6", "1", "in"]);
         hub.observe_view(&["1", "2", "99999", "4", "5", "6", "1", "px"]);

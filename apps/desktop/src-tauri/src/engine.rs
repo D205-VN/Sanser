@@ -1345,7 +1345,10 @@ impl EngineManager {
         {
             child.direct_bridges.insert(session, bridge);
         }
-        child.user.collab().configure(request.kind == EngineKind::Host);
+        child
+            .user
+            .collab()
+            .configure(request.kind == EngineKind::Host);
         child.voice_supported = probe.group_voice;
         child.external_voice_supported = probe.external_voice_gate;
         child.voice_floating_controls = probe.group_voice_floating_controls;

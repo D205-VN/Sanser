@@ -5,6 +5,8 @@
   import GroupVoice from '../components/GroupVoice.svelte';
   import SessionTextTools from '../components/SessionTextTools.svelte';
   import SessionFiles from '../components/SessionFiles.svelte';
+  import SessionChat from '../components/SessionChat.svelte';
+  import { sharing } from '../stores/sharing';
   import StatusPill from '../components/StatusPill.svelte';
   import { engineStatus, launchEngine, startRelay, stopEngine, stopRelay, routeRecoveryPlan, type RouteRecoveryEvidence } from '../lib/platform';
   import { resolveStreamProfile, resolveStreamSize } from '../lib/streamProfile';
@@ -600,6 +602,9 @@
   {/if}
   {#if sessionState?.sharingId && sessionState.status === 'accepted' && $connection.engineRunning}
     <GroupVoice kind="client" sharingId={sessionState.sharingId} sessionId={sessionState.id} />
+  {/if}
+  {#if sessionState?.wireProtocol === 'snv2' && sessionState.status === 'accepted' && $connection.engineRunning}
+    {#key sessionState.id}<SessionChat kind="client" sessionId={sessionState.id} selfName={$sharing.devices.find((device) => device.id === $presence.deviceId)?.name ?? ''} />{/key}
   {/if}
 
   {#if soundUnavailable}
