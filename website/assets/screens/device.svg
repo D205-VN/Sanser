@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844">
+<title>Chi tiết / Quyền truy cập</title>
+<rect x="0" y="0" width="390" height="844" rx="0" fill="#0E1119"/>
+<text x="25" y="27.310000000000002" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="13" font-weight="600">9:41</text>
+<rect x="150.0" y="10" width="90" height="25" rx="16" fill="#06080D"/>
+<rect x="314" y="25" width="2" height="3" rx="0" fill="#F2F4FA"/>
+<rect x="318" y="23" width="2" height="5" rx="0" fill="#F2F4FA"/>
+<rect x="322" y="21" width="2" height="7" rx="0" fill="#F2F4FA"/>
+<rect x="326" y="19" width="2" height="9" rx="0" fill="#F2F4FA"/>
+<line x1="334.25" y1="22.0" x2="337.375" y2="20.125" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="337.375" y1="20.125" x2="343.625" y2="20.125" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="343.625" y1="20.125" x2="346.75" y2="22.0" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="336.75" y1="24.5" x2="338.625" y2="23.25" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="338.625" y1="23.25" x2="342.375" y2="23.25" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="342.375" y1="23.25" x2="344.25" y2="24.5" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<ellipse cx="340.5" cy="28.25" rx="2.0" ry="2.0" fill="#F2F4FA"/>
+<rect x="357" y="21" width="19" height="9" rx="3" fill="#F2F4FA"/>
+<rect x="378" y="24" width="2" height="3" rx="0" fill="#F2F4FA"/>
+<rect x="20" y="61" width="44" height="44" rx="14" fill="#191F2C"/>
+<line x1="44.75" y1="76.58333333333333" x2="38.333333333333336" y2="83.0" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="38.333333333333336" y1="83.0" x2="44.75" y2="89.41666666666667" stroke="#F2F4FA" stroke-width="1.7" stroke-linecap="round"/>
+<text x="78" y="89.88" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="700">Windows Studio</text>
+<text x="78" y="114.44" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="400">Máy tính đã tin cậy</text>
+<defs><clipPath id="clip-21"><rect x="24" y="145" width="342" height="198" rx="12"/></clipPath></defs><g clip-path="url(#clip-21)">
+<rect x="24" y="145" width="342" height="198" rx="12" fill="#283B50"/>
+<ellipse cx="280.5" cy="230.14" rx="99.0" ry="99.0" fill="#3E6471"/>
+<ellipse cx="290.76" cy="289.53999999999996" rx="75.24" ry="75.24" fill="#638C88"/>
+<ellipse cx="99.24" cy="307.36" rx="114.83999999999999" ry="114.83999999999999" fill="#283548"/>
+<rect x="38" y="157" width="314" height="22" rx="6" fill="#182230"/>
+<text x="48" y="169.96" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="8" font-weight="600">Sanser Workspace</text>
+<rect x="61.62" y="192.51999999999998" width="198.35999999999999" height="108.9" rx="8" fill="#131C29"/>
+<text x="75.3" y="212.85999999999999" fill="#B9C8FF" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="600">Project Sanser</text>
+<text x="75.3" y="232.25" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="9" font-weight="400">Design / Mobile</text>
+<text x="75.3" y="254.25" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="9" font-weight="400">Ready when you are.</text>
+<rect x="266.82" y="202.42" width="64.98" height="71.28" rx="8" fill="#9BC4B6"/>
+<rect x="277.08" y="214.3" width="37.62" height="4" rx="2" fill="#446E67"/>
+<rect x="277.08" y="227.3" width="37.62" height="4" rx="2" fill="#446E67"/>
+<rect x="277.08" y="240.3" width="37.62" height="4" rx="2" fill="#446E67"/>
+<rect x="119.76" y="322" width="150.48" height="12" rx="4" fill="#1F2A3C"/>
+</g>
+<rect x="40" y="158" width="82" height="25" rx="12" fill="#203D37"/>
+<ellipse cx="51.0" cy="170.5" rx="2.5" ry="2.5" fill="#78DFC0"/>
+<text x="59" y="171.7" fill="#78DFC0" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="600">Trực tuyến</text>
+<text x="24" y="388.4" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="600">Bạn muốn kết nối thế nào?</text>
+<rect x="24" y="414" width="342" height="83" rx="18" fill="#252F48" stroke="#B9C8FF" stroke-width="1"/>
+<rect x="47.208333333333336" y="444.0833333333333" width="14.583333333333334" height="20.833333333333332" rx="4" fill="#0E1119" stroke="#B9C8FF" stroke-width="1"/>
+<line x1="52.416666666666664" y1="459.7083333333333" x2="56.583333333333336" y2="459.7083333333333" stroke="#B9C8FF" stroke-width="1.7" stroke-linecap="round"/>
+<ellipse cx="54.5" cy="452.5" rx="2.0" ry="2.0" fill="#B9C8FF"/>
+<text x="86" y="444.05" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="600">Điều khiển máy tính</text>
+<text x="86" y="467.7" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="400">Dùng chuột, bàn phím và cảm ứng</text>
+<ellipse cx="340.0" cy="454.0" rx="9.0" ry="9.0" fill="#B9C8FF"/>
+<ellipse cx="340.0" cy="454.0" rx="4.0" ry="4.0" fill="#0E1119"/>
+<rect x="24" y="509" width="342" height="83" rx="18" fill="#191F2C" stroke="#303A50" stroke-width="1"/>
+<rect x="45.0" y="542.0" width="18.0" height="12.0" rx="2" fill="#0E1119" stroke="#9EAAC0" stroke-width="1"/>
+<line x1="50.0" y1="558.0" x2="58.0" y2="558.0" stroke="#9EAAC0" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="54.0" y1="554.0" x2="54.0" y2="558.0" stroke="#9EAAC0" stroke-width="1.7" stroke-linecap="round"/>
+<text x="86" y="540.05" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="15" font-weight="600">Chỉ xem màn hình</text>
+<text x="86" y="563.7" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="400">Không gửi thao tác đến máy tính</text>
+<line x1="37.0" y1="621.6666666666666" x2="43.66666666666667" y2="624.1666666666666" stroke="#78DFC0" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="43.66666666666667" y1="624.1666666666666" x2="42.833333333333336" y2="632.5" stroke="#78DFC0" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="42.833333333333336" y1="632.5" x2="37.0" y2="638.3333333333334" stroke="#78DFC0" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="37.0" y1="638.3333333333334" x2="31.166666666666668" y2="632.5" stroke="#78DFC0" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="31.166666666666668" y1="632.5" x2="30.333333333333332" y2="624.1666666666666" stroke="#78DFC0" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="30.333333333333332" y1="624.1666666666666" x2="37.0" y2="621.6666666666666" stroke="#78DFC0" stroke-width="1.7" stroke-linecap="round"/>
+<text x="57" y="629.44" fill="#F2F4FA" font-family="Inter,Arial,sans-serif" font-size="12" font-weight="600">Mã hóa đầu cuối</text>
+<text x="57" y="650.7" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="400">Máy chủ cần cho phép truy cập trước khi mở.</text>
+<rect x="24" y="715" width="342" height="50" rx="15" fill="#B9C8FF"/>
+<line x1="48.25" y1="733.5833333333334" x2="54.666666666666664" y2="740.0" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<line x1="54.666666666666664" y1="740.0" x2="48.25" y2="746.4166666666666" stroke="#0E1119" stroke-width="1.7" stroke-linecap="round"/>
+<text x="73" y="743.18" fill="#0E1119" font-family="Inter,Arial,sans-serif" font-size="14" font-weight="600">Kết nối an toàn</text>
+<text x="67" y="794.7" fill="#9EAAC0" font-family="Inter,Arial,sans-serif" font-size="10" font-weight="400">Chỉ số kết nối chỉ xuất hiện sau khi đo.</text>
+</svg>

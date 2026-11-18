@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sanser — Điều khiển máy tính từ xa</title>
+  <meta name="description" content="Sanser: điều khiển và xem máy tính từ xa với độ trễ thấp giữa Mac, Windows, Android và iPhone. Âm thanh hệ thống, voice nhóm, chia sẻ màn hình cho nhiều máy.">
+  <meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f7f8fb" media="(prefers-color-scheme: light)">
+  <meta property="og:title" content="Sanser — Điều khiển máy tính từ xa">
+  <meta property="og:description" content="Remote desktop độ trễ thấp cho Mac, Windows, Android và iPhone.">
+  <meta property="og:image" content="assets/icon.png">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="apple-touch-icon" href="assets/icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    // Apply saved theme/lang before paint to avoid a flash.
+    (function () {
+      try {
+        var t = localStorage.getItem('sanser-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip" href="#main" data-i18n="skip">Bỏ qua tới nội dung</a>
+
+  <header class="nav" id="top">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top" aria-label="Sanser">
+        <img src="assets/icon.png" alt="" width="32" height="32">
+        <span>Sanser</span>
+      </a>
+      <nav class="nav-links" aria-label="Chính">
+        <a href="#features" data-i18n="nav.features">Tính năng</a>
+        <a href="#how" data-i18n="nav.how">Cách dùng</a>
+        <a href="#mobile" data-i18n="nav.mobile">Di động</a>
+        <a href="#download" data-i18n="nav.download">Tải về</a>
+        <a href="#faq" data-i18n="nav.faq">Hỏi đáp</a>
+      </nav>
+      <div class="nav-actions">
+        <button class="icon-btn" id="lang-toggle" type="button" aria-label="Switch to English" title="English / Tiếng Việt">
+          <span class="lang-code">EN</span>
+        </button>
+        <button class="icon-btn" id="theme-toggle" type="button" aria-label="Đổi giao diện sáng/tối" data-i18n-aria="theme">
+          <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>
+          <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></svg>
+        </button>
+        <a class="btn btn-primary btn-sm nav-cta" href="#download" data-i18n="nav.cta">Tải miễn phí</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- HERO -->
+    <section class="hero">
+      <div class="hero-glow" aria-hidden="true"></div>
+      <div class="wrap hero-inner">
+        <div class="hero-copy">
+          <a class="pill" href="#whatsnew">
+            <span class="pill-tag" data-i18n="hero.badge">Mới</span>
+            <span><span data-i18n="hero.badgeText">Phiên bản</span> <span class="js-desktop-version">2.3.15</span> — <span data-i18n="hero.badgeMore">voice nhóm rõ hơn</span></span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </a>
+          <h1>
+            <span data-i18n="hero.title1">Máy tính của bạn.</span>
+            <span class="grad" data-i18n="hero.title2">Luôn trong tầm tay.</span>
+          </h1>
+          <p class="lead" data-i18n="hero.lead">Sanser điều khiển và xem máy tính từ xa với độ trễ thấp — giữa Mac, Windows, Android và iPhone. Có âm thanh hệ thống, voice nhóm và chia sẻ màn hình cho nhiều máy cùng lúc.</p>
+          <div class="hero-cta">
+            <a class="btn btn-primary btn-lg" id="hero-download" href="#download">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></svg>
+              <span id="hero-download-label" data-i18n="hero.cta">Tải Sanser</span>
+            </a>
+            <a class="btn btn-ghost btn-lg" href="#features" data-i18n="hero.secondary">Xem tính năng</a>
+          </div>
+          <ul class="hero-platforms" aria-label="Nền tảng">
+            <li>macOS</li><li>Windows</li><li>Android</li><li>iOS</li>
+          </ul>
+        </div>
+
+        <div class="hero-visual" aria-hidden="true">
+          <div class="device-window">
+            <div class="win-bar">
+              <i></i><i></i><i></i>
+              <span class="win-title">Sanser — Windows Studio</span>
+            </div>
+            <div class="win-screen">
+              <div class="wall"></div>
+              <div class="fake-app a1">
+                <div class="fa-bar"></div>
+                <div class="fa-line w70"></div><div class="fa-line w50"></div><div class="fa-line w60"></div>
+                <div class="fa-chart"><b style="height:40%"></b><b style="height:65%"></b><b style="height:50%"></b><b style="height:80%"></b><b style="height:60%"></b><b style="height:90%"></b></div>
+              </div>
+              <div class="fake-app a2">
+                <div class="fa-bar"></div>
+                <div class="fa-line w80"></div><div class="fa-line w40"></div>
+              </div>
+              <div class="cursor"></div>
+              <div class="float-bar">
+                <span class="fb mic on"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></span>
+                <span class="fb"><svg viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></span>
+                <span class="fb"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14.5 15.2A4.5 4.5 0 0 1 21 19"/></svg></span>
+                <span class="fb stop"><svg viewBox="0 0 24 24"><path d="M14 4h4.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H14M10 8l-4 4 4 4M6 12h10"/></svg></span>
+              </div>
+              <div class="route-chip"><span class="dot"></span>Direct · H.264</div>
+            </div>
+          </div>
+          <div class="phone">
+            <img src="assets/screens/home.svg" alt="" width="390" height="844" loading="eager">
+          </div>
+          <p class="illus-note" data-i18n="hero.illus">Hình minh họa giao diện</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- STRIP -->
+    <section class="strip" aria-label="Điểm nổi bật">
+      <div class="wrap strip-inner">
+        <div><strong data-i18n="strip.1a">Mã hóa phần cứng</strong><span data-i18n="strip.1b">H.264 qua VideoToolbox &amp; Media Foundation</span></div>
+        <div><strong data-i18n="strip.2a">Direct hoặc Relay</strong><span data-i18n="strip.2b">Tự chọn đường kết nối tốt nhất</span></div>
+        <div><strong data-i18n="strip.3a">Tối đa 3 người xem</strong><span data-i18n="strip.3b">Chia sẻ một màn hình cho nhiều máy</span></div>
+        <div><strong data-i18n="strip.4a">Miễn phí tải về</strong><span data-i18n="strip.4b">Bản cài đặt trên GitHub Releases</span></div>
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section class="section" id="features">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow" data-i18n="feat.eyebrow">Tính năng</p>
+          <h2 data-i18n="feat.title">Mọi thứ bạn cần để làm việc — và chơi — từ xa.</h2>
+          <p class="sub" data-i18n="feat.sub">Engine gốc cho từng hệ điều hành lo phần ghi hình, mã hóa, âm thanh và nhập liệu. Giao diện chỉ hiện tính năng khi máy thật sự hỗ trợ.</p>
+        </div>
+
+        <div class="bento">
+          <article class="card card-xl c-video">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/><path d="m10 9 4 2-4 2z"/></svg></div>
+            <h3 data-i18n="f.video.t">Hình ảnh mượt, độ trễ thấp</h3>
+            <p data-i18n="f.video.d">Ghi màn hình bằng ScreenCaptureKit trên Mac, Desktop Duplication trên Windows, mã hóa H.264 bằng phần cứng. Khi mạng yếu, máy chủ Mac tự hạ độ phân giải (ví dụ 1080p → 720p) rồi tự trở lại khi mạng ổn — không cần kết nối lại.</p>
+            <div class="viz-bars" aria-hidden="true">
+              <span style="--h:.35"></span><span style="--h:.55"></span><span style="--h:.45"></span><span style="--h:.7"></span><span style="--h:.6"></span><span style="--h:.85"></span><span style="--h:.75"></span><span style="--h:.95"></span><span style="--h:.8"></span><span style="--h:.9"></span>
+            </div>
+          </article>
+
+          <article class="card c-route">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M7.3 11 16.7 7M7.3 13l9.4 4"/></svg></div>
+            <h3 data-i18n="f.route.t">Auto · Direct · Relay</h3>
+            <p data-i18n="f.route.d">Kết nối UDP trực tiếp khi có thể, chuyển qua UDP relay, hoặc WSS/443 mã hóa đầu cuối khi mạng chặn UDP. Mất kết nối thì tự thử lại.</p>
+          </article>
+
+          <article class="card c-audio">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg></div>
+            <h3 data-i18n="f.audio.t">Âm thanh hệ thống</h3>
+            <p data-i18n="f.audio.d">Nghe âm thanh của máy từ xa qua Opus, có che mất gói. Mỗi người xem tự tắt/bật tiếng của mình.</p>
+          </article>
+
+          <article class="card card-wide c-voice">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></div>
+            <h3 data-i18n="f.voice.t">Voice nhóm, rõ ràng hơn</h3>
+            <p data-i18n="f.voice.d">Máy chủ và tối đa 3 người xem trò chuyện trực tiếp trong phiên. Lọc ồn RNNoise, gói dự phòng chống mất tiếng, bộ đệm tự thích ứng với mạng. Micro luôn tắt mặc định — bạn quyết định khi nào nói.</p>
+            <div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </article>
+
+          <article class="card c-share">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.4"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M14.5 15.2A4.5 4.5 0 0 1 21 19"/></svg></div>
+            <h3 data-i18n="f.share.t">Chia sẻ cho nhiều máy</h3>
+            <p data-i18n="f.share.d">Một bộ mã hóa, tối đa 3 máy xem cùng tài khoản. Mời, gỡ từng người, hoặc dừng tất cả bằng một nút.</p>
+          </article>
+
+          <article class="card c-input">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></div>
+            <h3 data-i18n="f.input.t">Bàn phím &amp; phím tắt</h3>
+            <p data-i18n="f.input.d">Chuyển tiếp phím, tổ hợp Command/Ctrl giữa Mac và Windows, gõ Unicode. Trên điện thoại có touchpad, phóng to và phím điều khiển game.</p>
+          </article>
+
+          <article class="card c-clip">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M9.5 10h5M9.5 14h5"/></svg></div>
+            <h3 data-i18n="f.clip.t">Clipboard &amp; gửi tệp</h3>
+            <p data-i18n="f.clip.d">Đồng bộ văn bản clipboard khi bạn cho phép. Gửi tệp hai chiều — bên kia phải bấm chấp nhận trước khi nhận.</p>
+          </article>
+
+          <article class="card c-sec">
+            <div class="card-icon"><svg viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.5 3.2 8 7.5 9.5 4.3-1.5 7.5-5 7.5-9.5V6z"/><path d="m8.8 12 2.2 2.2 4.2-4.4"/></svg></div>
+            <h3 data-i18n="f.sec.t">Bảo mật ngay từ đầu</h3>
+            <p data-i18n="f.sec.d">Phiên được xác thực, mật khẩu băm Argon2id, token ngắn hạn có xoay vòng. Bí mật lưu trong Keychain / Credential Manager. Hỗ trợ cửa sổ UAC trên Windows khi bạn bật tùy chọn này.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- HOW -->
+    <section class="section section-alt" id="how">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow" data-i18n="how.eyebrow">Cách dùng</p>
+          <h2 data-i18n="how.title">Ba bước để kết nối.</h2>
+        </div>
+        <ol class="steps">
+          <li>
+            <span class="step-n">1</span>
+            <h3 data-i18n="how.1t">Cài đặt &amp; đăng nhập</h3>
+            <p data-i18n="how.1d">Tải Sanser cho máy tính và điện thoại, đăng nhập cùng một tài khoản trên mọi thiết bị.</p>
+          </li>
+          <li>
+            <span class="step-n">2</span>
+            <h3 data-i18n="how.2t">Bật chế độ máy chủ</h3>
+            <p data-i18n="how.2d">Trên máy muốn điều khiển, chọn <b>Host → Go online</b>. Trên Mac, cấp quyền ghi màn hình và trợ năng.</p>
+          </li>
+          <li>
+            <span class="step-n">3</span>
+            <h3 data-i18n="how.3t">Kết nối</h3>
+            <p data-i18n="how.3d">Chọn máy trong danh sách và bấm <b>Kết nối</b> — hoặc <b>Start sharing → Invite</b> để chia sẻ màn hình cho người khác xem.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- MOBILE -->
+    <section class="section" id="mobile">
+      <div class="wrap mobile-grid">
+        <div class="mobile-copy">
+          <p class="eyebrow" data-i18n="mob.eyebrow">Trên điện thoại</p>
+          <h2 data-i18n="mob.title">Máy tính trong túi bạn.</h2>
+          <p class="sub" data-i18n="mob.sub">Ứng dụng Sanser cho Android và iPhone dùng chạm như touchpad, có phóng to, bàn phím mở rộng và phím điều khiển game. Xoay ngang để xem toàn màn hình.</p>
+          <ul class="checks">
+            <li data-i18n="mob.c1">Chạm một ngón để nhấp, hai ngón để cuộn, giữ để nhấp chuột phải</li>
+            <li data-i18n="mob.c2">Hỗ trợ bàn phím ngoài và tay cầm</li>
+            <li data-i18n="mob.c3">Bố cục riêng cho máy tính bảng</li>
+            <li data-i18n="mob.c4">Xem chia sẻ màn hình chỉ-xem từ máy tính</li>
+          </ul>
+          <p class="fine" data-i18n="mob.note">Ứng dụng di động đang ở giai đoạn xem trước. Điện thoại chưa tham gia voice nhóm.</p>
+        </div>
+        <div class="gallery" aria-label="Ảnh giao diện di động (minh họa)">
+          <figure class="g-phone"><img src="assets/screens/device.svg" alt="Màn hình chọn cách kết nối" width="390" height="844" loading="lazy" data-i18n-alt="alt.device"></figure>
+          <figure class="g-phone g-up"><img src="assets/screens/home.svg" alt="Danh sách máy tính" width="390" height="844" loading="lazy" data-i18n-alt="alt.home"></figure>
+          <figure class="g-phone"><img src="assets/screens/sharing.svg" alt="Lời mời chia sẻ màn hình" width="390" height="844" loading="lazy" data-i18n-alt="alt.sharing"></figure>
+          <figure class="g-land"><img src="assets/screens/remote.svg" alt="Điều khiển máy tính khi xoay ngang" width="844" height="390" loading="lazy" data-i18n-alt="alt.remote"></figure>
+          <figcaption class="illus-note" data-i18n="mob.illus">Thiết kế giao diện — dữ liệu minh họa</figcaption>
+        </div>
+      </div>
+    </section>
+
+    <!-- WHAT'S NEW -->
+    <section class="section section-alt" id="whatsnew">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow"><span data-i18n="new.eyebrow">Có gì mới trong</span> <span class="js-desktop-version">2.3.15</span></p>
+          <h2 data-i18n="new.title">Voice nhóm rõ hơn, không còn kẹt phím.</h2>
+        </div>
+        <div class="news">
+          <div class="news-item">
+            <h3 data-i18n="new.1t">Chống mất tiếng</h3>
+            <p data-i18n="new.1d">Mỗi gói voice mang thêm 20 ms lời nói trước đó, nên một gói bị mất vẫn phát lại đúng tiếng nói thật.</p>
+          </div>
+          <div class="news-item">
+            <h3 data-i18n="new.2t">Bộ đệm thích ứng</h3>
+            <p data-i18n="new.2d">Độ trễ phát của từng người nói tự điều chỉnh 20–100 ms theo chất lượng mạng.</p>
+          </div>
+          <div class="news-item">
+            <h3 data-i18n="new.3t">Lọc ồn RNNoise</h3>
+            <p data-i18n="new.3d">Micro được lọc ồn, có cổng tự động theo giọng nói và bộ giới hạn đỉnh để tránh vỡ tiếng.</p>
+          </div>
+          <div class="news-item">
+            <h3 data-i18n="new.4t">Hết kẹt phím Command</h3>
+            <p data-i18n="new.4d">Khi Mac điều khiển máy khác, các tổ hợp như Cmd+Z, Cmd+S giờ được nhả phím đúng cách.</p>
+          </div>
+        </div>
+        <p class="center"><a class="link-arrow" href="https://github.com/D205-VN/Sanser/releases/latest" target="_blank" rel="noopener" data-i18n="new.all">Xem ghi chú phát hành đầy đủ</a></p>
+      </div>
+    </section>
+
+    <!-- DOWNLOAD -->
+    <section class="section" id="download">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="eyebrow" data-i18n="dl.eyebrow">Tải về</p>
+          <h2 data-i18n="dl.title">Chọn nền tảng của bạn.</h2>
+          <p class="sub" data-i18n="dl.sub">Tất cả bản cài đặt được tải trực tiếp từ GitHub Releases của dự án.</p>
+        </div>
+
+        <div class="dl-grid">
+          <article class="dl-card" data-os="mac">
+            <div class="dl-os">
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="os-ico"><path d="M16.4 12.6c0-2.4 2-3.5 2-3.6-1.1-1.6-2.8-1.8-3.4-1.8-1.4-.1-2.8.9-3.5.9s-1.9-.9-3.1-.8c-1.6 0-3 .9-3.8 2.3-1.6 2.8-.4 7 1.2 9.3.8 1.1 1.7 2.4 2.9 2.3 1.2 0 1.6-.7 3-.7s1.8.7 3 .7c1.3 0 2.1-1.1 2.8-2.3.9-1.3 1.3-2.6 1.3-2.6s-2.4-1-2.4-3.7ZM14.1 5.6c.6-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.4-.6.7-1.1 1.8-1 2.9 1 .1 2.1-.5 2.8-1.3Z"/></svg>
+              <div>
+                <h3>macOS</h3>
+                <p class="dl-req" data-i18n="dl.mac.req">Apple Silicon (M1 trở lên)</p>
+              </div>
+            </div>
+            <a class="btn btn-primary btn-block" id="dl-mac" href="https://github.com/D205-VN/Sanser/releases/download/v2.3.15/Sanser-macOS-2.3.15-arm64.dmg">
+              <span data-i18n="dl.mac.btn">Tải .dmg</span>
+              <span class="dl-meta" id="dl-mac-meta">v2.3.15 · 10.1 MB</span>
+            </a>
+            <a class="dl-alt" id="dl-mac-zip" href="https://github.com/D205-VN/Sanser/releases/download/v2.3.15/Sanser-macOS-2.3.15-arm64.zip" data-i18n="dl.mac.zip">Hoặc tải bản .zip</a>
+            <p class="dl-note" data-i18n="dl.mac.note">Bản chưa được Apple notarize: lần mở đầu, nhấp chuột phải vào Sanser → Mở. Sau đó cấp quyền Ghi màn hình và Trợ năng trong Cài đặt hệ thống.</p>
+          </article>
+
+          <article class="dl-card" data-os="win">
+            <div class="dl-os">
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="os-ico"><path d="M3 5.3 10 4.3v7.2H3zM11 4.2 21 2.8v8.7H11zM3 12.5h7v7.2l-7-1zM11 12.5h10v8.7l-10-1.4z"/></svg>
+              <div>
+                <h3>Windows</h3>
+                <p class="dl-req" data-i18n="dl.win.req">Windows 64-bit (x64)</p>
+              </div>
+            </div>
+            <a class="btn btn-primary btn-block" id="dl-win" href="https://github.com/D205-VN/Sanser/releases/download/v2.3.15/Sanser-Windows-2.3.15-x64-setup.exe">
+              <span data-i18n="dl.win.btn">Tải bộ cài đặt</span>
+              <span class="dl-meta" id="dl-win-meta">v2.3.15 · 6.1 MB</span>
+            </a>
+            <a class="dl-alt" id="dl-win-portable" href="https://github.com/D205-VN/Sanser/releases/download/v2.3.15/Sanser-Windows-2.3.15-x64-portable.exe" data-i18n="dl.win.portable">Hoặc bản portable (không cần cài)</a>
+            <p class="dl-note" data-i18n="dl.win.note">Bộ cài tự cập nhật lên các phiên bản mới. Nếu SmartScreen cảnh báo, chọn “More info → Run anyway”.</p>
+          </article>
+
+          <article class="dl-card" data-os="android">
+            <div class="dl-os">
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="os-ico"><path d="M6 9.5h12v8a1.5 1.5 0 0 1-1.5 1.5H15v2.5a1 1 0 0 1-2 0V19h-2v2.5a1 1 0 0 1-2 0V19H7.5A1.5 1.5 0 0 1 6 17.5zM4 10a1 1 0 0 1 2 0v5a1 1 0 0 1-2 0zM18 10a1 1 0 0 1 2 0v5a1 1 0 0 1-2 0zM6.1 8.5a6 6 0 0 1 11.8 0zM8.2 3.2l1.2 1.9M15.8 3.2l-1.2 1.9"/></svg>
+              <div>
+                <h3>Android</h3>
+                <p class="dl-req" data-i18n="dl.and.req">ARM64 · bản xem trước</p>
+              </div>
+            </div>
+            <a class="btn btn-secondary btn-block" id="dl-android" href="https://github.com/D205-VN/Sanser/releases/download/v2.3.7/Sanser-Android-2.3.7-arm64.apk">
+              <span data-i18n="dl.and.btn">Tải .apk</span>
+              <span class="dl-meta" id="dl-android-meta">v2.3.7</span>
+            </a>
+            <p class="dl-note" data-i18n="dl.and.note">Cài trực tiếp từ tệp APK: cho phép “Cài ứng dụng không rõ nguồn gốc” khi được hỏi.</p>
+          </article>
+
+          <article class="dl-card" data-os="ios">
+            <div class="dl-os">
+              <svg viewBox="0 0 24 24" aria-hidden="true" class="os-ico"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 18.5h3"/></svg>
+              <div>
+                <h3>iPhone &amp; iPad</h3>
+                <p class="dl-req" data-i18n="dl.ios.req">Tệp IPA chưa ký · dành cho người dùng kỹ thuật</p>
+              </div>
+            </div>
+            <a class="btn btn-secondary btn-block" id="dl-ios" href="https://github.com/D205-VN/Sanser/releases/download/v2.3.7/Sanser-iOS-2.3.7-device-unsigned.ipa">
+              <span data-i18n="dl.ios.btn">Tải .ipa</span>
+              <span class="dl-meta" id="dl-ios-meta">v2.3.7</span>
+            </a>
+            <p class="dl-note" data-i18n="dl.ios.note">Chưa có trên App Store. Bạn cần tự ký bằng Apple Account của mình qua AltStore, SideStore hoặc Xcode trước khi cài.</p>
+          </article>
+        </div>
+
+        <p class="dl-foot">
+          <span data-i18n="dl.foot">Kiểm tra tính toàn vẹn:</span>
+          <a id="dl-sums" href="https://github.com/D205-VN/Sanser/releases/download/v2.3.15/SHA256SUMS.txt">SHA256SUMS.txt</a>
+          ·
+          <a href="https://github.com/D205-VN/Sanser/releases" target="_blank" rel="noopener" data-i18n="dl.all">Tất cả phiên bản</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section class="section section-alt" id="faq">
+      <div class="wrap faq-wrap">
+        <div class="section-head left">
+          <p class="eyebrow" data-i18n="faq.eyebrow">Hỏi đáp</p>
+          <h2 data-i18n="faq.title">Câu hỏi thường gặp.</h2>
+        </div>
+        <div class="faq">
+          <details>
+            <summary data-i18n="faq.1q">Sanser có miễn phí không?</summary>
+            <p data-i18n="faq.1a">Bạn có thể tải và dùng các bản phát hành trên GitHub mà không phải trả phí. Mã nguồn không được cấp phép để sao chép hay phân phối lại.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.2q">Những máy nào điều khiển được nhau?</summary>
+            <p data-i18n="faq.2a">Mac và Windows vừa làm máy chủ vừa làm máy điều khiển, theo mọi chiều: Mac ↔ Windows, Mac ↔ Mac, Windows ↔ Windows. Android và iPhone dùng để điều khiển hoặc xem máy tính.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.3q">Direct và Relay khác nhau thế nào?</summary>
+            <p data-i18n="faq.3a">Direct gửi dữ liệu thẳng giữa hai máy qua UDP — thường nhanh nhất. Relay đi qua máy chủ trung gian khi hai máy không kết nối trực tiếp được; nếu mạng chặn UDP, Sanser dùng WSS cổng 443 với mã hóa đầu cuối. Chế độ Auto tự chọn giúp bạn.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.4q">Tại sao macOS cảnh báo khi mở lần đầu?</summary>
+            <p data-i18n="faq.4a">Bản Mac được ký bằng chứng chỉ riêng của dự án nhưng chưa được Apple notarize, nên Gatekeeper sẽ hỏi lại. Nhấp chuột phải vào ứng dụng → Mở. Sanser cần quyền Ghi màn hình &amp; âm thanh hệ thống và Trợ năng để chia sẻ màn hình và nhận điều khiển.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.5q">Voice nhóm có tự bật micro không?</summary>
+            <p data-i18n="faq.5a">Không. Micro luôn tắt mặc định. Bạn có thể tham gia chỉ để nghe, tự bật micro khi muốn nói, hoặc tắt hết âm thanh cuộc trò chuyện bất cứ lúc nào.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.6q">Có bao nhiêu người xem cùng lúc?</summary>
+            <p data-i18n="faq.6a">Tính năng Chia sẻ cho phép tối đa 3 máy cùng tài khoản xem màn hình của bạn ở chế độ chỉ xem, kèm âm thanh hệ thống và voice nhóm.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.7q">Làm sao cài trên iPhone?</summary>
+            <p data-i18n="faq.7a">Sanser chưa có trên App Store hay TestFlight. Tệp IPA chưa ký; bạn cần ký bằng Apple Account của mình qua AltStore, SideStore hoặc Xcode. Với tài khoản miễn phí, Apple yêu cầu ký lại sau mỗi 7 ngày.</p>
+          </details>
+          <details>
+            <summary data-i18n="faq.8q">Làm sao cập nhật?</summary>
+            <p data-i18n="faq.8a">Ứng dụng desktop có bộ cập nhật được ký số. Khi cập nhật, hãy cập nhật mọi máy trong phiên để có đầy đủ tính năng mới.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="cta-band">
+      <div class="wrap cta-inner">
+        <img src="assets/icon.png" alt="" width="72" height="72">
+        <h2 data-i18n="cta.title">Sẵn sàng kết nối?</h2>
+        <p data-i18n="cta.sub">Tải Sanser cho máy tính của bạn và bắt đầu trong vài phút.</p>
+        <a class="btn btn-primary btn-lg" href="#download" data-i18n="cta.btn">Tải về ngay</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="#top"><img src="assets/icon.png" alt="" width="28" height="28"><span>Sanser</span></a>
+        <p data-i18n="foot.tag">Không gian của bạn, ở mọi nơi.</p>
+      </div>
+      <div class="footer-cols">
+        <div>
+          <h4 data-i18n="foot.product">Sản phẩm</h4>
+          <a href="#features" data-i18n="nav.features">Tính năng</a>
+          <a href="#mobile" data-i18n="nav.mobile">Di động</a>
+          <a href="#download" data-i18n="nav.download">Tải về</a>
+        </div>
+        <div>
+          <h4 data-i18n="foot.res">Tài nguyên</h4>
+          <a href="https://github.com/D205-VN/Sanser/releases" target="_blank" rel="noopener" data-i18n="foot.notes">Ghi chú phát hành</a>
+          <a href="https://github.com/D205-VN/Sanser" target="_blank" rel="noopener">GitHub</a>
+          <a href="#faq" data-i18n="nav.faq">Hỏi đáp</a>
+        </div>
+      </div>
+    </div>
+    <div class="wrap footer-base">
+      <span>© 2026 Sanser contributors.</span>
+      <span data-i18n="foot.rights">Bảo lưu mọi quyền.</span>
+    </div>
+  </footer>
+
+  <script src="main.js" defer></script>
+</body>
+</html>
