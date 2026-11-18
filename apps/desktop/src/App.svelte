@@ -10,6 +10,7 @@
   import About from './pages/About.svelte';
   import Computers from './pages/Computers.svelte';
   import Host from './pages/Host.svelte';
+  import History from './pages/History.svelte';
   import Settings from './pages/Settings.svelte';
   import Welcome from './pages/Welcome.svelte';
   import { diagnostics, networkDiagnostics, type DirectRouteHealth, type DirectPathsUpdate } from './stores/diagnostics';
@@ -67,6 +68,7 @@
     computers: { section: tk('Workspace'), label: tk('Computers') },
     host: { section: tk('Workspace'), label: tk('Host') },
     session: { section: tk('Workspace'), label: tk('Active session') },
+    history: { section: tk('Workspace'), label: tk('History') },
     settings: { section: tk('System'), label: tk('Settings') },
     diagnostics: { section: tk('System'), label: tk('Settings') },
     about: { section: tk('System'), label: tk('About Sanser') }
@@ -254,6 +256,7 @@
         <div class="persistent-session" hidden={page !== 'session'}><ActiveSession {runtime} {navigate} /></div>
         {#if page === 'computers'}<Computers {runtime} {navigate} />
         {:else if page === 'host'}<Host {runtime} />
+        {:else if page === 'history'}<History />
         {:else if page === 'settings' || page === 'diagnostics'}<Settings {runtime} onSignOut={signOut} initialSection={page === 'diagnostics' ? 'diagnostics' : 'stream'} />
         {:else if page === 'about'}<About checking={updateChecking} {updateAvailable} onCheckForUpdates={() => { void updater?.checkForUpdates(); }} />{/if}
       </main>

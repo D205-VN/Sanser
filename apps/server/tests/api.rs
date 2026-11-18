@@ -2180,3 +2180,374 @@ async fn voice_gateway_denies_cached_admission_after_offline_logout_and_stop() {
     task.await.unwrap();
     server.close().await;
 }
+
+/// Registers a host and a client device for an account and returns their IDs.
+async fn history_devices(server: &TestServer, access: &str) -> (String, String) {
+    let host = Uuid::new_v4().to_string();
+    let client = Uuid::new_v4().to_string();
+    for (id, role, platform, name) in [
+        (&host, "host", "windows-x86_64", "Office PC"),
+        (&client, "client", "macos-aarch64", "Laptop"),
+    ] {
+        let (status, body, _) = server
+            .request(
+                Method::POST,
+                "/api/v2/devices/register",
+                Some(
+                    json!({"id": id, "name": name, "platform": platform, "deviceRole": role,
+                    "nativeTransport": true, "codecs": ["h264"]}),
+                ),
+                Some(access),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+    (host, client)
+}
+
+async fn insert_history_row(
+    server: &TestServer,
+    user_id: &str,
+    requester: &str,
+    host: &str,
+    created_at: i64,
+    ended_at: Option<i64>,
+) -> String {
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO connection_sessions (id, user_id, requester_device_id, host_device_id, state, \
+         network_mode, quality_profile, requested_codec, selected_transport, created_at, updated_at, \
+         accepted_at, ended_at, disconnect_reason) VALUES ($1,$2,$3,$4,$5,'auto','balanced','auto', \
+         'native',$6,$6,$6,$7,NULL)",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .bind(requester)
+    .bind(host)
+    .bind(if ended_at.is_some() { "disconnected" } else { "accepted" })
+    .bind(created_at)
+    .bind(ended_at)
+    .execute(&server.state.pool)
+    .await
+    .expect("insert history row");
+    id
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn connection_history_is_account_scoped_paginated_filtered_and_retained() {
+    let server = TestServer::new().await.expect("test server");
+    let owner = server.register("history-owner@example.test").await;
+    let other = server.register("history-other@example.test").await;
+    let owner_access = owner["accessToken"].as_str().expect("owner token");
+    let other_access = other["accessToken"].as_str().expect("other token");
+    let owner_id = owner["account"]["id"]
+        .as_str()
+        .expect("owner id")
+        .to_owned();
+    let other_id = other["account"]["id"]
+        .as_str()
+        .expect("other id")
+        .to_owned();
+    let (host, client) = history_devices(&server, owner_access).await;
+    let (other_host, other_client) = history_devices(&server, other_access).await;
+    let now = chrono::Utc::now().timestamp();
+
+    // Five ended owner sessions, one live one, one relayed, and one for another account.
+    let mut owner_rows = Vec::new();
+    for index in 0..5 {
+        owner_rows.push(
+            insert_history_row(
+                &server,
+                &owner_id,
+                &client,
+                &host,
+                now - 600 + index,
+                Some(now - 300 + index),
+            )
+            .await,
+        );
+    }
+    let live = insert_history_row(&server, &owner_id, &client, &host, now - 10, None).await;
+    sqlx::query("UPDATE connection_sessions SET relay_used_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(&owner_rows[0])
+        .execute(&server.state.pool)
+        .await
+        .unwrap();
+    let foreign = insert_history_row(
+        &server,
+        &other_id,
+        &other_client,
+        &other_host,
+        now - 5,
+        Some(now),
+    )
+    .await;
+
+    // Pagination returns every owner row exactly once, newest first.
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let path = match &cursor {
+            Some(cursor) => format!("/api/v2/account/history?limit=2&cursor={cursor}"),
+            None => "/api/v2/account/history?limit=2".into(),
+        };
+        let (status, body, _) = server
+            .request(Method::GET, &path, None, Some(owner_access))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body["items"].as_array().expect("items");
+        assert!(items.len() <= 2);
+        seen.extend(
+            items
+                .iter()
+                .map(|item| item["id"].as_str().unwrap().to_owned()),
+        );
+        cursor = body["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 6, "{seen:?}");
+    assert_eq!(seen[0], live);
+    assert!(!seen.contains(&foreign));
+    let (_, first, _) = server
+        .request(
+            Method::GET,
+            "/api/v2/account/history",
+            None,
+            Some(owner_access),
+        )
+        .await;
+    let relayed = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == owner_rows[0].as_str())
+        .unwrap();
+    assert_eq!(relayed["route"], "relay");
+    assert_eq!(relayed["hostName"], "Office PC");
+    assert_eq!(relayed["requesterName"], "Laptop");
+    assert_eq!(relayed["durationSeconds"], 300);
+    assert_eq!(relayed["endReason"], "disconnected");
+    assert_eq!(first["items"][0]["route"], "direct");
+    assert!(first["items"][0].get("endedAt").is_none());
+
+    // The other account sees only its own row, even when filtering by the owner's devices.
+    let (_, foreign_view, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/account/history?deviceIds={host}"),
+            None,
+            Some(other_access),
+        )
+        .await;
+    assert_eq!(foreign_view["items"].as_array().unwrap().len(), 0);
+    let (_, own_view, _) = server
+        .request(
+            Method::GET,
+            "/api/v2/account/history",
+            None,
+            Some(other_access),
+        )
+        .await;
+    assert_eq!(own_view["items"].as_array().unwrap().len(), 1);
+    assert_eq!(own_view["items"][0]["id"], foreign.as_str());
+
+    // Direction filters.
+    let count = |body: &Value| body["items"].as_array().unwrap().len();
+    let (_, incoming, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/account/history?deviceIds={host}&direction=incoming"),
+            None,
+            Some(owner_access),
+        )
+        .await;
+    assert_eq!(count(&incoming), 6);
+    let (_, outgoing, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/account/history?deviceIds={host}&direction=outgoing"),
+            None,
+            Some(owner_access),
+        )
+        .await;
+    assert_eq!(count(&outgoing), 0);
+    for bad in ["direction=sideways", "deviceIds=nope", "cursor=%%%"] {
+        let (status, _, _) = server
+            .request(
+                Method::GET,
+                &format!("/api/v2/account/history?{bad}"),
+                None,
+                Some(owner_access),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+    }
+    assert_eq!(
+        server
+            .request(Method::GET, "/api/v2/account/history", None, None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Retention: rows ended more than 90 days ago go, live rows stay, and each
+    // account keeps at most HISTORY_MAX_PER_ACCOUNT ended rows.
+    let ancient = insert_history_row(
+        &server,
+        &owner_id,
+        &client,
+        &host,
+        now - 92 * 86_400,
+        Some(now - 91 * 86_400),
+    )
+    .await;
+    let ancient_live =
+        insert_history_row(&server, &owner_id, &client, &host, now - 92 * 86_400, None).await;
+    sqlx::query(
+        "INSERT INTO connection_sessions (id, user_id, requester_device_id, host_device_id, state, \
+         network_mode, quality_profile, requested_codec, created_at, updated_at, ended_at) \
+         SELECT gen_random_uuid()::TEXT, $1, $2, $3, 'disconnected', 'auto', 'balanced', 'auto', \
+                $4 - n * 10, $4 - n * 10, $4 - n * 10 + 1 FROM generate_series(1, $5) AS n",
+    )
+    .bind(&owner_id)
+    .bind(&client)
+    .bind(&host)
+    .bind(now - 3_600)
+    .bind(sanser_server::routes::history::HISTORY_MAX_PER_ACCOUNT)
+    .execute(&server.state.pool)
+    .await
+    .unwrap();
+    db::cleanup(&server.state.pool, now, now - 86_400, now - 86_400).await;
+    let remaining = |id: String| {
+        let pool = server.state.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM connection_sessions WHERE id=$1)",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(!remaining(ancient).await);
+    assert!(remaining(ancient_live.clone()).await);
+    assert!(
+        remaining(owner_rows[4].clone()).await,
+        "newest rows survive the per-account cap"
+    );
+    assert!(
+        remaining(foreign).await,
+        "another account's rows are not trimmed"
+    );
+    let ended = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM connection_sessions WHERE user_id=$1 AND ended_at IS NOT NULL",
+    )
+    .bind(&owner_id)
+    .fetch_one(&server.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        ended,
+        sanser_server::routes::history::HISTORY_MAX_PER_ACCOUNT
+    );
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn wake_on_lan_details_are_opt_in_host_only_and_account_scoped() {
+    let server = TestServer::new().await.expect("test server");
+    let owner = server.register("wake-owner@example.test").await;
+    let other = server.register("wake-other@example.test").await;
+    let owner_access = owner["accessToken"].as_str().unwrap();
+    let other_access = other["accessToken"].as_str().unwrap();
+    let (host, client) = history_devices(&server, owner_access).await;
+    let body = json!({"interfaces": [{"macAddress": "AA-BB-CC-00-11-22", "ipv4Address": "192.168.1.30",
+        "prefixLength": 24, "broadcastAddress": "192.168.1.255"}]});
+    let path = format!("/api/v2/devices/{host}/wake-on-lan");
+
+    let (status, device, _) = server
+        .request(Method::PUT, &path, Some(body.clone()), Some(owner_access))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{device}");
+    assert_eq!(
+        device["wakeOnLan"]["interfaces"][0]["macAddress"],
+        "aa:bb:cc:00:11:22"
+    );
+    let (_, listed, _) = server
+        .request(Method::GET, "/api/v2/devices", None, Some(owner_access))
+        .await;
+    let listed_host = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == host.as_str())
+        .unwrap();
+    assert_eq!(
+        listed_host["wakeOnLan"]["interfaces"][0]["broadcastAddress"],
+        "192.168.1.255"
+    );
+
+    assert_eq!(
+        server
+            .request(
+                Method::PUT,
+                &format!("/api/v2/devices/{client}/wake-on-lan"),
+                Some(body.clone()),
+                Some(owner_access)
+            )
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        server
+            .request(Method::PUT, &path, Some(body.clone()), Some(other_access))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        server
+            .request(Method::DELETE, &path, None, Some(other_access))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        server
+            .request(
+                Method::PUT,
+                &path,
+                Some(json!({"interfaces": []})),
+                Some(owner_access)
+            )
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    assert_eq!(
+        server
+            .request(Method::DELETE, &path, None, Some(owner_access))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    let (_, listed, _) = server
+        .request(Method::GET, "/api/v2/devices", None, Some(owner_access))
+        .await;
+    let listed_host = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == host.as_str())
+        .unwrap();
+    assert!(listed_host.get("wakeOnLan").is_none());
+    server.close().await;
+}

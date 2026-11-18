@@ -2573,6 +2573,255 @@
      }
     ]
    }
+  },
+  "/api/v2/account/history": {
+   "get": {
+    "tags": [
+     "Account"
+    ],
+    "summary": "List connection history (90 days)",
+    "operationId": "get_api_v2_account_history",
+    "parameters": [
+     {
+      "name": "cursor",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "limit",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "integer"
+      }
+     },
+     {
+      "name": "deviceIds",
+      "in": "query",
+      "required": false,
+      "description": "Comma-separated device IDs (up to 8).",
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "direction",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "any",
+        "incoming",
+        "outgoing"
+       ]
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HistoryPage"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
+  },
+  "/api/v2/devices/{id}/wake-on-lan": {
+   "put": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "Share this host's Wake-on-LAN adapters",
+    "operationId": "put_api_v2_devices_id_wake_on_lan",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/WakeOnLanRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Device"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Conflict.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   },
+   "delete": {
+    "tags": [
+     "Devices"
+    ],
+    "summary": "Stop sharing Wake-on-LAN details",
+    "operationId": "delete_api_v2_devices_id_wake_on_lan",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "204": {
+      "description": "No content"
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ]
+   }
   }
  },
  "components": {
@@ -2738,6 +2987,9 @@
      "updatedAt": {
       "type": "integer",
       "format": "int64"
+     },
+     "wakeOnLan": {
+      "$ref": "#/components/schemas/WakeOnLan"
      }
     },
     "additionalProperties": false
@@ -3190,6 +3442,145 @@
     "required": [
      "hostDeviceId"
     ]
+   },
+   "WakeInterface": {
+    "type": "object",
+    "required": [
+     "macAddress",
+     "ipv4Address",
+     "prefixLength",
+     "broadcastAddress"
+    ],
+    "properties": {
+     "macAddress": {
+      "type": "string",
+      "example": "aa:bb:cc:00:11:22"
+     },
+     "ipv4Address": {
+      "type": "string"
+     },
+     "prefixLength": {
+      "type": "integer"
+     },
+     "broadcastAddress": {
+      "type": "string"
+     }
+    }
+   },
+   "WakeOnLan": {
+    "type": "object",
+    "properties": {
+     "interfaces": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/WakeInterface"
+      }
+     },
+     "updatedAt": {
+      "type": "integer",
+      "format": "int64"
+     }
+    }
+   },
+   "WakeOnLanRequest": {
+    "type": "object",
+    "required": [
+     "interfaces"
+    ],
+    "properties": {
+     "interfaces": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+       "$ref": "#/components/schemas/WakeInterface"
+      }
+     }
+    }
+   },
+   "HistoryEntry": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "requesterDeviceId": {
+      "type": "string"
+     },
+     "requesterName": {
+      "type": "string"
+     },
+     "requesterPlatform": {
+      "type": "string"
+     },
+     "requesterComputerId": {
+      "type": "string"
+     },
+     "hostDeviceId": {
+      "type": "string"
+     },
+     "hostName": {
+      "type": "string"
+     },
+     "hostPlatform": {
+      "type": "string"
+     },
+     "hostComputerId": {
+      "type": "string"
+     },
+     "state": {
+      "type": "string"
+     },
+     "accessMode": {
+      "type": "string",
+      "enum": [
+       "control",
+       "view-only"
+      ]
+     },
+     "route": {
+      "type": "string",
+      "enum": [
+       "direct",
+       "relay"
+      ]
+     },
+     "sharedView": {
+      "type": "boolean"
+     },
+     "startedAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "connectedAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "endedAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "durationSeconds": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "endReason": {
+      "type": "string"
+     }
+    }
+   },
+   "HistoryPage": {
+    "type": "object",
+    "properties": {
+     "items": {
+      "type": "array",
+      "items": {
+       "$ref": "#/components/schemas/HistoryEntry"
+      }
+     },
+     "nextCursor": {
+      "type": "string"
+     }
+    }
    }
   }
  }

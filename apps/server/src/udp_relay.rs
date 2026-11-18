@@ -265,6 +265,7 @@ pub async fn relay_socket(
     let device_id = normalize_uuid(&query.device_id, "deviceId")?;
     devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
     let peer = authorize_relay(&state, &auth, &session_id, &device_id).await?;
+    crate::relay::mark_relay_used(&state, &auth, &session_id).await;
     Ok(ws.protocols(["sanser-relay-v1"]).max_message_size(4096).max_frame_size(4096).on_upgrade(move |socket| async move {
         let Ok((offer, mut events)) = state.udp_relay.register((auth.user_id.clone(), session_id.clone(), device_id.clone()), peer, address).await else { return; };
         let id = offer.allocation_id;

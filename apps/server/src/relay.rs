@@ -152,6 +152,7 @@ pub async fn relay_socket(
     let device_id = normalize_uuid(&query.device_id, "deviceId")?;
     devices::fetch_owned(&state, &auth.user_id, &device_id).await?;
     let peer_device_id = authorize_relay(&state, &auth, &session_id, &device_id).await?;
+    mark_relay_used(&state, &auth, &session_id).await;
     Ok(ws
         .protocols(["sanser-relay-v1"])
         .max_message_size(MAX_RELAY_FRAME_BYTES)
@@ -159,6 +160,23 @@ pub async fn relay_socket(
         .on_upgrade(move |socket| {
             run_relay_socket(socket, state, auth, session_id, device_id, peer_device_id)
         }))
+}
+
+/// Records that this session's media used the server relay, for the access
+/// log. Best effort: history must never block a relay connection.
+pub(crate) async fn mark_relay_used(state: &AppState, auth: &AuthContext, session_id: &str) {
+    if let Err(error) = sqlx::query(
+        "UPDATE connection_sessions SET relay_used_at = $1 \
+         WHERE id = $2 AND user_id = $3 AND relay_used_at IS NULL",
+    )
+    .bind(crate::time::now_unix())
+    .bind(session_id)
+    .bind(&auth.user_id)
+    .execute(&state.pool)
+    .await
+    {
+        tracing::debug!(error = %error, "could not record relay use for history");
+    }
 }
 
 pub(crate) async fn authorize_relay(

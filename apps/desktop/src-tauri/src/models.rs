@@ -260,6 +260,9 @@ pub struct HostPreferences {
     pub audio_enabled: bool,
     pub input_enabled: bool,
     pub clipboard_enabled: bool,
+    /// Opt-in: report this computer's adapter MACs so others can wake it.
+    #[serde(default)]
+    pub wake_on_lan: bool,
 }
 
 const fn default_direct_udp_port() -> u16 {

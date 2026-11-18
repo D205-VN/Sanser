@@ -3906,6 +3906,7 @@ dependencies = [
  "chacha20poly1305",
  "futures-util",
  "keyring",
+ "network-interface",
  "rand 0.8.6",
  "reqwest",
  "sanser-diagnostics",

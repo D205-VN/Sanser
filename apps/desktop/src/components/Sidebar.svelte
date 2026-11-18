@@ -11,7 +11,8 @@
   const primary: { page: Page; label: string }[] = [
     { page: 'computers', label: tk('Computers') },
     { page: 'host', label: tk('Host') },
-    { page: 'session', label: tk('Active session') }
+    { page: 'session', label: tk('Active session') },
+    { page: 'history', label: tk('History') }
   ];
   const secondary: { page: Page; label: string }[] = [
     { page: 'settings', label: tk('Settings') },

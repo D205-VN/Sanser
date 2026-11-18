@@ -628,6 +628,9 @@ fn row_to_device(row: sqlx::postgres::PgRow) -> Result<Device, AppError> {
         audio: row.try_get("audio").map_err(AppError::from_db)?,
         gamepad: row.try_get("gamepad").map_err(AppError::from_db)?,
         last_seen_at: row.try_get("last_seen_at").map_err(AppError::from_db)?,
+        wake_on_lan: super::wake::parse_stored(
+            row.try_get("wake_on_lan_json").map_err(AppError::from_db)?,
+        ),
         created_at: row.try_get("created_at").map_err(AppError::from_db)?,
         updated_at: row.try_get("updated_at").map_err(AppError::from_db)?,
     })

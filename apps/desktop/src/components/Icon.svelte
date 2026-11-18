@@ -1,10 +1,12 @@
 <script lang="ts">
-  let { name }: { name: 'computers' | 'host' | 'session' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' | 'laptop' | 'windows' | 'refresh' | 'arrow' | 'link' | 'grid' | 'list' | 'pin' | 'more' | 'mic' | 'mic-off' | 'headphones' | 'volume-off' | 'leave' | 'stop' | 'volume' | 'eye' | 'pointer' | 'clipboard' } = $props();
+  let { name }: { name: 'computers' | 'host' | 'session' | 'history' | 'settings' | 'diagnostics' | 'about' | 'search' | 'monitor' | 'laptop' | 'windows' | 'refresh' | 'arrow' | 'link' | 'grid' | 'list' | 'pin' | 'more' | 'mic' | 'mic-off' | 'headphones' | 'volume-off' | 'leave' | 'stop' | 'volume' | 'eye' | 'pointer' | 'clipboard' } = $props();
 </script>
 
 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   {#if name === 'computers'}
     <rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>
+  {:else if name === 'history'}
+    <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
   {:else if name === 'clipboard'}
     <rect x="5" y="4" width="14" height="18" rx="2"/><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M9 11h6M9 15h6"/>
   {:else if name === 'laptop'}

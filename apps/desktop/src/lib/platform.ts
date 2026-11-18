@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { DiagnosticsExport, EngineKind, EngineStatus, LaunchEngineRequest, Preferences, RuntimeStatus, SharingPeerVideoStatus } from './types';
+import type { DiagnosticsExport, EngineKind, EngineStatus, LaunchEngineRequest, Preferences, RuntimeStatus, SharingPeerVideoStatus, WakeInterface, WakeResult } from './types';
 import { PROTOCOL_VERSION, SANSER_VERSION, unavailableCapability } from './types';
 
 export function isTauriRuntime(): boolean {
@@ -181,6 +181,18 @@ export interface RouteRecoveryPlan {
 export async function routeRecoveryPlan(request: RouteRecoveryEvidence): Promise<RouteRecoveryPlan> {
   return isTauriRuntime() ? invoke<RouteRecoveryPlan>('route_recovery_plan', { request })
     : { action: 'observe', delayMs: 0, reason: 'desktop-required' };
+}
+
+/** This computer's wired/Wi-Fi adapters that can receive a Wake-on-LAN packet. */
+export async function wakeOnLanInterfaces(): Promise<WakeInterface[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<WakeInterface[]>('get_wake_on_lan_interfaces');
+}
+
+/** Broadcasts a magic packet from this computer; only reaches hosts on the same LAN. */
+export async function sendWakeOnLan(targets: WakeInterface[]): Promise<WakeResult> {
+  if (!isTauriRuntime()) throw new Error('Wake-on-LAN requires the Sanser desktop app');
+  return invoke<WakeResult>('send_wake_on_lan', { targets });
 }
 
 export async function getLocalRouteAddress(serverUrl: string): Promise<string | null> {
