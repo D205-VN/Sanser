@@ -3,6 +3,7 @@ pub mod auth;
 pub mod devices;
 pub mod docs;
 pub mod network;
+pub mod recording;
 pub mod sessions;
 pub mod sharing;
 pub mod system;

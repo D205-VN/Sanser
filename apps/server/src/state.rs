@@ -21,6 +21,7 @@ pub struct AppState {
     pub general_limiter: RateLimiter,
     pub login_limiter: RateLimiter,
     pub voice_lab_limiter: RateLimiter,
+    pub recording_consents: Arc<crate::recording_consent::RecordingConsents>,
 }
 
 impl AppState {
@@ -39,6 +40,7 @@ impl AppState {
             general_limiter: RateLimiter::new(general_limit, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(login_limit, Duration::from_secs(600)),
             voice_lab_limiter: RateLimiter::new(12, Duration::from_secs(60)),
+            recording_consents: Arc::default(),
         }
     }
 }

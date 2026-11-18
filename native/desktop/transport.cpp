@@ -1384,6 +1384,7 @@ void Peer::loop() {
       // one of its per-viewer peers. A single host owns its file commands here.
       if(!options_.host || !options_.sharing) for(const auto& command:takeNativeCommands()) {
         if(command=="audio-muted\t1" || command=="audio-muted\t0") setAudioMuted(command.back()=='1');
+        else if(onNativeCommand && onNativeCommand(command)) {}
         else if(const auto request=parseUserCommand(command)) {
           if(request->kind==UserCommand::FileMessage) {
             const auto bytes=userFileBody(request->body,peerGeneration_);

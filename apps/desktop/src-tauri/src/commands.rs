@@ -559,6 +559,112 @@ pub fn get_engine_status(
     Ok(status)
 }
 
+const RECORDING_MAX_BYTES: u64 = 3_800_000_000;
+const RECORDING_MAX_SECONDS: u64 = 2 * 3600;
+
+fn recordings_folder(app: &AppHandle) -> Result<std::path::PathBuf, DesktopError> {
+    Ok(app
+        .path()
+        .download_dir()
+        .map_err(|_| DesktopError::Storage("Downloads directory is unavailable".into()))?
+        .join("Sanser")
+        .join("Recordings"))
+}
+
+fn parse_session(session_id: &str) -> Result<uuid::Uuid, DesktopError> {
+    uuid::Uuid::parse_str(session_id)
+        .map_err(|_| DesktopError::InvalidRequest("sessionId must be a UUID".into()))
+}
+
+#[tauri::command]
+pub fn start_session_recording(
+    app: AppHandle,
+    engines: State<'_, EngineManager>,
+    session_id: String,
+) -> Result<crate::engine_user::RecordingStatus, DesktopError> {
+    let id = parse_session(&session_id)?;
+    let current = engines.recording_status(id)?;
+    if !current.capable {
+        return Err(DesktopError::Unavailable(
+            "Recording is unavailable for this connection (an SNV2 H.264 session is required)"
+                .into(),
+        ));
+    }
+    if matches!(current.state, "waiting" | "recording") {
+        return Ok(current);
+    }
+    let folder = recordings_folder(&app)?;
+    std::fs::create_dir_all(&folder)?;
+    let stem = format!(
+        "sanser-recording-{}Z",
+        crate::problem_report::utc_stamp(crate::problem_report::epoch_seconds())
+    );
+    let path = crate::problem_report::unique_path(&folder, &stem, "mp4");
+    let path = path
+        .to_str()
+        .ok_or_else(|| DesktopError::Storage("Recording path is not valid UTF-8".into()))?
+        .to_owned();
+    engines.recording_command(
+        id,
+        Some((&path, RECORDING_MAX_BYTES, RECORDING_MAX_SECONDS)),
+    )
+}
+
+#[tauri::command]
+pub fn stop_session_recording(
+    engines: State<'_, EngineManager>,
+    session_id: String,
+) -> Result<crate::engine_user::RecordingStatus, DesktopError> {
+    engines.recording_command(parse_session(&session_id)?, None)
+}
+
+#[tauri::command]
+pub fn session_recording_status(
+    engines: State<'_, EngineManager>,
+    session_id: String,
+) -> Result<crate::engine_user::RecordingStatus, DesktopError> {
+    engines.recording_status(parse_session(&session_id)?)
+}
+
+#[tauri::command]
+pub fn open_recordings_folder(app: AppHandle) -> Result<(), DesktopError> {
+    let folder = recordings_folder(&app)?;
+    std::fs::create_dir_all(&folder)?;
+    crate::problem_report::open_folder(&folder);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn create_problem_report(
+    app: AppHandle,
+    diagnostics: String,
+    capabilities: String,
+) -> Result<crate::problem_report::ProblemReport, DesktopError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::problem_report::create(&app, &diagnostics, &capabilities)
+    })
+    .await
+    .map_err(|error| DesktopError::Storage(format!("report task failed: {error}")))?
+}
+
+#[tauri::command]
+pub fn open_problem_report_folder(app: AppHandle) -> Result<(), DesktopError> {
+    let folder = app
+        .path()
+        .download_dir()
+        .map_err(|_| DesktopError::Storage("Downloads directory is unavailable".into()))?
+        .join("Sanser")
+        .join("Reports");
+    std::fs::create_dir_all(&folder)?;
+    crate::problem_report::open_folder(&folder);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_github_issue(url: String) -> Result<(), DesktopError> {
+    crate::problem_report::open_issue(&url)
+}
+
 #[tauri::command]
 pub async fn export_diagnostics(
     app: AppHandle,

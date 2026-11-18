@@ -24,6 +24,7 @@
 #include "voice_runtime.h"
 #include "voice_panel.h"
 #include "decode_worker.h"
+#include "recording_tap.h"
 #include "latest_frame_worker.h"
 #include "audio_player.h"
 #include "audio_capture.h"
@@ -732,7 +733,11 @@ int runWindows(bool host,int argc,char** argv) {
   VoicePanel voicePanel(options.groupVoice,voice);
   peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
   AudioPlayer audio(options.audio);
-  if(options.audio) peer.onAudio=[&](AudioSamples samples) { audio.submit(std::move(samples)); };
+  // Viewer-side recording of the already-received stream (no re-encode).
+  RecordingTap recording([&] { peer.requestKeyframe(); });
+  peer.onNativeCommand=[&](const std::string& line) { return recording.command(line); };
+  if(std::getenv("SANSER_CONTROL_STDIN")) recording.announce();
+  if(options.audio) peer.onAudio=[&](AudioSamples samples) { recording.audio(samples); audio.submit(std::move(samples)); };
   if(options.audio) peer.onAudioReset=[&] { audio.reset(); };
   // Decoder COM objects belong to the decode worker, not the socket/UI threads.
   std::atomic<bool> conversionFailed{false};
@@ -756,7 +761,7 @@ int runWindows(bool host,int argc,char** argv) {
     decoder->decode(frame);
   },[&] { decoder.reset(); runtime.reset(); conversion.clear(); decodedBase=decodedFrames.load(); },[&] { peer.requestKeyframe(); },true,options.ultraLowLatency,
     [] { return Clock::now(); },[&] { return decodedFrames.load()>decodedBase; });
-  peer.onFrame=[&](Frame frame) { decode.submit(std::move(frame)); };
+  peer.onFrame=[&](Frame frame) { recording.frame(frame); decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
   HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);

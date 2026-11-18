@@ -205,6 +205,8 @@ public:
     receiveBaselineMs_=std::isfinite(baselineRttMs) && baselineRttMs>0 && baselineRttMs<=3000 ? baselineRttMs:0;
   }
   std::function<void(Frame)> onFrame;
+  // Viewer-local stdin commands (e.g. recording) handled outside the peer.
+  std::function<bool(const std::string&)> onNativeCommand;
   std::function<void(Input)> onInput;
   std::function<void(AudioSamples)> onAudio;
   std::function<void()> onAudioReset;

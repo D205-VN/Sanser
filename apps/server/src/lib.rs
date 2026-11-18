@@ -5,6 +5,7 @@ pub mod error;
 mod events;
 mod middleware;
 pub mod models;
+pub mod recording_consent;
 pub mod relay;
 pub mod routes;
 pub mod state;
@@ -132,6 +133,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v2/sessions/{id}/disconnect",
             post(routes::sessions::disconnect),
+        )
+        .route(
+            "/api/v2/sessions/{id}/recording",
+            get(routes::recording::get).post(routes::recording::update),
         )
         .route("/api/v2/network/ice", get(routes::network::ice))
         .route(

@@ -1032,6 +1032,57 @@ impl EngineManager {
             b"audio-muted\t0\n".to_vec()
         })
     }
+    fn active_viewer(
+        &self,
+        session: Uuid,
+    ) -> Result<std::sync::MutexGuard<'_, EngineState>, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Client)
+            .ok_or_else(|| DesktopError::Unavailable("Viewer is not running".into()))?;
+        if child.session_id != Some(session)
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("Unable to inspect viewer".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "Viewer session is no longer active".into(),
+            ));
+        }
+        Ok(state)
+    }
+    pub fn recording_status(
+        &self,
+        session: Uuid,
+    ) -> Result<crate::engine_user::RecordingStatus, DesktopError> {
+        let state = self.active_viewer(session)?;
+        Ok(state
+            .children
+            .get(&EngineKind::Client)
+            .map(|child| child.user.recording())
+            .unwrap_or_default())
+    }
+    /// `Some((path, max_bytes, max_seconds))` starts, `None` stops.
+    pub fn recording_command(
+        &self,
+        session: Uuid,
+        start: Option<(&str, u64, u64)>,
+    ) -> Result<crate::engine_user::RecordingStatus, DesktopError> {
+        let state = self.active_viewer(session)?;
+        let child = state
+            .children
+            .get(&EngineKind::Client)
+            .ok_or_else(|| DesktopError::Unavailable("Viewer is not running".into()))?;
+        let command = child.user.prepare_recording(start)?;
+        child.send_command(command)?;
+        Ok(child.user.recording())
+    }
     pub fn user_capabilities(
         &self,
         session: Uuid,
