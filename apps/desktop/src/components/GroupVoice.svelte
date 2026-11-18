@@ -5,6 +5,7 @@
   import { session } from '../stores/session';
   import { host } from '../stores/host';
   import { presence } from '../stores/presence';
+  import { diagnostics } from '../stores/diagnostics';
   import Icon from './Icon.svelte';
   import { createGroupVoice } from '../stores/groupVoice';
   import type { GroupVoiceScope } from '../lib/platform';
@@ -13,6 +14,13 @@
   let gateway = $state(false);
   let opening = $state(false);
   let gatewayError = $state<string | null>(null);
+  // The host page hides voice errors; keep them in Diagnostics instead.
+  let loggedVoiceError: string | null = null;
+  $effect(() => {
+    const error = kind === 'host' ? $voice.error ?? gatewayError : null;
+    if (error && error !== loggedVoiceError) diagnostics.add({ level: 'warn', category: 'session', message: `Group voice: ${error}` });
+    loggedVoiceError = error;
+  });
   $effect(() => {
     const group = sharingId;
     let live = true;
@@ -66,8 +74,8 @@
   </div>
   {#if kind === 'host'}<p class="muted">On Windows versions that cannot exclude Sanser from audio capture, shared system sound pauses while the host is in voice to prevent echo. It resumes after leaving voice.</p>{/if}
   {#if notice}<p role="status">{notice}</p>{/if}
-  {#if $voice.error}<p class="notice error" role="alert">{$voice.error}</p>{/if}
-  {#if gatewayError}<p class="notice error" role="alert">{gatewayError}</p>{/if}
+  {#if kind !== 'host' && $voice.error}<p class="notice error" role="alert">{$voice.error}</p>{/if}
+  {#if kind !== 'host' && gatewayError}<p class="notice error" role="alert">{gatewayError}</p>{/if}
   {#if $voice.code === 'external'}<p class="muted">Voice is running in the floating controls. Shared system sound pauses until that voice window closes.</p>{/if}
 </section>
 <style>

@@ -15,6 +15,13 @@
 
   let { runtime }: { runtime: RuntimeStatus } = $props();
   let actionError = $state<string | null>(null);
+  // Host errors are not shown on this page; they are kept in Diagnostics.
+  let loggedHostError: string | null = null;
+  $effect(() => {
+    const error = actionError ?? $host.error;
+    if (error && error !== loggedHostError) diagnostics.add({ level: 'warn', category: 'session', message: error });
+    loggedHostError = error;
+  });
 
   const canHost = $derived($session.mode === 'cloud' && runtime.capabilities.hostEngine.state === 'available');
   const needsServerUpdate = $derived($host.errorCode === 'server_upgrade_required');
@@ -104,7 +111,7 @@
 
   {#if needsServerUpdate}
     <div class="notice warning" role="alert">Screen sharing on this Mac requires a Sanser server update. After the server is updated, select “Check again”.</div>
-  {:else if actionError ?? $host.error}<div class="notice error" role="alert">{actionError ?? $host.error}</div>{/if}
+  {/if}
   <div class="host-hero card">
     <div class="host-state-orb" class:online={$host.online}><Icon name="monitor" /></div>
     <div><h2>{$host.online ? 'This computer is visible' : needsServerUpdate ? 'Screen sharing is unavailable' : 'This computer is private'}</h2><p>{$host.online ? 'Your other computers can request access.' : needsServerUpdate ? 'Your screen is not being shared.' : 'Go online when you want to share your screen.'}</p></div>

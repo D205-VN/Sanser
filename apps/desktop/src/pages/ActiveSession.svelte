@@ -415,6 +415,32 @@
     }
   }
 
+  const endedStatuses: ConnectionSession['status'][] = ['rejected', 'disconnected', 'expired', 'closed', 'failed'];
+
+  // The server already ended this viewer's session; close the view locally.
+  async function leaveEndedSharing(targetId: string): Promise<void> {
+    if (disconnecting) return;
+    disconnecting = true;
+    connection.blockNativeRetry();
+    negotiationController?.abort();
+    try {
+      if (runtime.capabilities.desktopShell.state === 'available') {
+        await Promise.allSettled([stopEngine('client', targetId), stopRelay('client', targetId)]);
+      }
+      if ($connection.session?.id !== targetId) return;
+      failedP2pSessionId = null;
+      p2pRetryCount = 0;
+      p2pRetryAfter = 0;
+      p2pRetrySessionId = null;
+      localError = null;
+      closedViewerSessionId = null;
+      connection.clear();
+      diagnostics.add({ level: 'info', category: 'session', message: 'The host stopped sharing; the shared screen was closed' });
+    } finally {
+      disconnecting = false;
+    }
+  }
+
   async function refreshSession(): Promise<void> {
     if (!componentActive || refreshInFlight) return;
     const client = session.client();
@@ -424,6 +450,16 @@
     refreshInFlight = true;
     try {
       if (closedViewerSessionId === current.id) { await disconnect(); return; }
+      // A shared screen ends for every viewer when the host stops sharing or
+      // removes this viewer. Check before engine recovery, so a vanished host
+      // is not mistaken for a broken route and retried.
+      let sharingRefresh: ConnectionSession | null = null;
+      if (current.sharingId) {
+        sharingRefresh = await connection.refresh(client);
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (!componentActive || $connection.session?.id !== current.id) return;
+        if (sharingRefresh && endedStatuses.includes(sharingRefresh.status)) { await leaveEndedSharing(current.id); return; }
+      }
       if ($connection.nativeRecoveryPending && Date.now() > $connection.nativeRecoveryRetryAt + 30_000) {
         connection.blockNativeRetry();
         connection.setError('The server did not recover in time. Retry the connection manually.');
@@ -482,12 +518,12 @@
         }
       }
 
-      const refreshed = await connection.refresh(client);
+      const refreshed = sharingRefresh ?? await connection.refresh(client);
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       if (!componentActive || $connection.session?.id !== current.id) return;
       if (
         refreshed &&
-        ['rejected', 'disconnected', 'expired', 'closed', 'failed'].includes(refreshed.status) &&
+        endedStatuses.includes(refreshed.status) &&
         $connection.engineRunning
       ) {
         const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;

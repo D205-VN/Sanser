@@ -7,8 +7,16 @@
   import { host } from '../stores/host';
   import { presence } from '../stores/presence';
   import { sharing } from '../stores/sharing';
+  import { diagnostics } from '../stores/diagnostics';
   let selected = $state('');
   let actionError = $state<string | null>(null);
+  // Sharing errors are not shown on the host page; they are kept in Diagnostics.
+  let loggedSharingError: string | null = null;
+  $effect(() => {
+    const error = actionError ?? ($sharing.supported ? $sharing.error : null);
+    if (error && error !== loggedSharingError) diagnostics.add({ level: 'warn', category: 'session', message: error });
+    loggedSharingError = error;
+  });
   const group = $derived($sharing.ownGroup);
   const active = $derived(group?.members.filter((member) => member.state === 'invited' || member.state === 'accepted') ?? []);
   const ownComputer = $derived($sharing.devices.find((device) => device.id === $host.deviceId)?.computerId);
@@ -37,7 +45,6 @@
     <div class="panel-heading"><span class="panel-icon"><Icon name="computers" /></span><div><h2 class="card-title">Share with multiple computers <span class="view-only-label">View only</span></h2><p class="card-subtitle">Invite up to 3 computers to watch your screen. Sound follows your host audio setting; each viewer can mute independently.</p></div></div>
     {#if group}<button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.stop())}><Icon name="stop" />Stop sharing</button>{/if}
   </div>
-  {#if actionError}<div class="notice error" role="alert">{actionError}</div>{/if}
   {#if !$sharing.supported}
     <div class="notice">{$sharing.error ?? 'Checking sharing support…'} <button class="button small" onclick={() => run(() => sharing.refresh())}>Check again</button></div>
   {:else if !group}
@@ -60,7 +67,6 @@
       {#if candidates.length === 0}<p class="muted">Open Sanser and sign in on the other computer. Only online viewers can receive a new invitation.</p>{/if}
     {/if}
     <GroupVoice kind="host" sharingId={group.id} />
-    {#if $sharing.error}<div class="notice error" role="alert">{$sharing.error}</div>{/if}
   {/if}
 </article>
 

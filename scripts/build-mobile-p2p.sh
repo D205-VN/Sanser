@@ -4,6 +4,11 @@ repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
 rust_target="${1:?Expected a Rust iOS/Android target triple}"
 export CARGO_TARGET_DIR="${SANSER_MOBILE_RUST_TARGET_DIR:-$repo_dir/apps/mobile/build/rust-p2p}"
 case "$rust_target" in
+  # Match the app and C/C++ archive minimum, or rustc and cc default to the
+  # SDK version and the linked objects demand the newest iOS.
+  *-apple-ios*) export IPHONEOS_DEPLOYMENT_TARGET=15.0 ;;
+esac
+case "$rust_target" in
   aarch64-apple-ios) export SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)" ;;
   aarch64-apple-ios-sim|x86_64-apple-ios) export SDKROOT="$(xcrun --sdk iphonesimulator --show-sdk-path)" ;;
   aarch64-linux-android)

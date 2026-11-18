@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { get } from 'svelte/store';
 import type { RuntimeStatus } from '../lib/types';
+import { diagnostics } from '../stores/diagnostics';
 
 const mocks = vi.hoisted(() => ({ accept: vi.fn(), save: vi.fn() }));
 const requesterDeviceId = '22222222-2222-4222-8222-222222222222';
@@ -51,7 +53,8 @@ it('does not grant future access when accepting the request fails', async () => 
   mocks.accept.mockRejectedValue(new Error('Request expired'));
   render(Host, { runtime });
   await fireEvent.click(screen.getByRole('button', { name: 'Accept & trust' }));
-  expect(await screen.findByRole('alert')).toHaveTextContent('Request expired');
+  await waitFor(() => expect(get(diagnostics).some((entry) => entry.message === 'Request expired')).toBe(true));
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   expect(mocks.save).not.toHaveBeenCalled();
 });
 
@@ -59,5 +62,6 @@ it('reports accepted-but-not-remembered separately when saving trust fails', asy
   mocks.save.mockRejectedValue(new Error('Storage unavailable'));
   render(Host, { runtime });
   await fireEvent.click(screen.getByRole('button', { name: 'Accept & trust' }));
-  expect(await screen.findByRole('alert')).toHaveTextContent('Connection accepted, but this computer could not be saved as trusted');
+  await waitFor(() => expect(get(diagnostics).some((entry) => entry.message.startsWith('Connection accepted, but this computer could not be saved as trusted'))).toBe(true));
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });

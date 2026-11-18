@@ -163,6 +163,24 @@ it.each([[false, false], [true, false], [true, true]])('closes the server sessio
   expect(mocks.recovery).not.toHaveBeenCalled();
 });
 
+it.each([true, false])('closes a shared view when the host stops sharing, engineRunning=%s', async (engineRunning) => {
+  vi.useFakeTimers();
+  const viewer = { ...target, sharingId: 'group', accessMode: 'view-only' as const, wireProtocol: 'snv2' as const };
+  connection.begin(viewer); connection.setEngineRunning(engineRunning);
+  // The host vanished: the native viewer has stopped with a route failure.
+  mocks.status.mockResolvedValue({ running: false, routeFailure: 'peer-timeout', sessionId: viewer.id, lastError: 'Host stopped responding' });
+  mocks.getSession.mockResolvedValue({ ...viewer, status: 'disconnected' });
+  render(ActiveSession, { runtime, navigate: vi.fn() });
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(get(connection).session).toBeNull();
+  expect(get(connection).error).toBeNull();
+  expect(mocks.stop).toHaveBeenCalledWith('client', viewer.id);
+  expect(mocks.stopRelay).toHaveBeenCalledWith('client', viewer.id);
+  expect(mocks.disconnect).not.toHaveBeenCalled();
+  expect(mocks.recovery).not.toHaveBeenCalled();
+  expect(mocks.launch).not.toHaveBeenCalled();
+});
+
 it('retries server disconnect after a viewer close without reopening its window', async () => {
   vi.useFakeTimers(); connection.setEngineRunning(true);
   mocks.status.mockResolvedValue({ running: false, userClosed: true, sessionId: target.id });
