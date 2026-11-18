@@ -79,3 +79,23 @@ domain setting.
   don't exist. Every feature claim comes from `README.md` and `docs/releases/`.
 - Vietnamese text: edit `index.html`. English text: edit the `EN` table in
   `main.js` using the same `data-i18n` key.
+
+## Google search
+
+The page has a canonical URL, Open Graph tags, `WebSite`/`SoftwareApplication`
+structured data and `sitemap.xml`. A `robots.txt` would have no effect here: Google
+only reads it at the host root (`d205-vn.github.io/robots.txt`), not under `/Sanser/`.
+
+To get the site into Google:
+
+1. Open [Google Search Console](https://search.google.com/search-console), add a
+   **URL prefix** property for `https://d205-vn.github.io/Sanser/`.
+2. Verify with the **HTML tag** method: paste the
+   `<meta name="google-site-verification" ...>` tag into `<head>` of
+   `index.html`, push, then press *Verify*.
+3. *Sitemaps*: submit `sitemap.xml`.
+4. *URL inspection*: inspect the home page URL and press *Request indexing*.
+
+Indexing usually takes days to a few weeks. Ranking first for the single word
+"Sanser" also depends on other sites using that name; a custom domain and links
+to the site (the GitHub repo's *Website* field, release notes) help.
