@@ -798,6 +798,7 @@ int runWindows(bool host,int argc,char** argv) {
   });
   MSG message{}; bool open=true;
   auto lastProgress=Clock::now();bool macClipboardAvailable=false;
+  CollabViewReport viewReport; const bool reportView=std::getenv("SANSER_CONTROL_STDIN")!=nullptr;
   while(open && peer.running() && decode.failures()<10 && !conversionFailed) {
     const bool available=options.input && peer.macHost();
     if(available!=macClipboardAvailable) {
@@ -820,6 +821,14 @@ int runWindows(bool host,int argc,char** argv) {
       if(peer.clipboardAvailable()) (void)peer.clipboard(false,{},[](unsigned status,std::string text) {
         if(status==0 && !text.empty()) platformClipboard(true,std::move(text),[] { return true; },[](unsigned,std::string) {});
       });
+    }
+    if(reportView) {
+      // The painted, aspect-fit video rectangle in physical screen pixels.
+      POINT origin{state.video.left,state.video.top};
+      const bool painted=state.video.right>state.video.left && state.video.bottom>state.video.top && ClientToScreen(window,&origin);
+      const int width=painted ? state.video.right-state.video.left:0,height=painted ? state.video.bottom-state.video.top:0;
+      viewReport.publish({origin.x,origin.y,width,height,static_cast<unsigned>(width),static_cast<unsigned>(height),
+        painted && IsWindowVisible(window) && !IsIconic(window)},"px");
     }
     if(state.controller)state.controller->refresh();
     if(state.textInput) state.textInput->refresh();

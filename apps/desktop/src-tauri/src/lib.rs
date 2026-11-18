@@ -1,3 +1,5 @@
+mod collab;
+mod collab_window;
 mod commands;
 mod connection_report;
 mod device_identity;
@@ -48,6 +50,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(EngineManager::default())
         .manage(voice_window::VoiceWindowState::default())
+        .manage(collab_window::OverlayState::default())
         .manage(commands::P2pSessionManager::default())
         .manage(relay::RelayManager::default())
         .setup(|app| {
@@ -106,10 +109,11 @@ fn app_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
 }
 
 fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
-    if !voice_window::allowed_app_command(
-        invoke.message.webview_ref().label(),
-        invoke.message.command(),
-    ) {
+    let label = invoke.message.webview_ref().label();
+    let command = invoke.message.command();
+    if !voice_window::allowed_app_command(label, command)
+        && !collab_window::allowed_app_command(label, command)
+    {
         invoke
             .resolver
             .reject("This command is unavailable in voice controls");
@@ -138,6 +142,16 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         commands::set_group_voice,
         commands::get_group_voice_status,
         voice_window::open_voice_window,
+        collab_window::collab_snapshot,
+        collab_window::collab_post,
+        collab_window::collab_set_annotations,
+        collab_window::open_annotation_overlay,
+        collab_window::close_annotation_overlay,
+        collab_window::set_annotation_pen,
+        collab_window::annotation_overlay_poll,
+        collab_window::annotation_overlay_stroke,
+        collab_window::annotation_overlay_pen_off,
+        collab_window::annotation_overlay_status,
         voice_window::take_voice_window_grant,
         voice_window::voice_window_ready,
         voice_window::stop_voice_sharing,

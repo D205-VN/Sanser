@@ -44,6 +44,8 @@ public:
   std::function<void(voice::Packet)> onVoice;
   std::uint64_t encodedAudioPackets() const { return encodedAudioPackets_.load(); }
   void setCapturePaused(bool paused);
+  // Chat/annotation fan-out: "*" reaches every capable viewer.
+  unsigned collab(const std::string& target,const Bytes& payload);
   void updateHealth(Clock::time_point now=Clock::now());
   bool ready() const;
   bool running() const { return running_.load(); }
@@ -85,6 +87,8 @@ public:
   void setCapturePaused(bool paused);
   bool takeKeyframeRequest();
   void pumpControl();
+  // Sharing hosts route chat/annotation commands here; a single peer drains its own.
+  void pumpCollab();
   void voicePacket(voice::Packet packet);
   void setVoiceState(voice::State state);
   std::function<void(voice::Packet)> onVoice;

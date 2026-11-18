@@ -32,6 +32,7 @@ struct State {
 pub struct UserControl {
     state: Mutex<State>,
     files: Mutex<Option<crate::file_transfer::Service>>,
+    collab: crate::collab::Hub,
 }
 impl Drop for UserControl {
     fn drop(&mut self) {
@@ -101,6 +102,9 @@ impl UserControl {
         }
         Ok(())
     }
+    pub fn collab(&self) -> &crate::collab::Hub {
+        &self.collab
+    }
     pub fn files(&self) -> Option<crate::file_transfer::Service> {
         self.files.lock().ok().and_then(|v| v.clone())
     }
@@ -165,6 +169,21 @@ impl UserControl {
         let Some(position) = line.find("SNUSER_") else {
             return;
         };
+        if line[position..].starts_with("SNUSER_COLLAB") {
+            let fields = line[position..]
+                .trim_end_matches(['\n', '\r'])
+                .split('\t')
+                .collect::<Vec<_>>();
+            match fields.as_slice() {
+                ["SNUSER_COLLAB", source, payload] => self.collab.observe_message(source, payload),
+                ["SNUSER_COLLAB_CAP", source, available @ ("0" | "1")] => {
+                    self.collab.observe_capability(source, *available == "1");
+                }
+                ["SNUSER_COLLAB_VIEW", rest @ ..] => self.collab.observe_view(rest),
+                _ => {}
+            }
+            return;
+        }
         if line[position..].starts_with("SNUSER_FILE_") {
             if let Some(files) = self.files() {
                 files.record(&line[position..]);
@@ -206,6 +225,7 @@ impl UserControl {
         }
     }
     fn close(&self) {
+        self.collab.close();
         if let Some(files) = self.files() {
             files.close();
         }

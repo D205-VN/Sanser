@@ -86,6 +86,9 @@ impl EngineChild {
             }
         };
         let sharing_statuses = Arc::new(Mutex::new(HashMap::new()));
+        if let Some(pipe) = control.as_ref() {
+            user.collab().connect(pipe.clone());
+        }
         if let Some(pipe) = control.as_ref()
             && let Err(error) = user.connect_files(pipe.clone())
         {
@@ -1086,6 +1089,72 @@ impl EngineManager {
         child.send_command(command)?;
         Ok(request)
     }
+    /// Chat/annotation scope: the viewer of `session`, or this computer's host.
+    fn collab_hub(
+        &self,
+        kind: EngineKind,
+        session: Option<Uuid>,
+    ) -> Result<Arc<crate::engine_user::UserControl>, DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&kind)
+            .filter(|_| kind != EngineKind::LocalServer)
+            .ok_or_else(|| DesktopError::Unavailable("Session engine is not running".into()))?;
+        if (kind == EngineKind::Client && (session.is_none() || child.session_id != session))
+            || child
+                .process
+                .try_wait()
+                .map_err(|_| DesktopError::Process("Unable to inspect the session".into()))?
+                .is_some()
+        {
+            return Err(DesktopError::InvalidRequest(
+                "Session is no longer active".into(),
+            ));
+        }
+        Ok(Arc::clone(&child.user))
+    }
+    pub fn collab_snapshot(
+        &self,
+        kind: EngineKind,
+        session: Option<Uuid>,
+        after: u64,
+    ) -> Result<crate::collab::Snapshot, DesktopError> {
+        Ok(self.collab_hub(kind, session)?.collab().snapshot(after))
+    }
+    pub fn collab_post(
+        &self,
+        kind: EngineKind,
+        session: Option<Uuid>,
+        message: crate::collab::Outgoing,
+    ) -> Result<u64, DesktopError> {
+        self.collab_hub(kind, session)?.collab().post(message)
+    }
+    pub fn collab_set_annotations(&self, enabled: bool) -> Result<(), DesktopError> {
+        self.collab_hub(EngineKind::Host, None)?
+            .collab()
+            .set_annotations(enabled)
+    }
+    pub fn collab_view(&self, session: Uuid) -> Option<crate::collab::View> {
+        self.collab_hub(EngineKind::Client, Some(session))
+            .ok()
+            .and_then(|user| user.collab().view())
+    }
+    /// macOS host: exclude (or stop excluding) the annotation overlay window.
+    pub fn collab_exclude_overlay(&self, active: bool) -> Result<(), DesktopError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| DesktopError::Process("engine state unavailable".into()))?;
+        let child = state
+            .children
+            .get_mut(&EngineKind::Host)
+            .ok_or_else(|| DesktopError::Unavailable("Host engine is not running".into()))?;
+        child.send_command(format!("collab-exclude\t{}\n", u8::from(active)).into_bytes())
+    }
     pub fn sharing_peer_status(
         &self,
         group: Uuid,
@@ -1276,6 +1345,7 @@ impl EngineManager {
         {
             child.direct_bridges.insert(session, bridge);
         }
+        child.user.collab().configure(request.kind == EngineKind::Host);
         child.voice_supported = probe.group_voice;
         child.external_voice_supported = probe.external_voice_gate;
         child.voice_floating_controls = probe.group_voice_floating_controls;
@@ -1417,6 +1487,7 @@ impl EngineManager {
         if let Ok(mut statuses) = child.sharing_statuses.lock() {
             statuses.remove(&viewer);
         }
+        child.user.collab().forget_peer(&viewer.to_string());
         Ok(())
     }
 
