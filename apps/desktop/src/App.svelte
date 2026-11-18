@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { locale, t, tk } from './lib/i18n';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
   import BrandMark from './components/BrandMark.svelte';
@@ -21,6 +22,7 @@
   import { session } from './stores/session';
   import { sharing } from './stores/sharing';
   import Updater from './components/Updater.svelte';
+  import LanguageToggle from './components/LanguageToggle.svelte';
   import ConnectionAlerts from './components/ConnectionAlerts.svelte';
   import FileInvitations from './components/FileInvitations.svelte';
   import { incomingSharingInvitations } from './lib/sharingInvitations';
@@ -52,23 +54,25 @@
   async function respondInvitation(group: SharingGroup, member: SharingMember, accept: boolean): Promise<void> {
     sharingActionError = null;
     try { await sharing.respond(group, member, accept); if (accept) navigate('session'); }
-    catch (error) { sharingActionError = error instanceof Error ? error.message : 'Unable to respond to the invitation'; }
+    catch (error) { sharingActionError = error instanceof Error ? error.message : $t('Unable to respond to the invitation'); }
   }
 
   async function stopSharing(): Promise<void> {
     sharingActionError = null;
     try { await sharing.stop(); }
-    catch (error) { sharingActionError = error instanceof Error ? error.message : 'Unable to stop sharing'; }
+    catch (error) { sharingActionError = error instanceof Error ? error.message : $t('Unable to stop sharing'); }
   }
 
   const pageMeta: Record<Page, { section: string; label: string }> = {
-    computers: { section: 'Workspace', label: 'Computers' },
-    host: { section: 'Workspace', label: 'Host' },
-    session: { section: 'Workspace', label: 'Active session' },
-    settings: { section: 'System', label: 'Settings' },
-    diagnostics: { section: 'System', label: 'Settings' },
-    about: { section: 'System', label: 'About Sanser' }
+    computers: { section: tk('Workspace'), label: tk('Computers') },
+    host: { section: tk('Workspace'), label: tk('Host') },
+    session: { section: tk('Workspace'), label: tk('Active session') },
+    settings: { section: tk('System'), label: tk('Settings') },
+    diagnostics: { section: tk('System'), label: tk('Settings') },
+    about: { section: tk('System'), label: tk('About Sanser') }
   };
+
+  $effect(() => { document.documentElement.lang = $locale; });
 
   function navigate(next: Page): void {
     page = next;
@@ -105,7 +109,7 @@
         diagnostics.add({
           level: 'warn',
           category: 'engine',
-          message: error instanceof Error ? error.message : 'Unable to bring the host online automatically'
+          message: error instanceof Error ? error.message : $t('Unable to bring the host online automatically')
         });
       });
     }
@@ -132,7 +136,7 @@
             diagnostics.add({
               level: 'warn',
               category: 'engine',
-              message: result.reason instanceof Error ? result.reason.message : 'Unable to stop a native engine during sign out'
+              message: result.reason instanceof Error ? result.reason.message : $t('Unable to stop a native engine during sign out')
             });
           }
         }
@@ -142,8 +146,8 @@
       await session.logout();
       page = 'computers';
     } catch (error) {
-      signOutError = error instanceof Error ? error.message : 'Unable to sign out. Please try again.';
-      diagnostics.add({ level: 'warn', category: 'auth', message: error instanceof Error ? error.message : 'Sign out failed' });
+      signOutError = error instanceof Error ? error.message : $t('Unable to sign out. Please try again.');
+      diagnostics.add({ level: 'warn', category: 'auth', message: error instanceof Error ? error.message : $t('Sign out failed') });
     } finally {
       signingOut = false;
     }
@@ -192,7 +196,7 @@
         }
         diagnostics.add({ level: 'info', category: 'app', message: 'Sanser desktop initialized', details: { platform: loadedRuntime.platform, version: loadedRuntime.version } });
       } catch (error) {
-        bootError = error instanceof Error ? error.message : 'Unable to initialize Sanser';
+        bootError = error instanceof Error ? error.message : $t('Unable to initialize Sanser');
       }
     })();
     return () => {
@@ -213,11 +217,11 @@
 <svelte:window ononline={() => (browserOnline = true)} onoffline={() => (browserOnline = false)} />
 
 {#if bootError}
-  <main class="fatal-screen"><BrandMark size={68} label="Sanser" /><h1>Sanser could not start</h1><p>{bootError}</p><button class="button" onclick={() => window.location.reload()}>Retry</button></main>
+  <main class="fatal-screen"><BrandMark size={68} label="Sanser" /><h1>{$t('Sanser could not start')}</h1><p>{$t(bootError)}</p><button class="button" onclick={() => window.location.reload()}>{$t('Retry')}</button></main>
 {:else if !runtime || !$session.ready}
-  <main class="boot-screen"><BrandMark size={68} label="Sanser" /><span>Starting Sanser…</span></main>
+  <main class="boot-screen"><BrandMark size={68} label="Sanser" /><span>{$t('Starting Sanser…')}</span></main>
 {:else if $session.mode === 'signedOut'}
-  {#if updateAvailable}<div class="welcome-update"><button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button></div>{/if}
+  {#if updateAvailable}<div class="welcome-update"><button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? $t('Checking…') : $t('Update')}</button></div>{/if}
   <Welcome />
 {:else}
   <ConnectionAlerts />
@@ -226,26 +230,27 @@
     <div class="content-shell">
       <header class="titlebar">
         <div class="title-context">
-          <span>{pageMeta[page].section}</span><span class="breadcrumb-divider" aria-hidden="true">/</span>
-          <strong>{pageMeta[page].label}</strong>
+          <span>{$t(pageMeta[page].section)}</span><span class="breadcrumb-divider" aria-hidden="true">/</span>
+          <strong>{$t(pageMeta[page].label)}</strong>
         </div>
         <div class="title-actions">
-          {#if $sharing.ownGroup}<span class="sharing-indicator" role="status">{$sharing.paused ? 'Sharing paused' : 'Sharing'} · {watchingCount} watching <button class="button small danger" disabled={$sharing.busy} onclick={stopSharing}>Stop</button></span>{/if}
+          <LanguageToggle />
+          {#if $sharing.ownGroup}<span class="sharing-indicator" role="status">{$sharing.paused ? $t('Sharing paused') : $t('Sharing')} · {$t('{count} watching', { count: watchingCount })} <button class="button small danger" disabled={$sharing.busy} onclick={stopSharing}>{$t('Stop')}</button></span>{/if}
           <span class="account-avatar" aria-hidden="true">{($session.account?.email ?? 'S').slice(0, 1).toUpperCase()}</span>
           <span class="title-account" title={$session.account?.email}>{$session.account?.email}</span>
-          <button class="button small ghost" disabled={signingOut} onclick={signOut}>{signingOut ? 'Signing out…' : 'Sign out'}</button>
-          {#if updateAvailable}<button class="button small primary" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? 'Checking…' : 'Update'}</button>{/if}
+          <button class="button small ghost" disabled={signingOut} onclick={signOut}>{signingOut ? $t('Signing out…') : $t('Sign out')}</button>
+          {#if updateAvailable}<button class="button small primary" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? $t('Checking…') : $t('Update')}</button>{/if}
         </div>
       </header>
       <main bind:this={pageContainer} class:session-scroll={page === 'session'} class="page-scroll">
-        {#if signOutError}<div class="notice error" role="alert">{signOutError}</div>{/if}
-        {#if sharingActionError}<div class="notice error" role="alert">{sharingActionError}</div>{/if}
+        {#if signOutError}<div class="notice error" role="alert">{$t(signOutError)}</div>{/if}
+        {#if sharingActionError}<div class="notice error" role="alert">{$t(sharingActionError)}</div>{/if}
         <FileInvitations hostSession={hostFileSession} clientSession={$connection.engineRunning && $connection.session?.accessMode !== 'view-only' ? $connection.session?.id ?? null : null} {navigate} />
-        {#if $sharing.error && page !== 'host'}<div class="notice warning" role="status">Screen sharing invitations could not be loaded. {$sharing.error} <button class="button small" onclick={() => sharing.refresh()}>Retry invitations</button></div>{/if}
+        {#if $sharing.error && page !== 'host'}<div class="notice warning" role="status">{$t('Screen sharing invitations could not be loaded.')} {$t($sharing.error)} <button class="button small" onclick={() => sharing.refresh()}>{$t('Retry invitations')}</button></div>{/if}
         {#each invitations as invitation (invitation.member.id)}
-          <div class="notice sharing-invitation" role="status"><div><strong>{$sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? 'A computer in your account'} invited you to view its screen.</strong><p>View only · Your keyboard and mouse remain on this computer.</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? 'Open shared screen' : 'Join'}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>Decline</button>{/if}</span></div>
+          <div class="notice sharing-invitation" role="status"><div><strong>{$t('{name} invited you to view its screen.', { name: $sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? $t('A computer in your account') })}</strong><p>{$t('View only · Your keyboard and mouse remain on this computer.')}</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? $t('Open shared screen') : $t('Join')}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>{$t('Decline')}</button>{/if}</span></div>
         {/each}
-        {#if !browserOnline}<div class="notice warning" role="status">You are offline. Check your connection; your saved settings are still available.</div>{/if}
+        {#if !browserOnline}<div class="notice warning" role="status">{$t('You are offline. Check your connection; your saved settings are still available.')}</div>{/if}
         <div class="persistent-session" hidden={page !== 'session'}><ActiveSession {runtime} {navigate} /></div>
         {#if page === 'computers'}<Computers {runtime} {navigate} />
         {:else if page === 'host'}<Host {runtime} />

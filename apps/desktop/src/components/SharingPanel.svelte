@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
   import { get } from 'svelte/store';
   import Icon from './Icon.svelte';
   import GroupVoice from './GroupVoice.svelte';
@@ -21,50 +22,50 @@
   const active = $derived(group?.members.filter((member) => member.state === 'invited' || member.state === 'accepted') ?? []);
   const ownComputer = $derived($sharing.devices.find((device) => device.id === $host.deviceId)?.computerId);
   const candidates = $derived(sharingViewerCandidates($sharing.devices, [$presence.deviceId, $host.deviceId], ownComputer, active.map((member) => member.viewerDeviceId)));
-  function name(id: string): string { return $sharing.devices.find((device) => device.id === id)?.name ?? `Computer ${id.slice(0, 8)}`; }
+  function name(id: string): string { return $sharing.devices.find((device) => device.id === id)?.name ?? $t('Computer {id}', { id: id.slice(0, 8) }); }
   function viewerState(member: SharingMember): string {
     const error = $sharing.peerErrors[member.id];
     if (error) return error;
-    if (member.state === 'invited') return $sharing.devices.find((device) => device.id === member.viewerDeviceId)?.online ? 'Invitation sent · waiting for approval' : 'Invited computer is offline. Remove this invitation and select its online registration.';
+    if (member.state === 'invited') return $sharing.devices.find((device) => device.id === member.viewerDeviceId)?.online ? $t('Invitation sent · waiting for approval') : $t('Invited computer is offline. Remove this invitation and select its online registration.');
     const status = $sharing.peerVideo[member.id];
-    if (status && !status.running) return 'Connection stopped · remove this viewer and invite it again.';
-    if (status?.videoState === 'paused') return 'Video paused · viewer is falling behind. Retrying automatically; other viewers continue.';
-    if (status?.videoState === 'probing') return 'Testing recovery · video resumes when delivery is stable.';
-    return member.startedAt !== undefined && !$sharing.paused ? 'Watching · view only' : 'Connecting · waiting for the first frame';
+    if (status && !status.running) return $t('Connection stopped · remove this viewer and invite it again.');
+    if (status?.videoState === 'paused') return $t('Video paused · viewer is falling behind. Retrying automatically; other viewers continue.');
+    if (status?.videoState === 'probing') return $t('Testing recovery · video resumes when delivery is stable.');
+    return member.startedAt !== undefined && !$sharing.paused ? $t('Watching · view only') : $t('Connecting · waiting for the first frame');
   }
   async function run(operation: () => Promise<void>): Promise<void> {
     actionError = null;
     try { await operation(); }
-    catch (error) { actionError = error instanceof Error ? error.message : 'Unable to update sharing'; }
+    catch (error) { actionError = error instanceof Error ? error.message : $t('Unable to update sharing'); }
   }
-  async function invite(): Promise<void> { if (!get(host).online) { actionError = 'Go online before inviting another computer'; return; } if (selected) await run(async () => { await sharing.invite(selected); selected = ''; }); }
+  async function invite(): Promise<void> { if (!get(host).online) { actionError = $t('Go online before inviting another computer'); return; } if (selected) await run(async () => { await sharing.invite(selected); selected = ''; }); }
 </script>
 
 <article class="card card-body stack sharing-panel">
   <div class="sharing-heading">
-    <div class="panel-heading"><span class="panel-icon"><Icon name="computers" /></span><div><h2 class="card-title">Share with multiple computers <span class="view-only-label">View only</span></h2><p class="card-subtitle">Invite up to 3 computers to watch your screen. Sound follows your host audio setting; each viewer can mute independently.</p></div></div>
-    {#if group}<button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.stop())}><Icon name="stop" />Stop sharing</button>{/if}
+    <div class="panel-heading"><span class="panel-icon"><Icon name="computers" /></span><div><h2 class="card-title">{$t('Share with multiple computers')} <span class="view-only-label">{$t('View only')}</span></h2><p class="card-subtitle">{$t('Invite up to 3 computers to watch your screen. Sound follows your host audio setting; each viewer can mute independently.')}</p></div></div>
+    {#if group}<button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.stop())}><Icon name="stop" />{$t('Stop sharing')}</button>{/if}
   </div>
   {#if !$sharing.supported}
-    <div class="notice">{$sharing.error ?? 'Checking sharing support…'} <button class="button small" onclick={() => run(() => sharing.refresh())}>Check again</button></div>
+    <div class="notice">{$t($sharing.error ?? '') || $t('Checking sharing support…')} <button class="button small" onclick={() => run(() => sharing.refresh())}>{$t('Check again')}</button></div>
   {:else if !group}
-    <div class="button-row"><button class="button primary" disabled={!$host.online || $sharing.busy || $host.engineRunning || $host.launchingSessionId !== null} onclick={() => run(() => sharing.create())}>Start sharing</button><span class="muted">{$host.online ? 'Only computers in your account can be invited.' : 'Go online first.'}</span></div>
+    <div class="button-row"><button class="button primary" disabled={!$host.online || $sharing.busy || $host.engineRunning || $host.launchingSessionId !== null} onclick={() => run(() => sharing.create())}>{$t('Start sharing')}</button><span class="muted">{$host.online ? $t('Only computers in your account can be invited.') : $t('Go online first.')}</span></div>
   {:else}
-    {#if $sharing.paused}<div class="notice">This sharing group is paused on this computer. Stop sharing and start a new group to resume.</div>{/if}
-    <p class="sharing-count" role="status">{$sharing.paused ? 0 : active.filter((member) => member.startedAt !== undefined && member.state === 'accepted' && (!$sharing.peerVideo[member.id] || ($sharing.peerVideo[member.id]?.videoState === 'active' && $sharing.peerVideo[member.id]?.ready && $sharing.peerVideo[member.id]?.running))).length} watching · {active.length}/{group.maxViewers} places reserved</p>
+    {#if $sharing.paused}<div class="notice">{$t('This sharing group is paused on this computer. Stop sharing and start a new group to resume.')}</div>{/if}
+    <p class="sharing-count" role="status">{$t('{watching} watching · {reserved}/{max} places reserved', { watching: $sharing.paused ? 0 : active.filter((member) => member.startedAt !== undefined && member.state === 'accepted' && (!$sharing.peerVideo[member.id] || ($sharing.peerVideo[member.id]?.videoState === 'active' && $sharing.peerVideo[member.id]?.ready && $sharing.peerVideo[member.id]?.running))).length, reserved: active.length, max: group.maxViewers })}</p>
     {#each active as member (member.id)}
-      <div class="viewer-row"><div><strong>{name(member.viewerDeviceId)}</strong><p role="status">{viewerState(member)}</p></div><button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.remove(member))}>Remove</button></div>
+      <div class="viewer-row"><div><strong>{name(member.viewerDeviceId)}</strong><p role="status">{viewerState(member)}</p></div><button class="button small danger" disabled={$sharing.busy} onclick={() => run(() => sharing.remove(member))}>{$t('Remove')}</button></div>
     {/each}
     {#if active.length < group.maxViewers}
       <div class="invite-row">
-        <label for="sharing-viewer">Invite a computer</label>
+        <label for="sharing-viewer">{$t('Invite a computer')}</label>
         <select class="select" id="sharing-viewer" bind:value={selected} disabled={$sharing.busy || candidates.length === 0}>
-          <option value="">Choose a computer…</option>
+          <option value="">{$t('Choose a computer…')}</option>
           {#each candidates as device (device.id)}<option value={device.id}>{device.name} · {device.platform} · {(device.computerId ?? device.id).slice(0, 6).toUpperCase()}</option>{/each}
         </select>
-        <button class="button primary" disabled={!selected || $sharing.busy} onclick={invite}>Invite</button>
+        <button class="button primary" disabled={!selected || $sharing.busy} onclick={invite}>{$t('Invite')}</button>
       </div>
-      {#if candidates.length === 0}<p class="muted">Open Sanser and sign in on the other computer. Only online viewers can receive a new invitation.</p>{/if}
+      {#if candidates.length === 0}<p class="muted">{$t('Open Sanser and sign in on the other computer. Only online viewers can receive a new invitation.')}</p>{/if}
     {/if}
     <GroupVoice kind="host" sharingId={group.id} />
   {/if}

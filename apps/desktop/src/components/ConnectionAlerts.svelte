@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
   import { onDestroy, onMount } from 'svelte';
   import Icon from './Icon.svelte';
   import type { ConnectionSession } from '../lib/types';
@@ -23,24 +24,24 @@
         const member = $sharing.ownGroup?.id === alert.sharingId ? $sharing.ownGroup.members.find((item) => item.id === alert.memberId && item.sessionId === alert.sessionId) : null;
         if (member) await sharing.remove(member);
       } else if (($host.sessions as ConnectionSession[]).some((item) => item.id === alert.sessionId && item.status === 'accepted')) await host.disconnect(alert.sessionId);
-    } catch (value) { error = value instanceof Error ? value.message : 'Unable to stop access'; }
+    } catch (value) { error = value instanceof Error ? value.message : $t('Unable to stop access'); }
     finally { stopping = null; }
   }
 </script>
 
 {#if $connectionAlerts.items.length}
-  <aside class="connection-alerts" aria-label="Incoming computer connections" aria-live="polite">
+  <aside class="connection-alerts" aria-label={$t('Incoming computer connections')} aria-live="polite">
     {#each $connectionAlerts.items as alert (alert.id)}
       <article class="connection-alert">
         <div class="alert-icon"><Icon name="monitor" /></div>
-        <div class="alert-content"><strong>{alert.deviceName}</strong><p>{alert.sharingId ? 'Joined your screen sharing' : 'Remote connection approved'} · {alert.viewOnly ? 'View only' : 'Mouse & keyboard access'}</p>
-          <button class="stop-access" disabled={stopping !== null} onclick={() => stop(alert)}>{stopping === alert.id ? 'Stopping…' : alert.viewOnly ? 'Stop viewing' : 'Stop access'}</button>
-          {#if $connectionAlerts.permission === 'not-granted' || $connectionAlerts.permission === 'unknown'}<button class="enable-alerts" onclick={() => connectionAlerts.checkPermission(true)}>Enable desktop alerts</button>{/if}
+        <div class="alert-content"><strong>{alert.deviceName}</strong><p>{alert.sharingId ? $t('Joined your screen sharing') : $t('Remote connection approved')} · {alert.viewOnly ? $t('View only') : $t('Mouse & keyboard access')}</p>
+          <button class="stop-access" disabled={stopping !== null} onclick={() => stop(alert)}>{stopping === alert.id ? $t('Stopping…') : alert.viewOnly ? $t('Stop viewing') : $t('Stop access')}</button>
+          {#if $connectionAlerts.permission === 'not-granted' || $connectionAlerts.permission === 'unknown'}<button class="enable-alerts" onclick={() => connectionAlerts.checkPermission(true)}>{$t('Enable desktop alerts')}</button>{/if}
         </div>
-        <button class="dismiss-alert" aria-label={`Dismiss connection alert for ${alert.deviceName}`} title="Dismiss notification" onclick={() => connectionAlerts.dismiss(alert.id)}>×</button>
+        <button class="dismiss-alert" aria-label={$t('Dismiss connection alert for {name}', { name: alert.deviceName })} title={$t('Dismiss notification')} onclick={() => connectionAlerts.dismiss(alert.id)}>×</button>
       </article>
     {/each}
-    {#if error}<p class="alert-error" role="alert">{error}</p>{/if}
+    {#if error}<p class="alert-error" role="alert">{$t(error)}</p>{/if}
   </aside>
 {/if}
 

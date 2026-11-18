@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
   import { onMount } from 'svelte';
   import { isTauri } from '@tauri-apps/api/core';
   import type { Update } from '@tauri-apps/plugin-updater';
@@ -79,7 +80,7 @@
     } catch (caught) {
       if (!mounted) return;
       status = 'error';
-      error = 'Unable to check for updates. Check your connection and try again.';
+      error = $t('Unable to check for updates. Check your connection and try again.');
       diagnostics.add({ level: 'warn', category: 'app', message: caught instanceof Error ? caught.message : error });
       retryTimer = window.setTimeout(() => { if (mounted) void checkForUpdates(false); }, retryDelay);
       retryDelay = Math.min(5 * 60_000, retryDelay * 2);
@@ -107,14 +108,14 @@
       status = 'done';
     } catch (caught) {
       status = 'error';
-      error = caught instanceof Error ? caught.message : 'Unable to install the update. Please try again.';
+      error = caught instanceof Error ? caught.message : $t('Unable to install the update. Please try again.');
     }
   }
 
   async function restart(): Promise<void> {
     if (activeSession || status !== 'done') return;
     try { await relaunch(); }
-    catch { error = 'Unable to restart automatically. Quit and reopen Sanser to finish updating.'; }
+    catch { error = $t('Unable to restart automatically. Quit and reopen Sanser to finish updating.'); }
   }
 
   function dismiss(): void {
@@ -131,31 +132,31 @@
 
 <dialog bind:this={dialog} class="update-dialog" aria-labelledby="update-title" oncancel={(event) => { event.preventDefault(); dismiss(); }}>
   {#if manifest}
-    <div class="update-heading"><span class="section-eyebrow">SANSER UPDATE</span><h2 id="update-title">{status === 'done' ? 'Your update is ready' : 'Update available'}</h2><span class="status available">Version {manifest.version}</span></div>
+    <div class="update-heading"><span class="section-eyebrow">{$t('SANSER UPDATE')}</span><h2 id="update-title">{status === 'done' ? $t('Your update is ready') : $t('Update available')}</h2><span class="status available">{$t('Version {version}', { version: manifest.version })}</span></div>
     <div aria-live="polite">
       {#if status === 'idle' || status === 'error'}
-        <p>Get the latest improvements and fixes. Sanser will ask you to restart when installation is complete.</p>
+        <p>{$t('Get the latest improvements and fixes. Sanser will ask you to restart when installation is complete.')}</p>
         {#if manifest.body}<div class="update-notes">{manifest.body}</div>{/if}
       {:else if status === 'downloading'}
-        <p>{totalSize ? `Downloading update · ${progress}%` : `Downloading update · ${(downloadedSize / 1_048_576).toFixed(1)} MB`}</p>
-        <progress max="100" value={totalSize ? progress : undefined} aria-label="Download progress"></progress>
-      {:else if status === 'installing'}<p>Installing the update. Please keep Sanser open.</p>
-      {:else}<p>Restart Sanser to start using the new version.</p>{/if}
+        <p>{totalSize ? $t('Downloading update · {progress}%', { progress }) : $t('Downloading update · {size} MB', { size: (downloadedSize / 1_048_576).toFixed(1) })}</p>
+        <progress max="100" value={totalSize ? progress : undefined} aria-label={$t('Download progress')}></progress>
+      {:else if status === 'installing'}<p>{$t('Installing the update. Please keep Sanser open.')}</p>
+      {:else}<p>{$t('Restart Sanser to start using the new version.')}</p>{/if}
     </div>
-    {#if error}<div class="notice error" role="alert">{error}</div>{/if}
-    {#if activeSession}<div class="notice warning">Finish your remote session before updating or restarting.</div>{/if}
+    {#if error}<div class="notice error" role="alert">{$t(error)}</div>{/if}
+    {#if activeSession}<div class="notice warning">{$t('Finish your remote session before updating or restarting.')}</div>{/if}
     <div class="update-actions">
-      <button class="button ghost" disabled={updating} onclick={dismiss}>{status === 'done' ? 'Restart later' : 'Not now'}</button>
-      {#if status === 'done'}<button class="button primary" disabled={activeSession} onclick={restart}>Restart Sanser</button>
-      {:else}<button class="button primary" disabled={updating || activeSession} onclick={install}>{updating ? 'Updating…' : status === 'error' ? 'Try again' : 'Install update'}</button>{/if}
+      <button class="button ghost" disabled={updating} onclick={dismiss}>{status === 'done' ? $t('Restart later') : $t('Not now')}</button>
+      {#if status === 'done'}<button class="button primary" disabled={activeSession} onclick={restart}>{$t('Restart Sanser')}</button>
+      {:else}<button class="button primary" disabled={updating || activeSession} onclick={install}>{updating ? $t('Updating…') : status === 'error' ? $t('Try again') : $t('Install update')}</button>{/if}
     </div>
   {:else}
-    <div class="update-heading"><h2 id="update-title">{status === 'checking' ? 'Checking for updates…' : status === 'current' ? 'You’re up to date' : status === 'unsupported' ? 'Open the desktop app to update' : 'Check for updates'}</h2></div>
-    <p aria-live="polite">{status === 'current' ? `Sanser ${SANSER_VERSION} is the latest version available for this computer.` : status === 'unsupported' ? 'Updates can be installed from the Sanser desktop app.' : status === 'checking' ? 'Looking for the latest version of Sanser.' : `Current version: ${SANSER_VERSION}`}</p>
-    {#if error}<div class="notice error" role="alert">{error}</div>{/if}
+    <div class="update-heading"><h2 id="update-title">{status === 'checking' ? $t('Checking for updates…') : status === 'current' ? $t('You’re up to date') : status === 'unsupported' ? $t('Open the desktop app to update') : $t('Check for updates')}</h2></div>
+    <p aria-live="polite">{status === 'current' ? $t('Sanser {version} is the latest version available for this computer.', { version: SANSER_VERSION }) : status === 'unsupported' ? $t('Updates can be installed from the Sanser desktop app.') : status === 'checking' ? $t('Looking for the latest version of Sanser.') : $t('Current version: {version}', { version: SANSER_VERSION })}</p>
+    {#if error}<div class="notice error" role="alert">{$t(error)}</div>{/if}
     <div class="update-actions">
-      <button class="button ghost" disabled={checking} onclick={dismiss}>Close</button>
-      {#if status === 'error'}<button class="button primary" onclick={() => checkForUpdates()}>Try again</button>{/if}
+      <button class="button ghost" disabled={checking} onclick={dismiss}>{$t('Close')}</button>
+      {#if status === 'error'}<button class="button primary" onclick={() => checkForUpdates()}>{$t('Try again')}</button>{/if}
     </div>
   {/if}
 </dialog>

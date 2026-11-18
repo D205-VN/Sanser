@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
   import StatusPill from '../components/StatusPill.svelte';
   import Icon from '../components/Icon.svelte';
   import Toggle from '../components/Toggle.svelte';
@@ -43,7 +44,7 @@
         await host.online(runtime);
       }
     } catch (error) {
-      actionError = error instanceof Error ? error.message : 'Unable to change host state';
+      actionError = error instanceof Error ? error.message : $t('Unable to change host state');
     }
   }
 
@@ -53,7 +54,7 @@
   ): Promise<void> {
     actionError = null;
     try { await preferences.save({ ...$preferences, host: { ...$preferences.host, [key]: value } }); }
-    catch (error) { actionError = error instanceof Error ? error.message : 'Unable to save host settings'; }
+    catch (error) { actionError = error instanceof Error ? error.message : $t('Unable to save host settings'); }
   }
 
   async function acceptRequest(request: ConnectionSession, trust = false): Promise<void> {
@@ -67,11 +68,11 @@
             trustedDeviceIds: [...new Set([...$preferences.trustedDeviceIds, accepted.requesterDeviceId])]
           });
         } catch {
-          actionError = 'Connection accepted, but this computer could not be saved as trusted. Please try again from Computers.';
+          actionError = $t('Connection accepted, but this computer could not be saved as trusted. Please try again from Computers.');
         }
       }
     } catch (error) {
-      actionError = error instanceof Error ? error.message : 'Unable to accept the connection request';
+      actionError = error instanceof Error ? error.message : $t('Unable to accept the connection request');
     }
   }
 
@@ -81,7 +82,7 @@
       await host.reject(request.id);
       diagnostics.add({ level: 'info', category: 'session', message: 'Host rejected the connection request' });
     } catch (error) {
-      actionError = error instanceof Error ? error.message : 'Unable to reject the connection request';
+      actionError = error instanceof Error ? error.message : $t('Unable to reject the connection request');
     }
   }
 
@@ -91,7 +92,7 @@
     try {
       await host.disconnect(activeSession.id);
     } catch (error) {
-      actionError = error instanceof Error ? error.message : 'Unable to stop the active session';
+      actionError = error instanceof Error ? error.message : $t('Unable to stop the active session');
     }
   }
 
@@ -99,27 +100,27 @@
     if (!activeSession) return;
     actionError = null;
     try { await host.retry(activeSession.id); }
-    catch (error) { actionError = error instanceof Error ? error.message : 'Unable to retry connection'; }
+    catch (error) { actionError = error instanceof Error ? error.message : $t('Unable to retry connection'); }
   }
 </script>
 
 <section class="page host-page">
   <header class="page-header">
-    <div><h1>Share this computer</h1><p>Manage who can see and control your screen.</p></div>
-    <StatusPill state={$host.online ? 'online' : 'offline'} label={$host.online ? 'Online' : 'Offline'} />
+    <div><h1>{$t('Share this computer')}</h1><p>{$t('Manage who can see and control your screen.')}</p></div>
+    <StatusPill state={$host.online ? 'online' : 'offline'} label={$host.online ? $t('Online') : $t('Offline')} />
   </header>
 
   {#if needsServerUpdate}
-    <div class="notice warning" role="alert">Screen sharing on this Mac requires a Sanser server update. After the server is updated, select “Check again”.</div>
+    <div class="notice warning" role="alert">{$t('Screen sharing on this Mac requires a Sanser server update. After the server is updated, select “Check again”.')}</div>
   {/if}
   <div class="host-hero card">
     <div class="host-state-orb" class:online={$host.online}><Icon name="monitor" /></div>
-    <div><h2>{$host.online ? 'This computer is visible' : needsServerUpdate ? 'Screen sharing is unavailable' : 'This computer is private'}</h2><p>{$host.online ? 'Your other computers can request access.' : needsServerUpdate ? 'Your screen is not being shared.' : 'Go online when you want to share your screen.'}</p></div>
-    <button class:danger={$host.online} class:primary={!$host.online} class="button" disabled={$host.busy || (!canHost && !$host.online)} title={!canHost && !$host.online ? runtime.capabilities.hostEngine.reason ?? 'The Host engine is unavailable' : undefined} onclick={toggleHost}>{$host.busy ? 'Working…' : $host.online ? 'Go offline' : needsServerUpdate ? 'Check again' : 'Go online'}</button>
+    <div><h2>{$host.online ? $t('This computer is visible') : needsServerUpdate ? $t('Screen sharing is unavailable') : $t('This computer is private')}</h2><p>{$host.online ? $t('Your other computers can request access.') : needsServerUpdate ? $t('Your screen is not being shared.') : $t('Go online when you want to share your screen.')}</p></div>
+    <button class:danger={$host.online} class:primary={!$host.online} class="button" disabled={$host.busy || (!canHost && !$host.online)} title={!canHost && !$host.online ? runtime.capabilities.hostEngine.reason ?? $t('The Host engine is unavailable') : undefined} onclick={toggleHost}>{$host.busy ? $t('Working…') : $host.online ? $t('Go offline') : needsServerUpdate ? $t('Check again') : $t('Go online')}</button>
   </div>
-  {#if !canHost}<div class="notice warning">{runtime.capabilities.hostEngine.reason ?? 'Screen sharing is unavailable on this computer.'}</div>{/if}
+  {#if !canHost}<div class="notice warning">{runtime.capabilities.hostEngine.reason ?? $t('Screen sharing is unavailable on this computer.')}</div>{/if}
   {#if runtime.platform.toLowerCase().includes('mac') && canHost}
-    <details class="sharing-help"><summary>Mac permissions</summary><p>On this Mac, allow Sanser in System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording. Allow Accessibility for remote keyboard and mouse control. After changing permissions, quit Sanser completely (Cmd+Q), reopen /Applications/Sanser.app, and reconnect. If permission is already enabled but capture still fails after an update, turn Sanser’s recording permission off and on, then quit and reopen the app.</p></details>
+    <details class="sharing-help"><summary>{$t('Mac permissions')}</summary><p>{$t('On this Mac, allow Sanser in System Settings → Privacy & Security → Screen & System Audio Recording. Allow Accessibility for remote keyboard and mouse control. After changing permissions, quit Sanser completely (Cmd+Q), reopen /Applications/Sanser.app, and reconnect. If permission is already enabled but capture still fails after an update, turn Sanser’s recording permission off and on, then quit and reopen the app.')}</p></details>
   {/if}
   <ConnectionNotificationSettings />
   {#if runtime.capabilities.multiViewerHost === true}<SharingPanel />{/if}
@@ -128,33 +129,33 @@
   {/if}
   <div class="grid two host-grid">
     <article class="card card-body stack">
-      <div class="panel-heading"><span class="panel-icon"><Icon name="monitor" /></span><div><h2 class="card-title">Screen sharing</h2><p class="card-subtitle">Choose what a connected computer can use.</p></div></div>
-      {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="System audio" description="Share sound from this computer." onchange={(value) => updateHost('audioEnabled', value)} />{/if}
-      <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label="Remote input" description="Allow the other computer to use your keyboard and mouse." onchange={(value) => updateHost('inputEnabled', value)} />
+      <div class="panel-heading"><span class="panel-icon"><Icon name="monitor" /></span><div><h2 class="card-title">{$t('Screen sharing')}</h2><p class="card-subtitle">{$t('Choose what a connected computer can use.')}</p></div></div>
+      {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('System audio')} description={$t('Share sound from this computer.')} onchange={(value) => updateHost('audioEnabled', value)} />{/if}
+      <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('Remote input')} description={$t('Allow the other computer to use your keyboard and mouse.')} onchange={(value) => updateHost('inputEnabled', value)} />
     </article>
 
     <article class="card card-body stack">
-      <div class="panel-heading"><span class="panel-icon"><Icon name="link" /></span><div><h2 class="card-title">Connection requests</h2><p class="card-subtitle">You decide who can access this computer.</p></div></div>
+      <div class="panel-heading"><span class="panel-icon"><Icon name="link" /></span><div><h2 class="card-title">{$t('Connection requests')}</h2><p class="card-subtitle">{$t('You decide who can access this computer.')}</p></div></div>
       <Toggle
         checked={$preferences.host.autoAcceptOwnDevices}
         disabled={!canHost}
-        label="Auto accept trusted devices"
-        description={$preferences.trustedDeviceIds.length > 0 ? `${$preferences.trustedDeviceIds.length} trusted computer(s) can connect without asking. Other computers need approval.` : 'No trusted computers yet. Choose Accept & trust on a request to allow automatic connections next time.'}
+        label={$t('Auto accept trusted devices')}
+        description={$preferences.trustedDeviceIds.length > 0 ? $t('{count} trusted computer(s) can connect without asking. Other computers need approval.', { count: $preferences.trustedDeviceIds.length }) : $t('No trusted computers yet. Choose Accept & trust on a request to allow automatic connections next time.')}
         onchange={(value) => updateHost('autoAcceptOwnDevices', value)}
       />
       {#if pendingSessions.length === 0}
-        <div class="notice">{$host.online ? $preferences.host.autoAcceptOwnDevices && $preferences.trustedDeviceIds.length > 0 ? 'Trusted computers will be accepted automatically.' : 'Waiting for a connection request. Approve once with Accept & trust to remember that computer.' : 'Go online to receive connection requests from your other computers.'}</div>
+        <div class="notice">{$host.online ? $preferences.host.autoAcceptOwnDevices && $preferences.trustedDeviceIds.length > 0 ? $t('Trusted computers will be accepted automatically.') : $t('Waiting for a connection request. Approve once with Accept & trust to remember that computer.') : $t('Go online to receive connection requests from your other computers.')}</div>
       {:else}
         <div class="security-list">
           {#each pendingSessions as request (request.id)}
             <div>
-              <span><strong>Client {request.requesterDeviceId.slice(0, 8)}</strong><span>{$preferences.trustedDeviceIds.includes(request.requesterDeviceId) ? 'Trusted · ' : ''}{request.qualityProfile} · {request.requestedCodec === 'hevc' ? 'HEVC' : request.requestedCodec === 'h264' ? 'H.264' : 'Auto codec'}</span></span>
+              <span><strong>{$t('Client {id}', { id: request.requesterDeviceId.slice(0, 8) })}</strong><span>{$preferences.trustedDeviceIds.includes(request.requesterDeviceId) ? $t('Trusted') + ' · ' : ''}{request.qualityProfile} · {request.requestedCodec === 'hevc' ? 'HEVC' : request.requestedCodec === 'h264' ? 'H.264' : $t('Auto codec')}</span></span>
               <span class="button-row">
                 {#if $preferences.host.autoAcceptOwnDevices && !$preferences.trustedDeviceIds.includes(request.requesterDeviceId)}
-                  <button class="button small primary" disabled={$host.actionSessionId !== null} onclick={() => acceptRequest(request, true)}>Accept &amp; trust</button>
+                  <button class="button small primary" disabled={$host.actionSessionId !== null} onclick={() => acceptRequest(request, true)}>{$t('Accept & trust')}</button>
                 {/if}
-                <button class="button small primary" disabled={$host.actionSessionId !== null} onclick={() => acceptRequest(request)}>{$host.actionSessionId === request.id ? 'Accepting…' : 'Accept'}</button>
-                <button class="button small danger" disabled={$host.actionSessionId !== null} onclick={() => rejectRequest(request)}>Reject</button>
+                <button class="button small primary" disabled={$host.actionSessionId !== null} onclick={() => acceptRequest(request)}>{$host.actionSessionId === request.id ? $t('Accepting…') : $t('Accept')}</button>
+                <button class="button small danger" disabled={$host.actionSessionId !== null} onclick={() => rejectRequest(request)}>{$t('Reject')}</button>
               </span>
             </div>
           {/each}
@@ -163,18 +164,18 @@
     </article>
 
     <article class="card card-body stack current-client">
-      <div class="panel-heading"><span class="panel-icon"><Icon name="session" /></span><div><h2 class="card-title">Current client</h2><p class="card-subtitle">The computer currently accessing your screen.</p></div></div>
+      <div class="panel-heading"><span class="panel-icon"><Icon name="session" /></span><div><h2 class="card-title">{$t('Current client')}</h2><p class="card-subtitle">{$t('The computer currently accessing your screen.')}</p></div></div>
       {#if activeSession}
         <div class="empty compact-empty"><div>
-          <h3>Client {activeSession.requesterDeviceId.slice(0, 8)}</h3>
-          <p>{activeSession.requesterReadyAt ? ($host.engineRunning ? 'Screen sharing has started.' : $host.failedP2pSessionId === activeSession.id ? 'Connection failed. You can try again.' : 'Starting screen sharing…') : 'Waiting for the other computer…'}</p>
+          <h3>{$t('Client {id}', { id: activeSession.requesterDeviceId.slice(0, 8) })}</h3>
+          <p>{activeSession.requesterReadyAt ? ($host.engineRunning ? $t('Screen sharing has started.') : $host.failedP2pSessionId === activeSession.id ? $t('Connection failed. You can try again.') : $t('Starting screen sharing…')) : $t('Waiting for the other computer…')}</p>
           <span class="button-row">
-            {#if $host.failedP2pSessionId === activeSession.id}<button class="button primary" disabled={$host.actionSessionId !== null || $host.launchingSessionId !== null} onclick={retryActiveSession}>Retry connection</button>{/if}
-            <button class="button danger" disabled={$host.busy || $host.actionSessionId !== null} onclick={stopActiveSession}>Stop session</button>
+            {#if $host.failedP2pSessionId === activeSession.id}<button class="button primary" disabled={$host.actionSessionId !== null || $host.launchingSessionId !== null} onclick={retryActiveSession}>{$t('Retry connection')}</button>{/if}
+            <button class="button danger" disabled={$host.busy || $host.actionSessionId !== null} onclick={stopActiveSession}>{$t('Stop session')}</button>
           </span>
         </div></div>
       {:else}
-        <div class="empty compact-empty"><div><h3>No active client</h3><p>No computer is accessing your screen.</p></div></div>
+        <div class="empty compact-empty"><div><h3>{$t('No active client')}</h3><p>{$t('No computer is accessing your screen.')}</p></div></div>
       {/if}
     </article>
     {#if activeSession && $host.engineRunning && !$host.sharingActive}

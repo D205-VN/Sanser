@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
@@ -38,7 +39,7 @@
       const grant = await api.voiceGatewayCredentials(sharingId, device);
       try { await invoke('open_voice_window', { grant: { ...grant, kind, sharingId, sessionId } }); }
       finally { grant.token = ''; }
-    } catch { gatewayError = 'Unable to join enhanced voice. Close other desktop sessions or native voice calls, check the server, and update the native engine.'; }
+    } catch { gatewayError = $t('Unable to join enhanced voice. Close other desktop sessions or native voice calls, check the server, and update the native engine.'); }
     finally { opening = false; }
   }
   $effect(() => {
@@ -49,34 +50,34 @@
       return () => { window.clearInterval(timer); void voice.detach(); };
     });
   });
-  const notice = $derived($voice.code === 'permission-denied' ? 'Microphone access was denied. Allow Sanser in system privacy settings, then unmute again.' : $voice.code === 'no-device' ? 'No microphone is available. Connect a microphone and unmute again.' : $voice.code === 'unavailable' ? 'Voice capture is unavailable on this computer.' : $voice.code === 'unsupported' ? 'Update Sanser on this computer to enable group voice. Screen sharing continues normally.' : $voice.code === 'device-changed' ? 'The microphone changed or disconnected. Reconnecting to your system microphone…' : $voice.code === 'permission-requested' ? 'Allow microphone access in the system permission dialog.' : null);
+  const notice = $derived($voice.code === 'permission-denied' ? $t('Microphone access was denied. Allow Sanser in system privacy settings, then unmute again.') : $voice.code === 'no-device' ? $t('No microphone is available. Connect a microphone and unmute again.') : $voice.code === 'unavailable' ? $t('Voice capture is unavailable on this computer.') : $voice.code === 'unsupported' ? $t('Update Sanser on this computer to enable group voice. Screen sharing continues normally.') : $voice.code === 'device-changed' ? $t('The microphone changed or disconnected. Reconnecting to your system microphone…') : $voice.code === 'permission-requested' ? $t('Allow microphone access in the system permission dialog.') : null);
 </script>
-<section class="group-voice" aria-label="Group voice">
+<section class="group-voice" aria-label={$t('Group voice')}>
   <div class="voice-heading">
     <span class="voice-glyph"><Icon name="headphones" /></span>
-    <div><strong>Group voice</strong><p class="muted">Listen together. Turn on your mic when you’re ready to talk.</p></div>
+    <div><strong>{$t('Group voice')}</strong><p class="muted">{$t('Listen together. Turn on your mic when you’re ready to talk.')}</p></div>
     <span class="voice-state" class:live={$voice.capture} class:pending={$voice.busy} role="status">
       <Icon name={$voice.capture ? 'mic' : 'mic-off'} />
-      {$voice.code === 'joining' ? 'Joining voice…' : $voice.code === 'leaving' ? 'Leaving voice…' : $voice.code === 'changing' ? 'Updating microphone…' : $voice.capture ? 'Microphone on' : ($voice.code === 'starting' || $voice.code === 'permission-requested' || $voice.code === 'device-changed') ? 'Opening microphone…' : $voice.deafened ? 'Voice deafened · microphone off' : $voice.joined ? 'Listening · microphone off' : 'Not joined · microphone off'}
+      {$voice.code === 'joining' ? $t('Joining voice…') : $voice.code === 'leaving' ? $t('Leaving voice…') : $voice.code === 'changing' ? $t('Updating microphone…') : $voice.capture ? $t('Microphone on') : ($voice.code === 'starting' || $voice.code === 'permission-requested' || $voice.code === 'device-changed') ? $t('Opening microphone…') : $voice.deafened ? $t('Voice deafened · microphone off') : $voice.joined ? $t('Listening · microphone off') : $t('Not joined · microphone off')}
     </span>
   </div>
   <div class="button-row voice-actions">
     {#if !$voice.joined}
-      {#if gateway}<button class="button small" disabled={opening || $voice.busy || !$voice.available} onclick={() => void enhancedVoice()}><Icon name="headphones" />{$voice.code === 'external' ? 'Open voice controls' : 'Join enhanced voice'}</button>{/if}
-      <button class="button small" disabled={$voice.busy || !$voice.available || $voice.code === 'external' || opening} onclick={() => void voice.join()}><Icon name="headphones" />Join voice</button>
-      {#if !$voice.available && $voice.code !== 'unsupported'}<span class="muted">Available when the sharing connection is ready.</span>{/if}
+      {#if gateway}<button class="button small" disabled={opening || $voice.busy || !$voice.available} onclick={() => void enhancedVoice()}><Icon name="headphones" />{$voice.code === 'external' ? $t('Open voice controls') : $t('Join enhanced voice')}</button>{/if}
+      <button class="button small" disabled={$voice.busy || !$voice.available || $voice.code === 'external' || opening} onclick={() => void voice.join()}><Icon name="headphones" />{$t('Join voice')}</button>
+      {#if !$voice.available && $voice.code !== 'unsupported'}<span class="muted">{$t('Available when the sharing connection is ready.')}</span>{/if}
     {:else}
-      <button class="button small" class:mic-live={$voice.capture} aria-pressed={$voice.microphone} disabled={$voice.busy} onclick={() => void voice.toggleMicrophone()}><Icon name={$voice.microphone ? 'mic' : 'mic-off'} />{$voice.microphone ? 'Mute mic' : 'Unmute mic'}</button>
-      <button class="button small" aria-pressed={$voice.deafened} disabled={$voice.busy} onclick={() => void voice.toggleDeafen()}><Icon name={$voice.deafened ? 'volume-off' : 'headphones'} />{$voice.deafened ? 'Hear voice' : 'Deafen voice'}</button>
-      <button class="button small" disabled={$voice.busy} onclick={() => void voice.leave()}><Icon name="leave" />Leave voice</button>
+      <button class="button small" class:mic-live={$voice.capture} aria-pressed={$voice.microphone} disabled={$voice.busy} onclick={() => void voice.toggleMicrophone()}><Icon name={$voice.microphone ? 'mic' : 'mic-off'} />{$voice.microphone ? $t('Mute mic') : $t('Unmute mic')}</button>
+      <button class="button small" aria-pressed={$voice.deafened} disabled={$voice.busy} onclick={() => void voice.toggleDeafen()}><Icon name={$voice.deafened ? 'volume-off' : 'headphones'} />{$voice.deafened ? $t('Hear voice') : $t('Deafen voice')}</button>
+      <button class="button small" disabled={$voice.busy} onclick={() => void voice.leave()}><Icon name="leave" />{$t('Leave voice')}</button>
 
     {/if}
   </div>
-  {#if kind === 'host'}<p class="muted">On Windows versions that cannot exclude Sanser from audio capture, shared system sound pauses while the host is in voice to prevent echo. It resumes after leaving voice.</p>{/if}
+  {#if kind === 'host'}<p class="muted">{$t('On Windows versions that cannot exclude Sanser from audio capture, shared system sound pauses while the host is in voice to prevent echo. It resumes after leaving voice.')}</p>{/if}
   {#if notice}<p role="status">{notice}</p>{/if}
-  {#if kind !== 'host' && $voice.error}<p class="notice error" role="alert">{$voice.error}</p>{/if}
-  {#if kind !== 'host' && gatewayError}<p class="notice error" role="alert">{gatewayError}</p>{/if}
-  {#if $voice.code === 'external'}<p class="muted">Voice is running in the floating controls. Shared system sound pauses until that voice window closes.</p>{/if}
+  {#if kind !== 'host' && $voice.error}<p class="notice error" role="alert">{$t($voice.error)}</p>{/if}
+  {#if kind !== 'host' && gatewayError}<p class="notice error" role="alert">{$t(gatewayError)}</p>{/if}
+  {#if $voice.code === 'external'}<p class="muted">{$t('Voice is running in the floating controls. Shared system sound pauses until that voice window closes.')}</p>{/if}
 </section>
 <style>
   .group-voice { border: 1px solid var(--border); border-radius: var(--sn-card-radius); padding: 18px; margin-top: 16px; background: var(--sn-background); }

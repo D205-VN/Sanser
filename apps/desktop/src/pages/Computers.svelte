@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
   import { groupComputers, isOlderRegistration, type Computer } from '../lib/computers';
   import { nativeCompatibilityReason } from '../lib/nativeCompatibility';
   import { SvelteSet } from 'svelte/reactivity';
@@ -34,16 +35,16 @@
     return value.includes('mac') ? 'macOS' : value.includes('windows') ? 'Windows' : platform;
   }
   function lastSeenLabel(value: string | null): string {
-    if (!value) return 'Not reported';
+    if (!value) return $t('Not reported');
     const date = new Date(value);
-    if (!Number.isFinite(date.getTime())) return 'Not reported';
+    if (!Number.isFinite(date.getTime())) return $t('Not reported');
     return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
   function availabilityLabel(device: Device, blockReason: string | null): string {
-    if (!device.online) return device.lastSeenAt ? `Last seen ${lastSeenLabel(device.lastSeenAt)}` : 'Waiting for this computer to come online';
-    if (device.streaming) return 'A screen session is in progress';
-    if (device.deviceRole === 'client') return 'Enable Host on this computer to connect';
-    return blockReason ? 'Online' : 'Available for a connection';
+    if (!device.online) return device.lastSeenAt ? $t('Last seen {time}', { time: lastSeenLabel(device.lastSeenAt) }) : $t('Waiting for this computer to come online');
+    if (device.streaming) return $t('A screen session is in progress');
+    if (device.deviceRole === 'client') return $t('Enable Host on this computer to connect');
+    return blockReason ? $t('Online') : $t('Available for a connection');
   }
   const remoteDevices = $derived(groupComputers(devices, [$presence.deviceId, $hostStore.deviceId]));
   let showOlder = $state(false);
@@ -77,7 +78,7 @@
         const response = await client.devices(cursor);
         items.push(...response.items);
         cursor = response.nextCursor ?? undefined;
-        if (cursor && cursors.has(cursor)) throw new Error('Unable to load more computers. Please refresh.');
+        if (cursor && cursors.has(cursor)) throw new Error($t('Unable to load more computers. Please refresh.'));
         if (cursor) cursors.add(cursor);
       } while (cursor);
       if (!mounted || currentRevision !== revision) return;
@@ -86,7 +87,7 @@
       error = null;
     } catch (caught) {
       if (!mounted || currentRevision !== revision) return;
-      error = caught instanceof Error ? caught.message : 'Unable to load computers';
+      error = caught instanceof Error ? caught.message : $t('Unable to load computers');
     } finally {
       if (showLoading) loading = false;
       loadInFlight = false;
@@ -114,21 +115,21 @@
       connection.begin(created);
       navigate('session');
     } catch (caught) {
-      error = caught instanceof Error ? caught.message : 'Unable to request a connection';
+      error = caught instanceof Error ? caught.message : $t('Unable to request a connection');
     } finally {
       connectingId = null;
     }
   }
 
   function connectionBlockReason(device: Device): string | null {
-    if ($connection.preparing) return 'Wait for the current connection attempt to finish cleaning up';
-    if ($connection.session && ['pending', 'accepted', 'connecting', 'connected'].includes($connection.session.status)) return 'Finish your current session before connecting to another computer';
+    if ($connection.preparing) return $t('Wait for the current connection attempt to finish cleaning up');
+    if ($connection.session && ['pending', 'accepted', 'connecting', 'connected'].includes($connection.session.status)) return $t('Finish your current session before connecting to another computer');
     const compatibilityError = nativeCompatibilityReason(runtime, device, $preferences.stream.codec);
     if (compatibilityError) return compatibilityError;
-    if (!device.online) return 'This computer is offline';
-    if (device.streaming) return 'This computer is already streaming';
-    if (runtime.capabilities.clientEngine.state !== 'available') return runtime.capabilities.clientEngine.reason ?? 'Install the desktop app to connect';
-    if (!$presence.online || !$presence.deviceId) return $presence.error ?? 'This computer is not registered with the server yet';
+    if (!device.online) return $t('This computer is offline');
+    if (device.streaming) return $t('This computer is already streaming');
+    if (runtime.capabilities.clientEngine.state !== 'available') return runtime.capabilities.clientEngine.reason ?? $t('Install the desktop app to connect');
+    if (!$presence.online || !$presence.deviceId) return $presence.error ?? $t('This computer is not registered with the server yet');
 
     const nativeCompatible =
       runtime.capabilities.nativeDirect.state === 'available' &&
@@ -138,9 +139,9 @@
     const relayCompatible =
       runtime.capabilities.nativeDirect.state === 'available' &&
       device.capabilities.nativeTransport;
-    if ($preferences.networkMode === 'relay' && !relayCompatible) return 'Update Sanser on both computers to use relay';
-    if ($preferences.networkMode === 'direct' && !nativeCompatible) return 'A direct connection is unavailable. Try Auto in Settings.';
-    if (!nativeCompatible && !relayCompatible) return 'These computers cannot connect with the current settings';
+    if ($preferences.networkMode === 'relay' && !relayCompatible) return $t('Update Sanser on both computers to use relay');
+    if ($preferences.networkMode === 'direct' && !nativeCompatible) return $t('A direct connection is unavailable. Try Auto in Settings.');
+    if (!nativeCompatible && !relayCompatible) return $t('These computers cannot connect with the current settings');
     return null;
   }
 
@@ -156,7 +157,7 @@
         devices = devices.map((item) => item.id === id ? updated : item);
       }
     } catch (caught) {
-      error = caught instanceof Error ? caught.message : 'Unable to update pin';
+      error = caught instanceof Error ? caught.message : $t('Unable to update pin');
     } finally { actionId = null; revision += 1; }
   }
 
@@ -167,7 +168,7 @@
     if (
       !trusted &&
       !window.confirm(
-        `Trust “${device.name}” for unattended access? Requests from this device may be accepted automatically by this host.`
+        $t('Trust “{name}” for unattended access? Requests from this device may be accepted automatically by this host.', { name: device.name })
       )
     ) return;
     try {
@@ -176,7 +177,7 @@
         : [...new Set([...$preferences.trustedDeviceIds, requesterId])];
       await preferences.save({ ...$preferences, trustedDeviceIds });
     } catch (caught) {
-      error = caught instanceof Error ? caught.message : 'Unable to update unattended-access trust';
+      error = caught instanceof Error ? caught.message : $t('Unable to update unattended-access trust');
     }
   }
 
@@ -189,7 +190,7 @@
     const client = session.client();
     const name = editingName.trim();
     if (!client || actionId) return;
-    if (!name || name.length > 80) { error = 'Use a computer name between 1 and 80 characters.'; return; }
+    if (!name || name.length > 80) { error = $t('Use a computer name between 1 and 80 characters.'); return; }
     actionId = device.id;
     revision += 1;
     error = null;
@@ -200,13 +201,13 @@
       }
       editingId = null;
     } catch (caught) {
-      error = caught instanceof Error ? caught.message : 'Unable to rename computer';
+      error = caught instanceof Error ? caught.message : $t('Unable to rename computer');
     } finally { actionId = null; revision += 1; }
   }
 
   async function remove(device: Computer): Promise<void> {
     const client = session.client();
-    if (!client || !window.confirm(`Remove “${device.name}” from your account?`)) return;
+    if (!client || !window.confirm($t('Remove “{name}” from your account?', { name: device.name }))) return;
     if (actionId) return;
     actionId = device.id;
     revision += 1;
@@ -217,7 +218,7 @@
         devices = devices.filter((item) => item.id !== id);
       }
     } catch (caught) {
-      error = caught instanceof Error ? caught.message : 'Unable to remove computer';
+      error = caught instanceof Error ? caught.message : $t('Unable to remove computer');
     } finally { actionId = null; revision += 1; }
   }
 
@@ -243,33 +244,33 @@
 
 <section class="page computers-page">
   <header class="page-header">
-    <div><h1>Your computers<span class="heading-count" aria-hidden="true">{remoteDevices.length}</span></h1><p>Choose a computer to connect. <span class="online-summary"><i aria-hidden="true"></i>{onlineCount} online</span></p></div>
-    <div class="button-row"><button class="button" onclick={() => { void loadDevices(); void sharing.refresh(); }} disabled={loading}><Icon name="refresh" />{loading ? 'Refreshing…' : 'Refresh'}</button><button class="button primary" onclick={() => navigate('host')}><Icon name="host" />Share this computer</button></div>
+    <div><h1>{$t('Your computers')}<span class="heading-count" aria-hidden="true">{remoteDevices.length}</span></h1><p>{$t('Choose a computer to connect.')} <span class="online-summary"><i aria-hidden="true"></i>{$t('{count} online', { count: onlineCount })}</span></p></div>
+    <div class="button-row"><button class="button" onclick={() => { void loadDevices(); void sharing.refresh(); }} disabled={loading}><Icon name="refresh" />{loading ? $t('Refreshing…') : $t('Refresh')}</button><button class="button primary" onclick={() => navigate('host')}><Icon name="host" />{$t('Share this computer')}</button></div>
   </header>
 
   {#if $connection.session && ['pending', 'accepted', 'connecting', 'connected'].includes($connection.session.status)}
-    <div class="session-banner"><span><i></i>{$connection.engineRunning ? 'Your remote window is open' : 'A connection is in progress'}</span><button class="button small" onclick={() => navigate('session')}>Return to session →</button></div>
+    <div class="session-banner"><span><i></i>{$connection.engineRunning ? $t('Your remote window is open') : $t('A connection is in progress')}</span><button class="button small" onclick={() => navigate('session')}>{$t('Return to session →')}</button></div>
   {/if}
 
   {#if $presence.error && !$presence.online && runtime.capabilities.clientEngine.state === 'available'}
-    <div class="notice warning registration-notice" role="status"><span><strong>This computer is not ready to connect.</strong> {$presence.error}</span><button class="button small" disabled={$presence.busy} onclick={() => presence.start(runtime)}>Retry registration</button></div>
+    <div class="notice warning registration-notice" role="status"><span><strong>{$t('This computer is not ready to connect.')}</strong> {$t($presence.error)}</span><button class="button small" disabled={$presence.busy} onclick={() => presence.start(runtime)}>{$t('Retry registration')}</button></div>
   {/if}
   <div class="computer-toolbar">
-    <label class="search-box"><Icon name="search" /><input type="search" bind:value={query} placeholder="Search computers" aria-label="Search computers" /></label>
-    <div class="filter-tabs" role="group" aria-label="Computer status">
+    <label class="search-box"><Icon name="search" /><input type="search" bind:value={query} placeholder={$t('Search computers')} aria-label={$t('Search computers')} /></label>
+    <div class="filter-tabs" role="group" aria-label={$t('Computer status')}>
       {#each ['all', 'online', 'offline', 'pinned'] as option}
-        <button class:active={filter === option} aria-pressed={filter === option} onclick={() => (filter = option as typeof filter)}>{option === 'all' ? 'All computers' : option.charAt(0).toUpperCase() + option.slice(1)}<span class="filter-count">{option === 'all' ? remoteDevices.length : option === 'online' ? onlineCount : option === 'pinned' ? pinnedCount : remoteDevices.length - onlineCount}</span></button>
+        <button class:active={filter === option} aria-pressed={filter === option} onclick={() => (filter = option as typeof filter)}>{option === 'all' ? $t('All computers') : option.charAt(0).toUpperCase() + option.slice(1)}<span class="filter-count">{option === 'all' ? remoteDevices.length : option === 'online' ? onlineCount : option === 'pinned' ? pinnedCount : remoteDevices.length - onlineCount}</span></button>
       {/each}
     </div>
-    <div class="layout-switch" role="group" aria-label="Computer layout"><button class:active={layout === 'grid'} aria-pressed={layout === 'grid'} aria-label="Card view" onclick={() => layout = 'grid'}><Icon name="grid" /></button><button class:active={layout === 'list'} aria-pressed={layout === 'list'} aria-label="List view" onclick={() => layout = 'list'}><Icon name="list" /></button></div>
+    <div class="layout-switch" role="group" aria-label={$t('Computer layout')}><button class:active={layout === 'grid'} aria-pressed={layout === 'grid'} aria-label={$t('Card view')} onclick={() => layout = 'grid'}><Icon name="grid" /></button><button class:active={layout === 'list'} aria-pressed={layout === 'list'} aria-label={$t('List view')} onclick={() => layout = 'list'}><Icon name="list" /></button></div>
   </div>
 
-  {#if error}<div class="notice error" role="alert">{error}</div>{/if}
+  {#if error}<div class="notice error" role="alert">{$t(error)}</div>{/if}
   {#if loading && devices.length === 0}
-    <div class="grid two computer-grid" aria-label="Loading computers"><div class="skeleton"></div><div class="skeleton"></div></div>
+    <div class="grid two computer-grid" aria-label={$t('Loading computers')}><div class="skeleton"></div><div class="skeleton"></div></div>
   {:else if visibleDevices.length === 0}
     <div class="card empty">
-      <div><div class="empty-mark"><Icon name="computers" /></div><h2>{remoteDevices.length === 0 ? 'Add your first remote computer' : 'No matching computers'}</h2><p>{remoteDevices.length === 0 ? 'Install Sanser on a Windows PC or Mac and bring it online with this account.' : 'Try another search or status filter.'}</p>{#if remoteDevices.length === 0}<ol class="setup-checklist"><li><span>1</span>Install Sanser on another computer</li><li><span>2</span>Sign in with this account and enable Host</li><li><span>3</span>Refresh this list and request a connection</li></ol>{/if}{#if remoteDevices.length > 0}<button class="button" onclick={() => { query = ''; filter = 'all'; }}>Clear filters</button>{:else}<button class="button primary" onclick={() => navigate(runtime.capabilities.hostEngine.state === 'available' ? 'host' : 'about')}>Set up your workspace →</button>{/if}</div>
+      <div><div class="empty-mark"><Icon name="computers" /></div><h2>{remoteDevices.length === 0 ? $t('Add your first remote computer') : $t('No matching computers')}</h2><p>{remoteDevices.length === 0 ? $t('Install Sanser on a Windows PC or Mac and bring it online with this account.') : $t('Try another search or status filter.')}</p>{#if remoteDevices.length === 0}<ol class="setup-checklist"><li><span>1</span>{$t('Install Sanser on another computer')}</li><li><span>2</span>{$t('Sign in with this account and enable Host')}</li><li><span>3</span>{$t('Refresh this list and request a connection')}</li></ol>{/if}{#if remoteDevices.length > 0}<button class="button" onclick={() => { query = ''; filter = 'all'; }}>{$t('Clear filters')}</button>{:else}<button class="button primary" onclick={() => navigate(runtime.capabilities.hostEngine.state === 'available' ? 'host' : 'about')}>{$t('Set up your workspace →')}</button>{/if}</div>
     </div>
   {:else}
     <div class="grid two computer-grid" class:computer-list={layout === 'list'}>
@@ -281,31 +282,31 @@
             <div class="computer-title">
               {#if editingId === device.id}
                 <form onsubmit={(event) => { event.preventDefault(); void saveRename(device); }} class="rename-form">
-                  <input class="input" bind:value={editingName} maxlength="80" aria-label="Computer name" />
-                  <button class="button small" type="submit" disabled={actionId !== null || !editingName.trim()}>Save</button>
-                  <button class="button small ghost" type="button" onclick={() => (editingId = null)}>Cancel</button>
+                  <input class="input" bind:value={editingName} maxlength="80" aria-label={$t('Computer name')} />
+                  <button class="button small" type="submit" disabled={actionId !== null || !editingName.trim()}>{$t('Save')}</button>
+                  <button class="button small ghost" type="button" onclick={() => (editingId = null)}>{$t('Cancel')}</button>
                 </form>
               {:else}
-                <div><h2>{device.name}</h2><p>{platformLabel(device.platform)}<span class="device-id" title="Computer ID">{(device.computerId ?? device.id).slice(0, 6).toUpperCase()}</span>{#if device.deviceRole === 'client'}<span>Sharing is off</span>{/if}</p></div>
+                <div><h2>{device.name}</h2><p>{platformLabel(device.platform)}<span class="device-id" title={$t('Computer ID')}>{(device.computerId ?? device.id).slice(0, 6).toUpperCase()}</span>{#if device.deviceRole === 'client'}<span>{$t('Sharing is off')}</span>{/if}</p></div>
               {/if}
             </div>
-            <StatusPill state={device.online ? 'online' : 'offline'} label={device.streaming ? 'Streaming' : device.online ? 'Online' : 'Offline'} />
+            <StatusPill state={device.online ? 'online' : 'offline'} label={device.streaming ? $t('Streaming') : device.online ? $t('Online') : $t('Offline')} />
           </div>
-          <div class="device-availability"><span class="device-last-seen">{availabilityLabel(device, blockReason)}</span>{#if device.requesterId && $preferences.trustedDeviceIds.includes(device.requesterId)}<span class="trusted-label">Trusted</span>{/if}</div>
+          <div class="device-availability"><span class="device-last-seen">{availabilityLabel(device, blockReason)}</span>{#if device.requesterId && $preferences.trustedDeviceIds.includes(device.requesterId)}<span class="trusted-label">{$t('Trusted')}</span>{/if}</div>
           <div class="computer-actions">
-            <button class="button primary" disabled={blockReason !== null || connectingId !== null} title={blockReason ?? 'Request a secure session'} onclick={() => connect(device)}>{connectingId === device.id ? 'Requesting…' : 'Connect'}<Icon name="arrow" /></button>
-            <button class="button small ghost" disabled={actionId !== null} aria-pressed={device.pinned} onclick={() => togglePin(device)}><Icon name="pin" />{device.pinned ? 'Pinned' : 'Pin'}</button>
+            <button class="button primary" disabled={blockReason !== null || connectingId !== null} title={blockReason ?? $t('Request a secure session')} onclick={() => connect(device)}>{connectingId === device.id ? $t('Requesting…') : $t('Connect')}<Icon name="arrow" /></button>
+            <button class="button small ghost" disabled={actionId !== null} aria-pressed={device.pinned} onclick={() => togglePin(device)}><Icon name="pin" />{device.pinned ? $t('Pinned') : $t('Pin')}</button>
             <details class="device-menu">
               <summary class="button small ghost" aria-label={`Manage ${device.name}`}><Icon name="more" /></summary>
               <div class="device-menu-items">
-                <button disabled={actionId !== null} onclick={() => beginRename(device)}>Rename computer</button>
-                <button onclick={() => inspect(device)}>View diagnostics</button>
-                {#if runtime.capabilities.hostEngine.state === 'available' && device.requesterId}<button disabled={actionId !== null} onclick={() => toggleTrust(device)}>{$preferences.trustedDeviceIds.includes(device.requesterId) ? 'Revoke trust' : 'Trust device'}</button>{/if}
-                <button class="danger-text" disabled={actionId !== null || device.streaming} onclick={() => remove(device)}>Remove computer</button>
+                <button disabled={actionId !== null} onclick={() => beginRename(device)}>{$t('Rename computer')}</button>
+                <button onclick={() => inspect(device)}>{$t('View diagnostics')}</button>
+                {#if runtime.capabilities.hostEngine.state === 'available' && device.requesterId}<button disabled={actionId !== null} onclick={() => toggleTrust(device)}>{$preferences.trustedDeviceIds.includes(device.requesterId) ? $t('Revoke trust') : $t('Trust device')}</button>{/if}
+                <button class="danger-text" disabled={actionId !== null || device.streaming} onclick={() => remove(device)}>{$t('Remove computer')}</button>
               </div>
             </details>
           </div>
-          {#if blockReason && blockReason !== 'This computer is offline'}<div class="connect-reason"><Icon name="about" /><span>{blockReason}</span></div>{/if}
+          {#if blockReason && blockReason !== $t('This computer is offline')}<div class="connect-reason"><Icon name="about" /><span>{blockReason}</span></div>{/if}
 
         </article>
       {/each}
@@ -313,9 +314,9 @@
   {/if}
   {#if olderCount > 0 && filter === 'all'}
     <details class="card card-body archived-computers" bind:open={showOlder}>
-      <summary>Older offline registrations ({olderCount})</summary>
-      <p>These entries were saved by earlier versions. They cannot be identified reliably until those computers reconnect. Use Rename or Remove computer to organize them.</p>
+      <summary>{$t('Older offline registrations ({count})', { count: olderCount })}</summary>
+      <p>{$t('These entries were saved by earlier versions. They cannot be identified reliably until those computers reconnect. Use Rename or Remove computer to organize them.')}</p>
     </details>
   {/if}
-  <footer class="workspace-footer"><span role="status">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Waiting for server'}</span></footer>
+  <footer class="workspace-footer"><span role="status">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : $t('Waiting for server')}</span></footer>
 </section>

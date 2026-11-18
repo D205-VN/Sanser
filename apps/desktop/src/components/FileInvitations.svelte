@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
   import { onMount } from 'svelte';
   import { sessionFileStatus, type FileTransfer } from '../lib/platform';
   import type { Page } from '../lib/types';
@@ -28,8 +29,8 @@
 {#each invitations as invitation (`${invitation.role}:${invitation.session}:${invitation.transfer.id}`)}
   {#if invitation.session === (invitation.role === 'host' ? hostSession : clientSession)}
     <aside class="notice file-invitation" role="status">
-      <div><strong>Incoming file: {invitation.transfer.name}</strong><p>Review the file transfer in {invitation.role === 'host' ? 'Host' : 'Active session'} to accept or decline. Nothing is saved before you accept.</p></div>
-      <button class="button small primary" onclick={() => navigate(invitation.role === 'host' ? 'host' : 'session')}>Review file</button>
+      <div><strong>{$t('Incoming file: {name}', { name: invitation.transfer.name })}</strong><p>{$t(invitation.role === 'host' ? 'Review the file transfer in Host to accept or decline. Nothing is saved before you accept.' : 'Review the file transfer in Active session to accept or decline. Nothing is saved before you accept.')}</p></div>
+      <button class="button small primary" onclick={() => navigate(invitation.role === 'host' ? 'host' : 'session')}>{$t('Review file')}</button>
     </aside>
   {/if}
 {/each}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t, tk } from '../lib/i18n';
   import { onMount } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import GroupVoice from '../components/GroupVoice.svelte';
@@ -32,7 +33,7 @@
   let closedViewerSessionId: string | null = null;
   let recoveryInFlight = $state(false);
   let phase = $state<'idle' | 'authorizing' | 'direct' | 'relay' | 'launching'>('idle');
-  const phaseLabels = { idle: 'Waiting for approval', authorizing: 'Preparing connection', direct: 'Connecting directly', relay: 'Connecting through relay', launching: 'Opening the remote window' };
+  const phaseLabels = { idle: tk('Waiting for approval'), authorizing: tk('Preparing connection'), direct: tk('Connecting directly'), relay: tk('Connecting through relay'), launching: tk('Opening the remote window') };
   const activeRoute = $derived($connection.nativeRoute);
 
   const sessionState = $derived($connection.session);
@@ -46,7 +47,7 @@
     const id = sessionState.id;
     changingSound = true;
     try { await muteViewerAudio(id, !($viewerAudio[id] ?? false)); }
-    catch (error) { if ($connection.session?.id === id) localError = error instanceof Error ? error.message : 'Unable to change sound'; }
+    catch (error) { if ($connection.session?.id === id) localError = error instanceof Error ? error.message : $t('Unable to change sound'); }
     finally { changingSound = false; }
   }
   const nativeReady = $derived(
@@ -87,17 +88,17 @@
     try {
       const localDeviceId = $presence.deviceId;
       const peerDeviceId = target.hostDeviceId;
-      if (!localDeviceId || !peerDeviceId) throw new Error('Missing device IDs for P2P connection');
+      if (!localDeviceId || !peerDeviceId) throw new Error($t('Missing device IDs for P2P connection'));
 
       diagnostics.add({ level: 'info', category: 'session', message: 'Starting P2P NAT Traversal...' });
       const client = session.client();
-      if (!client) throw new Error('Api client is unavailable');
+      if (!client) throw new Error($t('Api client is unavailable'));
       let p2pResult: Awaited<ReturnType<typeof coordinateP2pConnection>> | null = null;
       let directCheck: import('../lib/types').LaunchEngineRequest['directCheck'] = 'passed';
       let relayResult: Awaited<ReturnType<typeof startRelay>> | null = null;
       try {
         phase = 'direct';
-        if (target.networkMode === 'relay') throw new Error('Relay-only mode selected');
+        if (target.networkMode === 'relay') throw new Error($t('Relay-only mode selected'));
         p2pResult = await coordinateP2pConnection(
           client,
           target.id,
@@ -117,7 +118,7 @@
         phase = 'relay';
         const accessToken = await client.getAccessToken();
         if (isAborted(signal)) return false;
-        if (!accessToken) throw new Error('Relay fallback requires an authenticated access token');
+        if (!accessToken) throw new Error($t('Relay fallback requires an authenticated access token'));
         diagnostics.add({
           level: 'warn',
           category: 'network',
@@ -203,7 +204,7 @@
           await disconnect(); return false;
         }
       }
-      const message = error instanceof Error ? error.message : 'Unable to start native client';
+      const message = error instanceof Error ? error.message : $t('Unable to start native client');
       p2pRetryCount += 1;
       p2pRetryAfter = Date.now() + Math.min(1_500 * p2pRetryCount, 5_000);
       const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0 || $connection.nativeRecoveryPending;
@@ -239,7 +240,7 @@
       if (isAborted(controller.signal) || !componentActive || $connection.session?.id !== target.id || $session.mode !== 'cloud') return;
       if ($connection.nativeRecoveryPending && Date.now() > $connection.nativeRecoveryRetryAt + 30_000) {
         connection.blockNativeRetry();
-        connection.setError('The server did not recover in time. Retry the connection manually.');
+        connection.setError($t('The server did not recover in time. Retry the connection manually.'));
         return;
       }
       connection.authorizeNative(credentials, ready.requesterReadyAt);
@@ -266,14 +267,14 @@
       if ($connection.nativeRecoveryPending && p2pRetryCount < 3 &&
           Date.now() <= $connection.nativeRecoveryRetryAt + 30_000 &&
           error instanceof ApiError && [0, 408, 429, 502, 503, 504].includes(error.status)) {
-        localError = 'Waiting for the server to recover before authorizing a fresh connection…';
+        localError = $t('Waiting for the server to recover before authorizing a fresh connection…');
         connection.setError(localError);
         return;
       }
       const exhausted = p2pRetryCount >= 3 || $connection.nativeStartupRetries > 0 || $connection.nativeRecoveryPending;
       failedP2pSessionId = exhausted ? target.id : null;
       if (exhausted) connection.blockNativeRetry();
-      const message = error instanceof Error ? error.message : 'Unable to prepare a fresh native session';
+      const message = error instanceof Error ? error.message : $t('Unable to prepare a fresh native session');
       localError = message;
       connection.setError(message);
     } finally {
@@ -354,7 +355,7 @@
       connection.setNativeRoute(null);
       p2pRetrySessionId = target.id; p2pRetryCount = 0; failedP2pSessionId = null;
       p2pRetryAfter = $connection.nativeRecoveryRetryAt;
-      diagnostics.add({ level: 'warn', category: 'network', message: 'Reconnecting the accepted session with fresh credentials and candidates; the remote window will reopen.',
+      diagnostics.add({ level: 'warn', category: 'network', message: $t('Reconnecting the accepted session with fresh credentials and candidates; the remote window will reopen.'),
         details: { reason: plan.reason, automatic: !manual, attempt: $connection.nativeRouteRecoveries } });
       connection.setBusy(false);
       if (manual && componentActive && confirmed) await startNativeClient(confirmed);
@@ -362,7 +363,7 @@
     } catch (error) {
       if (ownsSession()) {
         connection.blockNativeRetry();
-        localError = error instanceof Error ? error.message : 'Unable to reconnect; retry manually';
+        localError = error instanceof Error ? error.message : $t('Unable to reconnect; retry manually');
         connection.setError(localError);
       }
       return false;
@@ -407,7 +408,7 @@
       diagnostics.add({ level: 'info', category: 'session', message: 'Session disconnected' });
     } catch (error) {
       if ($connection.session?.id !== targetId) return;
-      const message = error instanceof Error ? error.message : 'Unable to disconnect';
+      const message = error instanceof Error ? error.message : $t('Unable to disconnect');
       localError = message;
       connection.setError(message);
     } finally {
@@ -462,7 +463,7 @@
       }
       if ($connection.nativeRecoveryPending && Date.now() > $connection.nativeRecoveryRetryAt + 30_000) {
         connection.blockNativeRetry();
-        connection.setError('The server did not recover in time. Retry the connection manually.');
+        connection.setError($t('The server did not recover in time. Retry the connection manually.'));
         return;
       }
       if ($connection.engineRunning) {
@@ -480,7 +481,7 @@
           // A deliberate viewer X closes only its server session. This page
           // remains mounted across navigation; closing the main shell to tray
           // never emits the native viewer marker.
-          const message = status.lastError ?? 'The native client stopped unexpectedly';
+          const message = status.lastError ?? $t('The native client stopped unexpectedly');
           const stillCurrent = () => componentActive && !disconnecting && $connection.session?.id === current.id;
           if (status.routeFailure && status.startupFailure !== 'auth-rejected' && status.startupFailure !== 'decode-failed' &&
             await recoverRoute(current, { cause: status.routeFailure, stableMs: 0, evidenceAgeMs: 0 })) return;
@@ -506,8 +507,8 @@
             failedP2pSessionId = current.id;
             p2pRetryCount = Math.max(p2pRetryCount, 3);
           }
-          localError = retry ? `${message} Retrying once with a fresh connection…`
-            : status.routeFailure && $connection.nativeRouteRecoveries >= 2 ? `${message} Automatic reconnection stopped after two attempts. Retry manually.` : message;
+          localError = retry ? $t('{message} Retrying once with a fresh connection…', { message })
+            : status.routeFailure && $connection.nativeRouteRecoveries >= 2 ? $t('{message} Automatic reconnection stopped after two attempts. Retry manually.', { message }) : message;
           connection.setError(localError);
           diagnostics.add({
             level: 'warn',
@@ -551,7 +552,7 @@
         await startNativeClient(refreshed);
       }
     } catch (error) {
-      connection.setError(error instanceof Error ? error.message : 'Unable to refresh the native session');
+      connection.setError(error instanceof Error ? error.message : $t('Unable to refresh the native session'));
     } finally {
       refreshInFlight = false;
     }
@@ -572,29 +573,29 @@
 </script>
 
 <section class="session-page">
-  <header class="page-header"><div><h1>Active session</h1><p>{sessionState?.accessMode === 'view-only' ? 'Watch the shared screen in its own window.' : 'Your connection and remote desktop, in one place.'}</p></div></header>
+  <header class="page-header"><div><h1>{$t('Active session')}</h1><p>{sessionState?.accessMode === 'view-only' ? $t('Watch the shared screen in its own window.') : $t('Your connection and remote desktop, in one place.')}</p></div></header>
   {#if sessionState}<div class="session-toolbar">
     <div class="session-identity">
-      <StatusPill state={$connection.engineRunning ? 'online' : 'warning'} label={$connection.nativeRecoveryPending ? 'Reconnecting' : $connection.engineRunning ? 'Window open' : sessionState.status} />
-      {#if activeRoute}<span class="session-route"><Icon name="link" />{activeRoute === 'direct' ? 'Direct connection' : 'Relay connection'}</span>{/if}
-      <span class="session-access" title="Session access mode"><Icon name={sessionState.accessMode === 'view-only' ? 'eye' : 'pointer'} />{sessionState.accessMode === 'view-only' ? 'View only' : 'Remote control'}</span>
+      <StatusPill state={$connection.engineRunning ? 'online' : 'warning'} label={$connection.nativeRecoveryPending ? $t('Reconnecting') : $connection.engineRunning ? $t('Window open') : sessionState.status} />
+      {#if activeRoute}<span class="session-route"><Icon name="link" />{activeRoute === 'direct' ? $t('Direct connection') : $t('Relay connection')}</span>{/if}
+      <span class="session-access" title={$t('Session access mode')}><Icon name={sessionState.accessMode === 'view-only' ? 'eye' : 'pointer'} />{sessionState.accessMode === 'view-only' ? $t('View only') : $t('Remote control')}</span>
     </div>
-    <div class="session-actions" role="group" aria-label="Session actions">
+    <div class="session-actions" role="group" aria-label={$t('Session actions')}>
       {#if liveSoundControl && $connection.engineRunning}
-        <button class="button small" disabled={changingSound || disconnecting || recoveryInFlight} aria-pressed={$viewerAudio[sessionState.id] ?? false} title="Mute or unmute only this viewer" onclick={toggleSound}><Icon name={($viewerAudio[sessionState.id] ?? false) ? 'volume-off' : 'volume'} />{($viewerAudio[sessionState.id] ?? false) ? 'Unmute sound' : 'Mute sound'}</button>
+        <button class="button small" disabled={changingSound || disconnecting || recoveryInFlight} aria-pressed={$viewerAudio[sessionState.id] ?? false} title={$t('Mute or unmute only this viewer')} onclick={toggleSound}><Icon name={($viewerAudio[sessionState.id] ?? false) ? 'volume-off' : 'volume'} />{($viewerAudio[sessionState.id] ?? false) ? $t('Unmute sound') : $t('Mute sound')}</button>
       {/if}
-      {#if $connection.engineRunning}<button class="button small" title="Close and reopen the remote window" disabled={$connection.busy || nativePreparationInFlight || recoveryInFlight || disconnecting} onclick={() => recoverRoute(sessionState, null, true)}><Icon name="refresh" />Reconnect</button>{/if}
-      <button class="button small" onclick={() => navigate('settings')}><Icon name="settings" />Session settings</button>
-      <button class="button small" onclick={() => navigate('diagnostics')}><Icon name="diagnostics" />Connection details</button>
-      <button class="button small danger" disabled={disconnecting} onclick={disconnect}><Icon name="leave" />{disconnecting ? 'Disconnecting…' : nativePreparationInFlight ? 'Cancel connection' : $connection.nativeRecoveryPending ? 'Cancel reconnection' : 'Disconnect'}</button>
+      {#if $connection.engineRunning}<button class="button small" title={$t('Close and reopen the remote window')} disabled={$connection.busy || nativePreparationInFlight || recoveryInFlight || disconnecting} onclick={() => recoverRoute(sessionState, null, true)}><Icon name="refresh" />{$t('Reconnect')}</button>{/if}
+      <button class="button small" onclick={() => navigate('settings')}><Icon name="settings" />{$t('Session settings')}</button>
+      <button class="button small" onclick={() => navigate('diagnostics')}><Icon name="diagnostics" />{$t('Connection details')}</button>
+      <button class="button small danger" disabled={disconnecting} onclick={disconnect}><Icon name="leave" />{disconnecting ? $t('Disconnecting…') : nativePreparationInFlight ? $t('Cancel connection') : $connection.nativeRecoveryPending ? $t('Cancel reconnection') : $t('Disconnect')}</button>
     </div>
   </div>{/if}
 
   {#if sessionState}
-    <ol class="connection-steps" aria-label="Connection progress">
-      <li class:complete={['accepted', 'connecting', 'connected'].includes(sessionState.status)}><span>01</span><div><strong>Approval</strong><small>{sessionState.status === 'pending' ? 'Waiting for the host' : sessionState.status === 'accepted' ? 'Host accepted' : sessionState.status}</small></div></li>
-      <li class:complete={activeRoute !== null} class:current={nativePreparationInFlight}><span>02</span><div><strong>Connection</strong><small>{nativePreparationInFlight ? phaseLabels[phase] : activeRoute === 'relay' ? 'Relay connection' : activeRoute === 'direct' ? 'Direct connection' : 'Waiting'}</small></div></li>
-      <li class:complete={metrics !== null}><span>03</span><div><strong>Remote desktop</strong><small>{metrics ? 'Screen data received' : $connection.engineRunning ? 'Check the remote window' : 'Not started'}</small></div></li>
+    <ol class="connection-steps" aria-label={$t('Connection progress')}>
+      <li class:complete={['accepted', 'connecting', 'connected'].includes(sessionState.status)}><span>01</span><div><strong>{$t('Approval')}</strong><small>{sessionState.status === 'pending' ? $t('Waiting for the host') : sessionState.status === 'accepted' ? $t('Host accepted') : sessionState.status}</small></div></li>
+      <li class:complete={activeRoute !== null} class:current={nativePreparationInFlight}><span>02</span><div><strong>{$t('Connection')}</strong><small>{nativePreparationInFlight ? $t(phaseLabels[phase]) : activeRoute === 'relay' ? $t('Relay connection') : activeRoute === 'direct' ? $t('Direct connection') : $t('Waiting')}</small></div></li>
+      <li class:complete={metrics !== null}><span>03</span><div><strong>{$t('Remote desktop')}</strong><small>{metrics ? $t('Screen data received') : $connection.engineRunning ? $t('Check the remote window') : $t('Not started')}</small></div></li>
     </ol>
   {/if}
   {#if sessionState?.sharingId && sessionState.status === 'accepted' && $connection.engineRunning}
@@ -602,40 +603,40 @@
   {/if}
 
   {#if soundUnavailable}
-    <div class="notice">This viewer does not support sound for this connection yet.</div>
+    <div class="notice">{$t('This viewer does not support sound for this connection yet.')}</div>
   {:else if groupSound}
-    <div class="notice">Sound is available when the host shares system audio. Muting here affects only this viewer.</div>
+    <div class="notice">{$t('Sound is available when the host shares system audio. Muting here affects only this viewer.')}</div>
   {:else if sessionState?.wireProtocol === 'snv2' && $connection.engineRunning && !liveSoundControl}
-    <div class="notice">To enable live sound controls, turn on sound in Settings and reconnect.</div>
+    <div class="notice">{$t('To enable live sound controls, turn on sound in Settings and reconnect.')}</div>
   {/if}
   {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && !sessionState.sharingId && $connection.engineRunning}
     {#key sessionState.id}<SessionTextTools sessionId={sessionState.id} /><SessionFiles sessionId={sessionState.id} />{/key}
   {/if}
   {#if sessionState?.wireProtocol === 'snv2' && sessionState.accessMode !== 'view-only' && $preferences.input.mouseMode === 'relative'}
-    <div class="notice">This connection uses absolute mouse control. Relative mouse capture is not supported yet.</div>
+    <div class="notice">{$t('This connection uses absolute mouse control. Relative mouse capture is not supported yet.')}</div>
   {/if}
   <div class="stream-stage" class:has-metrics={metrics !== null}>
     {#if $connection.engineRunning}
-      <div class="native-stage-message"><span class="capture-dot"></span><h2>Remote window opened</h2><p>Switch to the remote window to {sessionState?.accessMode === 'view-only' ? 'view the shared screen' : 'view and control the computer'}. If the screen stays blank, check connection details.</p><button class="button" onclick={() => navigate('diagnostics')}>View connection details</button></div>
+      <div class="native-stage-message"><span class="capture-dot"></span><h2>{$t('Remote window opened')}</h2><p>{sessionState?.accessMode === 'view-only' ? $t('Switch to the remote window to view the shared screen. If the screen stays blank, check connection details.') : $t('Switch to the remote window to view and control the computer. If the screen stays blank, check connection details.')}</p><button class="button" onclick={() => navigate('diagnostics')}>{$t('View connection details')}</button></div>
     {:else if sessionState}
       <div class="native-stage-message">
         <span class="capture-dot waiting"></span>
-        <h2>{nativePreparationInFlight ? phaseLabels[phase] : $connection.nativeRecoveryPending ? 'Reconnecting' : sessionState.status === 'pending' ? 'Waiting for host approval' : sessionState.status === 'accepted' ? 'Host accepted the session' : `Session ${sessionState.status}`}</h2>
-        <p>{$connection.nativeRecoveryPending ? 'Checking fresh connection routes. The remote window will reopen; you can cancel below.' : nativeReady ? 'Open the remote desktop to begin.' : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? 'Waiting for the other computer.'}</p>
-        <button class="button primary" disabled={!nativeReady || $connection.busy || nativePreparationInFlight} onclick={retryNativeClient}>{nativePreparationInFlight ? 'Connecting…' : failedP2pSessionId === sessionState.id || $connection.nativeRetryBlocked ? 'Retry connection' : 'Open remote desktop'}</button>
-        {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">This connection is unavailable. Check Settings → Diagnostics for details.</span>{/if}
+        <h2>{nativePreparationInFlight ? $t(phaseLabels[phase]) : $connection.nativeRecoveryPending ? $t('Reconnecting') : sessionState.status === 'pending' ? $t('Waiting for host approval') : sessionState.status === 'accepted' ? $t('Host accepted the session') : `Session ${sessionState.status}`}</h2>
+        <p>{$connection.nativeRecoveryPending ? $t('Checking fresh connection routes. The remote window will reopen; you can cancel below.') : nativeReady ? $t('Open the remote desktop to begin.') : runtime.capabilities.nativeDirect.reason ?? runtime.capabilities.clientEngine.reason ?? $t('Waiting for the other computer.')}</p>
+        <button class="button primary" disabled={!nativeReady || $connection.busy || nativePreparationInFlight} onclick={retryNativeClient}>{nativePreparationInFlight ? $t('Connecting…') : failedP2pSessionId === sessionState.id || $connection.nativeRetryBlocked ? $t('Retry connection') : $t('Open remote desktop')}</button>
+        {#if !nativeReady && sessionState.status === 'accepted'}<span class="planned-inline">{$t('This connection is unavailable. Check Settings → Diagnostics for details.')}</span>{/if}
       </div>
     {:else}
-      <div class="native-stage-message"><div class="session-empty-icon"><Icon name="monitor" /></div><h2>No active session</h2><p>Choose an online computer to get started.</p><button class="button primary" onclick={() => navigate('computers')}>Browse computers →</button></div>
+      <div class="native-stage-message"><div class="session-empty-icon"><Icon name="monitor" /></div><h2>{$t('No active session')}</h2><p>{$t('Choose an online computer to get started.')}</p><button class="button primary" onclick={() => navigate('computers')}>{$t('Browse computers →')}</button></div>
     {/if}
 
-    {#if metrics}<div class="stream-stats" aria-label="Connection statistics">
-      <div><span>Frame rate</span><strong>{metrics.fps} FPS</strong></div>
-      <div><span>Bitrate</span><strong>{metrics.bitrateMbps.toFixed(1)} Mb/s</strong></div>
-      <div><span>Latency</span><strong>{metrics.rttMs} ms</strong></div>
-      <div><span>Packet loss</span><strong>{metrics.packetLossPercent.toFixed(2)}%</strong></div>
+    {#if metrics}<div class="stream-stats" aria-label={$t('Connection statistics')}>
+      <div><span>{$t('Frame rate')}</span><strong>{metrics.fps} FPS</strong></div>
+      <div><span>{$t('Bitrate')}</span><strong>{metrics.bitrateMbps.toFixed(1)} Mb/s</strong></div>
+      <div><span>{$t('Latency')}</span><strong>{metrics.rttMs} ms</strong></div>
+      <div><span>{$t('Packet loss')}</span><strong>{metrics.packetLossPercent.toFixed(2)}%</strong></div>
     </div>{/if}
   </div>
 
-  {#if localError ?? $connection.error}<div class="session-error notice error" role="alert">{localError ?? $connection.error}</div>{/if}
+  {#if localError ?? $connection.error}<div class="session-error notice error" role="alert">{$t(localError ?? $connection.error ?? '')}</div>{/if}
 </section>
