@@ -37,13 +37,13 @@ describe('connection history', () => {
   });
 
   it('requests account history with filters and pagination and normalizes rows', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
       items: [{ id: 's1', requesterDeviceId: 'r', requesterName: 'Laptop', requesterPlatform: 'macos-aarch64', hostDeviceId: 'h',
         hostName: 'Office PC', hostPlatform: 'windows-x86_64', state: 'disconnected', accessMode: 'view-only', route: 'relay',
         sharedView: false, startedAt: 1_700_000_000, connectedAt: 1_700_000_005, endedAt: 1_700_000_065, durationSeconds: 60, endReason: 'disconnected' },
       { id: 's2', state: 'weird', route: 'carrier-pigeon', startedAt: 1_700_000_000 }],
       nextCursor: 'next'
-    })));
+    }))));
     vi.stubGlobal('fetch', fetchMock);
     const client = new ApiClient('https://sanser.example', () => Promise.resolve('token'));
     const page = await client.connectionHistory({ cursor: 'abc', limit: 25, deviceIds: ['h', 'r'], direction: 'incoming' });

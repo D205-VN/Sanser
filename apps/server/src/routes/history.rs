@@ -246,6 +246,7 @@ fn decode_cursor(value: &str) -> Result<HistoryCursor, AppError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

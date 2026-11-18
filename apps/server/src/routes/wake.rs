@@ -195,6 +195,7 @@ fn broadcast_for(address: Ipv4Addr, prefix_length: u8) -> Ipv4Addr {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
