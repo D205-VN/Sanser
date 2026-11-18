@@ -1,9 +1,9 @@
-# Sanser 2.3.16
+# Sanser 2.3.17
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.3.16
+Product:  Sanser 2.3.17
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,7 +20,11 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
-Sanser 2.3.16 includes one-encoder screen sharing for up to three view-only
+Sanser 2.3.17 adds a Vietnamese/English language switch, display selection,
+a host-only privacy screen, two-step verification, support sessions with a
+one-time code, in-session chat and pen, Wake-on-LAN, connection history,
+viewer recording and Report a problem; see [2.3.17 notes](docs/releases/v2.3.17.md).
+It keeps one-encoder screen sharing for up to three view-only
 computers in the same account, common native diagnostics, bounded route reconnect,
 authenticated input-only reset after ACK loss, viewer-close Disconnect and
 reference-safe sharing dispatch. Relay recovery retains the real failure even
