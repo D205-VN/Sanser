@@ -1,4 +1,4 @@
-export const SANSER_VERSION = '2.3.15' as const;
+export const SANSER_VERSION = '2.3.16' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
