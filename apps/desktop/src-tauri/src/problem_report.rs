@@ -8,8 +8,12 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
-    process::Command,
 };
+
+// Only the macOS and Windows helpers start processes; other targets (the Linux
+// CI build) would otherwise report an unused import.
+#[cfg(any(target_os = "macos", windows))]
+use std::process::Command;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
