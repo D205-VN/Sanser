@@ -46,4 +46,8 @@ post_install do |installer|
       config.build_settings['ENABLE_MODULE_VERIFIER'] = 'NO'
     end
   end
+  # CocoaPods writes an old LastUpgradeCheck, so Xcode keeps offering (and
+  # applying) its recommended settings to Pods, which re-enables the verifier.
+  # Mark the generated project as already checked by this Xcode.
+  installer.pods_project.root_object.attributes['LastUpgradeCheck'] = '2720'
 end
