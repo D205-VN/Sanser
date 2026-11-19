@@ -38,6 +38,9 @@ jobs:
       - name: Prepare verified Windows installer tools
         shell: pwsh
         run: ./scripts/prepare-windows-nsis.ps1
+        env:
+          # Anonymous GitHub API calls share the runner's 60/hour limit (HTTP 403).
+          GITHUB_TOKEN: ${{ github.token }}
       - run: npm run desktop:stage-sidecar
         env:
           SANSER_TARGET_TRIPLE: x86_64-pc-windows-msvc

@@ -8,8 +8,13 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 function Get-VerifiedFile([string]$Url, [string]$Path, [string]$Sha256) {
     # Use the public asset API instead of the browser download endpoint, which
     # repeatedly returned HTTP 504 on Windows runners. No credentials are sent.
+    # Anonymous asset API calls share the runner IP's 60/hour limit and fail
+    # with HTTP 403, so the workflow token is sent when CI provides one. curl
+    # drops the header on the redirect to the asset storage host.
     $freshUrl = $Url + '?sanser=' + [Guid]::NewGuid().ToString('N')
-    & curl.exe --fail --location --silent --show-error --header 'Accept: application/octet-stream' --retry 4 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 60 --output $Path $freshUrl
+    $headers = @('--header', 'Accept: application/octet-stream')
+    if ($env:GITHUB_TOKEN) { $headers += @('--header', "Authorization: Bearer $env:GITHUB_TOKEN") }
+    & curl.exe --fail --location --silent --show-error @headers --retry 4 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 60 --output $Path $freshUrl
     if ($LASTEXITCODE -ne 0) { throw 'Unable to download the official NSIS toolchain' }
     if ((Get-FileHash -Algorithm SHA256 $Path).Hash -ne $Sha256) { throw 'NSIS toolchain checksum mismatch' }
 }
