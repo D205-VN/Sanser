@@ -12,7 +12,17 @@
   let { runtime }: { runtime: RuntimeStatus } = $props();
   let leaving = $state(false);
   const status = $derived($connection.session?.status ?? null);
-  const ended = $derived(status === null || ['rejected', 'disconnected', 'expired', 'closed', 'failed'].includes(status));
+  // A revoked guest token also means the host ended the session.
+  const ended = $derived(status === null || $connection.sessionGone || ['rejected', 'disconnected', 'expired', 'closed', 'failed'].includes(status));
+
+  // A guest has nothing else to do here once the session ends, so return to
+  // the sign-in screen on its own after the reason has been visible briefly.
+  const GUEST_EXIT_DELAY_MS = 3_000;
+  $effect(() => {
+    if (!ended) return;
+    const timer = setTimeout(() => { void leave(); }, GUEST_EXIT_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
 
   async function leave(): Promise<void> {
     if (leaving) return;
@@ -41,6 +51,7 @@
     {#if ended}
       <div class="empty"><div>
         <h3>{status === 'rejected' ? $t('The other person declined the request.') : status === 'expired' ? $t('The request was not answered in time.') : $t('The support session has ended.')}</h3>
+        <p class="muted" role="status">{$t('Returning to the sign-in screen…')}</p>
         <button class="button primary" disabled={leaving} onclick={leave}>{$t('Back to sign in')}</button>
       </div></div>
     {:else}

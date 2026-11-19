@@ -96,3 +96,18 @@ it('retains the startup retry limit until a manual retry or a new session', () =
   connection.clear();
   expect(connection.takeNativeStartupRetry()).toBe(false);
 });
+
+it('marks a session gone when the server no longer serves it, but not on network errors', async () => {
+  const { ApiError } = await import('../lib/api');
+  const client = new ApiClient('https://sanser.example');
+  connection.begin({ id: 'guest-session', status: 'accepted' } as ConnectionSession);
+  vi.spyOn(client, 'getSession').mockRejectedValueOnce(new ApiError('Unable to reach the server', 0, 'network_error', null));
+  await connection.refresh(client);
+  expect(get(connection).sessionGone).toBe(false);
+  vi.spyOn(client, 'getSession').mockRejectedValueOnce(new ApiError('Unauthorized', 401, 'unauthorized', null));
+  await connection.refresh(client);
+  expect(get(connection).sessionGone).toBe(true);
+  connection.begin({ id: 'next-session', status: 'pending' } as ConnectionSession);
+  expect(get(connection).sessionGone).toBe(false);
+  connection.clear();
+});

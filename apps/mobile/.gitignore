@@ -31,6 +31,8 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+# An iCloud-synced checkout may point build at a folder outside iCloud (symlink).
+/build
 /coverage/
 
 # Symbolication related

@@ -60,6 +60,7 @@ export const VI_SECURITY: Record<string, string> = {
   "The other person declined the request.": "Người kia đã từ chối yêu cầu.",
   "The request was not answered in time.": "Yêu cầu không được trả lời kịp thời.",
   "The support session has ended.": "Phiên hỗ trợ đã kết thúc.",
+  "Returning to the sign-in screen…": "Đang quay lại màn hình đăng nhập…",
   "Guest: {name}": "Khách: {name}",
   "Joined with your support code · no Sanser account": "Tham gia bằng mã hỗ trợ của bạn · không có tài khoản Sanser",
   "Allow control of keyboard and mouse": "Cho phép điều khiển bàn phím và chuột",

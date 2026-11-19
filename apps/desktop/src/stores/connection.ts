@@ -1,5 +1,5 @@
 import { get, writable } from 'svelte/store';
-import type { ApiClient } from '../lib/api';
+import { ApiError, type ApiClient } from '../lib/api';
 import type { ConnectionSession, NativeSessionCredentials, SessionMetrics } from '../lib/types';
 import { diagnostics } from './diagnostics';
 
@@ -10,6 +10,8 @@ export interface ConnectionState {
   preparing: boolean;
   busy: boolean;
   error: string | null;
+  /** The server no longer serves this session to us (401/403/404), e.g. a revoked guest token. */
+  sessionGone: boolean;
   nativeStartupRetries: number;
   nativeRetryBlocked: boolean;
   nativeRoute: 'direct' | 'relay' | null;
@@ -27,6 +29,7 @@ const initial: ConnectionState = {
   preparing: false,
   busy: false,
   error: null,
+  sessionGone: false,
   nativeStartupRetries: 0,
   nativeRetryBlocked: false,
   nativeRoute: null,
@@ -77,6 +80,9 @@ function createConnectionStore() {
         return merged;
       } catch (error) {
         if (get(store).session?.id !== current.id) return null;
+        if (error instanceof ApiError && [401, 403, 404].includes(error.status)) {
+          store.update((state) => ({ ...state, sessionGone: true }));
+        }
         const message = error instanceof Error ? error.message : 'Unable to refresh the session';
         store.update((state) => {
           if (state.error !== null && state.error !== refreshError) return state;
