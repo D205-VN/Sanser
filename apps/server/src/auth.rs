@@ -4,7 +4,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{RngCore, rngs::OsRng};
-use sanser_auth::{PasswordHashString, PasswordHasherService};
+use sanser_auth::{PasswordHashString, PasswordHasherService, PasswordPolicy};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row};
 use uuid::Uuid;
@@ -195,9 +195,33 @@ pub async fn authenticate_access_token(
 }
 
 pub async fn hash_password(password: String) -> Result<String, AppError> {
+    hash_with(PasswordHasherService::default(), password).await
+}
+
+/// Hashes a server-generated one-time guest password. It is 8 random
+/// characters from a 32-symbol alphabet (40 bits) and expires within minutes,
+/// so it is exempt from the 10-character account password policy. The Argon2id
+/// cost is the same as for account passwords.
+pub async fn hash_guest_password(password: String) -> Result<String, AppError> {
+    let hasher = PasswordHasherService::new(
+        PasswordPolicy {
+            minimum_characters: 8,
+        },
+        19_456,
+        2,
+        1,
+    )
+    .map_err(|error| {
+        tracing::error!(error = %error, "guest password hasher is misconfigured");
+        AppError::Internal
+    })?;
+    hash_with(hasher, password).await
+}
+
+async fn hash_with(hasher: PasswordHasherService, password: String) -> Result<String, AppError> {
     tokio::task::spawn_blocking(move || {
         let password = Zeroizing::new(password);
-        PasswordHasherService::default()
+        hasher
             .hash(&password)
             .map(|hash| hash.as_str().to_owned())
             .map_err(|error| {

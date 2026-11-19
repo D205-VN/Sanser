@@ -26,8 +26,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     auth::{
-        ACCESS_PREFIX, AuthContext, audit, clean_label, hash_password, new_token, token_digest,
-        verify_password,
+        ACCESS_PREFIX, AuthContext, audit, clean_label, hash_guest_password, new_token,
+        token_digest, verify_password,
     },
     config::PROTOCOL_VERSION,
     error::{ApiJson, AppError},
@@ -167,7 +167,7 @@ pub async fn create(
     }
     sessions::ensure_device_online(&state, &host)?;
     let password = Zeroizing::new(generate_password());
-    let password_hash = hash_password(password.to_string()).await?;
+    let password_hash = hash_guest_password(password.to_string()).await?;
     debug_assert_eq!(normalize_password(&password).as_str(), password.as_str());
     let now = now_unix();
     let expires_at = now + GRANT_TTL_SECONDS;
@@ -809,6 +809,26 @@ fn generate_password() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn generated_guest_passwords_can_be_hashed_and_verified() {
+        // Account passwords need 10 characters; the 8-character one-time guest
+        // password must still hash, or creating a support code fails with 500.
+        let password = generate_password();
+        let hash = hash_guest_password(password.clone())
+            .await
+            .expect("guest password hashes");
+        assert!(
+            crate::auth::verify_password(password, hash.clone())
+                .await
+                .expect("verify")
+        );
+        assert!(
+            !crate::auth::verify_password("WRONGPW2".into(), hash)
+                .await
+                .expect("verify")
+        );
+    }
 
     #[test]
     fn codes_and_passwords_have_the_documented_shape() {
