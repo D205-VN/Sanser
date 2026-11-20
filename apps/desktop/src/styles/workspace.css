@@ -86,6 +86,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .button-row > .muted { font-size: 13px; line-height: 1.6; }
 .input, .select { border-color: var(--border-strong); border-radius: 8px; background-color: var(--sn-background); box-shadow: none; }
 .input::placeholder { color: var(--muted-2); }
+/* Windows (WebView2) draws the open list with a white background unless the
+   options set their own colors; the light text was then unreadable. */
+select { color-scheme: dark; }
+select option, select optgroup { color: var(--sn-text); background-color: var(--sn-raised); }
+select option:disabled { color: var(--sn-muted-low); }
+select option:checked { color: var(--sn-text); background-color: var(--sn-selected); }
 .switch.on { background: #7f9edc; border-color: #a6c0f4; }
 .switch.on span { box-shadow: 0 1px 3px #0003; }
 .status { min-height: 26px; font-size: 12px; font-weight: 550; letter-spacing: .01em; }
