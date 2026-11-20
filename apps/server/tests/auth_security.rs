@@ -454,6 +454,7 @@ async fn email_codes_reject_guessing_expiry_cross_challenge_and_fast_resend() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["emailHint"], "al****@example.com");
     let resent = last_code(&outbox, "alice@example.com").await;
+    let mut guesses_left = 5;
     if resent != alice_code {
         let (status, _) = verify(&server, &alice_challenge, &alice_code).await;
         assert_eq!(
@@ -461,14 +462,15 @@ async fn email_codes_reject_guessing_expiry_cross_challenge_and_fast_resend() {
             StatusCode::UNPROCESSABLE_ENTITY,
             "the replaced code is dead"
         );
+        guesses_left -= 1;
     }
-    // Five wrong guesses burn the challenge, even with the right code after.
+    // Five wrong guesses in all burn the challenge, even with the right code after.
     let wrong = if resent == "111111" {
         "222222"
     } else {
         "111111"
     };
-    for _ in 0..5 {
+    for _ in 0..guesses_left {
         let (status, _) = verify(&server, &alice_challenge, wrong).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }

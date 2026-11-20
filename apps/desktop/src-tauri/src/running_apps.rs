@@ -73,8 +73,9 @@ fn list() -> Result<Vec<RunningApp>, DesktopError> {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
+#[allow(clippy::unnecessary_wraps)]
 fn list() -> Result<Vec<RunningApp>, DesktopError> {
-    Ok(Vec::new())
+    Ok(tidy(Vec::new()))
 }
 
 /// System processes the remote person never opens; hidden from the picker.
