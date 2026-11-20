@@ -13,6 +13,7 @@ mod file_transfer;
 mod models;
 mod problem_report;
 mod relay;
+mod running_apps;
 mod sharing_engine;
 mod storage;
 mod tray;
@@ -126,6 +127,7 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         windows_uac::windows_uac_status,
         windows_uac::configure_windows_uac,
         commands::get_runtime_status,
+        running_apps::list_running_apps,
         device_identity::get_device_identity,
         device_identity::get_login_device,
         commands::load_preferences,

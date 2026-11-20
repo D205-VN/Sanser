@@ -41,6 +41,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let config = Config::from_env()?;
     tracing::info!("server configuration is valid");
+    if config.smtp.is_none() {
+        tracing::warn!(
+            "SMTP_HOST is not set: new computers sign in with the password alone and sign-up does not confirm the email address"
+        );
+    }
     sanser_server::serve(config).await?;
     Ok(())
 }

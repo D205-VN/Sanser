@@ -1,4 +1,5 @@
 #pragma once
+#include "blocked_apps_policy.h"
 #include "delay_rate_policy.h"
 #include "snv2.h"
 #include "snv2_auth.h"
@@ -56,6 +57,9 @@ struct Options {
   // no SNV2 message can enable them from the viewer.
   bool privacyScreen = false;
   bool privacyBlockInput = false;
+  // Host-local blocked apps (--blocked-app, repeated): hidden from capture
+  // and not usable remotely. Never set by the viewer. See blocked_apps_policy.h.
+  sanser::blocked::List blockedApps;
   // Optional chat/annotation lane. Enabled whenever the shell owns stdin.
   bool collab = false;
   // Source label for collab records: the sharing viewer id, or "-" for a single peer.

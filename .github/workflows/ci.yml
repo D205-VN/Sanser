@@ -56,7 +56,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p sanser-server --test api -- --ignored
-      # Two-step sign-in and guest access codes against the same isolated database.
+      # Email sign-in codes and guest access codes against the same isolated database.
       - run: cargo test --locked -p sanser-server --test auth_security -- --ignored
 
   policy:

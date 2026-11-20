@@ -80,6 +80,9 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: c,
     builder: (context, _) {
+      if (c.account == null && c.emailCode != null) {
+        return EmailCodeStep(controller: c);
+      }
       if (c.account == null) return SignIn(controller: c);
       if (c.active != null) {
         return RemoteSession(
@@ -495,6 +498,144 @@ class DeviceCard extends StatelessWidget {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Asks for the 6-digit code emailed after a sign-in from a new phone or a
+/// sign-up.
+class EmailCodeStep extends StatefulWidget {
+  final MobileController controller;
+  const EmailCodeStep({super.key, required this.controller});
+  @override
+  State<EmailCodeStep> createState() => _EmailCodeStepState();
+}
+
+class _EmailCodeStepState extends State<EmailCodeStep> {
+  final code = TextEditingController();
+  Timer? timer;
+  int wait = 60;
+
+  @override
+  void initState() {
+    super.initState();
+    _countdown();
+  }
+
+  void _countdown() {
+    timer?.cancel();
+    setState(() => wait = 60);
+    timer = Timer.periodic(const Duration(seconds: 1), (tick) {
+      if (!mounted) return;
+      setState(() => wait = wait > 0 ? wait - 1 : 0);
+      if (wait == 0) tick.cancel();
+    });
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    code.dispose();
+    super.dispose();
+  }
+
+  bool get valid =>
+      RegExp(r'^\d{6}$').hasMatch(code.text.replaceAll(RegExp(r'[\s-]'), ''));
+
+  void submit() {
+    if (!valid || widget.controller.busy) return;
+    unawaited(widget.controller.verifyEmailCode(code.text));
+    code.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.controller;
+    final challenge = c.emailCode!;
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(26),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Align(alignment: Alignment.centerLeft, child: Brand()),
+                  const SizedBox(height: 56),
+                  Text(
+                    'Kiểm tra email',
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    challenge.register
+                        ? 'Nhập mã 6 số đã gửi đến ${challenge.emailHint} để xác nhận email và tạo tài khoản.'
+                        : 'Điện thoại này chưa từng đăng nhập tài khoản của bạn. Nhập mã 6 số đã gửi đến ${challenge.emailHint}.',
+                    style: const TextStyle(
+                      color: SanserTokens.muted,
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 30),
+                  if (c.error != null) ErrorNote(c.error!),
+                  if (c.emailNotice != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 14),
+                      child: Text(c.emailNotice!),
+                    ),
+                  TextField(
+                    controller: code,
+                    autofocus: true,
+                    keyboardType: TextInputType.number,
+                    autofillHints: const [AutofillHints.oneTimeCode],
+                    maxLength: 7,
+                    onChanged: (_) => setState(() {}),
+                    onSubmitted: (_) => submit(),
+                    decoration: const InputDecoration(
+                      labelText: 'Mã xác nhận',
+                      hintText: '123456',
+                      counterText: '',
+                      prefixIcon: Icon(Icons.mark_email_read_outlined),
+                      helperText:
+                          'Mã hết hạn sau 10 phút. Không thấy email thì xem thư mục Spam.',
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  FilledButton(
+                    onPressed: c.busy || !valid ? null : submit,
+                    child: c.busy
+                        ? const SizedBox(
+                            height: 22,
+                            width: 22,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Xác nhận'),
+                  ),
+                  TextButton(
+                    onPressed: c.busy || wait > 0
+                        ? null
+                        : () async {
+                            await c.resendEmailCode();
+                            if (mounted && c.error == null) _countdown();
+                          },
+                    child: Text(
+                      wait > 0 ? 'Gửi mã mới sau $wait giây' : 'Gửi mã mới',
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: c.busy ? null : c.cancelEmailCode,
+                    child: const Text('Quay lại đăng nhập'),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );

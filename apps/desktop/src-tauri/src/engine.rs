@@ -635,6 +635,49 @@ fn privacy_args(args: &mut Vec<String>, request: &LaunchEngineRequest) {
     }
 }
 
+/// Upper bounds shared with `native/common/blocked_apps_policy.h`.
+const MAX_BLOCKED_APPS: usize = 64;
+const MAX_BLOCKED_APP_ID: usize = 255;
+
+/// Same rules as the native parser, so a bad preference fails here with a
+/// clear error instead of inside the engine.
+pub(crate) fn valid_blocked_app_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty()
+        && id.len() <= MAX_BLOCKED_APP_ID
+        && !id.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+}
+
+// Blocked apps are a host-local setting, for one-to-one sessions and shares.
+// Client engines never receive the flag.
+// Also adds the privacy flags, which have their own one-to-one rule.
+fn blocked_app_args(
+    args: &mut Vec<String>,
+    request: &LaunchEngineRequest,
+) -> Result<(), DesktopError> {
+    privacy_args(args, request);
+    if request.kind != EngineKind::Host || request.blocked_apps.is_empty() {
+        return Ok(());
+    }
+    if request.blocked_apps.len() > MAX_BLOCKED_APPS {
+        return Err(DesktopError::InvalidRequest(
+            "at most 64 blocked apps are supported".into(),
+        ));
+    }
+    for id in &request.blocked_apps {
+        if !valid_blocked_app_id(id) {
+            return Err(DesktopError::InvalidRequest(
+                "a blocked app identifier is invalid".into(),
+            ));
+        }
+        args.push("--blocked-app".into());
+        args.push(id.trim().to_owned());
+    }
+    Ok(())
+}
+
 fn build_args_with_voice(
     request: &LaunchEngineRequest,
     supported: bool,
@@ -717,7 +760,7 @@ fn build_args(request: &LaunchEngineRequest) -> Result<Vec<String>, DesktopError
             if request.ultra_low_latency {
                 args.push("--ultra-low-latency".into());
             }
-            privacy_args(&mut args, request);
+            blocked_app_args(&mut args, request)?;
             Ok(args)
         }
         EngineKind::Client => {
@@ -1885,6 +1928,7 @@ mod tests {
             clipboard_enabled: false,
             privacy_screen: false,
             privacy_block_input: false,
+            blocked_apps: Vec::new(),
             relative_mouse: false,
             session_token: Some("a".repeat(32)),
             udp_connect: None,
@@ -1924,6 +1968,36 @@ mod tests {
                 .iter()
                 .any(|arg| arg == "--enable-clipboard")
         );
+        Ok(())
+    }
+    #[test]
+    fn blocked_apps_reach_only_host_engines_and_are_validated() -> Result<(), DesktopError> {
+        let values = |args: &[String]| -> Vec<String> {
+            args.windows(2)
+                .filter(|pair| pair[0] == "--blocked-app")
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+        for wire in [None, Some("snv2")] {
+            let mut host = request(EngineKind::Host);
+            host.wire_protocol = wire.map(Into::into);
+            assert!(values(&build_args(&host)?).is_empty());
+            host.blocked_apps = vec!["com.google.Chrome".into(), " chrome.exe ".into()];
+            assert_eq!(
+                values(&build_args(&host)?),
+                ["com.google.Chrome", "chrome.exe"]
+            );
+            for bad in ["", "  ", "C:\\x.exe", "a/b", "a*b", "a\nb"] {
+                host.blocked_apps = vec![bad.into()];
+                assert!(build_args(&host).is_err(), "{bad:?} must be rejected");
+            }
+            host.blocked_apps = (0..65).map(|i| format!("app{i}.exe")).collect();
+            assert!(build_args(&host).is_err());
+        }
+        let mut viewer = request(EngineKind::Client);
+        viewer.wire_protocol = Some("snv2".into());
+        viewer.blocked_apps = vec!["chrome.exe".into()];
+        assert!(values(&build_args(&viewer)?).is_empty());
         Ok(())
     }
     #[test]

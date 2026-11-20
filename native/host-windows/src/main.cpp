@@ -4,6 +4,7 @@
 #include "bmp_writer.h"
 #include "desktop_duplication.h"
 #include "../../platforms/windows/privacy_screen.h"
+#include "../../platforms/windows/blocked_apps.h"
 #include "../../windows-uac/client.h"
 #include "../../windows-uac/input_test.h"
 #include "mf_video_encoder.h"
@@ -1534,6 +1535,8 @@ std::atomic<DWORD> gInputSourceIntegrity{0},gInputTargetIntegrity{0},gInputFailu
 thread_local std::function<UINT(INPUT&,sanser::uac::InputDispatch&)> gInputDispatchTestHook;
 #endif
 bool sendAcceptedInput(INPUT& input) {
+  // Blocked apps: a dropped event counts as delivered, so releases are not retried.
+  if(!sanser::blocked::windowsInputAllowed(&input,1)) return true;
   sanser::uac::InputDispatch dispatch;
   UINT sent=0;
 #ifdef SANSER_UAC_TEST
@@ -7752,13 +7755,20 @@ int main(int argc, char** argv) {
     // preferences). The legacy path has one viewer per engine process, so the
     // overlay lives for the process: Windows removes it on exit or crash.
     bool privacyScreen=false, privacyBlockInput=false;
+    sanser::blocked::List blockedApps;
     std::vector<char*> legacyArgs;
     for (int i = 0; i < argc; ++i) {
       const std::string_view arg(argv[i]);
       if (i > 0 && arg == "--privacy-screen") { privacyScreen = true; continue; }
       if (i > 0 && arg == "--privacy-block-input") { privacyBlockInput = true; continue; }
+      if (i > 0 && arg == "--blocked-app") {
+        if (i + 1 >= argc) throw std::runtime_error("Missing --blocked-app value");
+        blockedApps.add(argv[++i]);
+        continue;
+      }
       legacyArgs.push_back(argv[i]);
     }
+    sanser::blocked::configureWindows(blockedApps);
     Options options = parseOptions(static_cast<int>(legacyArgs.size()), legacyArgs.data());
     std::unique_ptr<sanser::desktop::WindowsPrivacyScreen> privacy;
     if (privacyScreen && options.encodePipe) {
@@ -7779,6 +7789,10 @@ int main(int argc, char** argv) {
 
     DesktopDuplicator duplicator;
     duplicator.initialize(options.adapterIndex, options.outputIndex);
+    if (!blockedApps.empty()) {
+      duplicator.setMaskProvider([] { return sanser::blocked::windowsMask(); });
+      std::cerr << "SNBLOCKED apps=" << blockedApps.size() << " platform=windows path=legacy\n";
+    }
     {
       std::lock_guard<std::mutex> lock(gInputBoundsMutex);
       gInputBounds = {

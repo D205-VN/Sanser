@@ -29,9 +29,25 @@ class DeviceSecrets implements SecretStore {
 class ApiFailure implements Exception {
   final int status;
   final String message;
-  const ApiFailure(this.status, this.message);
+
+  /// The server's error code, such as `email_verification_required`.
+  final String? code;
+  final Json? error;
+  const ApiFailure(this.status, this.message, {this.code, this.error});
   @override
   String toString() => message;
+}
+
+/// The password was correct, but this phone has not signed in to the account
+/// before (or this is a sign-up): a 6-digit code was emailed. The challenge
+/// token stays in memory only.
+class EmailCodeRequired implements Exception {
+  final String challengeToken;
+  final String emailHint;
+  final bool register;
+  const EmailCodeRequired(this.challengeToken, this.emailHint, this.register);
+  @override
+  String toString() => 'Mã xác nhận đã được gửi đến $emailHint.';
 }
 
 Uri serverUri(String raw) {
@@ -187,24 +203,62 @@ class SanserApi {
     bool register = false,
   }) async {
     final generation = ++_generation;
+    final Json result;
+    try {
+      result = await request(
+        register ? '/api/v2/auth/register' : '/api/v2/auth/login',
+        method: 'POST',
+        auth: false,
+        body: {
+          'email': email.trim(),
+          'password': password,
+          'deviceName': deviceName,
+          'platform': platform,
+          'installationId': await identity('installation'),
+          if (register) 'displayName': email.split('@').first,
+        },
+      );
+    } on ApiFailure catch (failure) {
+      final token = failure.error?['challengeToken'];
+      if (failure.code == 'email_verification_required' && token is String) {
+        final hint = failure.error?['emailHint'];
+        throw EmailCodeRequired(token, hint is String ? hint : '', register);
+      }
+      rethrow;
+    }
+    await _signedIn(result, generation);
+    return result;
+  }
+
+  /// Finishes a sign-in from a new phone, or a sign-up, with the emailed code.
+  Future<Json> verifyEmailCode(String challengeToken, String code) async {
+    final generation = ++_generation;
     final result = await request(
-      register ? '/api/v2/auth/register' : '/api/v2/auth/login',
+      '/api/v2/auth/email/verify',
       method: 'POST',
       auth: false,
       body: {
-        'email': email.trim(),
-        'password': password,
-        'deviceName': deviceName,
-        'platform': platform,
-        'installationId': await identity('installation'),
-        if (register) 'displayName': email.split('@').first,
+        'challengeToken': challengeToken,
+        'code': code.replaceAll(RegExp(r'[\s-]'), ''),
       },
     );
+    await _signedIn(result, generation);
+    return result;
+  }
+
+  /// Emails a fresh code; the previous one stops working.
+  Future<Json> resendEmailCode(String challengeToken) => request(
+    '/api/v2/auth/email/resend',
+    method: 'POST',
+    auth: false,
+    body: {'challengeToken': challengeToken},
+  );
+
+  Future<void> _signedIn(Json result, int generation) async {
     await _tokens(result, generation);
     if (generation == _generation) {
       await secrets.write('mobile.selected-server', base.toString());
     }
-    return result;
   }
 
   Future<bool> renew() =>
@@ -326,11 +380,14 @@ class SanserApi {
           : decoded is Map
           ? decoded['message']
           : null;
+      final code = raw is Map ? raw['code'] : null;
       throw ApiFailure(
         response.statusCode,
         message is String
             ? message
             : 'Yêu cầu không thành công (${response.statusCode}).',
+        code: code is String ? code : null,
+        error: raw is Map<String, dynamic> ? raw : null,
       );
     }
     if (decoded is List) return {'items': decoded};

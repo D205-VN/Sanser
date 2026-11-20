@@ -30,6 +30,12 @@ class MobileController extends ChangeNotifier {
   List<Json> sharing = [];
   String deviceId = '';
   String? error;
+
+  /// Set while the emailed sign-in or sign-up code is awaited.
+  EmailCodeRequired? emailCode;
+
+  /// A short status after a new code was sent.
+  String? emailNotice;
   bool busy = false;
   bool sound = true;
   bool voiceJoined = false, microphone = false, deafened = false;
@@ -133,6 +139,8 @@ class MobileController extends ChangeNotifier {
   }) async {
     busy = true;
     error = null;
+    emailCode = null;
+    emailNotice = null;
     notifyListeners();
     try {
       api.useServer(server);
@@ -144,12 +152,71 @@ class MobileController extends ChangeNotifier {
         register: register,
       );
       await _signedIn();
+    } on EmailCodeRequired catch (challenge) {
+      emailCode = challenge;
     } catch (e) {
       error = e.toString();
     } finally {
       busy = false;
       notifyListeners();
     }
+  }
+
+  /// Finishes sign-in or sign-up with the 6-digit code from the email.
+  Future<void> verifyEmailCode(String code) async {
+    final challenge = emailCode;
+    if (challenge == null || busy) return;
+    busy = true;
+    error = null;
+    emailNotice = null;
+    notifyListeners();
+    try {
+      await api.verifyEmailCode(challenge.challengeToken, code);
+      emailCode = null;
+      await _signedIn();
+    } on ApiFailure catch (failure) {
+      if (failure.status == 401) {
+        // Expired, used or tried too often: start the sign-in again.
+        emailCode = null;
+        error = 'Mã đã hết hạn. Vui lòng đăng nhập lại.';
+      } else if (failure.status == 409) {
+        emailCode = null;
+        error = 'Email này đã có tài khoản. Hãy đăng nhập.';
+      } else if (failure.status == 422) {
+        error = 'Mã không đúng. Hãy xem email Sanser mới nhất.';
+      } else {
+        error = failure.message;
+      }
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Emails a new code (the server allows one a minute, five in all).
+  Future<void> resendEmailCode() async {
+    final challenge = emailCode;
+    if (challenge == null || busy) return;
+    error = null;
+    emailNotice = null;
+    try {
+      await api.resendEmailCode(challenge.challengeToken);
+      emailNotice = 'Đã gửi mã mới. Các mã trước không còn dùng được.';
+    } on ApiFailure catch (failure) {
+      error = failure.status == 409
+          ? 'Hãy chờ một phút trước khi xin mã mới. Sau năm mã, hãy đăng nhập lại.'
+          : failure.message;
+    }
+    notifyListeners();
+  }
+
+  void cancelEmailCode() {
+    emailCode = null;
+    emailNotice = null;
+    error = null;
+    notifyListeners();
   }
 
   Future<void> _signedIn() async {

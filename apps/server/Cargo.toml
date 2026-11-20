@@ -23,6 +23,7 @@ dotenvy = "0.15"
 futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
+lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
 http = "1"
 rand = "0.8"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }

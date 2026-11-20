@@ -16,6 +16,7 @@
 #include "audio_player.h"
 #include "input_injector.h"
 #include "privacy_screen.h"
+#include "blocked_apps.h"
 #include "clipboard.h"
 #include "latest_frame_worker.h"
 #include "decode_worker.h"
@@ -660,6 +661,9 @@ int runMac(bool host,int argc,char** argv) {
         // read, so capture can exclude them by window ID.
         MacPrivacyScreen privacy(options.privacyScreen);
         if(options.privacyBlockInput) std::cerr<<"SNPRIVACY blockInput=unsupported platform=macos"<<std::endl;
+        // Host-local blocked apps: hidden from capture, not usable remotely.
+        MacBlockedApps blockedApps(options.blockedApps,CGRectZero);
+        if(blockedApps.enabled()) std::cerr<<"SNBLOCKED apps="<<options.blockedApps.size()<<" platform=macos"<<std::endl;
         __block SCShareableContent* content=nil;
         auto readContent=^(CaptureCompletion complete) {
           [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent* value,NSError* error) {
@@ -685,6 +689,12 @@ int runMac(bool host,int argc,char** argv) {
           // Never show an overlay that capture would include.
           privacy.setCaptureExcluded(ids.count>0 && excluded.count==ids.count);
         }
+        // Capture filter = privacy windows + blocked apps' windows (+ the
+        // annotation overlay, added by the refresh below when wanted).
+        NSArray<SCWindow*>* initialBlocked=blockedApps.windowsIn(content);
+        blockedApps.applied()->set(initialBlocked);
+        NSMutableArray<SCWindow*>* initialExcluded=[NSMutableArray arrayWithArray:excluded];
+        [initialExcluded addObjectsFromArray:initialBlocked];
         const auto requestedWidth=options.width,requestedHeight=options.height;
         const auto fitted=[&](SCDisplay* target) {
           const double scale=std::min(static_cast<double>(requestedWidth)/target.width,static_cast<double>(requestedHeight)/target.height);
@@ -692,17 +702,18 @@ int runMac(bool host,int argc,char** argv) {
         };
         std::tie(options.width,options.height)=fitted(display);
         HostOutput peer(options); Encoder encoder(options,peer); MacInputInjector injector(CGDisplayBounds(display.displayID));
+        blockedApps.setBounds(CGDisplayBounds(display.displayID));
         VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
         VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{});
         peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
         voice::PlaybackTap originalSound(voice::RenderSource::External);
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
-        peer.onInput=[&](Input event) { injector.apply(event); };
+        peer.onInput=[&](Input event) { if(blockedApps.allow(event)) injector.apply(event); };
         peer.onClipboard=platformClipboard;
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         capture.audio=&audio;
         capture.originalSound=&originalSound;
-        SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:excluded];
+        SCContentFilter* filter=[[SCContentFilter alloc] initWithDisplay:display excludingWindows:initialExcluded];
         SCStreamConfiguration* config=[SCStreamConfiguration new]; config.width=options.width; config.height=options.height; config.minimumFrameInterval=CMTimeMake(1,options.fps); config.queueDepth=options.ultraLowLatency ? 2 : 3;
         // Control viewers already draw an immediate local cursor. Only a
         // view-only capture includes the host pointer in the encoded picture.
@@ -737,6 +748,7 @@ int runMac(bool host,int argc,char** argv) {
         bool excludeOverlay=false; unsigned excludeAttempts=20; auto excludeAt=Clock::time_point{};
         auto excludeApplied=std::make_shared<std::atomic<std::uint64_t>>(0); std::uint64_t excludeSerial=0;
         const pid_t shell=getppid();
+        auto blockedCheckAt=Clock::time_point{};
         // Mobile viewers only: at a low budget, fast motion at full size limits
         // the paced sender to ~15-20 fps. Trade size for frame rate.
         ResolutionPolicy resolution; bool reduced=false;
@@ -751,7 +763,15 @@ int runMac(bool host,int argc,char** argv) {
             std::tie(fullWidth,fullHeight)=fitted(target);
             const auto width=reduced ? ResolutionPolicy::reducedDimension(fullWidth) : fullWidth;
             const auto height=reduced ? ResolutionPolicy::reducedDimension(fullHeight) : fullHeight;
-            SCContentFilter* next=[[SCContentFilter alloc] initWithDisplay:target excludingWindows:excluded];
+            NSMutableArray<SCWindow*>* nextExcluded=[NSMutableArray arrayWithArray:excluded];
+            if(blockedApps.enabled()) {
+              // Never show the new display before its blocked windows are excluded.
+              awaitCaptureOperation([readContent](CaptureCompletion complete) { readContent(complete); },"Read available screens");
+              NSArray<SCWindow*>* windows=blockedApps.windowsIn(content);
+              blockedApps.applied()->set(windows);
+              [nextExcluded addObjectsFromArray:windows];
+            }
+            SCContentFilter* next=[[SCContentFilter alloc] initWithDisplay:target excludingWindows:nextExcluded];
             try {
               awaitCaptureOperation([&](CaptureCompletion complete) { [stream updateContentFilter:next completionHandler:complete]; },"Switch captured display");
               config.width=width; config.height=height;
@@ -759,7 +779,7 @@ int runMac(bool host,int argc,char** argv) {
               encoder.resize(width,height);
               injector.setBounds(CGDisplayBounds(target.displayID));
               displays.selected=*index; peer.setDisplays(displays); display=target;
-              if(excludeOverlay) { excludeAttempts=0; excludeAt={}; ++excludeSerial; } // Re-add the overlay on the new display.
+              if(excludeOverlay || blockedApps.enabled()) { excludeAttempts=0; excludeAt={}; ++excludeSerial; } // Re-add the overlay on the new display.
               encoder.keyframe(); encoder.refresh();
               std::cerr<<"SNV2_DISPLAY_SWITCHED index="<<static_cast<unsigned>(*index)<<" size="<<width<<"x"<<height<<" keyframeRequested=1"<<std::endl;
             } catch(const std::exception& error) {
@@ -767,9 +787,15 @@ int runMac(bool host,int argc,char** argv) {
             }
           }
           if(const auto exclude=takeCollabExclude()) { excludeOverlay=*exclude; excludeAttempts=0; excludeAt={}; ++excludeSerial; }
+          // A blocked app opened or showed a window: rebuild the filter now.
+          if(blockedApps.enabled() && Clock::now()>=blockedCheckAt) {
+            blockedCheckAt=Clock::now()+std::chrono::milliseconds(200);
+            if(blockedApps.takeStale()) { excludeAttempts=0; excludeAt={}; ++excludeSerial; }
+          }
           if(excludeAttempts<20 && excludeApplied->load()!=excludeSerial && Clock::now()>=excludeAt) {
             ++excludeAttempts; excludeAt=Clock::now()+std::chrono::milliseconds(500);
             const bool wanted=excludeOverlay; const auto serial=excludeSerial; const auto applied=excludeApplied; SCDisplay* target=display; NSArray<SCWindow*>* privacyWindows=[excluded copy];
+            const blocked::List blockedList=blockedApps.list(); const auto blockedApplied=blockedApps.applied();
             [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent* value,NSError*) {
               // Privacy-screen windows stay excluded alongside the overlay.
               NSMutableArray<SCWindow*>* excluded=[NSMutableArray arrayWithArray:privacyWindows];
@@ -777,10 +803,13 @@ int runMac(bool host,int argc,char** argv) {
               if(wanted) for(SCWindow* candidate in value.windows)
                 if(candidate.owningApplication.processID==shell && [candidate.title isEqualToString:@"Sanser Annotations"]) [excluded addObject:candidate];
               if(wanted && excluded.count==privacyCount) return; // Overlay is not on screen yet; retried.
+              NSArray<SCWindow*>* blockedWindows=MacBlockedApps::windowsIn(blockedList,value);
+              [excluded addObjectsFromArray:blockedWindows];
               SCContentFilter* next=[[SCContentFilter alloc] initWithDisplay:target excludingWindows:excluded];
               [stream updateContentFilter:next completionHandler:^(NSError* error) {
-                if(error) { std::cerr<<captureFailure(error,"Exclude annotation overlay")<<std::endl; return; }
-                applied->store(serial); std::cerr<<"SNV2_COLLAB_OVERLAY excluded="<<excluded.count<<std::endl;
+                if(error) { std::cerr<<captureFailure(error,"Update capture exclusions")<<std::endl; return; }
+                applied->store(serial); blockedApplied->set(blockedWindows);
+                std::cerr<<"SNV2_COLLAB_OVERLAY excluded="<<excluded.count<<" blocked="<<blockedWindows.count<<std::endl;
               }];
             }];
           }

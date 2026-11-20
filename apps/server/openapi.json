@@ -155,7 +155,7 @@
       }
      },
      "401": {
-      "description": "Wrong email or password, or code two_factor_required with challengeToken and challengeExpiresAt.",
+      "description": "Wrong email or password, or code email_verification_required with challengeToken, challengeExpiresAt and emailHint (a code was emailed).",
       "content": {
        "application/json": {
         "schema": {
@@ -2607,461 +2607,6 @@
     ]
    }
   },
-  "/api/v2/auth/login/two-factor": {
-   "post": {
-    "tags": [
-     "Auth"
-    ],
-    "summary": "Complete sign-in with a two-step verification code or recovery code",
-    "operationId": "post_api_v2_auth_login_two_factor",
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/TwoFactorChallengeRequest"
-       }
-      }
-     }
-    },
-    "responses": {
-     "200": {
-      "description": "Success",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/AuthTokens"
-        }
-       }
-      }
-     },
-     "401": {
-      "description": "Authentication is required.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation failed.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "429": {
-      "description": "Too many requests.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     }
-    },
-    "security": []
-   }
-  },
-  "/api/v2/account/two-factor": {
-   "get": {
-    "tags": [
-     "Account"
-    ],
-    "summary": "Two-step verification status",
-    "operationId": "get_api_v2_account_two_factor",
-    "responses": {
-     "200": {
-      "description": "Success",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/TwoFactorStatus"
-        }
-       }
-      }
-     },
-     "401": {
-      "description": "Authentication is required.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "403": {
-      "description": "Not allowed for this token.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "429": {
-      "description": "Too many requests.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     }
-    ]
-   }
-  },
-  "/api/v2/account/two-factor/enroll": {
-   "post": {
-    "tags": [
-     "Account"
-    ],
-    "summary": "Start two-step verification setup (returns the secret once)",
-    "operationId": "post_api_v2_account_two_factor_enroll",
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/PasswordRequest"
-       }
-      }
-     }
-    },
-    "responses": {
-     "200": {
-      "description": "Success",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/TwoFactorEnrollment"
-        }
-       }
-      }
-     },
-     "401": {
-      "description": "Authentication is required.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "403": {
-      "description": "Not allowed for this token.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "409": {
-      "description": "Conflict.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation failed.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "429": {
-      "description": "Too many requests.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     }
-    ]
-   }
-  },
-  "/api/v2/account/two-factor/confirm": {
-   "post": {
-    "tags": [
-     "Account"
-    ],
-    "summary": "Confirm setup with a code; returns recovery codes once",
-    "operationId": "post_api_v2_account_two_factor_confirm",
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/TwoFactorCodeRequest"
-       }
-      }
-     }
-    },
-    "responses": {
-     "200": {
-      "description": "Success",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/RecoveryCodes"
-        }
-       }
-      }
-     },
-     "401": {
-      "description": "Authentication is required.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "403": {
-      "description": "Not allowed for this token.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "409": {
-      "description": "Conflict.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation failed.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "429": {
-      "description": "Too many requests.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     }
-    ]
-   }
-  },
-  "/api/v2/account/two-factor/disable": {
-   "post": {
-    "tags": [
-     "Account"
-    ],
-    "summary": "Turn off two-step verification",
-    "operationId": "post_api_v2_account_two_factor_disable",
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/TwoFactorReauthRequest"
-       }
-      }
-     }
-    },
-    "responses": {
-     "204": {
-      "description": "No content"
-     },
-     "401": {
-      "description": "Authentication is required.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "403": {
-      "description": "Not allowed for this token.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "409": {
-      "description": "Conflict.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation failed.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "429": {
-      "description": "Too many requests.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     }
-    ]
-   }
-  },
-  "/api/v2/account/two-factor/recovery-codes": {
-   "post": {
-    "tags": [
-     "Account"
-    ],
-    "summary": "Replace recovery codes; returns them once",
-    "operationId": "post_api_v2_account_two_factor_recovery_codes",
-    "requestBody": {
-     "required": true,
-     "content": {
-      "application/json": {
-       "schema": {
-        "$ref": "#/components/schemas/TwoFactorReauthRequest"
-       }
-      }
-     }
-    },
-    "responses": {
-     "200": {
-      "description": "Success",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/RecoveryCodes"
-        }
-       }
-      }
-     },
-     "401": {
-      "description": "Authentication is required.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "403": {
-      "description": "Not allowed for this token.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "409": {
-      "description": "Conflict.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "422": {
-      "description": "Validation failed.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     },
-     "429": {
-      "description": "Too many requests.",
-      "content": {
-       "application/json": {
-        "schema": {
-         "$ref": "#/components/schemas/Error"
-        }
-       }
-      }
-     }
-    },
-    "security": [
-     {
-      "bearerAuth": []
-     }
-    ]
-   }
-  },
   "/api/v2/guest/grants": {
    "get": {
     "tags": [
@@ -3824,6 +3369,160 @@
      }
     ]
    }
+  },
+  "/api/v2/auth/email/verify": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Complete a sign-in from a new computer, or a sign-up, with the emailed 6-digit code",
+    "operationId": "post_api_v2_auth_email_verify",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/EmailCodeRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthTokens"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "201": {
+      "description": "Account created",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthTokens"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "An account with this email already exists.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/api/v2/auth/email/resend": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Email a fresh code for an open challenge (at most once a minute, five codes in all)",
+    "operationId": "post_api_v2_auth_email_resend",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/EmailResendRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/EmailResendResponse"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "409": {
+      "description": "Too soon, or too many codes for this challenge.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
   }
  },
  "components": {
@@ -3853,6 +3552,10 @@
        "challengeExpiresAt": {
         "type": "integer",
         "format": "int64"
+       },
+       "emailHint": {
+        "type": "string",
+        "description": "Masked account email when code is email_verification_required"
        }
       },
       "additionalProperties": false,
@@ -4464,61 +4167,6 @@
      "hostDeviceId"
     ]
    },
-   "TwoFactorChallengeRequest": {
-    "type": "object",
-    "properties": {
-     "challengeToken": {
-      "type": "string"
-     },
-     "code": {
-      "type": "string"
-     },
-     "recoveryCode": {
-      "type": "string"
-     }
-    },
-    "additionalProperties": false,
-    "required": [
-     "challengeToken"
-    ]
-   },
-   "TwoFactorStatus": {
-    "type": "object",
-    "properties": {
-     "enabled": {
-      "type": "boolean"
-     },
-     "enabledAt": {
-      "type": "integer",
-      "format": "int64"
-     },
-     "recoveryCodesRemaining": {
-      "type": "integer",
-      "format": "int64"
-     }
-    },
-    "additionalProperties": false,
-    "required": [
-     "enabled",
-     "recoveryCodesRemaining"
-    ]
-   },
-   "TwoFactorEnrollment": {
-    "type": "object",
-    "properties": {
-     "secret": {
-      "type": "string"
-     },
-     "otpauthUri": {
-      "type": "string"
-     }
-    },
-    "additionalProperties": false,
-    "required": [
-     "secret",
-     "otpauthUri"
-    ]
-   },
    "PasswordRequest": {
     "type": "object",
     "properties": {
@@ -4529,51 +4177,6 @@
     "additionalProperties": false,
     "required": [
      "password"
-    ]
-   },
-   "TwoFactorCodeRequest": {
-    "type": "object",
-    "properties": {
-     "code": {
-      "type": "string"
-     }
-    },
-    "additionalProperties": false,
-    "required": [
-     "code"
-    ]
-   },
-   "TwoFactorReauthRequest": {
-    "type": "object",
-    "properties": {
-     "password": {
-      "type": "string"
-     },
-     "code": {
-      "type": "string"
-     },
-     "recoveryCode": {
-      "type": "string"
-     }
-    },
-    "additionalProperties": false,
-    "required": [
-     "password"
-    ]
-   },
-   "RecoveryCodes": {
-    "type": "object",
-    "properties": {
-     "recoveryCodes": {
-      "type": "array",
-      "items": {
-       "type": "string"
-      }
-     }
-    },
-    "additionalProperties": false,
-    "required": [
-     "recoveryCodes"
     ]
    },
    "CreateGuestGrantRequest": {
@@ -4974,6 +4577,52 @@
     "required": [
      "state"
     ]
+   },
+   "EmailCodeRequest": {
+    "type": "object",
+    "properties": {
+     "challengeToken": {
+      "type": "string"
+     },
+     "code": {
+      "type": "string",
+      "description": "6 digits; spaces and dashes are ignored"
+     }
+    },
+    "required": [
+     "challengeToken",
+     "code"
+    ],
+    "additionalProperties": false
+   },
+   "EmailResendRequest": {
+    "type": "object",
+    "properties": {
+     "challengeToken": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "challengeToken"
+    ],
+    "additionalProperties": false
+   },
+   "EmailResendResponse": {
+    "type": "object",
+    "properties": {
+     "challengeExpiresAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "emailHint": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "challengeExpiresAt",
+     "emailHint"
+    ],
+    "additionalProperties": false
    }
   }
  }

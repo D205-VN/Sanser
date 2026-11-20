@@ -5,6 +5,7 @@ add_subdirectory(text-input)
 add_library(sanser-native-windows STATIC
   backend.cpp
   privacy_screen.cpp
+  blocked_apps.cpp
   gamepad.cpp
   clipboard.cpp
   audio_player.cpp
@@ -25,4 +26,4 @@ target_compile_definitions(sanser-native-windows PRIVATE NOMINMAX WIN32_LEAN_AND
 if(MSVC)
   target_compile_options(sanser-native-windows PRIVATE /utf-8 /W4)
 endif()
-target_link_libraries(sanser-native-windows PUBLIC d3d11 d3dcompiler dxgi mfplat mfreadwrite mfuuid avrt ole32 wmcodecdspuuid user32 gdi32 gdiplus uxtheme comctl32 strmiids)
+target_link_libraries(sanser-native-windows PUBLIC d3d11 d3dcompiler dxgi mfplat mfreadwrite mfuuid avrt ole32 wmcodecdspuuid user32 gdi32 gdiplus uxtheme comctl32 strmiids dwmapi)

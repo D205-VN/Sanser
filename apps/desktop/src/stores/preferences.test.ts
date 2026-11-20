@@ -23,6 +23,17 @@ describe('migratePreferences', () => {
     expect(migratePreferences({ host: { privacyScreen: true, privacyBlockInput: true } }).host).toMatchObject({ privacyScreen: true, privacyBlockInput: true });
   });
 
+  it('keeps only valid, unique blocked apps, at most 64', () => {
+    expect(migratePreferences({}).host.blockedApps).toEqual([]);
+    expect(migratePreferences({ host: { blockedApps: 'chrome.exe' } }).host.blockedApps).toEqual([]);
+    expect(migratePreferences({ host: { blockedApps: [
+      { id: ' chrome.exe ', name: ' Chrome ' }, { id: 'CHROME.EXE', name: 'dup' }, { id: 'com.apple.Safari' },
+      { id: 'C:\\x.exe', name: 'path' }, { id: 'a\nb', name: 'control' }, { id: '', name: 'empty' }, 'raw', null
+    ] } }).host.blockedApps).toEqual([{ id: 'chrome.exe', name: 'Chrome' }, { id: 'com.apple.Safari', name: 'com.apple.Safari' }]);
+    const many = Array.from({ length: 70 }, (_, i) => ({ id: `app${String(i)}.exe`, name: 'x' }));
+    expect(migratePreferences({ host: { blockedApps: many } }).host.blockedApps).toHaveLength(64);
+  });
+
   it('keeps a safe fixed host UDP port', () => {
     expect(migratePreferences({ host: { directUdpPort: 50_123 } }).host.directUdpPort).toBe(50_123);
     expect(migratePreferences({ host: { directUdpPort: 80 } }).host.directUdpPort).toBe(50_000);

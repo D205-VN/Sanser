@@ -26,7 +26,7 @@ vi.mock('./presence', async () => {
 });
 vi.mock('./preferences', async () => {
   const { writable } = await import('svelte/store');
-  return { preferences: writable({ networkMode: 'auto', host: { audioEnabled: true }, stream: { profile: 'balanced', codec: 'h264', fps: 60, bitrateMbps: 20, resolution: '1080p' } }) };
+  return { preferences: writable({ networkMode: 'auto', host: { audioEnabled: true, blockedApps: [] }, stream: { profile: 'balanced', codec: 'h264', fps: 60, bitrateMbps: 20, resolution: '1080p' } }) };
 });
 import { createSharingStore } from './sharing';
 

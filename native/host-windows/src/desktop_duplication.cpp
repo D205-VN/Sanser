@@ -5,6 +5,7 @@
 #endif
 
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3d10.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -298,6 +299,7 @@ bool DesktopDuplicator::captureFrameOnce(FrameBgra& frame, std::uint32_t timeout
       }
       if (owned) {
         impl_->context->CopyResource(owned.get(), desktopTexture.Get());
+        maskTexture(owned.get());
         frame = FrameBgra{};
         frame.width = width_; frame.height = height_; frame.stride = width_ * 4;
         frame.texture = std::move(owned);
@@ -379,6 +381,10 @@ bool DesktopDuplicator::captureFrameOnce(FrameBgra& frame, std::uint32_t timeout
     }
 
     unmapStaging();
+    if (const auto rects = outputMask(); !rects.empty()) {
+      sanser::blocked::paintBlack(frame.pixels.data(), frame.stride, static_cast<long>(frame.width),
+                                  static_cast<long>(frame.height), rects);
+    }
     const HRESULT releaseHr = releaseFrame();
     if (FAILED(releaseHr)) {
       std::fprintf(stderr,
@@ -393,6 +399,31 @@ bool DesktopDuplicator::captureFrameOnce(FrameBgra& frame, std::uint32_t timeout
     }
     releaseFrame();
     throw;
+  }
+}
+
+std::vector<sanser::blocked::Rect> DesktopDuplicator::outputMask() const {
+  if (!maskProvider_) return {};
+  return sanser::blocked::toOutput(maskProvider_(), left_, top_, static_cast<long>(width_), static_cast<long>(height_));
+}
+
+void DesktopDuplicator::maskTexture(ID3D11Texture2D* texture) {
+  const auto rects = outputMask();
+  if (rects.empty()) return;
+  ComPtr<ID3D11RenderTargetView> view;
+  if (FAILED(impl_->device->CreateRenderTargetView(texture, nullptr, view.GetAddressOf()))) {
+    throw std::runtime_error("Unable to hide blocked apps in the captured frame.");
+  }
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  ComPtr<ID3D11DeviceContext1> context1;
+  if (SUCCEEDED(impl_->context.As(&context1))) {
+    std::vector<D3D11_RECT> clear;
+    clear.reserve(rects.size());
+    for (const auto& r : rects) clear.push_back({r.left, r.top, r.right, r.bottom});
+    context1->ClearView(view.Get(), black, clear.data(), static_cast<UINT>(clear.size()));
+  } else {
+    // Without D3D11.1 rectangles, fail closed: hide the whole frame.
+    impl_->context->ClearRenderTargetView(view.Get(), black);
   }
 }
 

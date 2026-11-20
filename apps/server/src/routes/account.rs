@@ -102,7 +102,25 @@ pub async fn revoke_login_session(
     if owned == 0 {
         return Err(AppError::NotFound);
     }
+    let installation_id: Option<String> =
+        sqlx::query_scalar("SELECT installation_id FROM auth_sessions WHERE id = $1")
+            .bind(&session_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(AppError::from_db)?;
     revoke_auth_session(&state.pool, &session_id).await?;
+    // Signing out another computer from this list also forgets it, so it
+    // needs an email code to sign in again. Signing out here keeps trust.
+    if session_id != auth.auth_session_id {
+        if let Some(installation_id) = installation_id {
+            crate::routes::email_verification::forget_device(
+                &state,
+                &auth.user_id,
+                &installation_id,
+            )
+            .await?;
+        }
+    }
     audit(
         &state.pool,
         Some(&auth.user_id),

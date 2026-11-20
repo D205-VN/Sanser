@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { loadNativePreferences, saveNativePreferences } from '../lib/platform';
 import { normalizeServerUrl } from '../lib/api';
-import type { NetworkMode, Preferences, QualityProfile, VideoCodec } from '../lib/types';
+import type { BlockedApp, NetworkMode, Preferences, QualityProfile, VideoCodec } from '../lib/types';
 
 const STORAGE_KEY = 'sanser.preferences.v2';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -29,7 +29,8 @@ export const DEFAULT_PREFERENCES: Preferences = {
     privacyScreen: false,
     privacyBlockInput: false,
     wakeOnLan: false,
-    allowRecording: true
+    allowRecording: true,
+    blockedApps: []
   },
   input: {
     mouseMode: 'auto',
@@ -79,6 +80,28 @@ function codec(value: unknown): VideoCodec {
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter((item): item is string => typeof item === 'string' && item.length > 0))].slice(0, 200);
+}
+
+/** Same rules as the engine: 1-255 characters, no path or control characters. */
+export function validBlockedAppId(id: string): boolean {
+  const value = id.trim();
+  // eslint-disable-next-line no-control-regex
+  return value.length > 0 && value.length <= 255 && !/[\u0000-\u001f\u007f/\\:*?"<>|]/.test(value);
+}
+
+function blockedAppArray(value: unknown): BlockedApp[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const apps: BlockedApp[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const { id, name } = item as Record<string, unknown>;
+    if (typeof id !== 'string' || !validBlockedAppId(id) || seen.has(id.trim().toLowerCase())) continue;
+    seen.add(id.trim().toLowerCase());
+    apps.push({ id: id.trim(), name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 80) : id.trim() });
+    if (apps.length === 64) break;
+  }
+  return apps;
 }
 
 function deviceIdArray(value: unknown): string[] {
@@ -142,7 +165,8 @@ export function migratePreferences(
       privacyScreen: pickBoolean(host.privacyScreen, false),
       privacyBlockInput: pickBoolean(host.privacyScreen, false) && pickBoolean(host.privacyBlockInput, false),
       wakeOnLan: pickBoolean(host.wakeOnLan, false),
-      allowRecording: pickBoolean(host.allowRecording, true)
+      allowRecording: pickBoolean(host.allowRecording, true),
+      blockedApps: blockedAppArray(host.blockedApps)
     },
     input: {
       mouseMode: input.mouseMode === 'absolute' || input.mouseMode === 'relative' ? input.mouseMode : 'auto',

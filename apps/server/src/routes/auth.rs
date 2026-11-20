@@ -16,6 +16,9 @@ use crate::{
     },
     error::{ApiJson, AppError},
     models::Account,
+    routes::email_verification::{
+        Origin, PendingAccount, require_login_code, require_signup_code, trust_device,
+    },
     state::AppState,
     time::now_unix,
 };
@@ -67,6 +70,24 @@ pub async fn register(
     let platform = clean_label(&request.platform, "platform", 40)?;
 
     let password_hash = hash_password(request.password).await?;
+    let installation_id = request.installation_id.as_ref().map(Uuid::to_string);
+    let origin = Origin {
+        device_name: &device_name,
+        platform: &platform,
+        installation_id: installation_id.as_deref(),
+    };
+    let pending = PendingAccount {
+        email,
+        display_name,
+        password_hash,
+    };
+    // With a mail service, the account is created only after the emailed code.
+    require_signup_code(&state, &pending, &origin).await?;
+    let PendingAccount {
+        email,
+        display_name,
+        password_hash,
+    } = pending;
     let now = now_unix();
     let account = Account {
         id: Uuid::new_v4().to_string(),
@@ -80,13 +101,10 @@ pub async fn register(
         password_hash,
         &device_name,
         &platform,
-        request
-            .installation_id
-            .as_ref()
-            .map(Uuid::to_string)
-            .as_deref(),
+        installation_id.as_deref(),
     )
     .await?;
+    trust_device(&state, &account.id, installation_id.as_deref()).await?;
     audit(
         &state.pool,
         Some(&account.id),
@@ -133,13 +151,16 @@ pub async fn login(
         created_at: row.try_get("created_at").map_err(AppError::from_db)?,
     };
     let installation_id = request.installation_id.as_ref().map(Uuid::to_string);
-    // Accounts with two-step verification get a challenge instead of tokens.
-    super::two_factor::require_second_step(
+    // A computer that has not signed in to this account before gets an
+    // emailed code instead of tokens.
+    require_login_code(
         &state,
         &account,
-        &device_name,
-        &platform,
-        installation_id.as_deref(),
+        &Origin {
+            device_name: &device_name,
+            platform: &platform,
+            installation_id: installation_id.as_deref(),
+        },
     )
     .await?;
     let tokens = create_login_session(

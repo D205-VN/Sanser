@@ -20,9 +20,9 @@ vi.mock('../stores/host', async () => {
 vi.mock('../stores/preferences', async () => {
   const { writable } = await import('svelte/store');
   return { preferences: { ...writable({
-    host: { autoAcceptOwnDevices: true, inputEnabled: true, audioEnabled: false },
+    host: { autoAcceptOwnDevices: true, inputEnabled: true, audioEnabled: false, blockedApps: [] },
     trustedDeviceIds: []
-  }), save: mocks.save } };
+  }), save: mocks.save }, validBlockedAppId: () => true };
 });
 import Host from './Host.svelte';
 const runtime = { platform: 'macOS', capabilities: { hostEngine: { state: 'available' } } } as RuntimeStatus;

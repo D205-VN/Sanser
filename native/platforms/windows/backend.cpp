@@ -36,6 +36,7 @@
 #include "controller_input.h"
 #include "desktop_duplication.h"
 #include "privacy_screen.h"
+#include "blocked_apps.h"
 #include "../../windows-uac/client.h"
 #include "mf_video_packet_encoder.h"
 #include <algorithm>
@@ -60,7 +61,8 @@ struct Runtime {
 class Injector {
 public:
   using Send=std::function<UINT(UINT,INPUT*,int)>;
-  explicit Injector(const DesktopDuplicator& display,Send send=[](UINT count,INPUT* input,int size) { return sanser::uac::sendInput(count,input,size); })
+  // Blocked apps: a dropped batch counts as delivered, so releases are not retried.
+  explicit Injector(const DesktopDuplicator& display,Send send=[](UINT count,INPUT* input,int size) { return sanser::blocked::windowsInputAllowed(input,count) ? sanser::uac::sendInput(count,input,size) : count; })
     : send_(std::move(send)) { setViewport(display.left(),display.top(),display.width(),display.height()); }
   ~Injector() { reset(); }
   void setViewport(long left,long top,std::uint32_t width,std::uint32_t height) {
@@ -621,6 +623,12 @@ int runWindows(bool host,int argc,char** argv) {
   SetProcessDPIAware(); const auto options=parseOptions(host,argc,argv);
   if(host) {
     DesktopDuplicator display; display.initialize(); HostOutput peer(options); Injector injector(display);
+    // Host-local blocked apps: painted black in capture, not usable remotely.
+    sanser::blocked::configureWindows(options.blockedApps);
+    if(!options.blockedApps.empty()) {
+      display.setMaskProvider([] { return sanser::blocked::windowsMask(); });
+      std::cerr<<"SNBLOCKED apps="<<options.blockedApps.size()<<" platform=windows"<<std::endl;
+    }
     // Display list for one-to-one control sessions. Index 0/0 stays the
     // default capture target, exactly as before.
     const auto outputs=options.sharing ? std::vector<DisplayOutput>{} : enumerateDisplayOutputs(sanser::desktop::display::maxDisplays);

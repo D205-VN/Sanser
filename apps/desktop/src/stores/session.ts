@@ -1,7 +1,7 @@
 import { get, writable } from 'svelte/store';
 import { ApiClient, ApiError } from '../lib/api';
 import { loginDevice, secureDelete, secureGet, secureSet } from '../lib/platform';
-import type { Account, AuthResult, GuestRedemption, SecondFactor } from '../lib/types';
+import type { Account, AuthResult, GuestRedemption } from '../lib/types';
 import { diagnostics } from './diagnostics';
 
 export const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -17,8 +17,9 @@ export interface SessionState {
   account: Account | null;
   serverUrl: string;
   error: string | null;
-  /** Set after a correct password on an account with two-step verification. */
-  twoFactor: { expiresAt: number } | null;
+  /** Set after a correct password on a new computer, or a sign-up: a code
+   *  was emailed to `emailHint` (masked) and must be entered. */
+  emailCode: { expiresAt: number; emailHint: string; purpose: 'login' | 'register' } | null;
   guest: { hostName: string; deviceId: string } | null;
 }
 
@@ -37,12 +38,20 @@ let savedAuth: SavedAuth | null = null;
 let rememberSignIn = false;
 let credentialSaved = false;
 let lastActivityWrite = 0;
-const initial: SessionState = { ready: false, busy: false, mode: 'signedOut', account: null, serverUrl: '', error: null, twoFactor: null, guest: null };
-/** The pending second sign-in step; the challenge token lives only in memory. */
-let pendingChallenge: { serverUrl: string; token: string; remember: boolean } | null = null;
+const initial: SessionState = { ready: false, busy: false, mode: 'signedOut', account: null, serverUrl: '', error: null, emailCode: null, guest: null };
+/** The pending email-code step; the challenge token lives only in memory. */
+let pendingChallenge: { serverUrl: string; token: string; remember: boolean; purpose: 'login' | 'register' } | null = null;
 
-class TwoFactorChallenge extends Error {
-  constructor(readonly token: string, readonly expiresAt: number) { super('Two-step verification is required'); }
+class EmailCodeChallenge extends Error {
+  constructor(readonly token: string, readonly expiresAt: number, readonly emailHint: string) { super('An email code is required'); }
+}
+
+/** Turns the server's "check your email" answer into the code step. */
+function emailChallenge(error: unknown): unknown {
+  if (error instanceof ApiError && error.code === 'email_verification_required' && error.challenge) {
+    return new EmailCodeChallenge(error.challenge.token, error.challenge.expiresAt, error.challenge.emailHint);
+  }
+  return error;
 }
 let authWrites = Promise.resolve();
 let authGeneration = 0;
@@ -156,7 +165,7 @@ async function clearAuth(): Promise<number> {
 function createSessionStore() {
   const store = writable<SessionState>(initial);
 
-  async function authenticate(serverUrl: string, request: (client: ApiClient) => Promise<AuthResult>, success: string, remember: boolean): Promise<void> {
+  async function authenticate(serverUrl: string, request: (client: ApiClient) => Promise<AuthResult>, success: string, remember: boolean, purpose: 'login' | 'register' = 'login'): Promise<void> {
     const generation = ++authGeneration;
     store.update((state) => ({ ...state, busy: true, error: null }));
     try {
@@ -169,14 +178,15 @@ function createSessionStore() {
       const result = await request(client);
       if (!await persistAuth(result, client, generation)) return;
       pendingChallenge = null;
-      store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null, twoFactor: null, guest: null });
+      store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null, emailCode: null, guest: null });
       diagnostics.add({ level: 'info', category: 'auth', message: success });
     } catch (error) {
       if (generation !== authGeneration) return;
-      if (error instanceof TwoFactorChallenge) {
+      if (error instanceof EmailCodeChallenge) {
         api = null;
-        pendingChallenge = { serverUrl, token: error.token, remember };
-        store.update((state) => ({ ...state, busy: false, error: null, twoFactor: { expiresAt: error.expiresAt } }));
+        pendingChallenge = { serverUrl, token: error.token, remember, purpose };
+        store.update((state) => ({ ...state, busy: false, error: null, emailCode: { expiresAt: error.expiresAt, emailHint: error.emailHint, purpose } }));
+        diagnostics.add({ level: 'info', category: 'auth', message: purpose === 'register' ? 'Sign-up code emailed' : 'Sign-in from a new computer: code emailed' });
         return;
       }
       const message = error instanceof Error ? error.message : 'Unable to sign in';
@@ -230,7 +240,7 @@ function createSessionStore() {
         const result = await client.refresh(saved.refreshToken);
         if (isExpired(saved.lastActiveAt)) throw new ApiError('Saved sign-in expired', 401, 'session_expired', null);
         if (!await persistAuth(result, client, generation)) return;
-        store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null, twoFactor: null, guest: null });
+        store.set({ ready: true, busy: false, mode: 'cloud', account: result.account, serverUrl: client.serverUrl, error: null, emailCode: null, guest: null });
       } catch (error) {
         if (generation !== authGeneration) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -250,33 +260,41 @@ function createSessionStore() {
         try {
           return await client.login(email.trim().toLowerCase(), password, await loginDevice());
         } catch (error) {
-          if (error instanceof ApiError && error.code === 'two_factor_required' && error.challenge) {
-            throw new TwoFactorChallenge(error.challenge.token, error.challenge.expiresAt);
-          }
-          throw error;
+          throw emailChallenge(error);
         }
       }, 'Signed in successfully', remember);
     },
-    /** Second sign-in step with an authenticator code or a recovery code. */
-    async completeTwoFactor(factor: SecondFactor): Promise<void> {
+    /** Finishes sign-in or sign-up with the 6-digit code from the email. */
+    async completeEmailCode(code: string): Promise<void> {
       const pending = pendingChallenge;
       if (!pending) throw new Error('Sign in again to continue.');
+      const success = pending.purpose === 'register' ? 'Account created successfully' : 'Signed in successfully';
       try {
-        await authenticate(pending.serverUrl, (client) => client.completeTwoFactorLogin(pending.token, factor), 'Signed in successfully', pending.remember);
+        await authenticate(pending.serverUrl, (client) => client.verifyEmailCode(pending.token, code.replace(/[\s-]/g, '')), success, pending.remember, pending.purpose);
       } catch (error) {
-        // 401: the challenge expired or ran out of attempts; start over.
+        // 401: the code expired, was used or was tried too often; start over.
         if (error instanceof ApiError && error.status === 401) {
           pendingChallenge = null;
-          store.update((state) => ({ ...state, twoFactor: null, error: 'This sign-in attempt expired. Sign in again.' }));
+          store.update((state) => ({ ...state, emailCode: null, error: 'This code expired. Sign in again.' }));
         } else {
           store.update((state) => ({ ...state, error: null }));
         }
         throw error;
       }
     },
-    cancelTwoFactor(): void {
+    /** Emails a new code (the server allows one a minute, five in all). */
+    async resendEmailCode(): Promise<void> {
+      const pending = pendingChallenge;
+      if (!pending) throw new Error('Sign in again to continue.');
+      const result = await makeClient(pending.serverUrl).resendEmailCode(pending.token);
+      if (pendingChallenge !== pending) return;
+      store.update((state) => state.emailCode
+        ? { ...state, emailCode: { ...state.emailCode, expiresAt: result.challengeExpiresAt, emailHint: result.emailHint } }
+        : state);
+    },
+    cancelEmailCode(): void {
       pendingChallenge = null;
-      store.update((state) => ({ ...state, twoFactor: null, error: null, busy: false }));
+      store.update((state) => ({ ...state, emailCode: null, error: null, busy: false }));
     },
     /** Joins a support session with a host's code. The token stays in memory only. */
     async startGuest(serverUrl: string, redeem: (client: ApiClient) => Promise<GuestRedemption>): Promise<GuestRedemption> {
@@ -310,7 +328,14 @@ function createSessionStore() {
       store.set({ ...initial, ready: true, serverUrl: current.serverUrl });
     },
     register(serverUrl: string, email: string, password: string, displayName: string, remember = false): Promise<void> {
-      return authenticate(serverUrl, async (client) => client.register(email.trim().toLowerCase(), password, displayName, await loginDevice()), 'Account created successfully', remember);
+      pendingChallenge = null;
+      return authenticate(serverUrl, async (client) => {
+        try {
+          return await client.register(email.trim().toLowerCase(), password, displayName, await loginDevice());
+        } catch (error) {
+          throw emailChallenge(error);
+        }
+      }, 'Account created successfully', remember, 'register');
     },
     async logout(): Promise<void> {
       const currentApi = api;

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { DiagnosticsExport, EngineKind, EngineStatus, LaunchEngineRequest, Preferences, RuntimeStatus, SharingPeerVideoStatus, WakeInterface, WakeResult } from './types';
+import type { BlockedApp, DiagnosticsExport, EngineKind, EngineStatus, LaunchEngineRequest, Preferences, RuntimeStatus, SharingPeerVideoStatus, WakeInterface, WakeResult } from './types';
 import { PROTOCOL_VERSION, SANSER_VERSION, unavailableCapability } from './types';
 
 export function isTauriRuntime(): boolean {
@@ -198,6 +198,12 @@ export async function routeRecoveryPlan(request: RouteRecoveryEvidence): Promise
 export async function wakeOnLanInterfaces(): Promise<WakeInterface[]> {
   if (!isTauriRuntime()) return [];
   return invoke<WakeInterface[]>('get_wake_on_lan_interfaces');
+}
+
+/** Regular apps running on this computer, for the blocked-apps picker. */
+export async function listRunningApps(): Promise<BlockedApp[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<BlockedApp[]>('list_running_apps');
 }
 
 /** Broadcasts a magic packet from this computer; only reaches hosts on the same LAN. */

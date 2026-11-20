@@ -61,7 +61,7 @@
     'new.eyebrow': "What's new in", 'new.title': 'Ten new features and a Vietnamese interface.',
     'new.1t': 'Vietnamese and English', 'new.1d': 'The app starts in Vietnamese; switch to English with the VI | EN button in the title bar.',
     'new.2t': 'Choose a display, hide your screen', 'new.2d': "Switch between the host's monitors. The host can turn on a black privacy screen so people nearby can't see while it is being controlled.",
-    'new.3t': 'Security and remote help', 'new.3d': 'Two-step verification with an authenticator app, and one-time support codes for people without an account.',
+    'new.3t': 'Security and remote help', 'new.3d': 'A new computer or phone confirms sign-in with a code sent to your email, and one-time support codes help people without an account.',
     'new.4t': 'Chat, pen, recording', 'new.4d': 'Chat and draw during a session, record it to MP4, wake computers with Wake-on-LAN and review connection history.',
     'new.all': 'Read the full release notes',
     'dl.eyebrow': 'Download', 'dl.title': 'Choose your platform.',

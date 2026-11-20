@@ -23,7 +23,7 @@ Native:   Authenticated SNV2 media engines
 Sanser 2.3.18 fixes support-code creation and returns a guest to sign-in
 when a support session ends; see [2.3.18 notes](docs/releases/v2.3.18.md).
 Sanser 2.3.17 adds a Vietnamese/English language switch, display selection,
-a host-only privacy screen, two-step verification, support sessions with a
+a host-only privacy screen, support sessions with a
 one-time code, in-session chat and pen, Wake-on-LAN, connection history,
 viewer recording and Report a problem; see [2.3.17 notes](docs/releases/v2.3.17.md).
 It keeps one-encoder screen sharing for up to three view-only

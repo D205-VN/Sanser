@@ -21,8 +21,10 @@ pub struct AppState {
     pub general_limiter: RateLimiter,
     pub login_limiter: RateLimiter,
     pub voice_lab_limiter: RateLimiter,
-    /// Second-step code attempts per account (login, confirm, disable).
-    pub two_factor_limiter: RateLimiter,
+    /// Outgoing mail for sign-in and sign-up codes.
+    pub mailer: crate::mailer::Mailer,
+    /// Verification emails sent per address.
+    pub email_limiter: RateLimiter,
     /// Guest code redemption attempts per client address.
     pub guest_redeem_limiter: RateLimiter,
     /// Guest code redemption attempts across all clients.
@@ -35,9 +37,14 @@ impl AppState {
         let general_limit = config.general_rate_limit_per_minute;
         let login_limit = config.login_rate_limit_per_ten_minutes;
         let (events, _) = broadcast::channel(256);
+        let mailer = crate::mailer::Mailer::from_config(config.smtp.as_ref()).unwrap_or_else(|error| {
+            tracing::error!(error = %error, "SMTP configuration is unusable; email codes are off");
+            crate::mailer::Mailer::Disabled
+        });
         Self {
             shutdown: tokio_util::sync::CancellationToken::new(),
             config: Arc::new(config),
+            mailer,
             pool,
             events,
             signaling: Arc::new(SignalHub::default()),
@@ -46,7 +53,7 @@ impl AppState {
             general_limiter: RateLimiter::new(general_limit, Duration::from_secs(60)),
             login_limiter: RateLimiter::new(login_limit, Duration::from_secs(600)),
             voice_lab_limiter: RateLimiter::new(12, Duration::from_secs(60)),
-            two_factor_limiter: RateLimiter::new(10, Duration::from_secs(600)),
+            email_limiter: RateLimiter::new(8, Duration::from_secs(3600)),
             guest_redeem_limiter: RateLimiter::new(20, Duration::from_secs(600)),
             guest_redeem_global_limiter: RateLimiter::new(600, Duration::from_secs(60)),
             recording_consents: Arc::default(),

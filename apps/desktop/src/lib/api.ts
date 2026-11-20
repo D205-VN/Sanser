@@ -6,9 +6,6 @@ import type {
   GuestDeviceInfo,
   GuestGrant,
   GuestRedemption,
-  SecondFactor,
-  TwoFactorEnrollment,
-  TwoFactorStatus,
   Device,
   DeviceRegistration,
   HistoryEntry,
@@ -31,8 +28,8 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     readonly requestId: string | null,
-    /** Set with code `two_factor_required`: the second sign-in step. */
-    readonly challenge: { token: string; expiresAt: number } | null = null
+    /** Set with code `email_verification_required`: enter the emailed code. */
+    readonly challenge: { token: string; expiresAt: number; emailHint: string } | null = null
   ) {
     super(message);
     this.name = 'ApiError';
@@ -62,7 +59,7 @@ export function normalizeServerUrl(raw: string): string {
 }
 
 interface ErrorEnvelope {
-  error?: { code?: string; message?: string; challengeToken?: string; challengeExpiresAt?: number };
+  error?: { code?: string; message?: string; challengeToken?: string; challengeExpiresAt?: number; emailHint?: string };
   message?: string;
   code?: string;
 }
@@ -463,34 +460,18 @@ export class ApiClient {
     );
   }
 
-  async completeTwoFactorLogin(challengeToken: string, factor: SecondFactor): Promise<AuthResult> {
-    return this.request('/api/v2/auth/login/two-factor', {
-      method: 'POST', body: { challengeToken, ...factor }, authenticated: false
+  /** Finishes a sign-in from a new computer, or a sign-up, with the emailed code. */
+  async verifyEmailCode(challengeToken: string, code: string): Promise<AuthResult> {
+    return this.request('/api/v2/auth/email/verify', {
+      method: 'POST', body: { challengeToken, code }, authenticated: false
     });
   }
 
-  async twoFactorStatus(): Promise<TwoFactorStatus> {
-    return this.request('/api/v2/account/two-factor');
-  }
-
-  async enrollTwoFactor(password: string): Promise<TwoFactorEnrollment> {
-    return this.request('/api/v2/account/two-factor/enroll', { method: 'POST', body: { password } });
-  }
-
-  async confirmTwoFactor(code: string): Promise<string[]> {
-    const result = await this.request<{ recoveryCodes: string[] }>('/api/v2/account/two-factor/confirm', { method: 'POST', body: { code } });
-    return result.recoveryCodes;
-  }
-
-  async disableTwoFactor(password: string, factor: SecondFactor): Promise<void> {
-    await this.request('/api/v2/account/two-factor/disable', { method: 'POST', body: { password, ...factor } });
-  }
-
-  async regenerateRecoveryCodes(password: string, factor: SecondFactor): Promise<string[]> {
-    const result = await this.request<{ recoveryCodes: string[] }>('/api/v2/account/two-factor/recovery-codes', {
-      method: 'POST', body: { password, ...factor }
+  /** Emails a fresh code; the previous one stops working. */
+  async resendEmailCode(challengeToken: string): Promise<{ challengeExpiresAt: number; emailHint: string }> {
+    return this.request('/api/v2/auth/email/resend', {
+      method: 'POST', body: { challengeToken }, authenticated: false
     });
-    return result.recoveryCodes;
   }
 
   async guestGrants(hostDeviceId: string): Promise<GuestGrant[]> {
@@ -613,7 +594,7 @@ export class ApiClient {
           error?.code ?? payload.code ?? 'request_failed',
           responseRequestId,
           typeof error?.challengeToken === 'string'
-            ? { token: error.challengeToken, expiresAt: error.challengeExpiresAt ?? 0 }
+            ? { token: error.challengeToken, expiresAt: error.challengeExpiresAt ?? 0, emailHint: error.emailHint ?? '' }
             : null
         );
       }

@@ -39,9 +39,36 @@ pub struct Config {
     pub native_base_port: u16,
     pub session_credential_ttl: Duration,
     pub(crate) session_credential_key: Arc<Zeroizing<Vec<u8>>>,
-    /// Optional dedicated key for TOTP secrets at rest. Without it the key is
-    /// derived from `SESSION_CREDENTIAL_KEY` (see docs/two-factor.md).
-    pub(crate) two_factor_key: Option<Arc<Zeroizing<Vec<u8>>>>,
+    /// Outgoing mail for sign-in and sign-up codes. Without it the server
+    /// does not ask for email codes (see docs/email-verification.md).
+    pub smtp: Option<SmtpConfig>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmtpSecurity {
+    /// Plain connection upgraded with STARTTLS (usually port 587).
+    StartTls,
+    /// TLS from the first byte (usually port 465).
+    Tls,
+    /// No encryption. Only for a mail relay on the same machine or network.
+    None,
+}
+
+#[derive(Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub security: SmtpSecurity,
+    pub username: Option<String>,
+    pub(crate) password: Option<Arc<Zeroizing<String>>>,
+    /// Sender, for example `Sanser <no-reply@example.com>`.
+    pub from: String,
+}
+
+impl SmtpConfig {
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref().map(|value| value.as_str())
+    }
 }
 
 #[derive(Debug, Error)]
@@ -78,17 +105,7 @@ impl Config {
         let database_url = required_env("DATABASE_URL")?;
         validate_neon_database_url(&database_url, false)?;
         let session_credential_key = session_credential_key_from_env()?;
-        let two_factor_key = match env::var("TWO_FACTOR_ENCRYPTION_KEY").map(Zeroizing::new) {
-            Ok(encoded) if !encoded.trim().is_empty() => {
-                Some(decode_session_credential_key(encoded.trim()).map_err(|_| {
-                    ConfigError::Invalid(
-                        "TWO_FACTOR_ENCRYPTION_KEY must be base64 that decodes to 32–128 bytes"
-                            .into(),
-                    )
-                })?)
-            }
-            _ => None,
-        };
+        let smtp = smtp_from_env()?;
         let allowed_origins = parse_origins(&env_or(
             "ALLOWED_ORIGINS",
             "http://127.0.0.1:5174,http://localhost:5174,tauri://localhost,http://tauri.localhost",
@@ -172,7 +189,7 @@ impl Config {
                 "60",
             )?),
             session_credential_key,
-            two_factor_key,
+            smtp,
         };
         config.validate()?;
         Ok(config)
@@ -209,7 +226,7 @@ impl Config {
             native_base_port: 50_000,
             session_credential_ttl: Duration::from_secs(60),
             session_credential_key: Arc::new(Zeroizing::new(vec![0xA5; 32])),
-            two_factor_key: None,
+            smtp: None,
         };
         config.validate()?;
         Ok(config)
@@ -472,6 +489,56 @@ fn optional_env(name: &str) -> Option<String> {
 
 fn required_env(name: &str) -> Result<String, ConfigError> {
     optional_env(name).ok_or_else(|| ConfigError::Invalid(format!("{name} is required")))
+}
+
+fn smtp_from_env() -> Result<Option<SmtpConfig>, ConfigError> {
+    let Some(host) = optional_env("SMTP_HOST") else {
+        return Ok(None);
+    };
+    let security = match env_or("SMTP_SECURITY", "starttls")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "starttls" => SmtpSecurity::StartTls,
+        "tls" | "ssl" => SmtpSecurity::Tls,
+        "none" => SmtpSecurity::None,
+        _ => {
+            return Err(ConfigError::Invalid(
+                "SMTP_SECURITY must be starttls, tls or none".into(),
+            ));
+        }
+    };
+    let default_port = match security {
+        SmtpSecurity::StartTls => "587",
+        SmtpSecurity::Tls => "465",
+        SmtpSecurity::None => "25",
+    };
+    let port = parse_env("SMTP_PORT", default_port)?;
+    let username = optional_env("SMTP_USERNAME");
+    let password = env::var("SMTP_PASSWORD")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| Arc::new(Zeroizing::new(value)));
+    if username.is_some() != password.is_some() {
+        return Err(ConfigError::Invalid(
+            "SMTP_USERNAME and SMTP_PASSWORD must be configured together".into(),
+        ));
+    }
+    let from = required_env("SMTP_FROM")
+        .map_err(|_| ConfigError::Invalid("SMTP_FROM is required when SMTP_HOST is set".into()))?;
+    if from.parse::<lettre::message::Mailbox>().is_err() {
+        return Err(ConfigError::Invalid(
+            "SMTP_FROM must be an address such as Sanser <no-reply@example.com>".into(),
+        ));
+    }
+    Ok(Some(SmtpConfig {
+        host,
+        port,
+        security,
+        username,
+        password,
+        from,
+    }))
 }
 
 fn session_credential_key_from_env() -> Result<Arc<Zeroizing<Vec<u8>>>, ConfigError> {

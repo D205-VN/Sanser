@@ -216,6 +216,7 @@ export function createHostStore(): HostStore {
         // Local host preference only; the request from the viewer cannot set it.
         privacyScreen: settings.host.privacyScreen,
         privacyBlockInput: settings.host.privacyScreen && settings.host.privacyBlockInput,
+        blockedApps: settings.host.blockedApps.map((app) => app.id),
         relativeMouse: false,
         sessionToken: credentials.sessionToken,
         udpBindPort: relayRoute?.enginePort ?? route?.localPort,

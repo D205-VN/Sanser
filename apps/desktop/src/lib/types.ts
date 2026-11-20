@@ -102,6 +102,8 @@ export interface HostPreferences {
   wakeOnLan: boolean;
   /** Viewers may record this screen; the host is always told. */
   allowRecording: boolean;
+  /** Applications the remote person cannot see or use (see docs/blocked-apps.md). */
+  blockedApps: BlockedApp[];
 }
 
 export interface InputPreferences {
@@ -261,20 +263,6 @@ export interface ConnectionSession {
   guest?: { name: string };
 }
 
-export interface TwoFactorStatus {
-  enabled: boolean;
-  enabledAt?: number;
-  recoveryCodesRemaining: number;
-}
-
-export interface TwoFactorEnrollment {
-  secret: string;
-  otpauthUri: string;
-}
-
-/** Exactly one of the two is sent. */
-export type SecondFactor = { code: string } | { recoveryCode: string };
-
 export interface CreatedGuestGrant {
   id: string;
   hostDeviceId: string;
@@ -412,6 +400,8 @@ export interface LaunchEngineRequest {
   clipboardEnabled?: boolean;
   privacyScreen?: boolean;
   privacyBlockInput?: boolean;
+  /** Host engine only: macOS bundle IDs or Windows executable names. */
+  blockedApps?: string[];
   relativeMouse?: boolean;
   /** Ephemeral server-authorized media credential. Never persist or log this value. */
   sessionToken?: string;
@@ -453,4 +443,11 @@ export interface RecordingStatus {
 export interface ProblemReport {
   path: string;
   folder: string;
+}
+
+/** A host application hidden from capture and not usable remotely. */
+export interface BlockedApp {
+  /** macOS bundle identifier (com.google.Chrome) or Windows executable name (chrome.exe). */
+  id: string;
+  name: string;
 }

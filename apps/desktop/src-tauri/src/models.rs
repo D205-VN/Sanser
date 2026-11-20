@@ -65,6 +65,11 @@ pub struct LaunchEngineRequest {
     pub privacy_screen: bool,
     #[serde(default)]
     pub privacy_block_input: bool,
+    /// Host engine only: applications hidden from capture and not usable
+    /// remotely (macOS bundle IDs, Windows executable names). Sourced from
+    /// local host preferences; the viewer has no field that reaches this.
+    #[serde(default)]
+    pub blocked_apps: Vec<String>,
     #[serde(default)]
     pub relative_mouse: bool,
     #[serde(default)]
@@ -278,6 +283,18 @@ pub struct HostPreferences {
     /// Viewers may record this computer's screen (they always show a notice).
     #[serde(default = "default_true")]
     pub allow_recording: bool,
+    /// Applications the remote person cannot see or use.
+    #[serde(default)]
+    pub blocked_apps: Vec<BlockedApp>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BlockedApp {
+    /// macOS bundle identifier or Windows executable file name.
+    pub id: String,
+    /// Display name shown in Settings.
+    pub name: String,
 }
 
 const fn default_true() -> bool {

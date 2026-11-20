@@ -16,6 +16,15 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         sync: false
+      # Email sign-in codes (docs/email-verification.md); values set in the dashboard.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
       - key: NETWORK_MODE
         value: auto
       - key: STUN_URLS

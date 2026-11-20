@@ -196,6 +196,7 @@ Options parseOptions(bool host, int argc, char** argv) {
     else if (arg == "--enable-clipboard") o.clipboard = true;
     else if (arg == "--privacy-screen") o.privacyScreen = true;
     else if (arg == "--privacy-block-input") o.privacyBlockInput = true;
+    else if (arg == "--blocked-app") o.blockedApps.add(value());
     else if (arg == "--disable-audio") o.audio = false;
     else if (arg == "--mute-audio") o.audioMuted = true;
     else if (arg == "--relative-mouse") throw std::runtime_error("SNV2 currently supports absolute mouse mode; select Auto or Absolute");
@@ -216,6 +217,7 @@ Options parseOptions(bool host, int argc, char** argv) {
   // Privacy is a host-only, one-to-one control feature, never a viewer flag.
   if((o.privacyScreen || o.privacyBlockInput) && (!host || o.sharing)) throw std::runtime_error("Privacy screen requires a one-to-one host session");
   if(o.privacyBlockInput && !o.privacyScreen) throw std::runtime_error("Blocking local input requires the privacy screen");
+  if(!o.blockedApps.empty() && !host) throw std::runtime_error("Blocked apps are a host setting");
   o.width &= ~1U; o.height &= ~1U;
   return o;
 }

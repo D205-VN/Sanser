@@ -27,14 +27,16 @@ pub enum AppError {
     Unavailable,
     #[error("internal server error")]
     Internal,
-    /// The password was correct and the account uses two-step verification.
-    /// Older clients show the message; newer ones read the challenge.
+    /// The password was correct, but this computer has not signed in to the
+    /// account before (or this is a sign-up): a code was emailed. Older
+    /// clients show the message; newer ones read the challenge.
     #[error(
-        "Two-step verification is turned on for this account. Update Sanser to the latest version to sign in."
+        "A Sanser verification code was sent to your email. Update Sanser to the latest version to enter it."
     )]
-    TwoFactorRequired {
+    EmailVerificationRequired {
         challenge_token: String,
         expires_at: i64,
+        email_hint: String,
     },
 }
 
@@ -52,6 +54,8 @@ struct ErrorDetail {
     challenge_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     challenge_expires_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_hint: Option<String>,
 }
 
 impl AppError {
@@ -62,7 +66,7 @@ impl AppError {
 
     pub fn status(&self) -> StatusCode {
         match self {
-            Self::Unauthorized | Self::TwoFactorRequired { .. } => StatusCode::UNAUTHORIZED,
+            Self::Unauthorized | Self::EmailVerificationRequired { .. } => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -85,7 +89,7 @@ impl AppError {
             Self::PayloadTooLarge => "payload_too_large",
             Self::Unavailable => "unavailable",
             Self::Internal => "internal_error",
-            Self::TwoFactorRequired { .. } => "two_factor_required",
+            Self::EmailVerificationRequired { .. } => "email_verification_required",
         }
     }
 }
@@ -95,12 +99,13 @@ impl IntoResponse for AppError {
         let status = self.status();
         let message = self.to_string();
         let code = self.code();
-        let (challenge_token, challenge_expires_at) = match self {
-            Self::TwoFactorRequired {
+        let (challenge_token, challenge_expires_at, email_hint) = match self {
+            Self::EmailVerificationRequired {
                 challenge_token,
                 expires_at,
-            } => (Some(challenge_token), Some(expires_at)),
-            _ => (None, None),
+                email_hint,
+            } => (Some(challenge_token), Some(expires_at), Some(email_hint)),
+            _ => (None, None, None),
         };
         (
             status,
@@ -110,6 +115,7 @@ impl IntoResponse for AppError {
                     message,
                     challenge_token,
                     challenge_expires_at,
+                    email_hint,
                 },
             }),
         )

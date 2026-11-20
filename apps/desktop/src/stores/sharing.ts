@@ -116,7 +116,9 @@ export function createSharingStore() {
         udpBindPort: relay?.enginePort ?? direct?.localPort, relay: relay !== null,
         sessionToken: credentials.sessionToken,
         audioEnabled: runtime.capabilities.hostAudio === true && get(preferences).host.audioEnabled,
-        inputEnabled: false, relativeMouse: false
+        inputEnabled: false, relativeMouse: false,
+        // Viewers of a share never see this host's blocked apps either.
+        blockedApps: get(preferences).host.blockedApps.map((app) => app.id)
       };
       // Negotiations are independent; creation of the one encoder is serialized.
       const operation = nativeQueue.then(async () => {

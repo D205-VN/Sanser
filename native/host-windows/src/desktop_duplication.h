@@ -1,6 +1,8 @@
 #pragma once
 
+#include "../../common/blocked_apps_policy.h"
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +33,10 @@ public:
   void initialize(std::uint32_t adapterIndex = 0, std::uint32_t outputIndex = 0);
   bool captureFrame(FrameBgra& frame, std::uint32_t timeoutMs = 1000);
   void setGpuCapture(bool enabled) { gpuCapture_ = enabled; }
+  // Blocked apps: rectangles in virtual-screen pixels painted black in every
+  // captured frame of this output (GPU and CPU paths). Empty: no masking.
+  using MaskProvider = std::function<std::vector<sanser::blocked::Rect>()>;
+  void setMaskProvider(MaskProvider provider) { maskProvider_ = std::move(provider); }
   ID3D11Device* gpuDevice() const;
   // AcquireNextFrame may wait for a desktop change; this is not capture work.
   std::uint64_t lastAcquireWaitMicros() const { return lastAcquireWaitMicros_; }
@@ -45,6 +51,9 @@ public:
 
 private:
   bool captureFrameOnce(FrameBgra& frame, std::uint32_t timeoutMs);
+  std::vector<sanser::blocked::Rect> outputMask() const;
+  void maskTexture(ID3D11Texture2D* texture);
+  MaskProvider maskProvider_;
   struct Impl;
   std::unique_ptr<Impl> impl_;
   std::uint32_t width_ = 0;

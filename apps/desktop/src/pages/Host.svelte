@@ -9,6 +9,7 @@
   import SessionFiles from '../components/SessionFiles.svelte';
   import WindowsUac from '../components/WindowsUac.svelte';
   import HostPrivacySettings from '../components/HostPrivacySettings.svelte';
+  import BlockedApps from '../components/BlockedApps.svelte';
   import ConnectionNotificationSettings from '../components/ConnectionNotificationSettings.svelte';
   import { sharing } from '../stores/sharing';
   import type { ConnectionSession, RuntimeStatus } from '../lib/types';
@@ -141,6 +142,7 @@
       {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('System audio')} description={$t('Share sound from this computer.')} onchange={(value) => updateHost('audioEnabled', value)} />{/if}
       <Toggle checked={$preferences.host.inputEnabled} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('Remote input')} description={$t('Allow the other computer to use your keyboard and mouse.')} onchange={(value) => updateHost('inputEnabled', value)} />
       <HostPrivacySettings {runtime} onerror={(message) => { actionError = message; }} />
+      <BlockedApps {runtime} onerror={(message) => { actionError = message; }} />
       <Toggle checked={$preferences.host.allowRecording} label={$t('Allow viewers to record')} description={$t('Viewers can save this screen to their own computer. You are always told when someone is recording, and turning this off stops it.')} onchange={(value) => updateHost('allowRecording', value)} />
     </article>
 

@@ -10,30 +10,57 @@
 
   let { runtime }: { runtime?: RuntimeStatus } = $props();
   let guestMode = $state(false);
-  let secondFactor = $state('');
-  let useRecoveryCode = $state(false);
-  const canVerify = $derived(useRecoveryCode ? secondFactor.replace(/[\s-]/g, '').length === 10 : /^\d{6}$/.test(secondFactor.replace(/\s/g, '')));
+  let emailCode = $state('');
+  let resendMessage = $state<string | null>(null);
+  let resendAt = $state(0);
+  let now = $state(Date.now());
+  const canVerify = $derived(/^\d{6}$/.test(emailCode.replace(/[\s-]/g, '')));
+  const resendWait = $derived(Math.max(0, Math.ceil((resendAt - now) / 1_000)));
+  $effect(() => {
+    if (!$session.emailCode) return;
+    resendAt = Date.now() + 60_000;
+    const timer = window.setInterval(() => { now = Date.now(); }, 1_000);
+    return () => { window.clearInterval(timer); };
+  });
   const canUseCode = $derived(runtime?.capabilities.clientEngine.state === 'available');
 
-  async function verifySecondFactor(event: SubmitEvent): Promise<void> {
+  async function verifyEmailCode(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (!canVerify || $session.busy) return;
     formError = null;
+    resendMessage = null;
     try {
-      await session.completeTwoFactor(useRecoveryCode ? { recoveryCode: secondFactor.trim() } : { code: secondFactor.replace(/\s/g, '') });
-      secondFactor = '';
+      await session.completeEmailCode(emailCode);
+      emailCode = '';
+      password = '';
+      confirmPassword = '';
     } catch (error) {
-      secondFactor = '';
-      formError = $session.twoFactor ? (error instanceof Error ? error.message : $t('Unable to continue')) : null;
+      emailCode = '';
+      formError = $session.emailCode ? (error instanceof Error ? error.message : $t('Unable to continue')) : null;
     }
   }
 
-  function cancelSecondFactor(): void {
-    secondFactor = '';
-    useRecoveryCode = false;
+  async function resendEmailCode(): Promise<void> {
+    if (resendWait > 0 || $session.busy) return;
     formError = null;
+    resendMessage = null;
+    try {
+      await session.resendEmailCode();
+      resendAt = Date.now() + 60_000;
+      now = Date.now();
+      resendMessage = 'A new code was sent. Earlier codes no longer work.';
+    } catch (error) {
+      formError = error instanceof Error ? error.message : $t('Unable to continue');
+    }
+  }
+
+  function cancelEmailCode(): void {
+    emailCode = '';
+    formError = null;
+    resendMessage = null;
     password = '';
-    session.cancelTwoFactor();
+    confirmPassword = '';
+    session.cancelEmailCode();
   }
 
   let mode = $state<'login' | 'register'>('login');
@@ -99,22 +126,27 @@
 <main class="welcome welcome-simple">
   <div class="welcome-language"><LanguageToggle /></div>
   <section class="welcome-panel" aria-label={$t('Account access')}>
-    {#if $session.twoFactor}
-    <form class="auth-card" onsubmit={verifySecondFactor}>
+    {#if $session.emailCode}
+    <form class="auth-card" onsubmit={verifyEmailCode}>
       <div class="auth-brand"><BrandMark size={40} label="Sanser" /><strong>{$t('Sanser')}</strong></div>
       <header>
-        <h2>{$t('Two-step verification')}</h2>
-        <p>{useRecoveryCode ? $t('Enter one of your recovery codes. Each code works only once.') : $t('Enter the 6-digit code from your authenticator app.')}</p>
+        <h2>{$t('Check your email')}</h2>
+        <p>{$session.emailCode.purpose === 'register'
+          ? $t('Enter the 6-digit code sent to {email} to confirm this address and create your account.', { email: $session.emailCode.emailHint })
+          : $t('This computer has not signed in to your account before. Enter the 6-digit code sent to {email}.', { email: $session.emailCode.emailHint })}</p>
       </header>
       <div class="field">
-        <label for="second-factor">{useRecoveryCode ? $t('Recovery code') : $t('Verification code')}</label>
-        <input id="second-factor" class="input" bind:value={secondFactor} required autocomplete="one-time-code" inputmode={useRecoveryCode ? 'text' : 'numeric'} spellcheck="false" maxlength={useRecoveryCode ? 11 : 7} placeholder={useRecoveryCode ? 'XXXXX-XXXXX' : '123456'} />
+        <label for="email-code">{$t('Verification code')}</label>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input id="email-code" class="input" bind:value={emailCode} required autofocus autocomplete="one-time-code" inputmode="numeric" spellcheck="false" maxlength="7" placeholder="123456" />
+        <p class="muted">{$t('The code expires in 10 minutes. Check spam if it does not arrive.')}</p>
       </div>
       {#if formError}<div class="notice error" role="alert">{$t(formError)}</div>{/if}
+      {#if resendMessage}<div class="notice" role="status">{$t(resendMessage)}</div>{/if}
       <button class="button primary auth-submit" type="submit" disabled={$session.busy || !canVerify}>{$session.busy ? $t('Please wait…') : $t('Verify')}</button>
       <div class="auth-footer">
-        <button class="text-button" type="button" disabled={$session.busy} onclick={() => { useRecoveryCode = !useRecoveryCode; secondFactor = ''; formError = null; }}>{useRecoveryCode ? $t('Use an authenticator code') : $t('Use a recovery code')}</button>
-        <button class="text-button" type="button" disabled={$session.busy} onclick={cancelSecondFactor}>{$t('Back to sign in')}</button>
+        <button class="text-button" type="button" disabled={$session.busy || resendWait > 0} onclick={resendEmailCode}>{resendWait > 0 ? $t('Send a new code in {seconds}s', { seconds: resendWait }) : $t('Send a new code')}</button>
+        <button class="text-button" type="button" disabled={$session.busy} onclick={cancelEmailCode}>{$t('Back to sign in')}</button>
       </div>
     </form>
     {:else if guestMode && runtime}

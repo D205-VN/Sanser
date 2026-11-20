@@ -1,4 +1,4 @@
-//! Two-step verification and guest access: every rejection path.
+//! Email sign-in codes and guest access: every rejection path.
 //! Runs against an isolated schema in TEST_DATABASE_URL, like tests/api.rs.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -13,11 +13,11 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use sanser_auth::TotpSecret;
 use sanser_server::{
     build_router,
     config::{Config, PROTOCOL_VERSION, SANSER_VERSION},
     db,
+    mailer::{Mailer, OutgoingEmail},
     state::{AppState, RateLimiter},
 };
 use serde_json::{Value, json};
@@ -28,6 +28,8 @@ use uuid::Uuid;
 
 const PASSWORD: &str = "StrongPass123";
 
+type Outbox = Arc<tokio::sync::Mutex<Vec<OutgoingEmail>>>;
+
 struct TestServer {
     app: Router,
     state: AppState,
@@ -37,8 +39,18 @@ struct TestServer {
 }
 
 impl TestServer {
-    /// `generous_limits` lifts the per-account code limiter so a test can walk
-    /// through many rejection paths; the limiter itself has its own test.
+    /// With an in-memory mailer, so sign-in from a new computer and sign-up
+    /// need the emailed code.
+    async fn with_email() -> (Self, Outbox) {
+        let (mailer, outbox) = Mailer::memory();
+        let mut server = Self::new(true).await;
+        server.state.mailer = mailer;
+        server.app = build_router(server.state.clone());
+        (server, outbox)
+    }
+
+    /// `generous_limits` lifts the per-address email limiter so a test can
+    /// send many codes.
     async fn new(generous_limits: bool) -> Self {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .expect("set TEST_DATABASE_URL to a dedicated test database");
@@ -76,7 +88,7 @@ impl TestServer {
         let pool = db::connect(&config).await.unwrap();
         let mut state = AppState::new(config, pool);
         if generous_limits {
-            state.two_factor_limiter = RateLimiter::new(1_000, Duration::from_secs(600));
+            state.email_limiter = RateLimiter::new(1_000, Duration::from_secs(600));
         }
         Self {
             app: build_router(state.clone()),
@@ -167,487 +179,372 @@ fn token(value: &Value) -> String {
         .to_owned()
 }
 
-fn decode_base32(value: &str) -> Vec<u8> {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut output = Vec::new();
-    let (mut buffer, mut bits) = (0_u32, 0_u32);
-    for byte in value.bytes() {
-        let index = ALPHABET
-            .iter()
-            .position(|candidate| *candidate == byte)
-            .unwrap();
-        buffer = (buffer << 5) | u32::try_from(index).unwrap();
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            output.push(u8::try_from((buffer >> bits) & 0xff).unwrap());
-        }
-    }
-    output
-}
-
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-fn code(secret: &TotpSecret, offset_steps: i64) -> String {
-    format!("{:06}", secret.code_at_step(now() / 30 + offset_steps))
+const INSTALLATION: &str = "6f1c2a7e-4b2d-4c1e-9a55-0d7e3f8b9c10";
+const OTHER_INSTALLATION: &str = "a3e9c4d2-1f7b-4e6a-8c2d-5b9f0e1a7c34";
+
+fn login_body(email: &str, installation: &str) -> Value {
+    json!({"email": email, "password": PASSWORD, "deviceName": "Test", "platform": "test", "installationId": installation})
 }
 
-/// Lets a test use the current step again without waiting 30 seconds.
-async fn forget_used_step(server: &TestServer, user_id: &str) {
-    sqlx::query("UPDATE user_two_factor SET last_used_step = NULL WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&server.state.pool)
-        .await
-        .unwrap();
+fn signup_body(email: &str, installation: &str) -> Value {
+    json!({"email": email, "password": PASSWORD, "deviceName": "Test", "platform": "test", "installationId": installation})
 }
 
-/// Enables 2FA and returns (secret, recovery codes).
-async fn enable_two_factor(server: &TestServer, access: &str) -> (TotpSecret, Vec<String>) {
-    let (status, enrolled) = server
-        .post(
-            "/api/v2/account/two-factor/enroll",
-            json!({"password": PASSWORD}),
-            Some(access),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{enrolled}");
-    let secret = TotpSecret::from_bytes(decode_base32(enrolled["secret"].as_str().unwrap()));
-    assert!(
-        enrolled["otpauthUri"]
-            .as_str()
-            .unwrap()
-            .starts_with("otpauth://totp/Sanser:")
-    );
-    let (status, confirmed) = server
-        .post(
-            "/api/v2/account/two-factor/confirm",
-            json!({"code": code(&secret, 0)}),
-            Some(access),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{confirmed}");
-    let codes = confirmed["recoveryCodes"]
-        .as_array()
-        .unwrap()
+/// The 6-digit code in the newest email to `to`.
+async fn last_code(outbox: &Outbox, to: &str) -> String {
+    let sent = outbox.lock().await;
+    let email = sent
         .iter()
-        .map(|value| value.as_str().unwrap().to_owned())
-        .collect();
-    (secret, codes)
+        .rev()
+        .find(|email| email.to == to)
+        .expect("an email was sent");
+    email.subject.rsplit(' ').next().unwrap().to_owned()
 }
 
-async fn challenge(server: &TestServer, email: &str) -> String {
-    let (status, body) = server.login(email).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
-    assert_eq!(body["error"]["code"], "two_factor_required");
-    assert!(body.get("accessToken").is_none());
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("Update Sanser")
+fn challenge_of(body: &Value) -> String {
+    assert_eq!(
+        body["error"]["code"], "email_verification_required",
+        "{body}"
     );
     body["error"]["challengeToken"].as_str().unwrap().to_owned()
 }
 
-async fn complete(
-    server: &TestServer,
-    challenge: &str,
-    field: &str,
-    value: &str,
-) -> (StatusCode, Value) {
+async fn verify(server: &TestServer, challenge: &str, code: &str) -> (StatusCode, Value) {
     server
         .post(
-            "/api/v2/auth/login/two-factor",
-            json!({"challengeToken": challenge, field: value}),
+            "/api/v2/auth/email/verify",
+            json!({"challengeToken": challenge, "code": code}),
             None,
         )
         .await
 }
 
-#[tokio::test]
-#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
-async fn two_factor_enrollment_rejects_bad_password_bad_code_and_double_enable() {
-    let server = TestServer::new(true).await;
-    let auth = server.register("enroll@example.test").await;
-    let access = token(&auth);
-    let other_device = token(&server.login("enroll@example.test").await.1);
-    let other_refresh = server.login("enroll@example.test").await.1["refreshToken"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-
+/// Signs up through the email code and returns the tokens.
+async fn signup_verified(server: &TestServer, outbox: &Outbox, email: &str) -> Value {
     let (status, body) = server
         .post(
-            "/api/v2/account/two-factor/enroll",
-            json!({"password": "WrongPass123"}),
-            Some(&access),
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    let (status, _) = server
-        .post(
-            "/api/v2/account/two-factor/confirm",
-            json!({"code": "123456"}),
-            Some(&access),
-        )
-        .await;
-    assert_eq!(status, StatusCode::CONFLICT, "confirm before enroll");
-
-    let (status, enrolled) = server
-        .post(
-            "/api/v2/account/two-factor/enroll",
-            json!({"password": PASSWORD}),
-            Some(&access),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK);
-    let secret = TotpSecret::from_bytes(decode_base32(enrolled["secret"].as_str().unwrap()));
-    // Stored only encrypted.
-    let stored: String = sqlx::query_scalar("SELECT secret_envelope FROM user_two_factor")
-        .fetch_one(&server.state.pool)
-        .await
-        .unwrap();
-    assert!(!stored.contains(enrolled["secret"].as_str().unwrap()));
-    for bad in ["000000", "12345", "abcdef", &code(&secret, -3)] {
-        let (status, body) = server
-            .post(
-                "/api/v2/account/two-factor/confirm",
-                json!({"code": bad}),
-                Some(&access),
-            )
-            .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {body}");
-    }
-    // Not enabled yet: login still returns tokens directly.
-    assert_eq!(server.login("enroll@example.test").await.0, StatusCode::OK);
-    let (status, confirmed) = server
-        .post(
-            "/api/v2/account/two-factor/confirm",
-            json!({"code": code(&secret, 0)}),
-            Some(&access),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{confirmed}");
-    let codes = confirmed["recoveryCodes"].as_array().unwrap();
-    assert_eq!(codes.len(), 10);
-    let hashes: Vec<String> = sqlx::query_scalar("SELECT code_hash FROM two_factor_recovery_codes")
-        .fetch_all(&server.state.pool)
-        .await
-        .unwrap();
-    assert_eq!(hashes.len(), 10);
-    assert!(hashes.iter().all(|hash| hash.starts_with("$argon2id$")));
-
-    // Enabling signs out password-only sessions, including their refresh tokens.
-    assert_eq!(
-        server.get("/api/v2/account", &other_device).await.0,
-        StatusCode::UNAUTHORIZED
-    );
-    let (status, _) = server
-        .post(
-            "/api/v2/auth/refresh",
-            json!({"refreshToken": other_refresh}),
+            "/api/v2/auth/register",
+            signup_body(email, INSTALLATION),
             None,
         )
         .await;
-    assert_eq!(
-        status,
-        StatusCode::UNAUTHORIZED,
-        "refresh must not bypass 2FA"
-    );
-    assert_eq!(
-        server.get("/api/v2/account", &access).await.0,
-        StatusCode::OK
-    );
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let challenge = challenge_of(&body);
+    let code = last_code(outbox, email).await;
+    let (status, tokens) = verify(server, &challenge, &code).await;
+    assert_eq!(status, StatusCode::CREATED, "{tokens}");
+    tokens
+}
 
-    let (status, _) = server
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn signup_creates_the_account_only_after_the_emailed_code() {
+    let (server, outbox) = TestServer::with_email().await;
+    let (status, body) = server
         .post(
-            "/api/v2/account/two-factor/enroll",
-            json!({"password": PASSWORD}),
-            Some(&access),
+            "/api/v2/auth/register",
+            signup_body("new@example.com", INSTALLATION),
+            None,
         )
         .await;
-    assert_eq!(status, StatusCode::CONFLICT, "already enabled");
-    let (status, state) = server.get("/api/v2/account/two-factor", &access).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(state["enabled"], true);
-    assert_eq!(state["recoveryCodesRemaining"], 10);
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert_eq!(body["error"]["emailHint"], "ne****@example.com");
+    let challenge = challenge_of(&body);
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&server.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(users, 0, "no account exists before the code is entered");
+    // Someone else cannot squat the address: a second sign-up just gets its
+    // own challenge, and the first code does not complete it.
+    let (_, second) = server
+        .post(
+            "/api/v2/auth/register",
+            signup_body("new@example.com", OTHER_INSTALLATION),
+            None,
+        )
+        .await;
+    let second_challenge = challenge_of(&second);
+    let second_code = last_code(&outbox, "new@example.com").await;
+    {
+        let sent = outbox.lock().await;
+        let first_code = sent[0].subject.rsplit(' ').next().unwrap().to_owned();
+        drop(sent);
+        if first_code != second_code {
+            let (status, _) = verify(&server, &second_challenge, &first_code).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+    let (status, _) = verify(&server, &challenge, "000000x").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let first_code = outbox.lock().await[0]
+        .subject
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .to_owned();
+    let (status, tokens) = verify(&server, &challenge, &first_code).await;
+    assert_eq!(status, StatusCode::CREATED, "{tokens}");
+    assert_eq!(tokens["account"]["email"], "new@example.com");
+    let verified: Option<i64> = sqlx::query_scalar("SELECT email_verified_at FROM users")
+        .fetch_one(&server.state.pool)
+        .await
+        .unwrap();
+    assert!(verified.is_some());
+    // The code is single use, and the other sign-up can no longer finish.
+    let (status, _) = verify(&server, &challenge, &first_code).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = verify(&server, &second_challenge, &second_code).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    // An existing address is refused before any email is sent.
+    let sent_before = outbox.lock().await.len();
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/register",
+            signup_body("new@example.com", INSTALLATION),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(outbox.lock().await.len(), sent_before);
     server.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
-async fn two_factor_login_rejects_bad_expired_reused_and_cross_account_codes() {
-    let server = TestServer::new(true).await;
-    let alice = server.register("alice-2fa@example.test").await;
-    let bob = server.register("bob-2fa@example.test").await;
-    let alice_id = alice["account"]["id"].as_str().unwrap().to_owned();
-    let (alice_secret, alice_codes) = enable_two_factor(&server, &token(&alice)).await;
-    let (bob_secret, bob_codes) = enable_two_factor(&server, &token(&bob)).await;
-    forget_used_step(&server, &alice_id).await;
-
-    let pending = challenge(&server, "alice-2fa@example.test").await;
-    // Malformed and unknown challenge tokens.
-    for bad in [
-        "",
-        "sn2_c_short",
-        "sn2_a_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    ] {
-        assert_eq!(
-            complete(&server, bad, "code", &code(&alice_secret, 0))
-                .await
-                .0,
-            StatusCode::UNAUTHORIZED,
-            "{bad}"
-        );
-    }
-    let unknown = format!("sn2_c_{}", "A".repeat(43));
-    assert_eq!(
-        complete(&server, &unknown, "code", &code(&alice_secret, 0))
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-    // Neither or both factors.
-    let (status, _) = server
-        .post(
-            "/api/v2/auth/login/two-factor",
-            json!({"challengeToken": pending}),
-            None,
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let (status, _) = server
-        .post(
-            "/api/v2/auth/login/two-factor",
-            json!({"challengeToken": pending, "code": "123456", "recoveryCode": alice_codes[0]}),
-            None,
-        )
-        .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    // Wrong account: Bob's code and Bob's recovery code do not open Alice's challenge.
-    assert_eq!(
-        complete(&server, &pending, "code", &code(&bob_secret, 0))
-            .await
-            .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    assert_eq!(
-        complete(&server, &pending, "recoveryCode", &bob_codes[0])
-            .await
-            .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    // Stale code outside the drift window.
-    assert_eq!(
-        complete(&server, &pending, "code", &code(&alice_secret, -3))
-            .await
-            .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    // Success.
-    let (status, tokens) = complete(&server, &pending, "code", &code(&alice_secret, 0)).await;
-    assert_eq!(status, StatusCode::OK, "{tokens}");
-    assert_eq!(
-        server.get("/api/v2/account", &token(&tokens)).await.0,
-        StatusCode::OK
-    );
-    // The challenge is single use.
-    assert_eq!(
-        complete(&server, &pending, "code", &code(&alice_secret, 1))
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-    // The same TOTP code cannot be replayed on a fresh challenge.
-    let second = challenge(&server, "alice-2fa@example.test").await;
-    assert_eq!(
-        complete(&server, &second, "code", &code(&alice_secret, 0))
-            .await
-            .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-
-    // Recovery codes work once, in any case and with or without the dash.
-    let typed = alice_codes[0].to_ascii_lowercase().replace('-', "");
-    let (status, _) = complete(&server, &second, "recoveryCode", &typed).await;
-    assert_eq!(status, StatusCode::OK);
-    let third = challenge(&server, "alice-2fa@example.test").await;
-    assert_eq!(
-        complete(&server, &third, "recoveryCode", &alice_codes[0])
-            .await
-            .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    let (_, state) = server
-        .get("/api/v2/account/two-factor", &token(&tokens))
-        .await;
-    assert_eq!(state["recoveryCodesRemaining"], 9);
-
-    // Expired challenge.
-    sqlx::query("UPDATE two_factor_challenges SET expires_at = $1 WHERE consumed_at IS NULL")
-        .bind(now() - 1)
-        .execute(&server.state.pool)
-        .await
-        .unwrap();
-    forget_used_step(&server, &alice_id).await;
-    assert_eq!(
-        complete(&server, &third, "code", &code(&alice_secret, 0))
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-
-    // Wrong password never yields a challenge.
+async fn known_computer_signs_in_from_any_network_and_a_new_one_needs_the_code() {
+    let (server, outbox) = TestServer::with_email().await;
+    signup_verified(&server, &outbox, "owner@example.com").await;
+    let sent = outbox.lock().await.len();
+    // The computer that signed up is trusted: password alone.
     let (status, body) = server
         .post(
             "/api/v2/auth/login",
-            json!({"email": "alice-2fa@example.test", "password": "WrongPass123"}),
+            login_body("owner@example.com", INSTALLATION),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        outbox.lock().await.len(),
+        sent,
+        "no email for a known computer"
+    );
+    // A different computer, or a client without an installation ID, gets a code.
+    let (status, body) = server
+        .post(
+            "/api/v2/auth/login",
+            login_body("owner@example.com", OTHER_INSTALLATION),
             None,
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    assert_eq!(body["error"]["code"], "unauthorized");
-    assert!(body["error"].get("challengeToken").is_none());
+    let challenge = challenge_of(&body);
+    assert!(
+        body["error"]["challengeToken"]
+            .as_str()
+            .unwrap()
+            .starts_with("sn2_e_")
+    );
+    let mail = outbox.lock().await.last().cloned().unwrap();
+    assert_eq!(mail.to, "owner@example.com");
+    assert!(mail.body.contains("Test (test)"));
+    let (status, body) = server.login("owner@example.com").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    challenge_of(&body);
+    // A wrong password never sends an email.
+    let before = outbox.lock().await.len();
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/login",
+            json!({"email": "owner@example.com", "password": "WrongPass123", "installationId": OTHER_INSTALLATION}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(outbox.lock().await.len(), before);
+    // The right code signs in and trusts the new computer.
+    let code = {
+        let sent = outbox.lock().await;
+        sent.iter()
+            .rev()
+            .nth(1)
+            .unwrap()
+            .subject
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let (status, tokens) = verify(&server, &challenge, &code).await;
+    assert_eq!(status, StatusCode::OK, "{tokens}");
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/login",
+            login_body("owner@example.com", OTHER_INSTALLATION),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
     server.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
-async fn two_factor_challenge_and_account_limits_stop_brute_force() {
-    let server = TestServer::new(true).await;
-    let auth = server.register("brute@example.test").await;
-    let user_id = auth["account"]["id"].as_str().unwrap().to_owned();
-    let (secret, _) = enable_two_factor(&server, &token(&auth)).await;
-    forget_used_step(&server, &user_id).await;
-    let pending = challenge(&server, "brute@example.test").await;
-    for guess in 0..5 {
-        let (status, _) = complete(&server, &pending, "code", &format!("{guess:06}")).await;
+async fn email_codes_reject_guessing_expiry_cross_challenge_and_fast_resend() {
+    let (server, outbox) = TestServer::with_email().await;
+    signup_verified(&server, &outbox, "alice@example.com").await;
+    signup_verified(&server, &outbox, "bob@example.com").await;
+    let (_, alice) = server
+        .post(
+            "/api/v2/auth/login",
+            login_body("alice@example.com", OTHER_INSTALLATION),
+            None,
+        )
+        .await;
+    let alice_challenge = challenge_of(&alice);
+    let alice_code = last_code(&outbox, "alice@example.com").await;
+    let (_, bob) = server
+        .post(
+            "/api/v2/auth/login",
+            login_body("bob@example.com", OTHER_INSTALLATION),
+            None,
+        )
+        .await;
+    let bob_challenge = challenge_of(&bob);
+    // Alice's code does not open Bob's challenge (unless the codes collide).
+    let bob_code = last_code(&outbox, "bob@example.com").await;
+    if alice_code != bob_code {
+        let (status, _) = verify(&server, &bob_challenge, &alice_code).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
-    // The sixth attempt is refused even with the right code.
-    assert_eq!(
-        complete(&server, &pending, "code", &code(&secret, 0))
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-    server.close().await;
-
-    // With the default per-account limit, fresh challenges do not help either.
-    let server = TestServer::new(false).await;
-    let auth = server.register("brute2@example.test").await;
-    let user_id = auth["account"]["id"].as_str().unwrap().to_owned();
-    let (secret, _) = enable_two_factor(&server, &token(&auth)).await;
-    forget_used_step(&server, &user_id).await;
-    let mut limited = false;
-    for _ in 0..4 {
-        let pending = challenge(&server, "brute2@example.test").await;
-        for guess in 0..5 {
-            if complete(&server, &pending, "code", &format!("{guess:06}"))
-                .await
-                .0
-                == StatusCode::TOO_MANY_REQUESTS
-            {
-                limited = true;
-            }
-        }
-    }
-    assert!(limited, "per-account limiter must trip");
-    let pending = challenge(&server, "brute2@example.test").await;
-    assert_eq!(
-        complete(&server, &pending, "code", &code(&secret, 0))
-            .await
-            .0,
-        StatusCode::TOO_MANY_REQUESTS
-    );
-    server.close().await;
-}
-
-#[tokio::test]
-#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
-async fn disabling_two_factor_requires_password_and_a_valid_code() {
-    let server = TestServer::new(true).await;
-    let auth = server.register("disable@example.test").await;
-    let access = token(&auth);
-    let user_id = auth["account"]["id"].as_str().unwrap().to_owned();
-    let (secret, codes) = enable_two_factor(&server, &access).await;
-    forget_used_step(&server, &user_id).await;
-    let path = "/api/v2/account/two-factor/disable";
-    for body in [
-        json!({"password": PASSWORD}),
-        json!({"password": "WrongPass123", "code": code(&secret, 0)}),
-        json!({"password": PASSWORD, "code": "000000"}),
-        json!({"password": PASSWORD, "recoveryCode": "AAAAA-AAAAA"}),
+    // Unknown and malformed challenges.
+    for challenge in [
+        "sn2_e_unknownunknownunknownunknownunknown",
+        "not-a-token",
+        "",
     ] {
-        let (status, response) = server.post(path, body.clone(), Some(&access)).await;
+        let (status, _) = verify(&server, challenge, &alice_code).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // Resend is refused within a minute, and a resent code replaces the old one.
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/email/resend",
+            json!({"challengeToken": alice_challenge}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    sqlx::query("UPDATE email_challenges SET last_sent_at = last_sent_at - 120")
+        .execute(&server.state.pool)
+        .await
+        .unwrap();
+    let (status, body) = server
+        .post(
+            "/api/v2/auth/email/resend",
+            json!({"challengeToken": alice_challenge}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["emailHint"], "al****@example.com");
+    let resent = last_code(&outbox, "alice@example.com").await;
+    if resent != alice_code {
+        let (status, _) = verify(&server, &alice_challenge, &alice_code).await;
         assert_eq!(
             status,
             StatusCode::UNPROCESSABLE_ENTITY,
-            "{body}: {response}"
+            "the replaced code is dead"
         );
     }
-    assert_eq!(
-        server
-            .post(path, json!({"code": code(&secret, 0)}), Some(&access))
-            .await
-            .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    // Regenerating recovery codes invalidates the old ones.
-    let (status, fresh) = server
+    // Five wrong guesses burn the challenge, even with the right code after.
+    let wrong = if resent == "111111" {
+        "222222"
+    } else {
+        "111111"
+    };
+    for _ in 0..5 {
+        let (status, _) = verify(&server, &alice_challenge, wrong).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let (status, _) = verify(&server, &alice_challenge, &resent).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // An expired code is refused.
+    sqlx::query("UPDATE email_challenges SET expires_at = $1 WHERE consumed_at IS NULL")
+        .bind(now() - 1)
+        .execute(&server.state.pool)
+        .await
+        .unwrap();
+    let (status, _) = verify(&server, &bob_challenge, &bob_code).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn signing_out_another_computer_forgets_it() {
+    let (server, outbox) = TestServer::with_email().await;
+    let first = signup_verified(&server, &outbox, "owner@example.com").await;
+    let (_, body) = server
         .post(
-            "/api/v2/account/two-factor/recovery-codes",
-            json!({"password": PASSWORD, "recoveryCode": codes[1]}),
-            Some(&access),
+            "/api/v2/auth/login",
+            login_body("owner@example.com", OTHER_INSTALLATION),
+            None,
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{fresh}");
+    let challenge = challenge_of(&body);
+    let code = last_code(&outbox, "owner@example.com").await;
+    let (status, second) = verify(&server, &challenge, &code).await;
+    assert_eq!(status, StatusCode::OK);
+    let second_session = second["sessionId"].as_str().unwrap();
     let (status, _) = server
-        .post(
-            path,
-            json!({"password": PASSWORD, "recoveryCode": codes[2]}),
-            Some(&access),
+        .call(
+            Method::DELETE,
+            &format!("/api/v2/account/sessions/{second_session}"),
+            None,
+            Some(&token(&first)),
         )
         .await;
-    assert_eq!(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "old recovery code"
-    );
-    let new_code = fresh["recoveryCodes"][0].as_str().unwrap();
-    assert_eq!(
-        server
-            .post(
-                path,
-                json!({"password": PASSWORD, "recoveryCode": new_code}),
-                Some(&access)
-            )
-            .await
-            .0,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(server.login("disable@example.test").await.0, StatusCode::OK);
-    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM two_factor_recovery_codes")
+    assert!(status.is_success(), "{status}");
+    let (status, body) = server
+        .post(
+            "/api/v2/auth/login",
+            login_body("owner@example.com", OTHER_INSTALLATION),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    challenge_of(&body);
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn without_smtp_sign_in_needs_only_the_password_and_trusts_the_computer() {
+    let server = TestServer::new(false).await;
+    server.register("plain@example.com").await;
+    let (status, body) = server
+        .post(
+            "/api/v2/auth/login",
+            login_body("plain@example.com", OTHER_INSTALLATION),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let trusted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trusted_devices")
         .fetch_one(&server.state.pool)
         .await
         .unwrap();
-    assert_eq!(remaining, 0);
-    // Disabling twice is a conflict, not a silent success.
-    assert_eq!(
-        server
-            .post(
-                path,
-                json!({"password": PASSWORD, "code": code(&secret, 1)}),
-                Some(&access)
-            )
-            .await
-            .0,
-        StatusCode::CONFLICT
-    );
+    assert_eq!(trusted, 1);
     server.close().await;
 }
+
+// --- Guest access ----------------------------------------------------------
 
 struct GuestFixture {
     host_access: String,
@@ -914,7 +811,6 @@ async fn guest_token_is_scoped_to_one_session_and_needs_an_explicit_accept() {
     for path in [
         "/api/v2/account".to_owned(),
         "/api/v2/account/sessions".to_owned(),
-        "/api/v2/account/two-factor".to_owned(),
         "/api/v2/devices".to_owned(),
         "/api/v2/sharing".to_owned(),
         format!(

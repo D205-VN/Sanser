@@ -125,6 +125,16 @@ it.each([
   expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ kind: 'host', ...expected }));
 });
 
+it('passes the host\'s own blocked apps to the host engine, never a viewer field', async () => {
+  const settings = structuredClone(DEFAULT_PREFERENCES);
+  settings.host.blockedApps = [{ id: 'chrome.exe', name: 'Chrome' }, { id: 'com.apple.Safari', name: 'Safari' }];
+  await preferences.save(settings);
+  mocks.sessions.mockResolvedValue({ items: [{ ...target, blockedApps: [] }] });
+  await host.online(runtime);
+  await settle();
+  expect(mocks.launch).toHaveBeenCalledWith(expect.objectContaining({ kind: 'host', blockedApps: ['chrome.exe', 'com.apple.Safari'] }));
+});
+
 it('keeps unsupported Mac hosting offline and exposes a server upgrade reason', async () => {
   mocks.register.mockRejectedValueOnce(new ApiError('Server update required', 422, 'server_upgrade_required', 'test'));
   await expect(host.online(runtime)).rejects.toMatchObject({ code: 'server_upgrade_required' });
