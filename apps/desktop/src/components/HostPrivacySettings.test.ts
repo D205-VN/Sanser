@@ -37,7 +37,7 @@ it('says blocking local input is unavailable without the Windows helper or on ma
   expect(mocks.uac).toHaveBeenCalledTimes(1);
 });
 
-it('shows the stop-control hotkey for each host platform', async () => {
+it('shows the stop-control hotkey for each host platform', () => {
   const { unmount } = render(HostPrivacySettings, { runtime: runtime('windows') });
   expect(document.body.textContent).toContain('Ctrl+Alt+K');
   unmount();
