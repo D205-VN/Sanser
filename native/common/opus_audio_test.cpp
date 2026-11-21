@@ -78,6 +78,27 @@ int main() {
       (void)wifi.poll(clock);
     }
     check(wifi.reserveMs()>=30 && lateAfterWarmup==0,"Adaptive reserve did not absorb periodic 25ms jitter");
+    // Phone Wi-Fi power save, as measured: a ~100 ms delivery stall every
+    // 2 s, then the held blocks arrive together. The reserve must grow past
+    // the old 60 ms ceiling and the burst must not be flushed as stale.
+    Jitter spikes; std::uint64_t concealedBefore=0,droppedBefore=0;
+    std::vector<std::pair<Jitter::Clock::time_point,unsigned>> bursty;
+    for(unsigned i=0;i<4000;++i) {
+      const auto sent=i*5,window=sent/2000*2000;
+      const auto stalled=sent-window<100 ? window+100 : sent;
+      bursty.push_back({now+std::chrono::milliseconds(stalled),i});
+    }
+    std::sort(bursty.begin(),bursty.end());
+    next=0; clock=now;
+    for(unsigned tick=0;tick<20200;++tick,clock+=std::chrono::milliseconds(1)) {
+      while(next<bursty.size() && bursty[next].first<=clock) { spikes.push(make(bursty[next].second),clock); ++next; }
+      (void)spikes.poll(clock);
+      if(tick==6000) { concealedBefore=spikes.stats().concealed; droppedBefore=spikes.stats().dropped; }
+    }
+    check(spikes.reserveMs()>60,"Wi-Fi stalls could not grow the reserve past 60 ms");
+    // 2800 blocks after warm-up; allow the occasional calm-shrink retry.
+    check(spikes.stats().concealed-concealedBefore<=28 && spikes.stats().dropped-droppedBefore<=28,
+      "Audio kept concealing or dropping after adapting to 100 ms Wi-Fi stalls");
     // A calm path gives the delay back gradually, without PLC.
     Jitter calm; calm.push(packets[0],now);
     for(unsigned i=0;i<4;++i) (void)calm.poll(now+std::chrono::milliseconds(10+i*5));

@@ -130,6 +130,8 @@ private final class MobilePCM {
     init?(){guard let p=sanser_mobile_pcm_create() else{return nil};pointer=p}
     deinit{sanser_mobile_pcm_destroy(pointer)}
 }
+/// One line per microphone event (no audio content), for device consoles.
+func sanserVoiceLog(_ message:String){fputs("SANSER_VOICE \(message)\n",stderr);NSLog("SANSER_VOICE %@",message)}
 final class MobileAudio {
     private let queue=DispatchQueue(label:"SanserAudio",qos:.userInteractive)
     private var engine:AVAudioEngine?,source:AVAudioSourceNode?,pcm:MobilePCM?
@@ -140,13 +142,43 @@ final class MobileAudio {
     // Running engine without screen sound: keeps the session alive in the
     // background. Mixes with other apps so it never silences their music.
     private var keepingAlive=false
+    private var tapLogged=false,tapCallbacks:UInt64=0,tapFrames:UInt64=0
+    // Mic delivered on the hardware I/O cycle (~10 ms). An input tap batches
+    // ~100 ms under voice processing, which sent voice in 5-packet bursts.
+    private var sink:AVAudioSinkNode?
+    private var sinkPCM=[Int16](repeating:0,count:4096)
+    private var lastRebuild:TimeInterval=0
     private var closed=false
     private var observers=[NSObjectProtocol]()
     /// Echo-cancelled 48 kHz mono PCM, called on the input tap thread.
     var capture:((UnsafePointer<Int16>,Int)->Void)?
     init(){
+        // iOS stops the engine when it reconfigures audio (voice processing,
+        // volume/route events). Without a rebuild the microphone stayed dead
+        // while screen sound resumed through ensure().
+        observers.append(NotificationCenter.default.addObserver(forName:.AVAudioEngineConfigurationChange,object:nil,queue:nil){[weak self] note in
+            self?.queue.async{[weak self] in
+                guard let self=self,!self.closed,let engine=self.engine,(note.object as AnyObject?)===engine,!engine.isRunning else{return}
+                let now=ProcessInfo.processInfo.systemUptime
+                guard now-self.lastRebuild>=1 else{sanserVoiceLog("engine configuration change ignored (rebuilt <1 s ago)");return}
+                self.lastRebuild=now
+                sanserVoiceLog("engine configuration change: rebuilding mic=\(self.microphone)")
+                self.reset()
+                do{try self.start(mix:self.keepingAlive && !self.microphone)}catch{sanserVoiceLog("rebuild after configuration change failed: \(error)")}
+            }
+        })
         for name in [AVAudioSession.routeChangeNotification,AVAudioSession.mediaServicesWereResetNotification,AVAudioSession.interruptionNotification] {
-            observers.append(NotificationCenter.default.addObserver(forName:name,object:nil,queue:nil){[weak self] _ in
+            observers.append(NotificationCenter.default.addObserver(forName:name,object:nil,queue:nil){[weak self] note in
+                // Our own setCategory/voice processing posts categoryChange and
+                // routeConfigurationChange. Rebuilding on those restarted the
+                // engine every ~0.45 s with the mic open, so no microphone
+                // buffer was ever delivered. Only a real device change rebuilds;
+                // an engine iOS stopped is restarted by ensure() on the next block.
+                if name==AVAudioSession.routeChangeNotification {
+                    let raw=note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+                    let reason=AVAudioSession.RouteChangeReason(rawValue:raw)
+                    guard reason == .newDeviceAvailable || reason == .oldDeviceUnavailable else{return}
+                }
                 self?.queue.async{[weak self] in
                     guard let self=self else{return}
                     self.reset()
@@ -159,8 +191,8 @@ final class MobileAudio {
         // Touch inputNode only when the mic was open: creating it can switch
         // the audio session to recording.
         if let engine=engine{if converter != nil{engine.inputNode.removeTap(onBus:0)};engine.stop()}
-        for node in [source,voiceSource].compactMap({$0}){engine?.detach(node)}
-        source=nil;voiceSource=nil;engine=nil;pcm=nil;voicePCM=nil;converter=nil
+        for node in [source,voiceSource,sink].compactMap({$0 as AVAudioNode?}){engine?.detach(node)}
+        source=nil;voiceSource=nil;sink=nil;engine=nil;pcm=nil;voicePCM=nil;converter=nil
     }
     private static func node(_ ring:MobilePCM,_ format:AVAudioFormat)->AVAudioSourceNode{
         AVAudioSourceNode(format:format){_,_,count,list->OSStatus in
@@ -192,15 +224,46 @@ final class MobileAudio {
         engine.attach(voiceNode);engine.connect(voiceNode,to:engine.mainMixerNode,format:format)
         if microphone{
             let input=engine.inputNode,inputFormat=input.outputFormat(forBus:0)
-            guard inputFormat.sampleRate>0,let target=AVAudioFormat(commonFormat:.pcmFormatInt16,sampleRate:48000,channels:1,interleaved:true),
-                  let converter=AVAudioConverter(from:inputFormat,to:target) else{throw MobileError.socket}
-            self.converter=converter
-            input.installTap(onBus:0,bufferSize:1024,format:inputFormat){[weak self] buffer,_ in self?.captured(buffer,converter,target)}
+            guard inputFormat.sampleRate>0 else{throw MobileError.socket}
+            tapLogged=false;tapCallbacks=0;tapFrames=0
+            let direct=inputFormat.sampleRate==48000 && inputFormat.commonFormat == .pcmFormatFloat32 && !inputFormat.isInterleaved
+            sanserVoiceLog("mic start route=\(session.currentRoute.inputs.map{$0.portType.rawValue}) input=\(inputFormat) sessionRate=\(session.sampleRate) io=\(session.ioBufferDuration) path=\(direct ? "sink":"tap")")
+            if direct {
+                let sink=AVAudioSinkNode{[weak self] _,frames,list->OSStatus in self?.sunk(list,Int(frames));return noErr}
+                engine.attach(sink);engine.connect(input,to:sink,format:inputFormat);self.sink=sink
+            } else {
+                guard let target=AVAudioFormat(commonFormat:.pcmFormatInt16,sampleRate:48000,channels:1,interleaved:true),
+                      let converter=AVAudioConverter(from:inputFormat,to:target) else{throw MobileError.socket}
+                self.converter=converter
+                input.installTap(onBus:0,bufferSize:1024,format:inputFormat){[weak self] buffer,_ in self?.captured(buffer,converter,target)}
+            }
         }
         self.pcm=ring;self.voicePCM=voiceRing;self.source=node;self.voiceSource=voiceNode;self.engine=engine
         try engine.start()
     }
+    /// Realtime thread: 48 kHz Float32 channel 0 to Int16, no allocation.
+    private func sunk(_ list:UnsafePointer<AudioBufferList>,_ frames:Int){
+        tapCallbacks+=1;tapFrames+=UInt64(frames)
+        if !tapLogged{tapLogged=true;sanserVoiceLog("mic first buffer frames=\(frames) rate=48000 path=sink")}
+        else if tapCallbacks%3000==0{sanserVoiceLog("mic buffers=\(tapCallbacks) frames=\(tapFrames)")}
+        guard let capture=capture,frames>0 else{return}
+        let buffers=UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating:list))
+        guard let first=buffers.first,let data=first.mData else{return}
+        let samples=data.assumingMemoryBound(to:Float.self)
+        var offset=0
+        sinkPCM.withUnsafeMutableBufferPointer{out in
+            guard let base=out.baseAddress else{return}
+            while offset<frames {
+                let count=min(frames-offset,out.count)
+                for i in 0..<count{base[i]=Int16(max(-1,min(1,samples[offset+i]))*32767)}
+                capture(base,count);offset+=count
+            }
+        }
+    }
     private func captured(_ buffer:AVAudioPCMBuffer,_ converter:AVAudioConverter,_ target:AVAudioFormat){
+        tapCallbacks+=1;tapFrames+=UInt64(buffer.frameLength)
+        if !tapLogged{tapLogged=true;sanserVoiceLog("mic first buffer frames=\(buffer.frameLength) rate=\(buffer.format.sampleRate) sink=\(capture != nil)")}
+        else if tapCallbacks%500==0{sanserVoiceLog("mic buffers=\(tapCallbacks) frames=\(tapFrames)")}
         guard let capture=capture,buffer.frameLength>0 else{return}
         let capacity=AVAudioFrameCount(Double(buffer.frameLength)*48000/buffer.format.sampleRate)+64
         guard let output=AVAudioPCMBuffer(pcmFormat:target,frameCapacity:capacity) else{return}
@@ -209,17 +272,26 @@ final class MobileAudio {
             if supplied{state.pointee = .noDataNow;return nil}
             supplied=true;state.pointee = .haveData;return buffer
         }
-        guard status != .error,output.frameLength>0,let mono=output.int16ChannelData?[0] else{return}
+        guard status != .error,output.frameLength>0,let mono=output.int16ChannelData?[0] else{if tapCallbacks<5{sanserVoiceLog("mic convert failed status=\(status.rawValue) out=\(output.frameLength)")};return}
         capture(mono,Int(output.frameLength))
     }
-    private func ensure(mix:Bool=false) throws{if engine==nil || engine?.isRunning==false{reset();try start(mix:mix)}}
+    // A stopped engine (iOS pauses it after a configuration change) restarts
+    // in place; rebuilding it would reconfigure the session and stop it again.
+    private func ensure(mix:Bool=false) throws{
+        if let engine=engine{
+            if engine.isRunning{return}
+            if (try? engine.start()) != nil{return}
+            sanserVoiceLog("engine restart failed: rebuilding mic=\(microphone)")
+        }
+        reset();try start(mix:mix)
+    }
     func push(_ samples:[Int16]){queue.async{[weak self] in
         guard let self=self,!self.closed,!samples.isEmpty,samples.count%2==0 else{return}
         do {
             try self.ensure()
             guard let pcm=self.pcm else{return}
             samples.withUnsafeBufferPointer{sanser_mobile_pcm_push(pcm.pointer,$0.baseAddress,$0.count)}
-        }catch{self.reset()}
+        }catch{sanserVoiceLog("audio start failed: \(error)");self.reset()}
     }}
     func pushVoice(_ samples:[Int16]){queue.async{[weak self] in
         guard let self=self,!self.closed,!samples.isEmpty,samples.count%2==0 else{return}
@@ -234,7 +306,7 @@ final class MobileAudio {
     func voice(microphone:Bool){queue.async{[weak self] in
         guard let self=self,!self.closed,self.microphone != microphone else{return}
         self.microphone=microphone;self.reset()
-        do{try self.start()}catch{self.microphone=false;self.reset()}
+        do{try self.start()}catch{sanserVoiceLog("mic \(microphone ? "open":"close") failed: \(error)");self.microphone=false;self.reset()}
     }}
     /// Keeps the audio session running (silence when there is no sound) so
     /// iOS does not suspend Sanser while the session continues in the background.

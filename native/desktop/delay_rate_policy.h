@@ -59,7 +59,11 @@ public:
     // Three of the last four 250 ms probes, not every other one.
     const auto recent=std::count_if(elevated_.begin(),elevated_.end(),[&](const Sample& sample){return now-sample.at<=std::chrono::milliseconds(800);});
     const bool sustained=severeCount>=2 || recent>=3;
-    if(severe || sustained) quietUntil_=now+std::chrono::seconds(3);
+    // Only a standing queue holds recovery for long. A lone Wi-Fi spike (phone
+    // power save, AP aggregation) recurs every few seconds without any queue
+    // of ours; holding 3 s on each one pinned mobile video at the 1 Mbps floor.
+    if(sustained) quietUntil_=now+std::chrono::seconds(3);
+    else if(severe) quietUntil_=std::max(quietUntil_,now+std::chrono::milliseconds(750));
     if(!sustained || (reduced_ && now-lastReduction_<std::chrono::milliseconds(500))) return {};
     const auto floor=std::min(ceiling,1000000U);
     const auto target=std::clamp(static_cast<std::uint32_t>(current*(delay>=80 ? 0.60:0.85)),floor,ceiling);

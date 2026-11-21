@@ -119,8 +119,9 @@ struct Mixer::Impl {
     // Adaptive playout reserve: 20 ms start, +20 ms when a packet arrives
     // after its slot was concealed (by inserting one concealed packet, so no
     // speech is skipped), and -20 ms after 10 calm seconds by skipping one
-    // quiet packet. Bounded to 100 ms.
-    static constexpr unsigned minReserveMs=20,maxReserveMs=100;
+    // quiet packet. Bounded to 140 ms: phones on Wi-Fi power save stall
+    // ~100 ms every few seconds, which a 100 ms ceiling kept concealing.
+    static constexpr unsigned minReserveMs=20,maxReserveMs=140;
     OpusDecoder* decoder=nullptr;
     std::uint32_t generation=0;
     std::set<std::uint32_t> previous;
@@ -229,7 +230,9 @@ bool Mixer::receive(Packet packet,Clock::time_point now) {
   if(source.packets.empty() && !source.started) source.first=now;
   source.hear(packet.sequence);
   source.packets.emplace(packet.sequence,Mixer::Impl::Source::Entry{std::move(packet),now});
-  if(source.packets.size()>source.reserveMs/20+5) { while(source.packets.size()>3) { source.packets.erase(source.packets.begin()); ++source.stats.dropped; } source.started=false; source.chunk=4; source.stretch=0; source.first=now; opus_decoder_ctl(source.decoder,OPUS_RESET_STATE); }
+  // Room for the reserve plus one worst-case Wi-Fi burst; the held packets of a
+  // ~100 ms stall arrive together and must not be flushed as a stale backlog.
+  if(source.packets.size()>(source.reserveMs+Mixer::Impl::Source::maxReserveMs)/20+3) { while(source.packets.size()>3) { source.packets.erase(source.packets.begin()); ++source.stats.dropped; } source.started=false; source.chunk=4; source.stretch=0; source.first=now; opus_decoder_ctl(source.decoder,OPUS_RESET_STATE); }
   return true;
 }
 std::optional<desktop::AudioSamples> Mixer::poll(Clock::time_point now) {

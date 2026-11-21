@@ -36,7 +36,10 @@ public:
       used_=0;
       std::lock_guard lock(mutex_);
       if(epoch_!=epoch) return false;
-      if(captured_.size()>=8) captured_.pop_front();
+      // iOS voice processing delivers ~100 ms per tap (20 blocks); 8 dropped
+      // most of every callback. The worker drains each 5 ms; stale ones are
+      // still skipped by staleCapture.
+      if(captured_.size()>=48) captured_.pop_front();
       captured_.push_back({pending_,Clock::now()});
     }
     return true;

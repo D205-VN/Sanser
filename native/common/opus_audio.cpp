@@ -60,7 +60,9 @@ bool Jitter::push(Packet packet,Clock::time_point now) {
   if(!packets_.empty() && packet.sequence<packets_.rbegin()->first) ++stats_.reordered;
   if(packets_.empty() && !started_) first_=now;
   packets_.emplace(packet.sequence,Entry{std::move(packet),now});
-  if(packets_.size()>12) { stats_.dropped+=packets_.size()-3; while(packets_.size()>3) packets_.erase(packets_.begin()); started_=false; decoder_.reset(); first_=now; }
+  // Room for the current reserve plus one maximum-size Wi-Fi burst (blocks are
+  // 5 ms); beyond that the backlog is stale. Freshness still bounds latency.
+  if(packets_.size()>(reserveMs_+maxReserveMs)/5+4) { stats_.dropped+=packets_.size()-3; while(packets_.size()>3) packets_.erase(packets_.begin()); started_=false; decoder_.reset(); first_=now; }
   return true;
 }
 void Jitter::late(Clock::time_point now) {

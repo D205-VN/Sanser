@@ -344,6 +344,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             let microphone=joined && !deafened && args["microphone"] as? Bool == true
             let apply:(Bool)->Void={[weak self] allowed in
                 guard let self=self,self.session===native else{return result(nil)}
+                sanserVoiceLog("voice joined=\(joined) mic=\(microphone) deafened=\(deafened) permission=\(allowed)")
                 if microphone && !allowed{return result(FlutterError(code:"microphone_denied",message:"Sanser chưa được phép dùng micro. Hãy bật trong Cài đặt → Sanser → Micro.",details:nil))}
                 // Close the microphone before revoking consent, open it after granting.
                 if !microphone{self.audio?.voice(microphone:false)}

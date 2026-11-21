@@ -118,6 +118,18 @@ int main(){try{
     require(standing.observe(28,6,4000000,6000000,t+std::chrono::milliseconds(500))==3400000,"a sustained moderate delay rise must still reduce the rate");
     require(standing.recovering(t+std::chrono::seconds(1)),"a standing rise must hold recovery");
   }
+  {
+    // Measured on an iPhone over Wi-Fi: one 60-140 ms spike every ~2.5 s,
+    // healthy probes between. Each spike held recovery for 3 s, so the host
+    // stayed at 1 Mbps for the whole session and video arrived in bursts.
+    DelayRatePolicy policy;const auto t=Clock::now();
+    for(unsigned i=0;i<40;++i) {
+      const auto at=t+std::chrono::milliseconds(250*i);
+      require(!policy.observe(i%10==0 ? 110:9,7,1000000,6000000,at),"isolated Wi-Fi spikes cut the video rate");
+      if(i%10==0) require(policy.recovering(at+std::chrono::milliseconds(500)),"a large spike must briefly pause recovery");
+      else if(i%10>=4) require(!policy.recovering(at),"an isolated spike blocked recovery for seconds");
+    }
+  }
   const auto token=std::string(48,'r');receiverCodec=std::make_unique<PacketCodec>(token,false);
   std::unique_ptr<Peer> host,client;
   for(unsigned i=0;i<30 && !client;++i){
