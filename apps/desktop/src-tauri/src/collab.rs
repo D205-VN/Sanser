@@ -623,6 +623,14 @@ impl Hub {
         Self::record(&mut state, &wire, "self", true);
         Ok(state.seq)
     }
+    /// A notice from Sanser itself, sent as chat to every viewer. Ignored when
+    /// no viewer supports chat; the session continues either way.
+    pub fn announce(&self, text: &str) {
+        let _ = self.post(Outgoing::Chat {
+            name: "Sanser".into(),
+            text: text.into(),
+        });
+    }
     /// Host only: turn annotations on or off for the whole group.
     pub fn set_annotations(&self, enabled: bool) -> Result<(), DesktopError> {
         {
@@ -914,6 +922,29 @@ mod tests {
             hub.snapshot(0).events.is_empty(),
             "history survived the session"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn host_notice_reaches_viewers_and_stays_quiet_without_chat() -> Result<(), DesktopError> {
+        let (hub, commands) = hub(true);
+        hub.announce(crate::engine_user::CONTROL_REVOKED);
+        assert_eq!(
+            commands.try_iter().count(),
+            0,
+            "sent to a viewer without chat"
+        );
+        hub.observe_capability("-", true);
+        let _ = commands.try_iter().count();
+        hub.announce(crate::engine_user::CONTROL_REVOKED);
+        let (target, wire) = decode(&commands.try_recv().map_err(|_| unavailable())?);
+        assert_eq!(target, "*");
+        assert!(matches!(
+            wire,
+            Wire::Chat { ref name, ref text, .. }
+                if name == "Sanser" && text == crate::engine_user::CONTROL_REVOKED
+        ));
+        assert!(valid_chat(crate::engine_user::CONTROL_REVOKED));
         Ok(())
     }
 

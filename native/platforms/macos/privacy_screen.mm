@@ -6,7 +6,13 @@
 namespace sanser::desktop {
 namespace {
 std::atomic<bool> hotkeyPressed{false};
-OSStatus hotkeyHandler(EventHandlerCallRef,EventRef,void*) { hotkeyPressed=true; return noErr; }
+// Several hot keys share the application target; handle only this one.
+OSStatus hotkeyHandler(EventHandlerCallRef,EventRef event,void*) {
+  EventHotKeyID id{};
+  if(GetEventParameter(event,kEventParamDirectObject,typeEventHotKeyID,nullptr,sizeof(id),nullptr,&id)!=noErr || id.signature!='SNPV')
+    return eventNotHandledErr;
+  hotkeyPressed=true; return noErr;
+}
 }
 struct MacPrivacyScreen::Impl {
   NSMutableArray<NSWindow*>* windows=[NSMutableArray array];

@@ -6,6 +6,7 @@ add_library(sanser-native-windows STATIC
   backend.cpp
   privacy_screen.cpp
   blocked_apps.cpp
+  control_cutoff.cpp
   gamepad.cpp
   clipboard.cpp
   audio_player.cpp

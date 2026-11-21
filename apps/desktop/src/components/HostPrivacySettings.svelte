@@ -36,3 +36,7 @@
     : mac ? $t('To remove the black screen on this computer during a session, press Control+Option+Command+P. It also disappears when the session ends.')
     : $t('The black screen disappears when the session ends.')}</p>
 {/if}
+{#if windows || mac}
+  <p class="muted control-cutoff">{windows ? $t('Stop remote control: press Ctrl+Alt+K on this computer during a session. The viewer keeps seeing the screen but can no longer use the mouse or keyboard until the session ends.')
+    : $t('Stop remote control: press Control+Command+K on this computer during a session. The viewer keeps seeing the screen but can no longer use the mouse or keyboard until the session ends.')}</p>
+{/if}

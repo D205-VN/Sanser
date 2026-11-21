@@ -1,4 +1,5 @@
 #include "blocked_apps.h"
+#include "control_cutoff_policy.h"
 #include <dwmapi.h>
 #include <algorithm>
 #include <chrono>
@@ -125,6 +126,16 @@ std::vector<Rect> computeMask(State& s) {
   return rects;
 }
 
+// A key-up, or a button-up without any press or wheel step.
+bool isRelease(const INPUT& input) {
+  if(input.type==INPUT_KEYBOARD) return (input.ki.dwFlags & KEYEVENTF_KEYUP)!=0;
+  if(input.type!=INPUT_MOUSE) return false;
+  constexpr DWORD releases=MOUSEEVENTF_LEFTUP|MOUSEEVENTF_RIGHTUP|MOUSEEVENTF_MIDDLEUP|MOUSEEVENTF_XUP;
+  constexpr DWORD presses=MOUSEEVENTF_LEFTDOWN|MOUSEEVENTF_RIGHTDOWN|MOUSEEVENTF_MIDDLEDOWN|
+                          MOUSEEVENTF_XDOWN|MOUSEEVENTF_WHEEL|MOUSEEVENTF_HWHEEL;
+  return (input.mi.dwFlags & releases)!=0 && (input.mi.dwFlags & presses)==0;
+}
+
 bool isPress(const MOUSEINPUT& mouse) {
   constexpr DWORD presses = MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_MIDDLEDOWN |
                             MOUSEEVENTF_XDOWN | MOUSEEVENTF_WHEEL | MOUSEEVENTF_HWHEEL;
@@ -195,6 +206,10 @@ std::vector<Rect> windowsMask() {
 }
 
 bool windowsInputAllowed(const INPUT* inputs, UINT count) {
+  // Ctrl+Alt+K at the host: only releases pass for the rest of the session.
+  if(cutoff::revoked() && inputs) {
+    for(UINT i=0;i<count;++i) if(!cutoff::allows(isRelease(inputs[i]))) return false;
+  }
   auto& s = state();
   std::lock_guard lock(s.mutex);
   if (s.list.empty() || !inputs || count == 0) return true;

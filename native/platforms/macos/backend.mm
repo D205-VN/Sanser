@@ -16,6 +16,7 @@
 #include "audio_player.h"
 #include "input_injector.h"
 #include "privacy_screen.h"
+#include "control_cutoff.h"
 #include "blocked_apps.h"
 #include "clipboard.h"
 #include "latest_frame_worker.h"
@@ -664,6 +665,8 @@ int runMac(bool host,int argc,char** argv) {
         // Host-local blocked apps: hidden from capture, not usable remotely.
         MacBlockedApps blockedApps(options.blockedApps,CGRectZero);
         if(blockedApps.enabled()) std::cerr<<"SNBLOCKED apps="<<options.blockedApps.size()<<" platform=macos"<<std::endl;
+        // Control+Command+K at this Mac ends remote input for the session.
+        MacControlCutoff controlCutoff(options.input);
         __block SCShareableContent* content=nil;
         auto readContent=^(CaptureCompletion complete) {
           [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent* value,NSError* error) {
@@ -708,7 +711,7 @@ int runMac(bool host,int argc,char** argv) {
         peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
         voice::PlaybackTap originalSound(voice::RenderSource::External);
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
-        peer.onInput=[&](Input event) { if(blockedApps.allow(event)) injector.apply(event); };
+        peer.onInput=[&](Input event) { if(MacControlCutoff::allow(event) && blockedApps.allow(event)) injector.apply(event); };
         peer.onClipboard=platformClipboard;
         SanserCapture* capture=[SanserCapture new]; capture.encoder=&encoder;
         capture.audio=&audio;
@@ -756,6 +759,7 @@ int runMac(bool host,int argc,char** argv) {
         while(peer.running() && !capture.failed && !encoder.failed()) {
           peer.pumpControl();
           privacy.update(peer.ready());
+          controlCutoff.update();
           if(const auto index=peer.takeDisplayRequest(); index && *index<screens.count && *index!=displays.selected) {
             // Re-target the same stream: new display, size and pointer bounds,
             // then a fresh IDR at the new size (stale-size captures are dropped).

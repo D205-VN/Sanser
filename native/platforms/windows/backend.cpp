@@ -36,6 +36,7 @@
 #include "controller_input.h"
 #include "desktop_duplication.h"
 #include "privacy_screen.h"
+#include "control_cutoff.h"
 #include "blocked_apps.h"
 #include "../../windows-uac/client.h"
 #include "mf_video_packet_encoder.h"
@@ -641,6 +642,8 @@ int runWindows(bool host,int argc,char** argv) {
     if(displays.valid()) peer.setDisplays(displays);
     WindowsPrivacyScreen privacy(options.privacyScreen,options.privacyBlockInput);
     WindowsGamepad gamepad(options.input && !options.sharing);
+    // Ctrl+Alt+K at this PC ends remote input for the session.
+    WindowsControlCutoff controlCutoff(options.input);
     VideoPacketEncodeOptions encoding; encoding.fps=options.fps; encoding.bitrate=options.bitrate; encoding.codec=VideoCodec::H264;
     encoding.live=options.sharing || options.ultraLowLatency;
     encoding.gpuDevice=encoding.live ? display.gpuDevice() : nullptr;
@@ -653,7 +656,7 @@ int runWindows(bool host,int argc,char** argv) {
     peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
     peer.onGamepadAvailable=[&]{return gamepad.available();};
     peer.onInput=[&](Input event) {
-      if(event.kind==Input::Gamepad){(void)gamepad.apply(event.gamepad);return;}
+      if(event.kind==Input::Gamepad){(void)gamepad.apply(sanser::cutoff::revoked() ? decltype(event.gamepad){} : event.gamepad);return;}
       if(event.kind==Input::Reset)(void)gamepad.apply({});
       injector.apply(event);
     };peer.onClipboard=platformClipboard; HostOutputStop shutdown{peer}; peer.start();

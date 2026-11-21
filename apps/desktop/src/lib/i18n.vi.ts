@@ -830,6 +830,8 @@ export const VI: Record<string, string> = {
   "Unavailable on this operating system.": "Không khả dụng trên hệ điều hành này.",
   "To remove the black screen on this computer during a session, press Ctrl+Alt+Shift+P. It also disappears when the session ends.": "Để gỡ màn hình đen trên máy này trong phiên, nhấn Ctrl+Alt+Shift+P. Màn hình đen cũng tự biến mất khi phiên kết thúc.",
   "To remove the black screen on this computer during a session, press Control+Option+Command+P. It also disappears when the session ends.": "Để gỡ màn hình đen trên máy này trong phiên, nhấn Control+Option+Command+P. Màn hình đen cũng tự biến mất khi phiên kết thúc.",
+  "Stop remote control: press Ctrl+Alt+K on this computer during a session. The viewer keeps seeing the screen but can no longer use the mouse or keyboard until the session ends.": "Ngắt quyền điều khiển: trong phiên, nhấn Ctrl+Alt+K trên máy này. Người xem vẫn thấy màn hình nhưng không dùng được chuột và bàn phím nữa cho tới khi phiên kết thúc.",
+  "Stop remote control: press Control+Command+K on this computer during a session. The viewer keeps seeing the screen but can no longer use the mouse or keyboard until the session ends.": "Ngắt quyền điều khiển: trong phiên, nhấn Control+Command+K trên máy này. Người xem vẫn thấy màn hình nhưng không dùng được chuột và bàn phím nữa cho tới khi phiên kết thúc.",
   "The black screen disappears when the session ends.": "Màn hình đen sẽ biến mất khi phiên kết thúc.",
   // In-session chat and annotation
   "Sanser · New message": "Sanser · Tin nhắn mới",

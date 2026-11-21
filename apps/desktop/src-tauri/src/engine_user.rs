@@ -170,6 +170,10 @@ impl Drop for Request {
         }
     }
 }
+/// Chat notice sent once when the host ends remote control for the session.
+pub const CONTROL_REVOKED: &str = "Máy host đã tắt quyền điều khiển trong phiên này. \
+     The host turned off remote control for this session.";
+
 fn invalid() -> DesktopError {
     DesktopError::InvalidRequest("Unsupported or oversized text payload".into())
 }
@@ -344,6 +348,12 @@ impl UserControl {
         let Some(position) = line.find("SNUSER_") else {
             return;
         };
+        // The person at the host pressed the "take back control" hotkey
+        // (Ctrl+Alt+K / Control+Command+K). Tell the viewers.
+        if line[position..].trim_end_matches(['\n', '\r']) == "SNUSER_CONTROL\trevoked" {
+            self.collab.announce(CONTROL_REVOKED);
+            return;
+        }
         if line[position..].starts_with("SNUSER_COLLAB") {
             let fields = line[position..]
                 .trim_end_matches(['\n', '\r'])

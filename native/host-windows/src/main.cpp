@@ -4,6 +4,7 @@
 #include "bmp_writer.h"
 #include "desktop_duplication.h"
 #include "../../platforms/windows/privacy_screen.h"
+#include "../../platforms/windows/control_cutoff.h"
 #include "../../platforms/windows/blocked_apps.h"
 #include "../../windows-uac/client.h"
 #include "../../windows-uac/input_test.h"
@@ -7776,6 +7777,10 @@ int main(int argc, char** argv) {
       privacy->update(true);
     }
     gRemoteInputAllowed.store(options.remoteInputEnabled, std::memory_order_relaxed);
+    // Ctrl+Alt+K at this PC ends remote input for the session.
+    std::unique_ptr<sanser::desktop::WindowsControlCutoff> controlCutoff;
+    if (options.encodePipe && options.remoteInputEnabled)
+      controlCutoff = std::make_unique<sanser::desktop::WindowsControlCutoff>(true);
     if (options.sessionToken.empty()) {
       if (const char* token = std::getenv("SANSER_NATIVE_SESSION_TOKEN")) {
         options.sessionToken = token;

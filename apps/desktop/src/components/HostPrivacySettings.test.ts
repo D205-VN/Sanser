@@ -36,3 +36,11 @@ it('says blocking local input is unavailable without the Windows helper or on ma
   expect(screen.getByText(/Control\+Option\+Command\+P/)).toBeInTheDocument();
   expect(mocks.uac).toHaveBeenCalledTimes(1);
 });
+
+it('shows the stop-control hotkey for each host platform', async () => {
+  const { unmount } = render(HostPrivacySettings, { runtime: runtime('windows') });
+  expect(document.body.textContent).toContain('Ctrl+Alt+K');
+  unmount();
+  render(HostPrivacySettings, { runtime: runtime('macOS') });
+  expect(document.body.textContent).toContain('Control+Command+K');
+});
