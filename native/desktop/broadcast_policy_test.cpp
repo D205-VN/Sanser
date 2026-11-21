@@ -3,6 +3,16 @@
 #include <iostream>
 #include <stdexcept>
 using namespace sanser::desktop;
+// The simulated clock steps through an opaque call, as production reads
+// Clock::now(). MSVC 19.44 and 19.52 at /O2 passed observe() a stale `now`
+// when it was advanced in place inside these loops, so Release builds failed
+// probe checks that Debug, /O1 and Clang pass.
+#if defined(_MSC_VER)
+__declspec(noinline)
+#elif defined(__GNUC__)
+__attribute__((noinline))
+#endif
+SharingDeliveryPolicy::Clock::time_point later(SharingDeliveryPolicy::Clock::time_point at,SharingDeliveryPolicy::Clock::duration step) { return at+step; }
 void check(bool ok,const char* why) { if(!ok) throw std::runtime_error(why); }
 int main() {
   try {
@@ -11,7 +21,7 @@ int main() {
     P policy, healthy; P::Sample sample;
     policy.observe(now,sample); healthy.observe(now,sample);
     for(unsigned i=0;i<16 && policy.state()==P::Active;++i) {
-      now+=std::chrono::milliseconds(500);
+      now=later(now,std::chrono::milliseconds(500));
       sample.submitted+=30; sample.replaced+=20; sample.feedbackFresh=true;
       sample.feedbackCongested=true; ++sample.feedbackSerial; ++sample.sentFrame;
       policy.observe(now,sample);
@@ -23,46 +33,46 @@ int main() {
     const auto pausedAt=now;
     sample.feedbackCongested=false;
     // Silence is never treated as restored bandwidth.
-    now+=std::chrono::seconds(2); policy.observe(now,sample);
+    now=later(now,std::chrono::seconds(2)); policy.observe(now,sample);
     check(policy.state()==P::Paused,"cooldown retains the paused state");
-    now=pausedAt+std::chrono::seconds(3); policy.observe(now,sample);
+    now=later(pausedAt,std::chrono::seconds(3)); policy.observe(now,sample);
     check(policy.state()==P::Probing && policy.sendsVideo() && !policy.affectsBitrate(),"recovery probe stays outside the shared bitrate minimum");
     for(unsigned i=0;i<6;++i) {
-      now+=std::chrono::milliseconds(500); ++sample.feedbackSerial; sample.deliveredBytes=1000;
+      now=later(now,std::chrono::milliseconds(500)); ++sample.feedbackSerial; sample.deliveredBytes=1000;
       policy.observe(now,sample);
     }
     check(policy.state()==P::Paused && policy.pauses()==2,"received fragments without a completed new frame cannot restore the viewer");
     const auto failedAt=now;
-    now+=std::chrono::seconds(5); policy.observe(now,sample);
+    now=later(now,std::chrono::seconds(5)); policy.observe(now,sample);
     check(policy.state()==P::Paused,"a failed probe increases cooldown to six seconds");
-    now=failedAt+std::chrono::seconds(6); policy.observe(now,sample);
+    now=later(failedAt,std::chrono::seconds(6)); policy.observe(now,sample);
     check(policy.state()==P::Probing,"viewer retains a later recovery opportunity");
     sample.completedFrame=sample.sentFrame+1;
     for(unsigned i=0;i<3;++i) {
-      now+=std::chrono::milliseconds(500); ++sample.feedbackSerial;
+      now=later(now,std::chrono::milliseconds(500)); ++sample.feedbackSerial;
       policy.observe(now,sample);
     }
     check(policy.state()==P::Active && policy.affectsBitrate(),"only proven frame progress and three clean feedback windows restore quality participation");
     P backoff; P::Sample retries; backoff.observe(now,retries);
-    for(unsigned i=0;i<18;++i) { now+=std::chrono::milliseconds(500); retries.backoffMs=2000; backoff.observe(now,retries); }
+    for(unsigned i=0;i<18;++i) { now=later(now,std::chrono::milliseconds(500)); retries.backoffMs=2000; backoff.observe(now,retries); }
     check(backoff.state()==P::Paused,"persistent maximum IDR backoff isolates a viewer even without queue replacements");
     P recovered; P::Sample advancing; recovered.observe(now,advancing);
     for(unsigned i=0;i<40;++i) {
-      now+=std::chrono::milliseconds(500);
+      now=later(now,std::chrono::milliseconds(500));
       advancing.backoffMs=2000; advancing.feedbackFresh=true; ++advancing.feedbackSerial;
       advancing.sentFrame+=30; advancing.completedFrame=advancing.sentFrame; advancing.deliveredBytes=100000;
       recovered.observe(now,advancing);
     }
     check(recovered.state()==P::Active && recovered.pauses()==0,"old IDR backoff must not pause a viewer with fresh clean completed-frame progress");
     P gap; P::Sample pressure; gap.observe(now,pressure);
-    now+=std::chrono::milliseconds(500); pressure.submitted=30; pressure.referenceDrops=30; gap.observe(now,pressure);
-    now+=std::chrono::seconds(20); pressure.submitted+=30; pressure.referenceDrops+=30; gap.observe(now,pressure);
+    now=later(now,std::chrono::milliseconds(500)); pressure.submitted=30; pressure.referenceDrops=30; gap.observe(now,pressure);
+    now=later(now,std::chrono::seconds(20)); pressure.submitted+=30; pressure.referenceDrops+=30; gap.observe(now,pressure);
     check(gap.state()==P::Active,"a suspended host clock/sample gap is not continuous pressure");
     // Pictures skipped while a viewer awaits an IDR are recovery, not a slow
     // viewer (2.3.10 field log: 1617 of 3195 frames, nine pauses in 4 min).
     P waiting; P::Sample idr; waiting.observe(now,idr);
     for(unsigned i=0;i<30;++i) {
-      now+=std::chrono::milliseconds(500);
+      now=later(now,std::chrono::milliseconds(500));
       idr.submitted+=30; idr.referenceDrops+=20; idr.feedbackFresh=true; ++idr.feedbackSerial;
       idr.sentFrame+=10; idr.completedFrame=idr.sentFrame;
       waiting.observe(now,idr);
@@ -71,15 +81,15 @@ int main() {
     // A probe opens with an IDR burst: one congested window must not fail it.
     P probe; P::Sample burst; probe.observe(now,burst);
     for(unsigned i=0;i<16 && probe.state()==P::Active;++i) {
-      now+=std::chrono::milliseconds(500); burst.submitted+=30; burst.replaced+=20; probe.observe(now,burst);
+      now=later(now,std::chrono::milliseconds(500)); burst.submitted+=30; burst.replaced+=20; probe.observe(now,burst);
     }
     check(probe.state()==P::Paused,"overflowing queue still pauses");
-    now+=std::chrono::seconds(3); probe.observe(now,burst);
+    now=later(now,std::chrono::seconds(3)); probe.observe(now,burst);
     check(probe.state()==P::Probing,"first retry after three seconds");
-    now+=std::chrono::milliseconds(500); burst.feedbackFresh=true; burst.feedbackCongested=true; ++burst.feedbackSerial; probe.observe(now,burst);
+    now=later(now,std::chrono::milliseconds(500)); burst.feedbackFresh=true; burst.feedbackCongested=true; ++burst.feedbackSerial; probe.observe(now,burst);
     check(probe.state()==P::Probing,"a single congested IDR window keeps probing");
     burst.feedbackCongested=false; burst.deliveredBytes=50000; burst.completedFrame=burst.sentFrame+1;
-    for(unsigned i=0;i<3;++i) { now+=std::chrono::milliseconds(500); ++burst.feedbackSerial; probe.observe(now,burst); }
+    for(unsigned i=0;i<3;++i) { now=later(now,std::chrono::milliseconds(500)); ++burst.feedbackSerial; probe.observe(now,burst); }
     check(probe.state()==P::Active,"probe recovers after the IDR window");
     TxScheduler tx;
     check(tx.push(TxScheduler::Video,{{1},now,1}),"queue fresh video");
