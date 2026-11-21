@@ -49,7 +49,18 @@ update Sanser.
 
 ## Server configuration
 
-Email is sent over SMTP. Set these variables on the server (never commit them):
+Set these variables on the server (never commit them). Resend is the simplest
+choice: it sends over HTTPS, so it also works where outgoing mail ports are
+blocked, such as Render's free plan.
+
+**Resend (preferred)**
+
+| Variable | Meaning |
+| --- | --- |
+| `RESEND_API_KEY` | A Resend API key with sending access. Turns email codes on. |
+| `EMAIL_FROM` | Sender on a domain verified in Resend, e.g. `Sanser <no-reply@example.com>`. `SMTP_FROM` is used when it is not set. |
+
+**SMTP (used only when `RESEND_API_KEY` is not set)**
 
 | Variable | Meaning |
 | --- | --- |
@@ -59,8 +70,15 @@ Email is sent over SMTP. Set these variables on the server (never commit them):
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | Login for the mail server, set together. For Gmail use an app password, not the account password. |
 | `SMTP_FROM` | Sender, e.g. `Sanser <no-reply@example.com>` |
 
-Without `SMTP_HOST` the server logs a warning at startup, signs in with the
+Render's free plan blocks outgoing connections to ports 25, 465 and 587, so
+Gmail SMTP times out there. Use Resend, or an SMTP provider that also listens
+on port 2525, for example Brevo: `SMTP_HOST=smtp-relay.brevo.com`,
+`SMTP_PORT=2525`, `SMTP_SECURITY=starttls`, the Brevo SMTP login and SMTP key
+as username and password, and a sender verified in Brevo as `SMTP_FROM`.
+
+Without either service the server logs a warning at startup, signs in with the
 password alone and creates accounts without confirming the address. It still
-remembers each computer that signs in, so enabling SMTP later does not ask
-already-used computers for a code. If sending fails, sign-in and sign-up
-answer 503 and nothing is created.
+remembers each computer that signs in, so enabling email later does not ask
+already-used computers for a code. If sending fails or takes longer than 8
+seconds, sign-in and sign-up answer 503 and nothing is created; the reason
+(for example an unverified Resend domain) is in the server log.

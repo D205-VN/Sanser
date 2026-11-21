@@ -37,8 +37,12 @@ impl AppState {
         let general_limit = config.general_rate_limit_per_minute;
         let login_limit = config.login_rate_limit_per_ten_minutes;
         let (events, _) = broadcast::channel(256);
-        let mailer = crate::mailer::Mailer::from_config(config.smtp.as_ref()).unwrap_or_else(|error| {
-            tracing::error!(error = %error, "SMTP configuration is unusable; email codes are off");
+        let mailer = crate::mailer::Mailer::from_config(
+            config.resend.as_ref(),
+            config.smtp.as_ref(),
+        )
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "email configuration is unusable; email codes are off");
             crate::mailer::Mailer::Disabled
         });
         Self {

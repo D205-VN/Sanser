@@ -39,9 +39,26 @@ pub struct Config {
     pub native_base_port: u16,
     pub session_credential_ttl: Duration,
     pub(crate) session_credential_key: Arc<Zeroizing<Vec<u8>>>,
-    /// Outgoing mail for sign-in and sign-up codes. Without it the server
-    /// does not ask for email codes (see docs/email-verification.md).
+    /// Outgoing mail for sign-in and sign-up codes. Without either the
+    /// server does not ask for email codes (see docs/email-verification.md).
+    /// Resend is used when both are set.
+    pub resend: Option<ResendConfig>,
     pub smtp: Option<SmtpConfig>,
+}
+
+/// Resend's HTTPS email API. It needs no SMTP port, so it also works on hosts
+/// that block outgoing mail ports (Render's free plan).
+#[derive(Clone)]
+pub struct ResendConfig {
+    pub(crate) api_key: Arc<Zeroizing<String>>,
+    /// Sender on a domain verified in Resend, e.g. `Sanser <no-reply@example.com>`.
+    pub from: String,
+}
+
+impl ResendConfig {
+    pub fn api_key(&self) -> &str {
+        self.api_key.as_str()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +122,7 @@ impl Config {
         let database_url = required_env("DATABASE_URL")?;
         validate_neon_database_url(&database_url, false)?;
         let session_credential_key = session_credential_key_from_env()?;
+        let resend = resend_from_env()?;
         let smtp = smtp_from_env()?;
         let allowed_origins = parse_origins(&env_or(
             "ALLOWED_ORIGINS",
@@ -189,6 +207,7 @@ impl Config {
                 "60",
             )?),
             session_credential_key,
+            resend,
             smtp,
         };
         config.validate()?;
@@ -226,6 +245,7 @@ impl Config {
             native_base_port: 50_000,
             session_credential_ttl: Duration::from_secs(60),
             session_credential_key: Arc::new(Zeroizing::new(vec![0xA5; 32])),
+            resend: None,
             smtp: None,
         };
         config.validate()?;
@@ -491,6 +511,34 @@ fn required_env(name: &str) -> Result<String, ConfigError> {
     optional_env(name).ok_or_else(|| ConfigError::Invalid(format!("{name} is required")))
 }
 
+fn valid_sender(from: &str) -> bool {
+    from.parse::<lettre::message::Mailbox>().is_ok()
+}
+
+fn resend_from_env() -> Result<Option<ResendConfig>, ConfigError> {
+    let Some(api_key) = env::var("RESEND_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let from = optional_env("EMAIL_FROM")
+        .or_else(|| optional_env("SMTP_FROM"))
+        .ok_or_else(|| {
+            ConfigError::Invalid("EMAIL_FROM is required when RESEND_API_KEY is set".into())
+        })?;
+    if !valid_sender(&from) {
+        return Err(ConfigError::Invalid(
+            "EMAIL_FROM must be an address such as Sanser <no-reply@example.com>".into(),
+        ));
+    }
+    Ok(Some(ResendConfig {
+        api_key: Arc::new(Zeroizing::new(api_key)),
+        from,
+    }))
+}
+
 fn smtp_from_env() -> Result<Option<SmtpConfig>, ConfigError> {
     let Some(host) = optional_env("SMTP_HOST") else {
         return Ok(None);
@@ -526,7 +574,7 @@ fn smtp_from_env() -> Result<Option<SmtpConfig>, ConfigError> {
     }
     let from = required_env("SMTP_FROM")
         .map_err(|_| ConfigError::Invalid("SMTP_FROM is required when SMTP_HOST is set".into()))?;
-    if from.parse::<lettre::message::Mailbox>().is_err() {
+    if !valid_sender(&from) {
         return Err(ConfigError::Invalid(
             "SMTP_FROM must be an address such as Sanser <no-reply@example.com>".into(),
         ));
