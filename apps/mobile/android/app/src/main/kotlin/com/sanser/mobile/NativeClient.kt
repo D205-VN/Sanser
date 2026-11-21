@@ -21,6 +21,7 @@ class NativeClient(
     private external fun mute(handle: Long, value: Boolean)
     private external fun text(handle: Long, utf8: ByteArray): Boolean
     private external fun textAvailable(handle: Long): Boolean
+    private external fun remoteControlOff(handle: Long): Boolean
     private external fun clipboardAvailable(handle: Long): Boolean
     private external fun gamepadCapture(handle:Long,capture:Long,enabled:Boolean):Boolean
     private external fun gamepadStatus(handle:Long,capture:Long):Int
@@ -66,6 +67,7 @@ class NativeClient(
     @Synchronized fun mute(value: Boolean) { if (handle != 0L) mute(handle, value) }
     @Synchronized fun text(value: String): Boolean = handle != 0L && text(handle,value.toByteArray(Charsets.UTF_8))
     @Synchronized fun textAvailable(): Boolean = handle != 0L && textAvailable(handle)
+    @Synchronized fun remoteControlOff(): Boolean = handle != 0L && remoteControlOff(handle)
     @Synchronized fun clipboardAvailable():Boolean=handle!=0L && clipboardAvailable(handle)
     @Synchronized fun clipboard(write:Boolean,text:String,reply:(Int,String)->Unit):Boolean {
         if(handle==0L)return false

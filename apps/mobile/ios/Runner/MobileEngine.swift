@@ -67,6 +67,7 @@ final class NativeMobileSession {
     func input(kind:UInt32,x:UInt32=0,y:UInt32=0,code:UInt32=0,delta:Int32=0,down:Bool=false){lock.lock();defer{lock.unlock()};sanser_mobile_input(client,kind,x,y,code,delta,down ? 1:0)}
     func mute(_ value:Bool){lock.lock();defer{lock.unlock()};sanser_mobile_mute(client,value ? 1:0)}
     func textAvailable()->Bool{lock.lock();defer{lock.unlock()};return sanser_mobile_text_available(client) != 0}
+    func remoteControlOff()->Bool{lock.lock();defer{lock.unlock()};return sanser_mobile_remote_control_off(client) != 0}
     func clipboardAvailable()->Bool{lock.lock();defer{lock.unlock()};return sanser_mobile_clipboard_available(client) != 0}
     func gamepadCapture(_ capture:Int,_ enabled:Bool)->Bool{lock.lock();defer{lock.unlock()};guard capture>0 else{return false};return sanser_mobile_gamepad_capture(client,UInt64(capture),enabled ? 1:0) != 0}
     func gamepadStatus(_ capture:Int=0)->UInt32{lock.lock();defer{lock.unlock()};return sanser_mobile_gamepad_status(client,UInt64(max(0,capture)))}
@@ -397,7 +398,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             let capture=gamepadCapture;stopController()
             sink?(["state":"controller","sessionId":id,"engineAttempt":engineAttempt,"captureId":capture,"paused":true])
         }
-        var data:[String:Any]=["sessionId":id,"engineAttempt":engineAttempt,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};data["unicodeInput"]=session?.textAvailable() == true;data["clipboard"]=session?.clipboardAvailable() == true;data["collab"]=session?.collabAvailable() == true;data["gamepad"]=((session?.gamepadStatus() ?? 0)&1) != 0;if let stats=session?.stats(){for(key,value) in stats{data[key]=value}}
+        var data:[String:Any]=["sessionId":id,"engineAttempt":engineAttempt,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};data["unicodeInput"]=session?.textAvailable() == true;data["remoteControlOff"]=session?.remoteControlOff() == true;data["clipboard"]=session?.clipboardAvailable() == true;data["collab"]=session?.collabAvailable() == true;data["gamepad"]=((session?.gamepadStatus() ?? 0)&1) != 0;if let stats=session?.stats(){for(key,value) in stats{data[key]=value}}
         if let stats=video?.stats(){for(key,value) in stats{data[key]=value}}
         videoHealth.record(data);sink?(data)}
     private func fail(_ message:String){emit("stopped",message:message);disconnect()}

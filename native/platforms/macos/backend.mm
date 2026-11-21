@@ -903,8 +903,9 @@ int runMac(bool host,int argc,char** argv) {
         if(view.textMode) [view validateTextSession];
         if(options.input && view.inputEnabled!=peer.inputAvailable()) {
           view.inputEnabled=peer.inputAvailable(); view.released=YES;
-          window.title=view.inputEnabled ? @"Sanser · Input restored · Click to resume" : peer.capturePaused() ? @"Sanser · Host capture temporarily unavailable · Check UAC on the host" : @"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists";
+          window.title=view.inputEnabled ? @"Sanser · Input restored · Click to resume" : peer.remoteControlOff() ? @"Sanser · Máy host đã tắt điều khiển từ xa · The host turned remote control off" : peer.capturePaused() ? @"Sanser · Host capture temporarily unavailable · Check UAC on the host" : @"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists";
         }
+        if(options.input) view.pointerHidden=peer.remoteControlOff();
         [view refreshTextControls];
         [shortcuts refresh];
         [controller refresh];

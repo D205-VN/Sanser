@@ -945,6 +945,7 @@ mod tests {
                 if name == "Sanser" && text == crate::engine_user::CONTROL_REVOKED
         ));
         assert!(valid_chat(crate::engine_user::CONTROL_REVOKED));
+        assert!(valid_chat(crate::engine_user::CONTROL_RESTORED));
         Ok(())
     }
 

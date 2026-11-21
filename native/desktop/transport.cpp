@@ -5,6 +5,7 @@
 #include "text_input.h"
 #include "user_ipc.h"
 #include "session_shortcuts.h"
+#include "../common/control_cutoff_policy.h"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -725,7 +726,11 @@ bool Peer::queueShortcut(std::span<const std::uint16_t> keys,std::uint32_t expec
   sendReady_.notify_one();return true;
 }
 bool Peer::queueInput(const Input& input) {
-  if (!running_ || !ready_ || !inputAvailable() || options_.host) return false;
+  if (!running_ || !ready_ || options_.host) return false;
+  // While the host has remote control off, only "release everything" passes,
+  // so nothing the viewer was holding stays pressed at the host.
+  const bool releaseAll=input.kind==Input::Reset && remoteControlOff_ && options_.input && !options_.sharing;
+  if (!inputAvailable() && !releaseAll) return false;
   if(input.kind==Input::Gamepad)return false; // Only negotiated latest-state path.
   if(input.kind==Input::Text && !textAvailable()) return false;
   // Never reserve a reliable sequence for an unsupported OS key/event. A
@@ -1050,6 +1055,9 @@ void Peer::process(const Bytes& bytes) {
     if(b==Bytes({'S','I','C','1'})) { peerInputRecovery_=true; return; }
     if(!options_.host && b.size()==5 && std::memcmp(b.data(),"SCP1",4)==0 && b[4]<=1) {
       remoteCapturePaused_=b[4]!=0; return;
+    }
+    if(!options_.host && b.size()==5 && std::memcmp(b.data(),"SRC1",4)==0 && b[4]<=1) {
+      remoteControlOff_=b[4]!=0; return;
     }
     if(options_.host && peerInputRecovery_ && b==Bytes({'S','I','E','1'})) {
       inputLeaseAt_=Clock::now(); return;
@@ -1566,6 +1574,16 @@ void Peer::loop() {
         if(options_.host)transmit(snv2::PacketType::Keepalive,Bytes{'S','G','C','1',
           static_cast<std::uint8_t>(options_.input && !options_.sharing && onGamepadAvailable && onGamepadAvailable())});
         if(options_.host) transmit(snv2::PacketType::Keepalive,Bytes{'S','C','P','1',static_cast<std::uint8_t>(localCapturePaused_.load())});
+        // Host-local take-back-control hotkey: viewers hide their pointer and
+        // stop sending input while it is off. Old viewers ignore it (the host
+        // still drops their input).
+        if(options_.host && options_.input && !options_.sharing) {
+          const bool off=cutoff::revoked();
+          // Release every key and button the viewer still holds here.
+          if(off && !controlOffSent_ && inputWorker_) (void)inputWorker_->submit(Input{});
+          controlOffSent_=off;
+          transmit(snv2::PacketType::Keepalive,Bytes{'S','R','C','1',static_cast<std::uint8_t>(off)});
+        }
         announceDisplays();
         if(!options_.host && inputAvailable()) transmit(snv2::PacketType::Keepalive,Bytes{'S','I','E','1'});
         // Optional authenticated capability. Old engines safely ignore it;

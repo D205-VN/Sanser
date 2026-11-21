@@ -327,7 +327,7 @@ class MainActivity : FlutterActivity() {
             val capture=gamepadCapture;stopController()
             sink?.success(mapOf("state" to "controller","sessionId" to id,"engineAttempt" to engineAttempt,"captureId" to capture,"paused" to true))
         }
-        sink?.success(mapOf("sessionId" to id,"engineAttempt" to engineAttempt,"state" to state,"message" to message,"rttMs" to rtt,"videoWidth" to videoWidth,"videoHeight" to videoHeight,"unicodeInput" to (client?.textAvailable()==true),"clipboard" to (client?.clipboardAvailable()==true),"collab" to (client?.collabAvailable()==true),"gamepad" to (((client?.gamepadStatus()?:0) and 1)!=0))+(client?.stats()?:emptyMap()))}
+        sink?.success(mapOf("sessionId" to id,"engineAttempt" to engineAttempt,"state" to state,"message" to message,"rttMs" to rtt,"videoWidth" to videoWidth,"videoHeight" to videoHeight,"unicodeInput" to (client?.textAvailable()==true),"remoteControlOff" to (client?.remoteControlOff()==true),"clipboard" to (client?.clipboardAvailable()==true),"collab" to (client?.collabAvailable()==true),"gamepad" to (((client?.gamepadStatus()?:0) and 1)!=0))+(client?.stats()?:emptyMap()))}
     private fun poll(epoch:Long){
         main.postDelayed({if(epoch==generation.get() && sessionId!=null){val rtt=client?.rtt();emit(if(frameShown)"frame" else "connecting",rtt=rtt?.takeIf{it>=0});poll(epoch)}},1000)
     }

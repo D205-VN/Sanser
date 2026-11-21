@@ -101,6 +101,9 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_sanser_mobile_NativeClient_text(J
   if(env->ExceptionCheck()) return false;
   return sanser_mobile_text(h->client,data,static_cast<size_t>(size))!=0;
 }
+extern "C" JNIEXPORT jboolean JNICALL Java_com_sanser_mobile_NativeClient_remoteControlOff(JNIEnv*,jobject,jlong handle) {
+  auto *h=reinterpret_cast<Handle*>(handle); return h && sanser_mobile_remote_control_off(h->client);
+}
 extern "C" JNIEXPORT jboolean JNICALL Java_com_sanser_mobile_NativeClient_textAvailable(JNIEnv*,jobject,jlong handle) {
   auto *h=reinterpret_cast<Handle*>(handle); return h && sanser_mobile_text_available(h->client);
 }

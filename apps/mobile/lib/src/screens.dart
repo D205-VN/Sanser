@@ -178,7 +178,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.25',
+                          'Sanser 2.3.26',
                           style: TextStyle(color: SanserTokens.muted),
                         ),
                         const SizedBox(height: 24),
@@ -1089,10 +1089,14 @@ class _RemoteSessionState extends State<RemoteSession>
 
   bool get streamReady =>
       c.phase == SessionPhase.streaming && c.active?['id'] == input.sessionId;
+
+  /// The person at the host pressed Ctrl+Alt+K / Control+Command+K.
+  bool get hostControlOff => c.telemetry['remoteControlOff'] == true;
   bool get inputReady =>
       streamReady &&
       c.capabilities['available'] == true &&
-      c.active?['accessMode'] != 'view-only';
+      c.active?['accessMode'] != 'view-only' &&
+      !hostControlOff;
 
   Future<void> _toggleSound() async {
     if (soundBusy || !streamReady || c.capabilities['audio'] != true) return;
@@ -1528,6 +1532,40 @@ class _RemoteSessionState extends State<RemoteSession>
                             videoSize: videoSize,
                             onTapFeedback: haptics.tap,
                             onHoldFeedback: haptics.hold,
+                            pointerVisible: !hostControlOff,
+                          ),
+                        ),
+                      if (streamReady && hostControlOff)
+                        const Positioned(
+                          top: 12,
+                          left: 16,
+                          right: 16,
+                          child: IgnorePointer(
+                            child: Center(
+                              child: DecoratedBox(
+                                key: ValueKey('host-control-off'),
+                                decoration: BoxDecoration(
+                                  color: Color(0xE6141414),
+                                  borderRadius: BorderRadius.all(
+                                    Radius.circular(12),
+                                  ),
+                                ),
+                                child: Padding(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 8,
+                                  ),
+                                  child: Text(
+                                    'Máy host đã tắt điều khiển từ xa',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
                           ),
                         ),
                       if (gameControls && !viewOnly && streamReady)

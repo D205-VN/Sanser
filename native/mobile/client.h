@@ -49,6 +49,8 @@ int sanser_mobile_gamepad_sample(SanserMobileClient *,uint64_t capture,const San
 // Bits: 1 available, 2 matching capture active, 4 locally armed, 8 connected.
 unsigned sanser_mobile_gamepad_status(SanserMobileClient *,uint64_t capture);
 int sanser_mobile_text_available(SanserMobileClient *client);
+// The person at the host turned remote control off (input is dropped).
+int sanser_mobile_remote_control_off(SanserMobileClient *client);
 // UTF-8, explicit length, <=1024 bytes/256 UTF-16 units. No C-string truncation.
 int sanser_mobile_text(SanserMobileClient *client,const uint8_t *utf8,size_t bytes);
 int sanser_mobile_clipboard_available(SanserMobileClient *client);

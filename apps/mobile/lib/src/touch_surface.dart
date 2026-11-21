@@ -10,6 +10,9 @@ class MobileTouchSurface extends StatefulWidget {
   final Size videoSize;
   final int resetZoom;
   final VoidCallback? onTapFeedback, onHoldFeedback;
+
+  /// False while the host has remote control off: no pointer is drawn.
+  final bool pointerVisible;
   const MobileTouchSurface({
     super.key,
     required this.input,
@@ -18,6 +21,7 @@ class MobileTouchSurface extends StatefulWidget {
     this.resetZoom = 0,
     this.onTapFeedback,
     this.onHoldFeedback,
+    this.pointerVisible = true,
   });
   @override
   State<MobileTouchSurface> createState() => _MobileTouchSurfaceState();
@@ -219,7 +223,9 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
           },
           child: Stack(
             children: [
-              if (widget.mode == TouchMode.touchpad && widget.input.enabled)
+              if (widget.mode == TouchMode.touchpad &&
+                  widget.input.enabled &&
+                  widget.pointerVisible)
                 Positioned(
                   left: cursor.dx - 5,
                   top: cursor.dy - 5,

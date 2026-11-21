@@ -247,6 +247,7 @@ struct WindowState {
   bool viewOnly=false;
   bool userClosed=false;
   bool inputPaused=false;
+  bool pointerHidden=false; // the host turned remote control off
   std::unique_ptr<WindowsTextInput> textInput;
   std::unique_ptr<WindowsShortcuts> shortcuts;
   std::unique_ptr<WindowsControllerInput> controller;
@@ -339,6 +340,7 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
     if(!state->viewOnly)state->sendInput(Input{});
     state->released=true;return 0;
   }
+  if(message==WM_SETCURSOR && state->pointerHidden && LOWORD(l)==HTCLIENT) { SetCursor(nullptr); return TRUE; }
   if((state->viewOnly || state->inputPaused) && ((message>=WM_KEYFIRST && message<=WM_KEYLAST) || (message>=WM_MOUSEFIRST && message<=WM_MOUSELAST))) return DefWindowProcW(window,message,w,l);
   if(message==WM_CLOSE) { if(state->shortcuts)state->shortcuts->cancel();if(state->textInput) state->textInput->cancel();if(!state->viewOnly)state->sendInput(Input{}); state->userClosed=true; DestroyWindow(window); return 0; }
   if(message==WM_DESTROY) { PostQuitMessage(0); return 0; }
@@ -906,7 +908,11 @@ int runWindows(bool host,int argc,char** argv) {
       (void)clipboardKeys.apply(Input{},peer.macHost());state.capturedButtons.clear();state.wheel.reset();
       if(state.textInput) state.textInput->cancel();
       if(GetCapture()==window) ReleaseCapture();
-      SetWindowTextW(window,state.inputPaused ? peer.capturePaused() ? L"Sanser · Host capture temporarily unavailable · Check UAC on the host" : L"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists" : L"Sanser · Input restored · Click to resume");
+      SetWindowTextW(window,state.inputPaused ? peer.remoteControlOff() ? L"Sanser \u00b7 M\u00e1y host \u0111\u00e3 t\u1eaft \u0111i\u1ec1u khi\u1ec3n t\u1eeb xa \u00b7 The host turned remote control off" : peer.capturePaused() ? L"Sanser · Host capture temporarily unavailable · Check UAC on the host" : L"Sanser · Input paused · Waiting for authenticated reset; reconnect if it persists" : L"Sanser · Input restored · Click to resume");
+    }
+    if(options.input && state.pointerHidden!=peer.remoteControlOff()) {
+      state.pointerHidden=peer.remoteControlOff();
+      POINT at{}; GetCursorPos(&at); SetCursorPos(at.x,at.y); // re-evaluate WM_SETCURSOR now
     }
     for(const auto& event:clipboardSync->gate.release(Clock::now())) peer.input(event);
     if(macClipboardReadAt && Clock::now()>=*macClipboardReadAt) {

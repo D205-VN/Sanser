@@ -158,7 +158,9 @@ public:
     const auto budget=std::max(1000000U,videoBudget_.load());
     return static_cast<double>(queued)*8000.0/(budget*1.2)<=std::max(20.0,2000.0/std::max(1U,options_.fps));
   }
-  bool inputAvailable() const { return options_.input && !options_.sharing && !inputSuspended_.load() && !remoteCapturePaused_.load(); }
+  bool inputAvailable() const { return options_.input && !options_.sharing && !inputSuspended_.load() && !remoteCapturePaused_.load() && !remoteControlOff_.load(); }
+  // The person at the host turned remote control off (Ctrl+Alt+K / Control+Command+K).
+  bool remoteControlOff() const { return remoteControlOff_.load(); }
   bool capturePaused() const { return remoteCapturePaused_.load(); }
   void setCapturePaused(bool paused);
   // Last authenticated application RTT; absent until a supporting peer replies.
@@ -378,7 +380,8 @@ private:
   Clock::time_point lastUserPoll_{},lastClipboardRequest_{};
   int announcedUserCapabilities_=-1;
   std::atomic<bool> inputSuspended_{false};
-  std::atomic<bool> localCapturePaused_{false}, remoteCapturePaused_{false};
+  std::atomic<bool> localCapturePaused_{false}, remoteCapturePaused_{false}, remoteControlOff_{false};
+  bool controlOffSent_=false; // host: worker thread only
   std::uint64_t inputRecoverySerial_=0, inputRecoveryFence_=0, receivedRecoverySerial_=0, receivedRecoveryFence_=0;
   Clock::time_point inputRecoveryStarted_{}, inputRecoverySent_{}, inputLeaseAt_{};
   std::uint64_t lastInputAck_=0;

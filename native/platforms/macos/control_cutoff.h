@@ -4,16 +4,17 @@
 #include <memory>
 
 namespace sanser::desktop {
-// Control+Command+K at the host Mac ends remote input for the rest of
-// the session (see control_cutoff_policy.h). Main thread.
+// Control+Command+K at the host Mac turns remote input off or back on for
+// this session (see control_cutoff_policy.h) and shows a short notice. Main thread.
 class MacControlCutoff {
 public:
   explicit MacControlCutoff(bool input);
   ~MacControlCutoff();
   MacControlCutoff(const MacControlCutoff&)=delete;
   MacControlCutoff& operator=(const MacControlCutoff&)=delete;
-  // Once per host loop iteration: delivers the hotkey.
-  void update();
+  // Once per host loop iteration: delivers the hotkey. True when this call
+  // turned control off (the caller then releases everything still held).
+  bool update();
   // Any thread: false when a remote event must be dropped.
   static bool allow(const Input& event);
 private:

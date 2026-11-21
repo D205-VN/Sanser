@@ -4,8 +4,8 @@
 #include <thread>
 
 namespace sanser::desktop {
-// Ctrl+Alt+K at the host PC ends remote input for the rest of the
-// session (see control_cutoff_policy.h). The hot key lives on a private
+// Ctrl+Alt+K at the host PC turns remote input off or back on for this
+// session (see control_cutoff_policy.h) and shows a short notice. The hot key lives on a private
 // message thread of the host engine process. The SendInput gate in
 // blocked_apps.cpp (windowsInputAllowed) enforces it for both Windows hosts.
 class WindowsControlCutoff {

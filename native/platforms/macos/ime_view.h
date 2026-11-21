@@ -20,6 +20,8 @@
 @property(nonatomic,assign) sanser::desktop::Peer* peer;
 @property(nonatomic,assign) BOOL inputEnabled;
 @property(nonatomic,assign) BOOL released;
+// The host turned remote control off: no local pointer over the remote screen.
+@property(nonatomic,assign) BOOL pointerHidden;
 @property(nonatomic,readonly) BOOL textMode;
 @property(nonatomic,copy) void (^willResetInput)(void);
 - (void)sendInput:(sanser::desktop::Input)input;

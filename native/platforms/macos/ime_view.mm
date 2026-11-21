@@ -25,7 +25,16 @@ bool navigation(std::uint16_t hid) {
 }
 
 @implementation SanserSnv2RemoteView
-@synthesize inputEnabled=_inputEnabled, released=_released;
+@synthesize inputEnabled=_inputEnabled, released=_released, pointerHidden=_pointerHidden;
+- (void)setPointerHidden:(BOOL)value {
+  if(_pointerHidden==value) return;
+  _pointerHidden=value; [self.window invalidateCursorRectsForView:self];
+}
+- (void)resetCursorRects {
+  if(!_pointerHidden) { [super resetCursorRects]; return; }
+  static NSCursor* blank=[[NSCursor alloc] initWithImage:[[NSImage alloc] initWithSize:NSMakeSize(16,16)] hotSpot:NSZeroPoint];
+  [self addCursorRect:self.bounds cursor:blank];
+}
 // AppKit does not deliver keyUp to a view while Command is held, so a key
 // pressed inside a Command chord was sent down and never released on the
 // host. A local monitor sees every dequeued keyUp; route those to keyUp:.

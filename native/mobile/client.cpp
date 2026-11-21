@@ -172,6 +172,7 @@ extern "C" int sanser_mobile_gamepad_sample(SanserMobileClient *c,uint64_t id,co
 extern "C" unsigned sanser_mobile_gamepad_status(SanserMobileClient *c,uint64_t id){try{return c ? c->gamepad->status(id):0;}catch(...){return 0;}}
 extern "C" void sanser_mobile_mute(SanserMobileClient *c,int muted) {if(c)c->peer->setAudioMuted(muted!=0);}
 extern "C" int sanser_mobile_text_available(SanserMobileClient *c) {return c && c->peer->textAvailable();}
+extern "C" int sanser_mobile_remote_control_off(SanserMobileClient *c) {return c && c->peer->remoteControlOff();}
 extern "C" int sanser_mobile_clipboard_available(SanserMobileClient *c) {return c && c->peer->clipboardAvailable();}
 extern "C" int sanser_mobile_files_enable(SanserMobileClient *c,int enabled){return c && c->peer->configureFiles(enabled!=0);}
 extern "C" int sanser_mobile_files_available(SanserMobileClient *c){return c && c->peer->filesAvailable();}
