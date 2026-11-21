@@ -44,6 +44,8 @@ struct DatagramIo {
 struct Options {
   bool host = false;
   bool ultraLowLatency = false;
+  // Windows viewer: start in a normal window instead of full screen.
+  bool windowed = false;
   bool input = true;
   bool audio = true;
   bool audioOpus = true;

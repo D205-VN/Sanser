@@ -189,6 +189,7 @@ Options parseOptions(bool host, int argc, char** argv) {
     auto number = [&]() -> std::uint32_t { const auto v = value(); std::size_t used = 0; const auto n = std::stoul(v, &used); if (used != v.size() || n > std::numeric_limits<std::uint32_t>::max()) throw std::runtime_error("Invalid numeric engine argument"); return static_cast<std::uint32_t>(n); };
     if (arg == "--snv2" || arg == "--udp-video" || arg == "--low-latency-encoder" || arg == "--udp-pacing") continue;
     if (arg == "--ultra-low-latency") o.ultraLowLatency = true;
+    else if (arg == "--windowed") o.windowed = true;
     else if (arg == "--share-host") o.sharing = true;
     else if (arg == "--group-voice") o.groupVoice = true;
     else if (arg == "--share-peer-id") o.viewerId = value();

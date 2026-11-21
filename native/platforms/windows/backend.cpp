@@ -252,6 +252,9 @@ struct WindowState {
   std::unique_ptr<WindowsControllerInput> controller;
   std::function<void(Input)> sendInput; std::mutex mutex; std::shared_ptr<const Image> image;
   bool released=false; RECT video{};
+  // Borderless full screen over the window's monitor (covers the taskbar).
+  static constexpr UINT fullscreenCommand=0x1ec0;
+  bool fullscreen=false; WINDOWPLACEMENT windowed{sizeof(WINDOWPLACEMENT)};
   std::set<std::uint16_t> capturedButtons;
   WheelInput wheel;
   bool macClipboardShortcuts=true;
@@ -279,10 +282,32 @@ std::uint16_t windowsHid(WPARAM key,LPARAM detail) {
   }
   return hidFromWindows(static_cast<std::uint16_t>(scan|(extended ? 0x100 : 0)));
 }
+void setFullscreen(HWND window,WindowState& state,bool enabled) {
+  if(state.fullscreen==enabled) return;
+  const auto style=GetWindowLongPtrW(window,GWL_STYLE);
+  if(enabled) {
+    MONITORINFO monitor{sizeof(MONITORINFO)};
+    if(!GetWindowPlacement(window,&state.windowed) || !GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor)) return;
+    SetWindowLongPtrW(window,GWL_STYLE,(style&~WS_OVERLAPPEDWINDOW)|WS_POPUP);
+    const auto& area=monitor.rcMonitor;
+    SetWindowPos(window,HWND_TOP,area.left,area.top,area.right-area.left,area.bottom-area.top,SWP_NOOWNERZORDER|SWP_FRAMECHANGED|SWP_NOACTIVATE);
+  } else {
+    SetWindowLongPtrW(window,GWL_STYLE,(style&~WS_POPUP)|WS_OVERLAPPEDWINDOW);
+    SetWindowPlacement(window,&state.windowed);
+    SetWindowPos(window,nullptr,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_NOOWNERZORDER|SWP_FRAMECHANGED);
+  }
+  state.fullscreen=enabled;
+  if(auto menu=GetSystemMenu(window,FALSE)) CheckMenuItem(menu,WindowState::fullscreenCommand,MF_BYCOMMAND|(enabled ? MF_CHECKED:MF_UNCHECKED));
+  InvalidateRect(window,nullptr,FALSE);
+}
 LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   auto* state=reinterpret_cast<WindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE) { state=static_cast<WindowState*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state)); }
   if(!state) return DefWindowProcW(window,message,w,l);
+  if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowState::fullscreenCommand) {
+    if(!state->viewOnly) state->sendInput(Input{});
+    setFullscreen(window,*state,!state->fullscreen); return 0;
+  }
   if(message==WM_SYSCOMMAND && ((w&0xfff0)==WindowState::macClipboardCommand || (w&0xfff0)==WindowState::macEditingCommand)) {
     if(!state->viewOnly && state->macHost()) {
       state->sendInput(Input{});
@@ -358,6 +383,11 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   }
   if(message==WM_KEYDOWN || message==WM_SYSKEYDOWN || message==WM_KEYUP || message==WM_SYSKEYUP) {
     const bool down=message==WM_KEYDOWN||message==WM_SYSKEYDOWN;
+    // Ctrl+Alt+Enter: full screen on/off (never sent to the remote computer).
+    if(down && w==VK_RETURN && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000) && !(GetKeyState(VK_RMENU)&0x8000)) {
+      if(!(l&(1LL<<30))) { if(!state->viewOnly) state->sendInput(Input{}); setFullscreen(window,*state,!state->fullscreen); }
+      return 0;
+    }
     if(down && w=='G' && state->controller && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000) && !(GetKeyState(VK_RMENU)&0x8000)) {if(!(l&(1LL<<30)))state->controller->toggle();return 0;}
     if(down && w=='K' && state->shortcuts && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000) && !(GetKeyState(VK_RMENU)&0x8000)) {if(!(l&(1LL<<30)))state->shortcuts->toggle();return 0;}
     if(down && w=='I' && state->textInput && (GetKeyState(VK_CONTROL)&0x8000) && (GetKeyState(VK_MENU)&0x8000) && !(GetKeyState(VK_RMENU)&0x8000)) { if(!(l&(1LL<<30))) state->textInput->toggle(); return 0; }
@@ -370,7 +400,7 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   if(message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN || message==WM_LBUTTONUP || message==WM_RBUTTONDOWN || message==WM_RBUTTONUP || message==WM_MBUTTONDOWN || message==WM_MBUTTONUP || message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL) {
     if((message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN || message==WM_MBUTTONDOWN) && state->shortcuts)state->shortcuts->cancel();
     if((message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN || message==WM_MBUTTONDOWN) && state->textInput) state->textInput->cancel();
-    if(message==WM_LBUTTONDOWN && state->released) { SetFocus(window); state->released=false; SetWindowTextW(window,L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release"); }
+    if(message==WM_LBUTTONDOWN && state->released) { SetFocus(window); state->released=false; SetWindowTextW(window,L"Sanser · Remote desktop · Ctrl+Alt+Enter: full screen · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release"); }
     if(state->released) return 0;
     const bool wheel=message==WM_MOUSEWHEEL || message==WM_MOUSEHWHEEL;
     POINT point{static_cast<short>(LOWORD(l)),static_cast<short>(HIWORD(l))}; if(wheel) ScreenToClient(window,&point);
@@ -513,6 +543,20 @@ void testWindowsInput() {
   require(state.released && state.capturedButtons.empty() && events.back().kind==Input::Reset,"Stolen capture left remote buttons pressed");
   SendMessageW(window,WM_KILLFOCUS,0,0);
   require(state.released && events.back().kind==Input::Reset,"Focus loss did not release remote keys/buttons");
+  {
+    // Full screen covers the monitor without a frame and restores the window.
+    ShowWindow(window,SW_SHOWNOACTIVATE);
+    RECT original{};GetWindowRect(window,&original);
+    const auto keys=events.size();
+    SendMessageW(window,WM_SYSCOMMAND,WindowState::fullscreenCommand,0);
+    MONITORINFO monitor{sizeof(MONITORINFO)};GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor);
+    RECT full{};GetWindowRect(window,&full);
+    require(state.fullscreen && !(GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION) && EqualRect(&full,&monitor.rcMonitor),"Full screen did not cover the monitor");
+    SendMessageW(window,WM_SYSCOMMAND,WindowState::fullscreenCommand,0);
+    RECT restored{};GetWindowRect(window,&restored);
+    require(!state.fullscreen && (GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION) && EqualRect(&restored,&original),"Leaving full screen did not restore the window");
+    require(events.size()==keys+2 && events.back().kind==Input::Reset,"Full screen toggle must release remote keys and never forward the shortcut");
+  }
   state.viewOnly=true; const auto before=events.size();
   SendMessageW(window,WM_KEYDOWN,'A',0); SendMessageW(window,WM_LBUTTONDOWN,0,MAKELPARAM(100,50));
   SendMessageW(window,WM_KILLFOCUS,0,0);
@@ -803,8 +847,13 @@ int runWindows(bool host,int argc,char** argv) {
   peer.onFrame=[&](Frame frame) { recording.frame(frame); decode.submit(std::move(frame)); };
   PeerStop shutdown{peer};
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
-  HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
-  if(!window) throw std::runtime_error("Unable to create remote desktop window"); ShowWindow(window,SW_SHOW); SetForegroundWindow(window); SetFocus(window); peer.start();
+  HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+Enter: full screen · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only · Ctrl+Alt+Enter: full screen",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
+  if(!window) throw std::runtime_error("Unable to create remote desktop window");
+  if(auto menu=GetSystemMenu(window,FALSE)) AppendMenuW(menu,MF_STRING,WindowState::fullscreenCommand,L"Full screen\tCtrl+Alt+Enter");
+  // Open full screen like the macOS viewer's full-screen mode; Ctrl+Alt+Enter
+  // or the window menu returns to a normal window.
+  ShowWindow(window,SW_SHOW); if(!options.windowed) setFullscreen(window,state,true);
+  SetForegroundWindow(window); SetFocus(window); peer.start();
   { std::lock_guard lock(clipboardSync->mutex); clipboardSync->window=window; }
   if(options.input)if(auto menu=GetSystemMenu(window,FALSE)) {
     AppendMenuW(menu,MF_STRING|MF_GRAYED|MF_CHECKED,WindowState::macClipboardCommand,L"Mac Copy/Paste (Ctrl+C / Ctrl+V)");

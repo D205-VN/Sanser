@@ -1,9 +1,9 @@
-# Sanser 2.3.23
+# Sanser 2.3.24
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.3.23
+Product:  Sanser 2.3.24
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,6 +20,8 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
+Sanser 2.3.24 opens the Windows viewer in true full screen (Ctrl+Alt+Enter
+toggles it); see [2.3.24 notes](docs/releases/v2.3.24.md).
 Sanser 2.3.23 brings group voice, chat, background sessions and picture in
 picture to phones; see [2.3.23 notes](docs/releases/v2.3.23.md).
 Sanser 2.3.22 stops the person in control from removing the blocked-app list;
