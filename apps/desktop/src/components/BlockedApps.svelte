@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t } from '../lib/i18n';
-  import { listRunningApps } from '../lib/platform';
+  import { onMount } from 'svelte';
+  import { blockedAppsTrusted, listRunningApps, protectBlockedApps } from '../lib/platform';
   import { preferences, validBlockedAppId } from '../stores/preferences';
   import type { BlockedApp, RuntimeStatus } from '../lib/types';
 
@@ -17,9 +18,19 @@
   let message = $state<string | null>(null);
   const choices = $derived(running.filter((app) => !blocked.some((item) => item.id.toLowerCase() === app.id.toLowerCase())));
 
+  // False when the preferences file was edited outside Sanser; hosting is
+  // refused until the person at this computer confirms the list.
+  let trusted = $state(true);
+  onMount(() => {
+    void blockedAppsTrusted(blocked.map((app) => app.id)).then((value) => { trusted = value; }).catch(() => { trusted = true; });
+  });
+
   async function save(next: BlockedApp[]): Promise<void> {
-    try { await preferences.save({ ...$preferences, host: { ...$preferences.host, blockedApps: next } }); }
-    catch (error) { onerror?.(error instanceof Error ? error.message : $t('Unable to save host settings')); }
+    try {
+      await preferences.save({ ...$preferences, host: { ...$preferences.host, blockedApps: next } });
+      await protectBlockedApps(next.map((app) => app.id));
+      trusted = true;
+    } catch (error) { onerror?.(error instanceof Error ? error.message : $t('Unable to save host settings')); }
   }
 
   async function refresh(): Promise<void> {
@@ -56,6 +67,12 @@
     <h3 id="blocked-apps-title">{$t('Blocked apps')}</h3>
     <p class="muted">{$t('While someone is connected, these apps are hidden from the shared screen and the remote person cannot click or type in them. You can still use them on this computer. Applies from the next connection.')}</p>
   </div>
+  {#if !trusted}
+    <div class="notice warning" role="alert">
+      <p>{$t('This list was changed outside Sanser, for example by editing its settings file. Hosting is paused until you check the list below and confirm it.')}</p>
+      <button class="button small primary" {disabled} onclick={() => save(blocked)}>{$t('Confirm this list')}</button>
+    </div>
+  {/if}
   {#if blocked.length > 0}
     <ul class="blocked-list">
       {#each blocked as app (app.id)}
@@ -82,6 +99,9 @@
     <button class="button small" type="submit" disabled={disabled || !manual.trim()}>{$t('Add')}</button>
   </form>
   {#if message}<p class="muted" role="status">{$t(message)}</p>{/if}
+  {#if blocked.length > 0}
+    <p class="muted">{$t('While this list is not empty, Sanser itself is blocked too, so the person in control cannot open Sanser on this computer to change these settings.')}</p>
+  {/if}
   <p class="muted">{$t('This stops casual use, not a determined person with full control: a renamed or copied program is not recognised. Use view-only access when that matters.')}</p>
 </section>
 

@@ -133,6 +133,8 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         commands::load_preferences,
         commands::save_preferences,
         commands::secure_get,
+        commands::blocked_apps_trusted,
+        commands::protect_blocked_apps,
         commands::secure_set,
         commands::secure_delete,
         commands::get_local_route_address,

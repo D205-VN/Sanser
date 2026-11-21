@@ -202,6 +202,89 @@ pub fn secure_delete(key: &str) -> Result<(), DesktopError> {
     }
 }
 
+/// Host blocked apps are kept in the preferences file, which anyone using
+/// this computer (including the person in control during a session) could
+/// edit with another program. A SHA-256 fingerprint of the list lives in the
+/// OS credential store and is updated only when the host saves the list in
+/// Sanser. A host session does not start while the file disagrees with it.
+const BLOCKED_APPS_KEY: &str = "host_blocked_apps";
+
+/// Order- and case-insensitive fingerprint of a blocked app list.
+pub fn blocked_apps_fingerprint(ids: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut normalized: Vec<String> = ids.iter().map(|id| id.trim().to_lowercase()).collect();
+    normalized.sort();
+    normalized.dedup();
+    let mut hasher = Sha256::new();
+    hasher.update(b"sanser-blocked-apps-v1\n");
+    for id in &normalized {
+        hasher.update(id.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BlockedAppsCheck {
+    /// The list matches what the host saved (or both are empty).
+    Trusted,
+    /// No fingerprint yet (lists from before 2.3.22): record this one.
+    FirstUse,
+    /// The preferences file was changed outside Sanser.
+    Changed,
+}
+
+pub fn check_blocked_apps(stored: Option<&str>, ids: &[String]) -> BlockedAppsCheck {
+    match stored {
+        Some(stored) if stored == blocked_apps_fingerprint(ids) => BlockedAppsCheck::Trusted,
+        Some(_) => BlockedAppsCheck::Changed,
+        None if ids.is_empty() => BlockedAppsCheck::Trusted,
+        None => BlockedAppsCheck::FirstUse,
+    }
+}
+
+fn blocked_apps_entry() -> Result<Entry, DesktopError> {
+    Entry::new(SERVICE_NAME, BLOCKED_APPS_KEY).map_err(|_| DesktopError::SecureStorage)
+}
+
+/// Records the list the host just saved in Sanser.
+pub fn protect_blocked_apps(ids: &[String]) -> Result<(), DesktopError> {
+    blocked_apps_entry()?
+        .set_password(&blocked_apps_fingerprint(ids))
+        .map_err(|_| DesktopError::SecureStorage)
+}
+
+/// Whether `ids` (from the preferences file) is the list the host saved.
+pub fn blocked_apps_trusted(ids: &[String]) -> Result<bool, DesktopError> {
+    let stored = match blocked_apps_entry()?.get_password() {
+        Ok(value) => Some(value),
+        Err(keyring::Error::NoEntry) => None,
+        Err(_) => return Err(DesktopError::SecureStorage),
+    };
+    match check_blocked_apps(stored.as_deref(), ids) {
+        BlockedAppsCheck::Trusted => Ok(true),
+        BlockedAppsCheck::FirstUse => protect_blocked_apps(ids).map(|()| true),
+        BlockedAppsCheck::Changed => Ok(false),
+    }
+}
+
+/// Fails a host launch whose blocked app list was changed outside Sanser.
+pub fn require_trusted_blocked_apps(ids: &[String]) -> Result<(), DesktopError> {
+    if blocked_apps_trusted(ids)? {
+        return Ok(());
+    }
+    Err(DesktopError::Unavailable(
+        "Blocked apps were changed outside Sanser. On this computer, open Settings → Host → Blocked apps, check the list and confirm it.".into(),
+    ))
+}
+
 fn sensitive_key(key: &str) -> bool {
     let lowered = key.to_ascii_lowercase();
     [
@@ -283,4 +366,40 @@ pub fn export_diagnostics(
     Ok(DiagnosticsExport {
         path: path.to_string_lossy().into_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockedAppsCheck, blocked_apps_fingerprint, check_blocked_apps};
+
+    #[test]
+    fn blocked_app_fingerprint_detects_edits_outside_sanser() {
+        let saved = vec!["com.google.Chrome".to_owned(), "chrome.exe".to_owned()];
+        let stored = blocked_apps_fingerprint(&saved);
+        let reordered = vec![" CHROME.EXE ".to_owned(), "com.google.chrome".to_owned()];
+        assert_eq!(
+            check_blocked_apps(Some(&stored), &reordered),
+            BlockedAppsCheck::Trusted
+        );
+        assert_eq!(
+            check_blocked_apps(Some(&stored), &saved[..1]),
+            BlockedAppsCheck::Changed
+        );
+        assert_eq!(
+            check_blocked_apps(Some(&stored), &[]),
+            BlockedAppsCheck::Changed,
+            "deleting the list"
+        );
+        assert_eq!(check_blocked_apps(None, &[]), BlockedAppsCheck::Trusted);
+        assert_eq!(check_blocked_apps(None, &saved), BlockedAppsCheck::FirstUse);
+        let empty = blocked_apps_fingerprint(&[]);
+        assert_eq!(
+            check_blocked_apps(Some(&empty), &[]),
+            BlockedAppsCheck::Trusted
+        );
+        assert_eq!(
+            check_blocked_apps(Some(&empty), &saved),
+            BlockedAppsCheck::Changed
+        );
+    }
 }

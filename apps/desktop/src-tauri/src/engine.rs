@@ -650,8 +650,26 @@ pub(crate) fn valid_blocked_app_id(id: &str) -> bool {
         })
 }
 
+/// Sanser's own desktop app as a blocked-app identifier: the bundle ID on
+/// macOS, the program file name on Windows.
+fn own_blocked_app_id() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        return Some("com.sanser.desktop".into());
+    }
+    if cfg!(windows) {
+        return std::env::current_exe()
+            .ok()
+            .and_then(|path| path.file_name()?.to_str().map(str::to_owned))
+            .filter(|name| valid_blocked_app_id(name))
+            .or_else(|| Some("sanser.exe".into()));
+    }
+    None
+}
+
 // Blocked apps are a host-local setting, for one-to-one sessions and shares.
-// Client engines never receive the flag.
+// Client engines never receive the flag. When the host blocks anything,
+// Sanser itself is blocked too: otherwise the person in control could open
+// Sanser on the host and remove the list (or change other host settings).
 // Also adds the privacy flags, which have their own one-to-one rule.
 fn blocked_app_args(
     args: &mut Vec<String>,
@@ -665,6 +683,10 @@ fn blocked_app_args(
         return Err(DesktopError::InvalidRequest(
             "at most 64 blocked apps are supported".into(),
         ));
+    }
+    if let Some(own) = own_blocked_app_id() {
+        args.push("--blocked-app".into());
+        args.push(own);
     }
     for id in &request.blocked_apps {
         if !valid_blocked_app_id(id) {
@@ -1414,6 +1436,9 @@ impl EngineManager {
                 "The installed native engine does not support cross-platform sessions".into(),
             ));
         }
+        if request.kind == EngineKind::Host {
+            crate::storage::require_trusted_blocked_apps(&request.blocked_apps)?;
+        }
         let mut native_request = request.clone();
         let prepared = prepare_direct(reserved_socket, &mut native_request)?;
         let args = build_args_with_voice(&native_request, probe.group_voice)?;
@@ -1983,9 +2008,16 @@ mod tests {
             host.wire_protocol = wire.map(Into::into);
             assert!(values(&build_args(&host)?).is_empty());
             host.blocked_apps = vec!["com.google.Chrome".into(), " chrome.exe ".into()];
+            let expected: Vec<String> = own_blocked_app_id()
+                .into_iter()
+                .chain(["com.google.Chrome".into(), "chrome.exe".into()])
+                .collect();
+            assert_eq!(values(&build_args(&host)?), expected);
+            host.blocked_apps = (0..64).map(|i| format!("app{i}.exe")).collect();
             assert_eq!(
-                values(&build_args(&host)?),
-                ["com.google.Chrome", "chrome.exe"]
+                values(&build_args(&host)?).len(),
+                64 + usize::from(own_blocked_app_id().is_some()),
+                "Sanser is protected even with a full list"
             );
             for bad in ["", "  ", "C:\\x.exe", "a/b", "a*b", "a\nb"] {
                 host.blocked_apps = vec![bad.into()];

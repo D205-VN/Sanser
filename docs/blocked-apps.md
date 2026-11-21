@@ -30,6 +30,13 @@ and button releases, pointer moves, modifier keys, and Tab while Command or Alt
 is held (Cmd+Tab, Alt+Tab). Other shortcuts, such as Cmd+C, are dropped in a
 blocked app.
 
+**Sanser itself** is added to the list automatically whenever it is not empty
+(`com.sanser.desktop` on macOS, Sanser's program file name on Windows). The
+person in control therefore cannot open Sanser on the host to remove the list,
+turn off other host settings or change the account. The host engine's own
+windows (voice panel, privacy screen) and the click-through annotation layer
+stay as they are. The limit is 64 apps chosen by the host plus Sanser.
+
 The person at the host computer is not affected and can use the apps normally.
 Diagnostics write `SNBLOCKED apps=…` to stderr when the list is active.
 
@@ -44,6 +51,13 @@ full control:
 - On Windows, UWP apps hosted by `ApplicationFrameHost.exe` are not matched by
   their own name, and a rotated display uses the CPU capture path.
 - Sound from a blocked app is still part of shared system audio.
+- Preferences are a file in this user's app data folder. Each save in Sanser
+  also stores a fingerprint of the list in the system keychain (Windows
+  Credential Manager). If the file is edited with another program, sharing
+  does not start and Settings → Host → Blocked apps asks the host to check the
+  list and confirm it. Someone who also deletes the keychain entry is not
+  caught: the next start trusts the list as on first use. Block text editors,
+  terminals and Keychain Access too, or use a restricted user.
 - When it matters, use view-only access or a separate, restricted user account.
 
 ## Tests

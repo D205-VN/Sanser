@@ -206,6 +206,18 @@ export async function listRunningApps(): Promise<BlockedApp[]> {
   return invoke<BlockedApp[]>('list_running_apps');
 }
 
+/** Whether the blocked app list in the preferences file is the one saved in Sanser. */
+export async function blockedAppsTrusted(ids: string[]): Promise<boolean> {
+  if (!isTauriRuntime()) return true;
+  return invoke<boolean>('blocked_apps_trusted', { ids });
+}
+
+/** Records the blocked app list just saved or confirmed in Sanser (secure storage). */
+export async function protectBlockedApps(ids: string[]): Promise<void> {
+  if (!isTauriRuntime()) return;
+  await invoke('protect_blocked_apps', { ids });
+}
+
 /** Broadcasts a magic packet from this computer; only reaches hosts on the same LAN. */
 export async function sendWakeOnLan(targets: WakeInterface[]): Promise<WakeResult> {
   if (!isTauriRuntime()) throw new Error('Wake-on-LAN requires the Sanser desktop app');

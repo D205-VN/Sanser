@@ -239,6 +239,28 @@ pub async fn save_preferences(
         .map_err(|error| DesktopError::Storage(format!("preferences task failed: {error}")))?
 }
 
+/// Whether the blocked app list in the preferences file is the one the host
+/// saved in Sanser (see `storage::blocked_apps_trusted`).
+#[tauri::command]
+pub async fn blocked_apps_trusted(ids: Vec<String>) -> Result<bool, DesktopError> {
+    tauri::async_runtime::spawn_blocking(move || storage::blocked_apps_trusted(&ids))
+        .await
+        .map_err(|_| DesktopError::SecureStorage)?
+}
+
+/// Records the blocked app list the host just saved or confirmed in Sanser.
+#[tauri::command]
+pub async fn protect_blocked_apps(ids: Vec<String>) -> Result<(), DesktopError> {
+    if ids.len() > 64 || !ids.iter().all(|id| crate::engine::valid_blocked_app_id(id)) {
+        return Err(DesktopError::InvalidRequest(
+            "a blocked app identifier is invalid".into(),
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || storage::protect_blocked_apps(&ids))
+        .await
+        .map_err(|_| DesktopError::SecureStorage)?
+}
+
 #[tauri::command]
 pub async fn secure_get(key: String) -> Result<Option<String>, DesktopError> {
     tauri::async_runtime::spawn_blocking(move || storage::secure_get(&key))

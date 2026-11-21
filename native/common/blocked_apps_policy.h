@@ -25,7 +25,8 @@
 #include <vector>
 
 namespace sanser::blocked {
-inline constexpr std::size_t maxApps=64;
+// 64 apps chosen by the host, plus Sanser itself (added by the desktop shell).
+inline constexpr std::size_t maxApps=65;
 inline constexpr std::size_t maxIdLength=255;
 
 inline std::string lower(std::string_view value) {
@@ -52,7 +53,7 @@ public:
   void add(std::string_view id) {
     auto value=normalizeId(id);
     if(std::find(ids_.begin(),ids_.end(),value)!=ids_.end()) return;
-    if(ids_.size()>=maxApps) throw std::runtime_error("At most 64 blocked apps are supported");
+    if(ids_.size()>=maxApps) throw std::runtime_error("At most 65 blocked apps are supported");
     ids_.push_back(std::move(value));
   }
   bool empty() const { return ids_.empty(); }

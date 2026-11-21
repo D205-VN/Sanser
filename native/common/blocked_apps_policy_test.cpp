@@ -21,8 +21,8 @@ int main() {
       for(const char* bad:{"","   ","a/b","a\\b","C:x","a*","a?","a\"b","a<b","a>b","a|b","a\nb"})
         check(throws([&] { List l; l.add(bad); }),"invalid identifiers are rejected");
       check(throws([&] { List l; l.add(std::string(256,'a')); }),"identifiers longer than 255 are rejected");
-      List full; for(int i=0;i<64;++i) full.add("app"+std::to_string(i)+".exe");
-      check(throws([&] { full.add("one-more.exe"); }),"at most 64 apps");
+      List full; for(int i=0;i<65;++i) full.add("app"+std::to_string(i)+".exe");
+      check(throws([&] { full.add("one-more.exe"); }),"at most 64 apps plus Sanser");
     }
     {
       InputGate gate;
