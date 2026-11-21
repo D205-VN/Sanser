@@ -19,6 +19,7 @@ import 'haptics.dart';
 import 'adaptive_layout.dart';
 import 'gamepad_keys.dart';
 import 'host_shortcuts.dart';
+import 'chat_sheet.dart';
 
 class SanserHome extends StatefulWidget {
   final MobileController controller;
@@ -47,10 +48,17 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       documentBackground?.cancel();
       documentBackground = null;
+      unawaited(c.foregrounded());
     }
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
-      if (state != AppLifecycleState.detached && c.engine.documentUIActive) {
+      if (state == AppLifecycleState.detached) {
+        unawaited(c.disconnect());
+      } else if (c.preferences.backgroundMinutes > 0) {
+        // Keep the session: Settings → "Giữ kết nối khi thoát ra".
+        unawaited(c.engine.resetInput().catchError((Object _) {}));
+        unawaited(c.backgrounded());
+      } else if (c.engine.documentUIActive) {
         unawaited(c.engine.resetInput().catchError((Object _) {}));
         documentBackground?.cancel();
         documentBackground = Timer(const Duration(minutes: 2), () {
@@ -170,7 +178,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.22',
+                          'Sanser 2.3.23',
                           style: TextStyle(color: SanserTokens.muted),
                         ),
                         const SizedBox(height: 24),
@@ -1010,6 +1018,19 @@ class _RemoteSessionState extends State<RemoteSession>
     );
   }
 
+  Future<void> _chat() async {
+    gamepadInput.setCapture(false);
+    await input.releaseAll();
+    if (!mounted) return;
+    setState(() => modifiers.clear());
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => ChatSheet(controller: c),
+    );
+  }
+
   Future<void> _shortcuts() async {
     if (!inputReady) return;
     gamepadInput.setCapture(false);
@@ -1230,6 +1251,14 @@ class _RemoteSessionState extends State<RemoteSession>
               onPressed: inputReady && files.available ? _files : null,
             ),
           SessionActionButton(
+            icon: c.unreadChat > 0
+                ? Icons.mark_chat_unread_outlined
+                : Icons.chat_bubble_outline_rounded,
+            label: c.unreadChat > 0 ? 'Chat (${c.unreadChat})' : 'Chat',
+            selected: c.unreadChat > 0,
+            onPressed: streamReady && c.chatAvailable ? _chat : null,
+          ),
+          SessionActionButton(
             icon: Icons.center_focus_strong,
             label: 'Vừa khung',
             onPressed: streamReady ? () => setState(() => resetZoom++) : null,
@@ -1444,9 +1473,18 @@ class _RemoteSessionState extends State<RemoteSession>
         ),
     ],
   );
+  Widget get _video => defaultTargetPlatform == TargetPlatform.android
+      ? const AndroidView(viewType: 'com.sanser.mobile/video')
+      : defaultTargetPlatform == TargetPlatform.iOS
+      ? const UiKitView(viewType: 'com.sanser.mobile/video')
+      : const SizedBox.shrink();
+
   @override
   Widget build(BuildContext context) {
     final viewOnly = c.active?['accessMode'] == 'view-only';
+    // Android picture in picture shrinks this activity: show only the picture.
+    // The video stays the first Stack child so its platform view survives.
+    final pip = c.pictureInPicture;
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -1456,136 +1494,131 @@ class _RemoteSessionState extends State<RemoteSession>
         backgroundColor: Colors.black,
         body: Stack(
           children: [
-            Positioned.fill(
-              child: IgnorePointer(
-                child: defaultTargetPlatform == TargetPlatform.android
-                    ? const AndroidView(viewType: 'com.sanser.mobile/video')
-                    : defaultTargetPlatform == TargetPlatform.iOS
-                    ? const UiKitView(viewType: 'com.sanser.mobile/video')
-                    : const SizedBox.shrink(),
-              ),
-            ),
-            Positioned.fill(
-              child: ExternalKeyboardSurface(
-                key: ValueKey(
-                  'keys:$externalKeyboard-pad:$controllerKeys-analog:$controllerAnalog',
-                ),
-                input: input,
-                enabled:
-                    (externalKeyboard ||
-                        controllerKeys ||
-                        (controllerAnalog && c.telemetry['gamepad'] == true)) &&
-                    inputReady,
-                forwardKeys: externalKeyboard,
-                onFocusChanged: (focused) => gamepadInput.setCapture(
-                  (controllerKeys || controllerAnalog) && focused,
-                ),
-                current: () => mounted && inputReady,
-                onReleased: () => setState(() {
-                  externalKeyboard = false;
-                  modifiers.clear();
-                }),
-                child: Stack(
-                  children: [
-                    if (c.phase == SessionPhase.streaming)
-                      Positioned.fill(
-                        child: MobileTouchSurface(
-                          input: input,
-                          mode: mode,
-                          resetZoom: resetZoom,
-                          videoSize: videoSize,
-                          onTapFeedback: haptics.tap,
-                          onHoldFeedback: haptics.hold,
-                        ),
-                      ),
-                    if (gameControls && !viewOnly && streamReady)
-                      Positioned.fill(
-                        child: MobileGameControls(
-                          input: input,
-                          onPressFeedback: haptics.tap,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            if (files.invitation)
-              Positioned(
-                left: 12,
-                right: 12,
-                bottom: MediaQuery.paddingOf(context).bottom + 12,
-                child: Material(
-                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(16),
-                  child: ListTile(
-                    leading: const Icon(Icons.file_download_outlined),
-                    title: Text('File gửi đến: ${files.incoming?['name']}'),
-                    subtitle: const Text('Chưa lưu file. Cần bạn chấp nhận.'),
-                    trailing: TextButton(
-                      onPressed: _files,
-                      child: const Text('Xem'),
-                    ),
+            Positioned.fill(child: IgnorePointer(child: _video)),
+            if (!pip) ...[
+              Positioned.fill(
+                child: ExternalKeyboardSurface(
+                  key: ValueKey(
+                    'keys:$externalKeyboard-pad:$controllerKeys-analog:$controllerAnalog',
                   ),
-                ),
-              ),
-            if (c.phase != SessionPhase.streaming)
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.all(28),
-                  margin: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: SanserTokens.surface,
-                    borderRadius: BorderRadius.circular(22),
+                  input: input,
+                  enabled:
+                      (externalKeyboard ||
+                          controllerKeys ||
+                          (controllerAnalog &&
+                              c.telemetry['gamepad'] == true)) &&
+                      inputReady,
+                  forwardKeys: externalKeyboard,
+                  onFocusChanged: (focused) => gamepadInput.setCapture(
+                    (controllerKeys || controllerAnalog) && focused,
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
+                  current: () => mounted && inputReady,
+                  onReleased: () => setState(() {
+                    externalKeyboard = false;
+                    modifiers.clear();
+                  }),
+                  child: Stack(
                     children: [
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 22),
-                      Text(
-                        c.phase == SessionPhase.approval
-                            ? 'Đang chờ máy tính chấp nhận…'
-                            : c.recovering
-                            ? c.recoveryStatus
-                            : 'Đang mở màn hình từ xa…',
-                        textAlign: TextAlign.center,
-                      ),
-                      if (c.error != null) ...[
-                        const SizedBox(height: 16),
-                        ErrorNote(c.error!),
-                      ],
-                      const SizedBox(height: 12),
-                      TextButton(
-                        onPressed: () => c.disconnect(),
-                        child: const Text('Hủy kết nối'),
-                      ),
+                      if (c.phase == SessionPhase.streaming)
+                        Positioned.fill(
+                          child: MobileTouchSurface(
+                            input: input,
+                            mode: mode,
+                            resetZoom: resetZoom,
+                            videoSize: videoSize,
+                            onTapFeedback: haptics.tap,
+                            onHoldFeedback: haptics.hold,
+                          ),
+                        ),
+                      if (gameControls && !viewOnly && streamReady)
+                        Positioned.fill(
+                          child: MobileGameControls(
+                            input: input,
+                            onPressFeedback: haptics.tap,
+                          ),
+                        ),
                     ],
                   ),
                 ),
               ),
-            FloatingSessionControls(
-              initiallyCompact: c.preferences.compactControls,
-              expandedHeight: viewOnly ? 320 : 400,
-              icon: viewOnly
-                  ? Icons.visibility_outlined
-                  : Icons.touch_app_outlined,
-              title: viewOnly ? 'Chỉ xem' : 'Điều khiển',
-              statusLabel: c.phase == SessionPhase.streaming
-                  ? '${c.selectedTransport == 'direct' ? 'Direct UDP' : 'Relay'}${c.preferences.showLatency && c.telemetry['rttMs'] is num ? ' · ${(c.telemetry['rttMs'] as num).toStringAsFixed(0)} ms' : ''}'
-                  : c.recovering
-                  ? 'Đang khôi phục kết nối…'
-                  : 'Đang kết nối…',
-              connected: c.phase == SessionPhase.streaming,
-              content: _controls(viewOnly),
-              footer: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: SanserTokens.danger,
+              if (files.invitation)
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: MediaQuery.paddingOf(context).bottom + 12,
+                  child: Material(
+                    color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(16),
+                    child: ListTile(
+                      leading: const Icon(Icons.file_download_outlined),
+                      title: Text('File gửi đến: ${files.incoming?['name']}'),
+                      subtitle: const Text('Chưa lưu file. Cần bạn chấp nhận.'),
+                      trailing: TextButton(
+                        onPressed: _files,
+                        child: const Text('Xem'),
+                      ),
+                    ),
+                  ),
                 ),
-                icon: const Icon(Icons.logout_rounded, size: 19),
-                label: Text(streamReady ? 'Ngắt kết nối' : 'Hủy kết nối'),
-                onPressed: () => c.disconnect(),
+              if (c.phase != SessionPhase.streaming)
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(28),
+                    margin: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: SanserTokens.surface,
+                      borderRadius: BorderRadius.circular(22),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const CircularProgressIndicator(),
+                        const SizedBox(height: 22),
+                        Text(
+                          c.phase == SessionPhase.approval
+                              ? 'Đang chờ máy tính chấp nhận…'
+                              : c.recovering
+                              ? c.recoveryStatus
+                              : 'Đang mở màn hình từ xa…',
+                          textAlign: TextAlign.center,
+                        ),
+                        if (c.error != null) ...[
+                          const SizedBox(height: 16),
+                          ErrorNote(c.error!),
+                        ],
+                        const SizedBox(height: 12),
+                        TextButton(
+                          onPressed: () => c.disconnect(),
+                          child: const Text('Hủy kết nối'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              FloatingSessionControls(
+                initiallyCompact: c.preferences.compactControls,
+                expandedHeight: viewOnly ? 320 : 400,
+                icon: viewOnly
+                    ? Icons.visibility_outlined
+                    : Icons.touch_app_outlined,
+                title: viewOnly ? 'Chỉ xem' : 'Điều khiển',
+                statusLabel: c.phase == SessionPhase.streaming
+                    ? '${c.selectedTransport == 'direct' ? 'Direct UDP' : 'Relay'}${c.preferences.showLatency && c.telemetry['rttMs'] is num ? ' · ${(c.telemetry['rttMs'] as num).toStringAsFixed(0)} ms' : ''}'
+                    : c.recovering
+                    ? 'Đang khôi phục kết nối…'
+                    : 'Đang kết nối…',
+                connected: c.phase == SessionPhase.streaming,
+                content: _controls(viewOnly),
+                footer: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: SanserTokens.danger,
+                  ),
+                  icon: const Icon(Icons.logout_rounded, size: 19),
+                  label: Text(streamReady ? 'Ngắt kết nối' : 'Hủy kết nối'),
+                  onPressed: () => c.disconnect(),
+                ),
               ),
-            ),
+            ],
           ],
         ),
       ),

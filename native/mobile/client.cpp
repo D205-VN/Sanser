@@ -1,10 +1,100 @@
 #include "client.h"
 #include "transport.h"
 #include "gamepad_capture.h"
+#include "voice.h"
+#include "voice_capture_policy.h"
 #include <algorithm>
+#include <deque>
 #include <memory>
+#include <thread>
+namespace {
+using sanser::desktop::Clock;
+// Opus encode/decode and the jitter mixer run on one 5 ms worker, never on the
+// UDP reader or the platform's realtime audio thread. The platform supplies
+// echo-cancelled microphone PCM and plays the mixed voice output.
+class MobileVoice {
+public:
+  MobileVoice(sanser::desktop::Peer& peer,SanserMobileCallbacks callbacks):peer_(peer),callbacks_(callbacks),worker_([this]{run();}) {}
+  ~MobileVoice(){stop();}
+  void stop(){running_=false;if(worker_.joinable())worker_.join();}
+  void state(bool joined,bool microphone,bool deafened) {
+    if(!joined) microphone=deafened=false;
+    if(deafened) microphone=false;
+    // Revoke transport permission before anything else, then drop buffered PCM.
+    peer_.setVoiceState({joined,microphone,deafened});
+    joined_=joined;microphone_=microphone;deafened_=deafened;
+    std::lock_guard lock(mutex_);++epoch_;captured_.clear();if(!joined || deafened)incoming_.clear();
+  }
+  bool capture(const std::int16_t* mono,std::size_t frames) {
+    if(!running_ || !joined_ || !microphone_ || deafened_) return false;
+    std::lock_guard capture(captureMutex_);
+    const auto epoch=epoch_.load();
+    if(epoch!=captureEpoch_){captureEpoch_=epoch;used_=0;}
+    for(std::size_t i=0;i<frames;++i) {
+      pending_[used_*2]=pending_[used_*2+1]=mono[i];
+      if(++used_<sanser::desktop::audioFrames) continue;
+      used_=0;
+      std::lock_guard lock(mutex_);
+      if(epoch_!=epoch) return false;
+      if(captured_.size()>=8) captured_.pop_front();
+      captured_.push_back({pending_,Clock::now()});
+    }
+    return true;
+  }
+  void receive(sanser::voice::Packet packet) {
+    if(!joined_ || deafened_) return;
+    std::lock_guard lock(mutex_);
+    if(incoming_.size()>=24) incoming_.pop_front();
+    incoming_.push_back({std::move(packet),Clock::now()});
+  }
+private:
+  void run() noexcept {
+    std::unique_ptr<sanser::voice::Encoder> encoder;
+    std::unique_ptr<sanser::voice::Mixer> mixer;
+    std::uint64_t seen=0;
+    while(running_) {
+      const auto began=Clock::now();
+      try {
+        std::deque<std::pair<sanser::voice::Packet,Clock::time_point>> received;
+        std::deque<std::pair<sanser::desktop::AudioSamples,Clock::time_point>> pcm;
+        std::uint64_t epoch=0;
+        { std::lock_guard lock(mutex_); received.swap(incoming_); pcm.swap(captured_); epoch=epoch_; }
+        if(epoch!=seen) {
+          seen=epoch;encoder.reset();mixer.reset();
+          if(joined_ && !deafened_) mixer=std::make_unique<sanser::voice::Mixer>();
+          if(joined_ && microphone_ && !deafened_) encoder=std::make_unique<sanser::voice::Encoder>();
+        }
+        if(mixer) {
+          for(auto& [packet,at]:received) mixer->receive(std::move(packet),at);
+          for(auto& block:mixer->drain(began)) if(callbacks_.voice) callbacks_.voice(callbacks_.context,block.data(),block.size());
+        }
+        if(encoder && !pcm.empty()) {
+          const auto newest=pcm.back().second;bool skipped=false;
+          for(auto& [block,at]:pcm) {
+            if(sanser::voice::staleCapture(at,newest,Clock::now())){skipped=true;continue;}
+            if(skipped){encoder->reset();skipped=false;}
+            if(auto packet=encoder->push(block,at)) peer_.voicePacket(std::move(*packet));
+          }
+        }
+      } catch(...) {seen=0;encoder.reset();mixer.reset();}
+      std::this_thread::sleep_until(began+std::chrono::milliseconds(5));
+    }
+  }
+  sanser::desktop::Peer& peer_;
+  SanserMobileCallbacks callbacks_;
+  std::atomic<bool> running_{true},joined_{false},microphone_{false},deafened_{false};
+  std::atomic<std::uint64_t> epoch_{1};
+  std::mutex mutex_,captureMutex_;
+  std::deque<std::pair<sanser::voice::Packet,Clock::time_point>> incoming_;
+  std::deque<std::pair<sanser::desktop::AudioSamples,Clock::time_point>> captured_;
+  sanser::desktop::AudioSamples pending_{};std::size_t used_=0;std::uint64_t captureEpoch_=0;
+  std::thread worker_;
+};
+}
 struct SanserMobileClient {
   std::unique_ptr<sanser::desktop::Peer> peer;
+  // Declared after peer: destroyed first, but only after peer->stop() below.
+  std::unique_ptr<MobileVoice> voice;
   std::unique_ptr<sanser::mobile::GamepadCapture> gamepad;
   SanserMobileCallbacks callbacks;
   std::mutex fileMutex;
@@ -14,7 +104,7 @@ struct SanserMobileClient {
     // Peer::loop invokes onStopped while stop() joins its worker. Do this while
     // peer is still owned: unique_ptr destruction can clear its pointer before
     // invoking Peer::~Peer, so reading self->peer in that callback would crash.
-    gamepad.reset();if(peer) peer->stop();
+    gamepad.reset();if(voice) voice->stop();if(peer) peer->stop();
   }
 };
 extern "C" SanserMobileClient *sanser_mobile_create(const char *endpoint,uint16_t port,const char *token,int control,int sharing,const char *viewer,SanserMobileCallbacks callbacks) {
@@ -24,6 +114,8 @@ extern "C" SanserMobileClient *sanser_mobile_create(const char *endpoint,uint16_
     sanser::desktop::Options o;
     o.peer=endpoint; o.port=port; o.token=token; o.input=control!=0;
     o.sharing=sharing!=0; o.viewerId=viewer?viewer:""; o.audio=true;
+    o.groupVoice=o.sharing && !o.input;
+    o.collab=true;
     o.width=1920; o.height=1080; o.fps=60; o.bitrate=12000000;
     result->callbacks=callbacks;
     result->peer=std::make_unique<sanser::desktop::Peer>(o);
@@ -42,6 +134,13 @@ extern "C" SanserMobileClient *sanser_mobile_create(const char *endpoint,uint16_
     };
     result->peer->onAudio=[self](sanser::desktop::AudioSamples samples) {
       if(self->callbacks.audio) self->callbacks.audio(self->callbacks.context,samples.data(),samples.size());
+    };
+    if(o.groupVoice) {
+      result->voice=std::make_unique<MobileVoice>(*result->peer,callbacks);
+      result->peer->onVoice=[self](sanser::voice::Packet packet){self->voice->receive(std::move(packet));};
+    }
+    result->peer->onCollab=[self](sanser::desktop::Bytes payload) {
+      if(self->callbacks.collab) self->callbacks.collab(self->callbacks.context,payload.data(),payload.size());
     };
     result->peer->onStopped=[self] {if(self->callbacks.stopped) self->callbacks.stopped(self->callbacks.context,self->peer->stopReason());};
     return result.release();
@@ -99,4 +198,19 @@ extern "C" int sanser_mobile_text(SanserMobileClient *c,const uint8_t *utf8,size
   try { return c->peer->text(std::string(reinterpret_cast<const char*>(utf8),bytes)); }
   catch(...) { return 0; } // Never unwind a C++ exception through Swift/JNI.
 }
+extern "C" int sanser_mobile_voice_available(SanserMobileClient *c){return c && c->voice;}
+extern "C" int sanser_mobile_voice_state(SanserMobileClient *c,int joined,int microphone,int deafened){
+  if(!c || !c->voice)return 0;
+  try{c->voice->state(joined!=0,microphone!=0,deafened!=0);return 1;}catch(...){return 0;}
+}
+extern "C" int sanser_mobile_voice_capture(SanserMobileClient *c,const int16_t *mono,size_t frames){
+  if(!c || !c->voice || !mono || !frames || frames>48000)return 0;
+  try{return c->voice->capture(mono,frames);}catch(...){return 0;}
+}
+extern "C" int sanser_mobile_collab_available(SanserMobileClient *c){return c && c->peer->collabAvailable();}
+extern "C" int sanser_mobile_collab_send(SanserMobileClient *c,const uint8_t *payload,size_t bytes){
+  if(!c || !payload || bytes==0 || bytes>sanser::desktop::collabMaxPayload) return 0;
+  try{return c->peer->collab(sanser::desktop::Bytes(payload,payload+bytes));}catch(...){return 0;}
+}
+extern "C" void sanser_mobile_video_hidden(SanserMobileClient *c,int hidden){if(c)try{c->peer->setVideoHidden(hidden!=0);}catch(...){}}
 extern "C" void sanser_mobile_keyframe(SanserMobileClient *c) {if(c)c->peer->requestKeyframe();}

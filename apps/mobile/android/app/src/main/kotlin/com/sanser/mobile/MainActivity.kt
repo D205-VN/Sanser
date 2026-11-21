@@ -1,7 +1,13 @@
 package com.sanser.mobile
 
+import android.app.Notification
+import android.app.NotificationManager
+import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
+import android.os.Build
+import android.util.Rational
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -28,6 +34,9 @@ class MainActivity : FlutterActivity() {
     @Volatile private var client: NativeClient? = null
     @Volatile private var video: RemoteVideo? = null
     private var audio: PcmOutput? = null
+    private var voiceOutput: PcmOutput? = null
+    @Volatile private var mic: MicCapture? = null
+    private var micPermission: ((Boolean)->Unit)? = null
     private var relay: Relay? = null
     private var sink: EventChannel.EventSink? = null
     private var sessionId: String? = null
@@ -41,6 +50,40 @@ class MainActivity : FlutterActivity() {
     private var analogStatus=-1
     private fun stopController(){if(gamepadAnalog && gamepadCapture>0)client?.gamepadCapture(gamepadCapture,false);gamepad.stop();gamepadCapture=0;gamepadAnalog=false;analogStatus=-1}
     private var inputAllowed=false
+    // Background session: the picture is hidden unless picture in picture shows it.
+    private var inBackground=false;private var keepAlive=false;private var serviceMicrophone:Boolean?=null
+    private var pipEnabled=false;private var pipActive=false
+    private var notificationPermission:((Boolean)->Unit)?=null
+    private var notificationId=7400
+    private fun applyVisibility(){client?.videoHidden(inBackground && !pipActive)}
+    private fun service(running:Boolean){
+        val microphone=mic!=null
+        if(!running){if(serviceMicrophone!=null){serviceMicrophone=null;SessionService.stop(this)};return}
+        if(serviceMicrophone==microphone)return
+        serviceMicrophone=microphone;SessionService.start(this,microphone)
+    }
+    private fun pipParams():PictureInPictureParams{
+        val builder=PictureInPictureParams.Builder()
+        if(videoWidth>0 && videoHeight>0){
+            // Android accepts aspect ratios between 1:2.39 and 2.39:1.
+            val ratio=videoWidth.toDouble()/videoHeight
+            if(ratio in 0.42..2.39)builder.setAspectRatio(Rational(videoWidth,videoHeight))
+        }
+        if(Build.VERSION.SDK_INT>=31)builder.setAutoEnterEnabled(pipReady()).setSeamlessResizeEnabled(true)
+        return builder.build()
+    }
+    private fun pipReady()=pipEnabled && sessionId!=null && frameShown && packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)
+    private fun updatePip(){try{setPictureInPictureParams(pipParams())}catch(_:Exception){}}
+    override fun onUserLeaveHint(){
+        super.onUserLeaveHint()
+        if(Build.VERSION.SDK_INT<31 && pipReady())try{enterPictureInPictureMode(pipParams())}catch(_:Exception){}
+    }
+    override fun onPictureInPictureModeChanged(active:Boolean,newConfig:Configuration){
+        super.onPictureInPictureModeChanged(active,newConfig)
+        pipActive=active;applyVisibility()
+        if(active)client?.keyframe()
+        sink?.success(mapOf("state" to "pip","active" to active))
+    }
     private var videoWidth=0;private var videoHeight=0
     private var startup: Runnable? = null
     private var channels: MethodChannel? = null
@@ -49,7 +92,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.platformViewsController.registry.registerViewFactory("com.sanser.mobile/video",object:PlatformViewFactory(StandardMessageCodec.INSTANCE){
             override fun create(context:Context,viewId:Int,args:Any?):PlatformView {
-                val native = RemoteVideo(context,{client}) { main.post { if(!frameShown && sessionId!=null){frameShown=true;startup?.let{main.removeCallbacks(it)};emit("frame")} } }
+                val native = RemoteVideo(context,{client}) { main.post { if(!frameShown && sessionId!=null){frameShown=true;startup?.let{main.removeCallbacks(it)};emit("frame");updatePip()} } }
                 video=native
                 return object:PlatformView {
                     override fun getView():View = native
@@ -71,7 +114,7 @@ class MainActivity : FlutterActivity() {
         channels=MethodChannel(flutterEngine.dartExecutor.binaryMessenger,"com.sanser.mobile/engine").also { channel ->
             channel.setMethodCallHandler { call,result ->
                 when(call.method){
-                    "capabilities" -> result.success(mapOf("available" to true,"video" to "h264","audio" to true,"voice" to false,"files" to true,"transport" to "auto","direct" to true,"networkRecovery" to true,"controllerKeys" to true,"controllerAnalog" to true))
+                    "capabilities" -> result.success(mapOf("available" to true,"video" to "h264","audio" to true,"voice" to true,"chat" to true,"background" to true,"pictureInPicture" to packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE),"files" to true,"transport" to "auto","direct" to true,"networkRecovery" to true,"controllerKeys" to true,"controllerAnalog" to true))
                     "connect" -> {
                         stopController();inputAllowed=false
                         documents.cancelPick()
@@ -117,7 +160,38 @@ class MainActivity : FlutterActivity() {
                         }
                         if(args["operation"]=="close")operation.run() else work.execute(operation)
                     }
-                    "disconnect" -> {stopController();inputAllowed=false;documents.cancelPick();generation.incrementAndGet();startup?.let{main.removeCallbacks(it)};sessionId=null;frameShown=false;work.execute{stopNative();main.post{result.success(null)}}}
+                    "background" -> {
+                        inBackground=call.argument<Boolean>("background")==true;keepAlive=call.argument<Boolean>("keepAlive")==true
+                        applyVisibility()
+                        // The service can only start while Sanser is visible.
+                        if(!keepAlive || sessionId==null)service(false) else if(!inBackground)service(true)
+                        result.success(null)
+                    }
+                    "pictureInPicture" -> {pipEnabled=call.argument<Boolean>("enabled")==true;updatePip();result.success(null)}
+                    "collabSend" -> {
+                        val payload=call.argument<String>("payload")?.toByteArray(Charsets.UTF_8)
+                        val matches=sessionId!=null && call.argument<String>("sessionId")==sessionId && frameShown
+                        result.success(matches && payload!=null && client?.collabSend(payload)==true)
+                    }
+                    "requestNotifications" -> {
+                        if(Build.VERSION.SDK_INT<33 || checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)==android.content.pm.PackageManager.PERMISSION_GRANTED)result.success(true)
+                        else {notificationPermission?.invoke(false);notificationPermission={granted->result.success(granted)};requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),7303)}
+                    }
+                    "notify" -> {
+                        // Local only: nothing goes through Google's push service.
+                        val manager=getSystemService(NotificationManager::class.java)
+                        val title=call.argument<String>("title")?.take(64);val body=call.argument<String>("body")?.take(240)
+                        if(manager!=null && title!=null && body!=null && manager.areNotificationsEnabled()){
+                            SessionService.channels(this)
+                            manager.notify(notificationId++,Notification.Builder(this,SessionService.MESSAGE_CHANNEL)
+                                .setSmallIcon(R.mipmap.ic_launcher).setContentTitle(title).setContentText(body)
+                                .setStyle(Notification.BigTextStyle().bigText(body)).setAutoCancel(true)
+                                .setContentIntent(SessionService.open(this)).build())
+                            if(notificationId>7499)notificationId=7400
+                        }
+                        result.success(null)
+                    }
+                    "disconnect" -> {service(false);pipEnabled=false;updatePip();stopController();inputAllowed=false;documents.cancelPick();generation.incrementAndGet();startup?.let{main.removeCallbacks(it)};sessionId=null;frameShown=false;work.execute{stopNative();main.post{result.success(null)}}}
                     "controllerCapture" -> {
                         val id=call.argument<String>("sessionId");val attempt=call.argument<Number>("engineAttempt")?.toLong()
                         val capture=call.argument<Number>("captureId")?.toLong() ?: 0
@@ -196,7 +270,28 @@ class MainActivity : FlutterActivity() {
                             video?.viewport((call.argument<Number>("scale")?:1).toFloat(),(call.argument<Number>("x")?:0).toFloat(),(call.argument<Number>("y")?:0).toFloat())
                         result.success(null)
                     }
-                    "voice" -> result.error("voice_unavailable","Voice mobile chưa sẵn sàng trong bản preview.",null)
+                    "voice" -> {
+                        val native=client
+                        if(native==null || !native.voiceAvailable()){result.error("voice_unavailable","Voice chỉ có trong phiên xem màn hình được chia sẻ.",null);return@setMethodCallHandler}
+                        val joined=call.argument<Boolean>("joined")==true
+                        val deafened=joined && call.argument<Boolean>("deafened")==true
+                        val microphone=joined && !deafened && call.argument<Boolean>("microphone")==true
+                        val apply={allowed:Boolean->
+                            if(client!==native)result.success(null)
+                            else if(microphone && !allowed)result.error("microphone_denied","Sanser chưa được phép dùng micro. Hãy cho phép trong Cài đặt → Ứng dụng → Sanser → Quyền.",null)
+                            else {
+                                // Close the microphone before revoking consent, open it after granting.
+                                if(!microphone){mic?.close();mic=null;if(serviceMicrophone==true)service(true)}
+                                if(!native.voiceState(joined,microphone,deafened))result.error("voice_unavailable","Không thể đổi trạng thái voice.",null)
+                                else if(microphone && mic==null){
+                                    try{mic=MicCapture{samples,count->native.voiceCapture(samples,count)};if(serviceMicrophone!=null)service(true);result.success(null)}
+                                    catch(e:Exception){native.voiceState(joined,false,deafened);result.error("microphone_unavailable",e.message?:"Không mở được micro.",null)}
+                                }else result.success(null)
+                            }
+                        }
+                        if(!microphone || checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)==android.content.pm.PackageManager.PERMISSION_GRANTED)apply(true)
+                        else {micPermission?.invoke(false);micPermission=apply;requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO),7301)}
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -205,19 +300,26 @@ class MainActivity : FlutterActivity() {
     private fun startClient(endpoint:String,configuration:Map<String,Any?>,epoch:Long){
         if(epoch!=generation.get())return
         val output=PcmOutput();audio=output
+        val voiceSound=PcmOutput(voice=true);voiceOutput=voiceSound
         var previousWidth=0;var previousHeight=0
         val native=NativeClient({bytes,w,h,key->if(epoch==generation.get()){
             video?.push(bytes,w,h,key)
             if(previousWidth!=w || previousHeight!=h){previousWidth=w;previousHeight=h;main.post{
-                if(epoch==generation.get()){videoWidth=w;videoHeight=h;emit("dimensions")}
+                if(epoch==generation.get()){videoWidth=w;videoHeight=h;emit("dimensions");updatePip()}
             }}
         }},
             {samples->if(epoch==generation.get())output.push(samples)},
-            {reason->main.post{if(epoch==generation.get())fail("Engine native đã dừng ($reason).")}})
+            {reason->main.post{if(epoch==generation.get())fail("Engine native đã dừng ($reason).")}},
+            {samples->if(epoch==generation.get())voiceSound.push(samples)},
+            {payload->val text=String(payload,Charsets.UTF_8);main.post{
+                val id=sessionId
+                if(epoch==generation.get() && id!=null)sink?.success(mapOf("state" to "collab","sessionId" to id,"engineAttempt" to engineAttempt,"payload" to text))
+            }})
         client=native
         if(configuration["inputEnabled"]==true && configuration["sharingId"]==null){val root=documents.workspace();filesRoot=root;filesHandle=MobileFileBridge.open(root)}
         native.start(endpoint,configuration["sessionToken"] as String,configuration["inputEnabled"]==true,configuration["sharingId"]!=null,configuration["viewerId"] as? String ?: "",(configuration["localPort"] as? Number)?.toInt() ?: 0,((configuration["videoBitrateMbps"] as? Number)?.toInt() ?: 6)*1000000,(configuration["baselineRttMs"] as? Number)?.toDouble() ?: 0.0,filesHandle!=0L)
         native.mute(configuration["audioMuted"]==true)
+        if(inBackground)native.videoHidden(!pipActive)
         main.post { if(epoch==generation.get()){emit("connected");poll(epoch);pollFiles(epoch)} }
     }
     private fun emit(state:String,message:String?=null,rtt:Double?=null){val id=sessionId?:return
@@ -225,11 +327,11 @@ class MainActivity : FlutterActivity() {
             val capture=gamepadCapture;stopController()
             sink?.success(mapOf("state" to "controller","sessionId" to id,"engineAttempt" to engineAttempt,"captureId" to capture,"paused" to true))
         }
-        sink?.success(mapOf("sessionId" to id,"engineAttempt" to engineAttempt,"state" to state,"message" to message,"rttMs" to rtt,"videoWidth" to videoWidth,"videoHeight" to videoHeight,"unicodeInput" to (client?.textAvailable()==true),"clipboard" to (client?.clipboardAvailable()==true),"gamepad" to (((client?.gamepadStatus()?:0) and 1)!=0))+(client?.stats()?:emptyMap()))}
+        sink?.success(mapOf("sessionId" to id,"engineAttempt" to engineAttempt,"state" to state,"message" to message,"rttMs" to rtt,"videoWidth" to videoWidth,"videoHeight" to videoHeight,"unicodeInput" to (client?.textAvailable()==true),"clipboard" to (client?.clipboardAvailable()==true),"collab" to (client?.collabAvailable()==true),"gamepad" to (((client?.gamepadStatus()?:0) and 1)!=0))+(client?.stats()?:emptyMap()))}
     private fun poll(epoch:Long){
         main.postDelayed({if(epoch==generation.get() && sessionId!=null){val rtt=client?.rtt();emit(if(frameShown)"frame" else "connecting",rtt=rtt?.takeIf{it>=0});poll(epoch)}},1000)
     }
-    private fun fail(message:String){stopController();inputAllowed=false;documents.cancelPick();emit("stopped",message);generation.incrementAndGet();sessionId=null;startup?.let{main.removeCallbacks(it)};work.execute{stopNative()}}
+    private fun fail(message:String){service(false);stopController();inputAllowed=false;documents.cancelPick();emit("stopped",message);generation.incrementAndGet();sessionId=null;startup?.let{main.removeCallbacks(it)};work.execute{stopNative()}}
     private fun pollFiles(epoch:Long){
         main.postDelayed({if(epoch==generation.get() && sessionId!=null && filesHandle!=0L){work.execute{
             if(epoch==generation.get())client?.pumpFiles(filesHandle)
@@ -239,13 +341,19 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){if(!documents.result(requestCode,resultCode,data))super.onActivityResult(requestCode,resultCode,data)}
     private fun stopNative(){
         val files=filesHandle;filesHandle=0;filesRoot=null;MobileFileBridge.close(files)
+        mic?.close();mic=null
         val native=client;client=null;native?.input(4);native?.close()
         video?.resetStream()
-        relay?.close();relay=null;audio?.close();audio=null
+        relay?.close();relay=null;audio?.close();audio=null;voiceOutput?.close();voiceOutput=null
+    }
+    override fun onRequestPermissionsResult(requestCode:Int,permissions:Array<out String>,grantResults:IntArray){
+        super.onRequestPermissionsResult(requestCode,permissions,grantResults)
+        if(requestCode==7301){val done=micPermission;micPermission=null;done?.invoke(grantResults.firstOrNull()==android.content.pm.PackageManager.PERMISSION_GRANTED)}
+        if(requestCode==7303){val done=notificationPermission;notificationPermission=null;done?.invoke(grantResults.firstOrNull()==android.content.pm.PackageManager.PERMISSION_GRANTED)}
     }
     override fun dispatchKeyEvent(event:KeyEvent):Boolean = if(gamepad.key(event))true else super.dispatchKeyEvent(event)
     override fun dispatchGenericMotionEvent(event:MotionEvent):Boolean = if(gamepad.motion(event))true else super.dispatchGenericMotionEvent(event)
     override fun onWindowFocusChanged(hasFocus:Boolean){if(!hasFocus){gamepad.pause();stopController();client?.input(4)};super.onWindowFocusChanged(hasFocus)}
     override fun onStop(){stopController();client?.input(4);super.onStop()}
-    override fun onDestroy(){stopController();networkMonitor?.close();networkMonitor=null;documents.close();fileActions.shutdown();generation.incrementAndGet();sink=null;startup?.let{main.removeCallbacks(it)};channels?.setMethodCallHandler(null);events?.setStreamHandler(null);work.execute{stopNative()};work.shutdown();super.onDestroy()}
+    override fun onDestroy(){service(false);stopController();networkMonitor?.close();networkMonitor=null;documents.close();fileActions.shutdown();generation.incrementAndGet();sink=null;startup?.let{main.removeCallbacks(it)};channels?.setMethodCallHandler(null);events?.setStreamHandler(null);work.execute{stopNative()};work.shutdown();super.onDestroy()}
 }

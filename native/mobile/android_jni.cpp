@@ -20,7 +20,7 @@ struct Env {
 jbyteArray bytes(JNIEnv *e,const uint8_t *data,size_t n){auto a=e->NewByteArray(static_cast<jsize>(n));if(a && n)e->SetByteArrayRegion(a,0,static_cast<jsize>(n),reinterpret_cast<const jbyte*>(data));return a;}
 struct Handle {
   jobject owner=nullptr;SanserMobileClient *client=nullptr;
-  jmethodID video=nullptr,audio=nullptr,stopped=nullptr,clipboard=nullptr;
+  jmethodID video=nullptr,audio=nullptr,voice=nullptr,collab=nullptr,stopped=nullptr,clipboard=nullptr;
   ~Handle(){sanser_mobile_destroy(client);Env e;if(e.e && owner)e.e->DeleteGlobalRef(owner);}
 };
 struct ClipboardCall {
@@ -44,6 +44,16 @@ void video(void *context,const uint8_t *data,size_t size,uint32_t width,uint32_t
 void audio(void *context,const int16_t *data,size_t size){
   auto *h=static_cast<Handle*>(context);Env e;if(!e.e || e.e->PushLocalFrame(8)<0)return;
   auto a=e.e->NewShortArray(static_cast<jsize>(size));if(a){e.e->SetShortArrayRegion(a,0,static_cast<jsize>(size),data);e.e->CallVoidMethod(h->owner,h->audio,a);}
+  if(e.e->ExceptionCheck())e.e->ExceptionClear();e.e->PopLocalFrame(nullptr);
+}
+void collab(void *context,const uint8_t *data,size_t size){
+  auto *h=static_cast<Handle*>(context);if(!h->collab)return;Env e;if(!e.e || e.e->PushLocalFrame(8)<0)return;
+  auto a=e.e->NewByteArray(static_cast<jsize>(size));if(a){e.e->SetByteArrayRegion(a,0,static_cast<jsize>(size),reinterpret_cast<const jbyte*>(data));e.e->CallVoidMethod(h->owner,h->collab,a);}
+  if(e.e->ExceptionCheck())e.e->ExceptionClear();e.e->PopLocalFrame(nullptr);
+}
+void voice(void *context,const int16_t *data,size_t size){
+  auto *h=static_cast<Handle*>(context);if(!h->voice)return;Env e;if(!e.e || e.e->PushLocalFrame(8)<0)return;
+  auto a=e.e->NewShortArray(static_cast<jsize>(size));if(a){e.e->SetShortArrayRegion(a,0,static_cast<jsize>(size),data);e.e->CallVoidMethod(h->owner,h->voice,a);}
   if(e.e->ExceptionCheck())e.e->ExceptionClear();e.e->PopLocalFrame(nullptr);
 }
 void stopped(void *context,unsigned reason){auto *h=static_cast<Handle*>(context);Env e;if(e.e){e.e->CallVoidMethod(h->owner,h->stopped,static_cast<jint>(reason));if(e.e->ExceptionCheck())e.e->ExceptionClear();}}
@@ -71,9 +81,11 @@ extern "C" int sanser_android_aes(const uint8_t key[32],const uint8_t iv[16],con
 extern "C" JNIEXPORT jlong JNICALL Java_com_sanser_mobile_NativeClient_create(JNIEnv *e,jobject owner,jstring endpoint,jint port,jstring token,jboolean control,jboolean sharing,jstring viewer,jboolean files){
   auto h=std::make_unique<Handle>();h->owner=e->NewGlobalRef(owner);auto cls=e->GetObjectClass(owner);
   h->video=e->GetMethodID(cls,"onVideo","([BIIZ)V");h->audio=e->GetMethodID(cls,"onAudio","([S)V");h->stopped=e->GetMethodID(cls,"onStopped","(I)V");
+  h->voice=e->GetMethodID(cls,"onVoice","([S)V");
+  h->collab=e->GetMethodID(cls,"onCollab","([B)V");
   h->clipboard=e->GetMethodID(cls,"onClipboard","(JI[B)V");
   const char *p=e->GetStringUTFChars(endpoint,nullptr),*t=e->GetStringUTFChars(token,nullptr),*v=e->GetStringUTFChars(viewer,nullptr);
-  h->client=sanser_mobile_create(p,static_cast<uint16_t>(port),t,control,sharing,v,{h.get(),video,audio,stopped});
+  h->client=sanser_mobile_create(p,static_cast<uint16_t>(port),t,control,sharing,v,{h.get(),video,audio,stopped,voice,collab});
   e->ReleaseStringUTFChars(endpoint,p);e->ReleaseStringUTFChars(token,t);e->ReleaseStringUTFChars(viewer,v);e->DeleteLocalRef(cls);
   if(!h->client)return 0;sanser_mobile_files_enable(h->client,files);if(!sanser_mobile_start(h->client))return 0;
   return reinterpret_cast<jlong>(h.release());
@@ -154,4 +166,28 @@ extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_filePump(J
   sanser_mobile_files_state(id,epoch,sanser_mobile_files_available(c));if(sanser_mobile_file_overflow(c))sanser_mobile_files_failed(id,epoch);
   uint8_t data[8192];for(unsigned i=0;i<4;++i){const auto n=sanser_mobile_file_receive(c,epoch,data,sizeof(data));if(!n)break;sanser_mobile_files_receive(id,epoch,data,n);}
   for(unsigned i=0;i<4;++i){const auto n=sanser_mobile_files_next(id,data,sizeof(data));if(n<25)break;uint32_t generation=0;for(unsigned j=0;j<4;++j)generation=(generation<<8)|data[j];if(!sanser_mobile_file_send(c,generation,data+4,n-4))sanser_mobile_files_failed(id,generation);}
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_sanser_mobile_NativeClient_voiceAvailable(JNIEnv*,jobject,jlong handle){
+  auto *h=reinterpret_cast<Handle*>(handle);return h && sanser_mobile_voice_available(h->client);
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_sanser_mobile_NativeClient_voiceState(JNIEnv*,jobject,jlong handle,jboolean joined,jboolean microphone,jboolean deafened){
+  auto *h=reinterpret_cast<Handle*>(handle);return h && sanser_mobile_voice_state(h->client,joined,microphone,deafened);
+}
+extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_voiceCapture(JNIEnv *e,jobject,jlong handle,jshortArray samples,jint count){
+  auto *h=reinterpret_cast<Handle*>(handle);if(!h || !samples || count<=0 || count>e->GetArrayLength(samples))return;
+  auto *pcm=e->GetShortArrayElements(samples,nullptr);if(!pcm)return;
+  sanser_mobile_voice_capture(h->client,pcm,static_cast<size_t>(count));
+  e->ReleaseShortArrayElements(samples,pcm,JNI_ABORT);
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_sanser_mobile_NativeClient_collabAvailable(JNIEnv*,jobject,jlong handle){
+  auto *h=reinterpret_cast<Handle*>(handle);return h && sanser_mobile_collab_available(h->client);
+}
+extern "C" JNIEXPORT jboolean JNICALL Java_com_sanser_mobile_NativeClient_collabSend(JNIEnv *e,jobject,jlong handle,jbyteArray payload){
+  auto *h=reinterpret_cast<Handle*>(handle);if(!h || !payload)return JNI_FALSE;
+  const auto size=e->GetArrayLength(payload);if(size<=0 || size>4096)return JNI_FALSE;
+  std::vector<uint8_t> bytes(static_cast<size_t>(size));e->GetByteArrayRegion(payload,0,size,reinterpret_cast<jbyte*>(bytes.data()));
+  return sanser_mobile_collab_send(h->client,bytes.data(),bytes.size()) ? JNI_TRUE:JNI_FALSE;
+}
+extern "C" JNIEXPORT void JNICALL Java_com_sanser_mobile_NativeClient_videoHidden(JNIEnv*,jobject,jlong handle,jboolean hidden){
+  if(auto *h=reinterpret_cast<Handle*>(handle))sanser_mobile_video_hidden(h->client,hidden);
 }

@@ -11,6 +11,13 @@ typedef struct {
   void (*video)(void *,const uint8_t *,size_t,uint32_t,uint32_t,int);
   void (*audio)(void *,const int16_t *,size_t);
   void (*stopped)(void *,unsigned);
+  // Group voice playback: 48 kHz stereo interleaved, 5 ms blocks, already
+  // mixed across speakers. Separate from screen sound so platforms can route
+  // it through their voice-processing (echo cancelling) output. Optional.
+  void (*voice)(void *,const int16_t *,size_t);
+  // In-session chat: one bounded opaque payload (the desktop chat JSON, at
+  // most 4096 bytes) from the host. Parsing/validation belongs to the app.
+  void (*collab)(void *,const uint8_t *,size_t);
 } SanserMobileCallbacks;
 typedef struct SanserMobileClient SanserMobileClient;
 SanserMobileClient *sanser_mobile_create(const char *peer,uint16_t port,const char *token,
@@ -57,6 +64,22 @@ size_t sanser_mobile_file_receive(SanserMobileClient *,uint32_t generation,uint8
 int sanser_mobile_file_overflow(SanserMobileClient *); // Read-and-clear; abort files only.
 void sanser_mobile_mute(SanserMobileClient *client,int muted);
 void sanser_mobile_keyframe(SanserMobileClient *client);
+// Group voice exists only in view-only sharing sessions (sharing=1, control=0).
+int sanser_mobile_voice_available(SanserMobileClient *client);
+// Consent state. Leaving closes the microphone; deafened implies muted. The
+// transport refuses microphone packets unless joined and unmuted.
+int sanser_mobile_voice_state(SanserMobileClient *client,int joined,int microphone,int deafened);
+// Echo-cancelled microphone PCM: 48 kHz mono, any frame count per call. Call
+// from one capture thread. Ignored (returns 0) while the microphone is off.
+int sanser_mobile_voice_capture(SanserMobileClient *client,const int16_t *mono,size_t frames);
+// In-session chat lane (SCO1/SCL1). Available once the host announces it.
+int sanser_mobile_collab_available(SanserMobileClient *client);
+// 1..4096 bytes. Rate limited natively; returns 0 when refused or not ready.
+int sanser_mobile_collab_send(SanserMobileClient *client,const uint8_t *payload,size_t bytes);
+// The picture is not visible (app in the background without picture in
+// picture). A supporting host stops sending fresh video; showing again asks
+// for a keyframe. Sound, voice and chat continue.
+void sanser_mobile_video_hidden(SanserMobileClient *client,int hidden);
 // One PCM producer and one realtime render consumer; render never locks/allocates.
 typedef struct SanserMobilePCM SanserMobilePCM;
 SanserMobilePCM *sanser_mobile_pcm_create(void);

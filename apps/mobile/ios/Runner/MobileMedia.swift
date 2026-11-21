@@ -2,6 +2,7 @@ import UIKit
 import AVFoundation
 import CoreMedia
 import VideoToolbox
+import AVKit
 
 private final class MobileVideoDisplayTick:NSObject {
     weak var view:MobileVideoView?
@@ -88,6 +89,39 @@ final class MobileVideoView: UIView {
     override func touchesCancelled(_ touches:Set<UITouch>,with event:UIEvent?){input?(lastX,lastY,false)}
     func stats()->[String:UInt64]{decoder.stats().merging(["iOSPresentedFrames":presented,"iOSDisplayBusyTicks":displayBusy,"iOSDisplayFailures":displayFailures]){_,new in new}}
     func reset(){decoder.reset();display.flushAndRemoveImage();format=nil;shown=false;presented=0;displayBusy=0;displayFailures=0}
+    // Picture in picture shows this same display layer in a system window.
+    private var pip:MobilePictureInPicture?
+    var pictureInPictureChanged:((Bool)->Void)?
+    func pictureInPicture(_ enabled:Bool){
+        if !enabled{pip?.stop();pip=nil;return}
+        guard pip==nil,AVPictureInPictureController.isPictureInPictureSupported() else{return}
+        let controller=MobilePictureInPicture(display);controller.changed={[weak self] active in self?.pictureInPictureChanged?(active)};pip=controller
+    }
+}
+
+/// Live remote screen: no timeline, no pause and no skipping.
+final class MobilePictureInPicture:NSObject,AVPictureInPictureSampleBufferPlaybackDelegate,AVPictureInPictureControllerDelegate {
+    private var controller:AVPictureInPictureController?
+    var changed:((Bool)->Void)?
+    init(_ layer:AVSampleBufferDisplayLayer){
+        super.init()
+        let controller=AVPictureInPictureController(contentSource:.init(sampleBufferDisplayLayer:layer,playbackDelegate:self))
+        controller.delegate=self
+        // Starts by itself when the user leaves Sanser while the picture shows.
+        controller.canStartPictureInPictureAutomaticallyFromInline=true
+        controller.requiresLinearPlayback=true
+        self.controller=controller
+    }
+    func stop(){controller?.stopPictureInPicture();controller?.delegate=nil;controller=nil}
+    func pictureInPictureController(_ controller:AVPictureInPictureController,setPlaying playing:Bool){}
+    func pictureInPictureControllerTimeRangeForPlayback(_ controller:AVPictureInPictureController)->CMTimeRange{CMTimeRange(start:.negativeInfinity,duration:.positiveInfinity)}
+    func pictureInPictureControllerIsPlaybackPaused(_ controller:AVPictureInPictureController)->Bool{false}
+    func pictureInPictureController(_ controller:AVPictureInPictureController,didTransitionToRenderSize newRenderSize:CMVideoDimensions){}
+    func pictureInPictureController(_ controller:AVPictureInPictureController,skipByInterval skipInterval:CMTime,completion completionHandler:@escaping()->Void){completionHandler()}
+    func pictureInPictureControllerWillStartPictureInPicture(_ controller:AVPictureInPictureController){changed?(true)}
+    func pictureInPictureControllerDidStopPictureInPicture(_ controller:AVPictureInPictureController){changed?(false)}
+    func pictureInPictureController(_ controller:AVPictureInPictureController,failedToStartPictureInPictureWithError error:Error){changed?(false)}
+    func pictureInPictureController(_ controller:AVPictureInPictureController,restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler:@escaping(Bool)->Void){completionHandler(true)}
 }
 // AVAudioSourceNode continuously pulls PCM at the audio device clock. A single
 // lock-free ring replaces 5ms scheduleBuffer calls and repeated engine restarts.
@@ -99,28 +133,37 @@ private final class MobilePCM {
 final class MobileAudio {
     private let queue=DispatchQueue(label:"SanserAudio",qos:.userInteractive)
     private var engine:AVAudioEngine?,source:AVAudioSourceNode?,pcm:MobilePCM?
+    // Group voice plays through its own ring and node; the engine mixer sums
+    // it with screen sound, so voice processing cancels both from the mic.
+    private var voiceSource:AVAudioSourceNode?,voicePCM:MobilePCM?
+    private var microphone=false,converter:AVAudioConverter?
+    // Running engine without screen sound: keeps the session alive in the
+    // background. Mixes with other apps so it never silences their music.
+    private var keepingAlive=false
     private var closed=false
     private var observers=[NSObjectProtocol]()
+    /// Echo-cancelled 48 kHz mono PCM, called on the input tap thread.
+    var capture:((UnsafePointer<Int16>,Int)->Void)?
     init(){
         for name in [AVAudioSession.routeChangeNotification,AVAudioSession.mediaServicesWereResetNotification,AVAudioSession.interruptionNotification] {
             observers.append(NotificationCenter.default.addObserver(forName:name,object:nil,queue:nil){[weak self] _ in
-                self?.queue.async{[weak self] in self?.reset()}
+                self?.queue.async{[weak self] in
+                    guard let self=self else{return}
+                    self.reset()
+                    if self.keepingAlive && !self.closed{try? self.ensure(mix:true)}
+                }
             })
         }
     }
     private func reset(){
-        engine?.stop()
-        if let source=source{engine?.detach(source)}
-        source=nil;engine=nil;pcm=nil
+        // Touch inputNode only when the mic was open: creating it can switch
+        // the audio session to recording.
+        if let engine=engine{if converter != nil{engine.inputNode.removeTap(onBus:0)};engine.stop()}
+        for node in [source,voiceSource].compactMap({$0}){engine?.detach(node)}
+        source=nil;voiceSource=nil;engine=nil;pcm=nil;voicePCM=nil;converter=nil
     }
-    private func start() throws {
-        let session=AVAudioSession.sharedInstance()
-        try session.setCategory(.playback,mode:.default)
-        try session.setPreferredSampleRate(48000)
-        try session.setPreferredIOBufferDuration(0.01)
-        try session.setActive(true)
-        guard let ring=MobilePCM(),let format=AVAudioFormat(standardFormatWithSampleRate:48000,channels:2) else{throw MobileError.socket}
-        let node=AVAudioSourceNode(format:format){_,_,count,list->OSStatus in
+    private static func node(_ ring:MobilePCM,_ format:AVAudioFormat)->AVAudioSourceNode{
+        AVAudioSourceNode(format:format){_,_,count,list->OSStatus in
             let buffers=UnsafeMutableAudioBufferListPointer(list)
             guard buffers.count==2,let l=buffers[0].mData,let r=buffers[1].mData else{
                 for buffer in buffers{if let data=buffer.mData{memset(data,0,Int(buffer.mDataByteSize))}}
@@ -129,22 +172,80 @@ final class MobileAudio {
             sanser_mobile_pcm_render(ring.pointer,l.assumingMemoryBound(to:Float.self),r.assumingMemoryBound(to:Float.self),Int(count))
             return noErr
         }
+    }
+    private func start(mix:Bool=false) throws {
+        let session=AVAudioSession.sharedInstance()
+        if microphone{try session.setCategory(.playAndRecord,mode:.voiceChat,options:[.defaultToSpeaker,.allowBluetooth])}
+        else{try session.setCategory(.playback,mode:.default,options:mix ? [.mixWithOthers]:[])}
+        try session.setPreferredSampleRate(48000)
+        try session.setPreferredIOBufferDuration(0.01)
+        try session.setActive(true)
+        guard let ring=MobilePCM(),let voiceRing=MobilePCM(),let format=AVAudioFormat(standardFormatWithSampleRate:48000,channels:2) else{throw MobileError.socket}
         let engine=AVAudioEngine()
+        if microphone{
+            // Echo cancellation, noise suppression and gain control from iOS.
+            try engine.inputNode.setVoiceProcessingEnabled(true)
+            if #available(iOS 17.0,*){engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration=AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking:false,duckingLevel:.min)}
+        }
+        let node=Self.node(ring,format),voiceNode=Self.node(voiceRing,format)
         engine.attach(node);engine.connect(node,to:engine.mainMixerNode,format:format)
-        self.pcm=ring;self.source=node;self.engine=engine
+        engine.attach(voiceNode);engine.connect(voiceNode,to:engine.mainMixerNode,format:format)
+        if microphone{
+            let input=engine.inputNode,inputFormat=input.outputFormat(forBus:0)
+            guard inputFormat.sampleRate>0,let target=AVAudioFormat(commonFormat:.pcmFormatInt16,sampleRate:48000,channels:1,interleaved:true),
+                  let converter=AVAudioConverter(from:inputFormat,to:target) else{throw MobileError.socket}
+            self.converter=converter
+            input.installTap(onBus:0,bufferSize:1024,format:inputFormat){[weak self] buffer,_ in self?.captured(buffer,converter,target)}
+        }
+        self.pcm=ring;self.voicePCM=voiceRing;self.source=node;self.voiceSource=voiceNode;self.engine=engine
         try engine.start()
     }
+    private func captured(_ buffer:AVAudioPCMBuffer,_ converter:AVAudioConverter,_ target:AVAudioFormat){
+        guard let capture=capture,buffer.frameLength>0 else{return}
+        let capacity=AVAudioFrameCount(Double(buffer.frameLength)*48000/buffer.format.sampleRate)+64
+        guard let output=AVAudioPCMBuffer(pcmFormat:target,frameCapacity:capacity) else{return}
+        var supplied=false
+        let status=converter.convert(to:output,error:nil){_,state in
+            if supplied{state.pointee = .noDataNow;return nil}
+            supplied=true;state.pointee = .haveData;return buffer
+        }
+        guard status != .error,output.frameLength>0,let mono=output.int16ChannelData?[0] else{return}
+        capture(mono,Int(output.frameLength))
+    }
+    private func ensure(mix:Bool=false) throws{if engine==nil || engine?.isRunning==false{reset();try start(mix:mix)}}
     func push(_ samples:[Int16]){queue.async{[weak self] in
         guard let self=self,!self.closed,!samples.isEmpty,samples.count%2==0 else{return}
         do {
-            if self.engine==nil || self.engine?.isRunning==false{self.reset();try self.start()}
+            try self.ensure()
             guard let pcm=self.pcm else{return}
             samples.withUnsafeBufferPointer{sanser_mobile_pcm_push(pcm.pointer,$0.baseAddress,$0.count)}
         }catch{self.reset()}
     }}
+    func pushVoice(_ samples:[Int16]){queue.async{[weak self] in
+        guard let self=self,!self.closed,!samples.isEmpty,samples.count%2==0 else{return}
+        do {
+            try self.ensure()
+            guard let pcm=self.voicePCM else{return}
+            samples.withUnsafeBufferPointer{sanser_mobile_pcm_push(pcm.pointer,$0.baseAddress,$0.count)}
+        }catch{self.reset()}
+    }}
+    /// Opening or closing the microphone rebuilds the engine: voice processing
+    /// and the record category can only change while it is stopped.
+    func voice(microphone:Bool){queue.async{[weak self] in
+        guard let self=self,!self.closed,self.microphone != microphone else{return}
+        self.microphone=microphone;self.reset()
+        do{try self.start()}catch{self.microphone=false;self.reset()}
+    }}
+    /// Keeps the audio session running (silence when there is no sound) so
+    /// iOS does not suspend Sanser while the session continues in the background.
+    func keepAlive(_ enabled:Bool){queue.async{[weak self] in
+        guard let self=self,!self.closed,self.keepingAlive != enabled else{return}
+        self.keepingAlive=enabled
+        if enabled{do{try self.ensure(mix:true)}catch{self.reset()}}
+    }}
     func close(){queue.async{[self] in
-        guard !closed else{return};closed=true;reset()
+        guard !closed else{return};closed=true;microphone=false;reset()
         try? AVAudioSession.sharedInstance().setActive(false,options:.notifyOthersOnDeactivation)
     }}
-    deinit{for observer in observers{NotificationCenter.default.removeObserver(observer)};engine?.stop()}
+    deinit{for observer in observers{NotificationCenter.default.removeObserver(observer)};if converter != nil{engine?.inputNode.removeTap(onBus:0)};engine?.stop()}
 }

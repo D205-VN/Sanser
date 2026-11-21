@@ -4,21 +4,31 @@ class MobilePreferences {
   final String networkMode;
   final String pointerMode;
   final int videoBitrateMbps;
+
+  /// Minutes a session stays connected while Sanser is in the background.
+  /// 0 disconnects as soon as the app leaves the screen.
+  final int backgroundMinutes;
   final bool autoLandscape,
       soundOnConnect,
       compactControls,
       showLatency,
-      haptics;
+      haptics,
+      pictureInPicture,
+      notifications;
   const MobilePreferences({
     this.networkMode = 'auto',
     this.pointerMode = 'direct',
     this.videoBitrateMbps = 6,
+    this.backgroundMinutes = 15,
     this.autoLandscape = true,
     this.soundOnConnect = true,
     this.compactControls = true,
     this.showLatency = true,
     this.haptics = false,
+    this.pictureInPicture = true,
+    this.notifications = true,
   });
+  static const backgroundChoices = [0, 5, 15, 60];
   factory MobilePreferences.fromJson(Json json) => MobilePreferences(
     pointerMode: ['direct', 'touchpad'].contains(json['pointerMode'])
         ? json['pointerMode']
@@ -38,6 +48,13 @@ class MobilePreferences {
         : true,
     showLatency: json['showLatency'] is bool ? json['showLatency'] : true,
     haptics: json['haptics'] is bool ? json['haptics'] : false,
+    backgroundMinutes: backgroundChoices.contains(json['backgroundMinutes'])
+        ? json['backgroundMinutes']
+        : 15,
+    pictureInPicture: json['pictureInPicture'] is bool
+        ? json['pictureInPicture']
+        : true,
+    notifications: json['notifications'] is bool ? json['notifications'] : true,
   );
   MobilePreferences copyWith({
     String? networkMode,
@@ -48,6 +65,9 @@ class MobilePreferences {
     bool? compactControls,
     bool? showLatency,
     bool? haptics,
+    int? backgroundMinutes,
+    bool? pictureInPicture,
+    bool? notifications,
   }) => MobilePreferences(
     networkMode: networkMode ?? this.networkMode,
     pointerMode: pointerMode ?? this.pointerMode,
@@ -57,6 +77,9 @@ class MobilePreferences {
     compactControls: compactControls ?? this.compactControls,
     showLatency: showLatency ?? this.showLatency,
     haptics: haptics ?? this.haptics,
+    backgroundMinutes: backgroundMinutes ?? this.backgroundMinutes,
+    pictureInPicture: pictureInPicture ?? this.pictureInPicture,
+    notifications: notifications ?? this.notifications,
   );
   Json toJson() => {
     'networkMode': networkMode,
@@ -67,5 +90,8 @@ class MobilePreferences {
     'compactControls': compactControls,
     'showLatency': showLatency,
     'haptics': haptics,
+    'backgroundMinutes': backgroundMinutes,
+    'pictureInPicture': pictureInPicture,
+    'notifications': notifications,
   };
 }

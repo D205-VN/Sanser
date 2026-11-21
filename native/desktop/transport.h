@@ -149,7 +149,7 @@ public:
   // make space: a negotiated mobile receiver can instead skip superseded raw
   // captures while an IDR or transient wire backlog drains.
   bool acceptsCapture() {
-    if(!ready_ || !running_ || videoPaused_) return false;
+    if(!ready_ || !running_ || videoPaused_ || peerVideoHidden_) return false;
     if(!peerVideoLimit_) return true;
     std::lock_guard lock(sendMutex_);
     const auto queued=tx_.queuedVideoBytes();
@@ -212,6 +212,11 @@ public:
   void audio(const AudioSamples& samples);
   void audioPrepared(const Bytes& packet, bool opus);
   void setAudioMuted(bool muted);
+  // Viewer only: the picture is not on screen (app in the background). Asks a
+  // supporting host to stop sending fresh video ("SVH1"); old hosts ignore it.
+  // Showing again requests a keyframe.
+  void setVideoHidden(bool hidden);
+  bool peerVideoHidden() const { return peerVideoHidden_.load(); }
   void setVoiceState(voice::State state);
   void voicePacket(voice::Packet packet);
   void forwardVoice(const voice::Packet& packet);
@@ -294,6 +299,8 @@ private:
   std::atomic<bool> peerAudio_{false};
   std::atomic<bool> peerAudioOpus_{false};
   std::atomic<bool> peerAudioMuted_{false}, audioMuted_{false};
+  std::atomic<bool> peerVideoHidden_{false}, videoHidden_{false};
+  void observeVideoHidden(bool hidden);
   std::atomic<bool> voiceJoined_{false},voiceMic_{false},voiceDeaf_{false};
   std::atomic<bool> peerVoiceJoined_{false},peerVoiceMic_{false},peerVoiceDeaf_{false},peerVoiceRedundant_{false};
   std::atomic<std::int64_t> peerVoiceAt_{0};
@@ -310,7 +317,7 @@ private:
   std::atomic<std::uint64_t> queuedKeys_{0},queuedButtons_{0};
   std::atomic<std::uint64_t> deliveredKeys_{0},deliveredButtons_{0};
   std::uint64_t lastAudio_=0;
-  std::uint64_t lastAudioPreference_=0;
+  std::uint64_t lastAudioPreference_=0, lastVideoHidden_=0;
   std::atomic<bool> videoPaused_{false};
   mutable std::mutex feedbackMutex_;
   VideoFeedback feedback_{};

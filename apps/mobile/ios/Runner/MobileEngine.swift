@@ -1,8 +1,11 @@
 import Flutter
+import AVFoundation
 import UIKit
 import UniformTypeIdentifiers
 import Network
 import GameController
+import UserNotifications
+import AVKit
 
 private final class ClipboardReply {
     let reply:(UInt32,String)->Void
@@ -22,6 +25,8 @@ final class NativeMobileSession {
         set{videoLock.lock();videoCallback=newValue;videoLock.unlock()}
     }
     var audio:(([Int16])->Void)?
+    var voiceOutput:(([Int16])->Void)?
+    var collab:((Data)->Void)?
     var stopped:((UInt32)->Void)?
     init(endpoint:String,configuration:[String:Any],fileRoot:URL?) throws {
         self.fileRoot=fileRoot
@@ -36,6 +41,14 @@ final class NativeMobileSession {
         callbacks.audio={context,bytes,size in
             guard let context=context,let bytes=bytes else{return}
             Unmanaged<NativeMobileSession>.fromOpaque(context).takeUnretainedValue().audio?(Array(UnsafeBufferPointer(start:bytes,count:size)))
+        }
+        callbacks.voice={context,bytes,size in
+            guard let context=context,let bytes=bytes else{return}
+            Unmanaged<NativeMobileSession>.fromOpaque(context).takeUnretainedValue().voiceOutput?(Array(UnsafeBufferPointer(start:bytes,count:size)))
+        }
+        callbacks.collab={context,bytes,size in
+            guard let context=context,let bytes=bytes,size>0,size<=4096 else{return}
+            Unmanaged<NativeMobileSession>.fromOpaque(context).takeUnretainedValue().collab?(Data(bytes:bytes,count:size))
         }
         callbacks.stopped={context,reason in
             guard let context=context else{return}
@@ -83,6 +96,16 @@ final class NativeMobileSession {
         lock.lock();defer{lock.unlock()}
         return utf8.withUnsafeBufferPointer{sanser_mobile_text(client,$0.baseAddress,$0.count) != 0}
     }
+    func voiceAvailable()->Bool{lock.lock();defer{lock.unlock()};return sanser_mobile_voice_available(client) != 0}
+    func voiceState(joined:Bool,microphone:Bool,deafened:Bool)->Bool{lock.lock();defer{lock.unlock()};return sanser_mobile_voice_state(client,joined ? 1:0,microphone ? 1:0,deafened ? 1:0) != 0}
+    func voiceCapture(_ mono:UnsafePointer<Int16>,_ frames:Int){lock.lock();defer{lock.unlock()};_=sanser_mobile_voice_capture(client,mono,frames)}
+    func collabAvailable()->Bool{lock.lock();defer{lock.unlock()};return sanser_mobile_collab_available(client) != 0}
+    func collabSend(_ payload:Data)->Bool{
+        guard (1...4096).contains(payload.count) else{return false}
+        lock.lock();defer{lock.unlock()}
+        return payload.withUnsafeBytes{sanser_mobile_collab_send(client,$0.bindMemory(to:UInt8.self).baseAddress,$0.count) != 0}
+    }
+    func videoHidden(_ hidden:Bool){lock.lock();defer{lock.unlock()};sanser_mobile_video_hidden(client,hidden ? 1:0)}
     func keyframe(){lock.lock();defer{lock.unlock()};sanser_mobile_keyframe(client)}
     func rtt()->Double{lock.lock();defer{lock.unlock()};return sanser_mobile_rtt(client)}
     func stats()->[String:UInt64]{
@@ -127,6 +150,12 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
     private var gamepadCapture=0,inputAllowed=false
     private var gamepadHighest=0
     private var gamepadAnalog=false,analogStatus = -1
+    // Background session: the picture is hidden unless picture in picture shows it.
+    private var inBackground=false,keepAlive=false,pipEnabled=false,pipActive=false
+    private func applyVisibility(){
+        session?.videoHidden(inBackground && !pipActive)
+        audio?.keepAlive(inBackground && keepAlive)
+    }
     private func stopController(){if gamepadAnalog,gamepadCapture>0{_ = session?.gamepadCapture(gamepadCapture,false)};gamepad.stop();gamepadCapture=0;gamepadAnalog=false;analogStatus = -1}
     private var timer:Timer?,timeout:Timer?
     private var fileTimer:DispatchSourceTimer?
@@ -181,6 +210,10 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
         native.input={[weak self] x,y,down in self?.session?.input(kind:0,x:x,y:y);if let down=down{self?.session?.input(kind:1,x:x,y:y,down:down)}}
         native.keyframe={[weak self] in self?.session?.keyframe()}
         native.firstFrame={[weak self] in guard let self=self else{return};self.rendered=true;self.timeout?.invalidate();self.emit("frame")}
+        native.pictureInPictureChanged={[weak self] active in DispatchQueue.main.async{[weak self] in
+            guard let self=self else{return};self.pipActive=active;self.applyVisibility();self.sink?(["state":"pip","active":active])
+        }}
+        native.pictureInPicture(pipEnabled)
         // Flutter may create/replace the platform view after media has started.
         // Attach it atomically and ask for a fresh reference chain.
         session?.video=native.receiver();session?.keyframe()
@@ -190,7 +223,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
     func handle(_ call:FlutterMethodCall,result:@escaping FlutterResult){
         let args=call.arguments as? [String:Any] ?? [:]
         switch call.method {
-        case "capabilities":result(["available":true,"audio":true,"voice":false,"files":true,"transport":"auto","direct":true,"video":"h264","networkRecovery":true,"controllerKeys":true,"controllerAnalog":true])
+        case "capabilities":result(["available":true,"audio":true,"voice":true,"chat":true,"pictureInPicture":AVPictureInPictureController.isPictureInPictureSupported(),"background":true,"files":true,"transport":"auto","direct":true,"video":"h264","networkRecovery":true,"controllerKeys":true,"controllerAnalog":true])
         case "connect":
             disconnect();videoHealth.reset();generation+=1;let epoch=generation
             guard let id=args["sessionId"] as? String else{return result(FlutterError(code:"configuration",message:"Thiếu thông tin phiên.",details:nil))}
@@ -250,6 +283,24 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
                 };result(nil)
             }
         case "disconnect":disconnect{result(nil)}
+        case "background":
+            inBackground=args["background"] as? Bool == true;keepAlive=args["keepAlive"] as? Bool == true
+            applyVisibility();result(nil)
+        case "pictureInPicture":
+            pipEnabled=args["enabled"] as? Bool == true;video?.pictureInPicture(pipEnabled);result(nil)
+        case "collabSend":
+            guard let id=sessionID,args["sessionId"] as? String==id,rendered,let payload=args["payload"] as? String,
+                  let native=session else{return result(false)}
+            result(native.collabSend(Data(payload.utf8)))
+        case "requestNotifications":
+            UNUserNotificationCenter.current().requestAuthorization(options:[.alert,.sound]){granted,_ in DispatchQueue.main.async{result(granted)}}
+        case "notify":
+            // Local only: nothing goes through Apple's push service.
+            guard UIApplication.shared.applicationState != .active,let title=args["title"] as? String,let body=args["body"] as? String else{return result(nil)}
+            let content=UNMutableNotificationContent();content.title=String(title.prefix(64));content.body=String(body.prefix(240));content.sound = .default
+            content.threadIdentifier="sanser-session"
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier:UUID().uuidString,content:content,trigger:nil))
+            result(nil)
         case "mute":session?.mute(args["muted"] as? Bool == true);result(nil)
         case "resetInput":session?.input(kind:4);result(nil)
         case "text":
@@ -287,7 +338,21 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             video?.viewport((args["scale"] as? NSNumber)?.doubleValue ?? 1,
                 (args["x"] as? NSNumber)?.doubleValue ?? 0,(args["y"] as? NSNumber)?.doubleValue ?? 0);result(nil)
         case "key":session?.input(kind:2,code:UInt32(clamping:args["code"] as? Int ?? 0),down:args["down"] as? Bool == true);result(nil)
-        case "voice":result(FlutterError(code:"voice_unavailable",message:"Voice mobile chưa sẵn sàng trong bản preview.",details:nil))
+        case "voice":
+            guard let native=session,native.voiceAvailable() else{return result(FlutterError(code:"voice_unavailable",message:"Voice chỉ có trong phiên xem màn hình được chia sẻ.",details:nil))}
+            let joined=args["joined"] as? Bool == true,deafened=joined && args["deafened"] as? Bool == true
+            let microphone=joined && !deafened && args["microphone"] as? Bool == true
+            let apply:(Bool)->Void={[weak self] allowed in
+                guard let self=self,self.session===native else{return result(nil)}
+                if microphone && !allowed{return result(FlutterError(code:"microphone_denied",message:"Sanser chưa được phép dùng micro. Hãy bật trong Cài đặt → Sanser → Micro.",details:nil))}
+                // Close the microphone before revoking consent, open it after granting.
+                if !microphone{self.audio?.voice(microphone:false)}
+                guard native.voiceState(joined:joined,microphone:microphone,deafened:deafened) else{return result(FlutterError(code:"voice_unavailable",message:"Không thể đổi trạng thái voice.",details:nil))}
+                if microphone{self.audio?.voice(microphone:true)}
+                result(nil)
+            }
+            if !microphone{apply(true)}
+            else{AVAudioSession.sharedInstance().requestRecordPermission{granted in DispatchQueue.main.async{apply(granted)}}}
         default:result(FlutterMethodNotImplemented)
         }
     }
@@ -311,8 +376,18 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             // session/view or serialize compressed video through the UI queue.
             native.video=video?.receiver()
             native.audio={samples in output.push(samples)}
+            native.voiceOutput={samples in output.pushVoice(samples)}
+            native.collab={[weak self] payload in
+                guard let text=String(data:payload,encoding:.utf8) else{return}
+                DispatchQueue.main.async{[weak self] in
+                    guard let self=self,self.generation==epoch,let id=self.sessionID else{return}
+                    self.sink?(["state":"collab","sessionId":id,"engineAttempt":self.engineAttempt,"payload":text])
+                }
+            }
+            output.capture={[weak native] mono,frames in native?.voiceCapture(mono,frames)}
             native.stopped={[weak self] reason in DispatchQueue.main.async{[weak self] in if self?.generation==epoch{self?.fail("Engine native đã dừng (\(reason)).")}}}
             let pulse=DispatchSource.makeTimerSource(queue:work);fileTimer=pulse;pulse.schedule(deadline:.now(),repeating:.milliseconds(80));pulse.setEventHandler{[weak native] in native?.pumpFiles()};pulse.resume()
+            if inBackground{native.videoHidden(!pipActive);output.keepAlive(keepAlive)}
             self.work.async{[weak self] in do{try native.start()}catch{DispatchQueue.main.async{if self?.generation==epoch{self?.fail("Không thể bắt đầu engine native.")}}}}
         }catch{self.fail("Không thể mở engine native.")}
     }
@@ -321,7 +396,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             let capture=gamepadCapture;stopController()
             sink?(["state":"controller","sessionId":id,"engineAttempt":engineAttempt,"captureId":capture,"paused":true])
         }
-        var data:[String:Any]=["sessionId":id,"engineAttempt":engineAttempt,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};data["unicodeInput"]=session?.textAvailable() == true;data["clipboard"]=session?.clipboardAvailable() == true;data["gamepad"]=((session?.gamepadStatus() ?? 0)&1) != 0;if let stats=session?.stats(){for(key,value) in stats{data[key]=value}}
+        var data:[String:Any]=["sessionId":id,"engineAttempt":engineAttempt,"state":state];if let message=message{data["message"]=message};if let rtt=rtt,rtt>=0{data["rttMs"]=rtt};data["unicodeInput"]=session?.textAvailable() == true;data["clipboard"]=session?.clipboardAvailable() == true;data["collab"]=session?.collabAvailable() == true;data["gamepad"]=((session?.gamepadStatus() ?? 0)&1) != 0;if let stats=session?.stats(){for(key,value) in stats{data[key]=value}}
         if let stats=video?.stats(){for(key,value) in stats{data[key]=value}}
         videoHealth.record(data);sink?(data)}
     private func fail(_ message:String){emit("stopped",message:message);disconnect()}

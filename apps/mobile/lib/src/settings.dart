@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'controller.dart';
+import 'preferences.dart';
 import 'files.dart';
 import 'adaptive_layout.dart';
 
@@ -203,6 +204,69 @@ class MobileSettings extends StatelessWidget {
                   value: p.soundOnConnect,
                   onChanged: (value) => controller.setPreferences(
                     p.copyWith(soundOnConnect: value),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.timer_outlined),
+                  title: const Text('Giữ kết nối khi thoát ra'),
+                  subtitle: const Text(
+                    'Khi bạn chuyển sang app khác, phiên vẫn mở: âm thanh, voice và chat tiếp tục, máy tính ngừng gửi hình để tiết kiệm dữ liệu. Quay lại là dùng tiếp, không cần kết nối lại.',
+                  ),
+                  trailing: DropdownButton<int>(
+                    key: ValueKey('background-${p.backgroundMinutes}'),
+                    value: p.backgroundMinutes,
+                    underline: const SizedBox.shrink(),
+                    items: [
+                      for (final minutes in MobilePreferences.backgroundChoices)
+                        DropdownMenuItem(
+                          value: minutes,
+                          child: Text(
+                            minutes == 0
+                                ? 'Tắt'
+                                : minutes == 60
+                                ? '1 giờ'
+                                : '$minutes phút',
+                          ),
+                        ),
+                    ],
+                    onChanged: (minutes) {
+                      if (minutes != null) {
+                        controller.setPreferences(
+                          p.copyWith(backgroundMinutes: minutes),
+                        );
+                      }
+                    },
+                  ),
+                ),
+                const Divider(height: 1),
+                SwitchListTile.adaptive(
+                  secondary: const Icon(Icons.picture_in_picture_alt_outlined),
+                  title: const Text('Hình trong hình (PiP)'),
+                  subtitle: const Text(
+                    'Khi thoát ra, màn hình máy tính tiếp tục hiện trong một cửa sổ nhỏ.',
+                  ),
+                  value: p.pictureInPicture,
+                  onChanged: (value) => controller.setPreferences(
+                    p.copyWith(pictureInPicture: value),
+                  ),
+                ),
+                const Divider(height: 1),
+                SwitchListTile.adaptive(
+                  secondary: const Icon(Icons.notifications_outlined),
+                  title: const Text('Thông báo'),
+                  subtitle: const Text(
+                    'Báo tin nhắn chat và khi phiên ngắt lúc Sanser đang ở nền.',
+                  ),
+                  value: p.notifications,
+                  onChanged: (value) => controller.setPreferences(
+                    p.copyWith(notifications: value),
                   ),
                 ),
               ],

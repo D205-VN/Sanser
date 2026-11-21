@@ -16,7 +16,7 @@ import kotlin.concurrent.thread
 import kotlin.math.min
 
 /** Bounded native PCM output. Decoder callbacks never wait for the device. */
-internal class PcmOutput : AutoCloseable {
+internal class PcmOutput(private val voice: Boolean = false) : AutoCloseable {
     private val running = AtomicBoolean(true)
     private val queue = ArrayBlockingQueue<ShortArray>(16)
     private val reset = AtomicBoolean(false)
@@ -28,7 +28,8 @@ internal class PcmOutput : AutoCloseable {
                 val samples = queue.poll(100,java.util.concurrent.TimeUnit.MILLISECONDS) ?: continue
                 if (output == null) {
                     val minimum = AudioTrack.getMinBufferSize(48000,AudioFormat.CHANNEL_OUT_STEREO,AudioFormat.ENCODING_PCM_16BIT)
-                    output = AudioTrack.Builder().setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                    output = AudioTrack.Builder().setAudioAttributes(if(voice)AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+                        else AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
                         .setAudioFormat(AudioFormat.Builder().setSampleRate(48000).setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
                         .setBufferSizeInBytes(maxOf(minimum,19200)).setTransferMode(AudioTrack.MODE_STREAM).build()
                     output.play()
@@ -46,6 +47,43 @@ internal class PcmOutput : AutoCloseable {
     }
     fun push(samples: ShortArray) { if(!queue.offer(samples)){queue.clear();reset.set(true);queue.offer(samples)} }
     override fun close() { running.set(false);queue.clear();writer.join(1500) }
+}
+
+/**
+ * Group voice microphone: 48 kHz mono from the VOICE_COMMUNICATION source, so
+ * the platform's echo canceller and noise suppressor apply. Opened only after
+ * the user turns the mic on and closed (and the device released) on mute.
+ */
+internal class MicCapture(private val output: (ShortArray, Int) -> Unit) : AutoCloseable {
+    private val running = AtomicBoolean(true)
+    private val recorder: AudioRecord
+    private val effects = mutableListOf<android.media.audiofx.AudioEffect>()
+    private val reader: Thread
+    init {
+        val minimum = AudioRecord.getMinBufferSize(48000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        check(minimum > 0) { "Micro không hỗ trợ 48 kHz." }
+        @Suppress("MissingPermission")
+        recorder = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, 48000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minimum, 9600))
+        check(recorder.state == AudioRecord.STATE_INITIALIZED) { recorder.release(); "Không mở được micro." }
+        val session = recorder.audioSessionId
+        if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) android.media.audiofx.AcousticEchoCanceler.create(session)?.let { it.enabled = true; effects += it }
+        if (android.media.audiofx.NoiseSuppressor.isAvailable()) android.media.audiofx.NoiseSuppressor.create(session)?.let { it.enabled = true; effects += it }
+        try { recorder.startRecording() } catch (e: IllegalStateException) { effects.forEach { it.release() }; recorder.release(); throw e }
+        reader = thread(name = "SanserMic") {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            val buffer = ShortArray(480)
+            while (running.get()) {
+                val n = recorder.read(buffer, 0, buffer.size)
+                if (n > 0) output(buffer, n) else if (n < 0) break
+            }
+        }
+    }
+    override fun close() {
+        if (!running.getAndSet(false)) return
+        try { recorder.stop() } catch (_: IllegalStateException) {}
+        reader.join(1000)
+        effects.forEach { it.release() }; recorder.release()
+    }
 }
 
 internal class RemoteVideo(context: Context, private val client: () -> NativeClient?, private val rendered: () -> Unit) : FrameLayout(context), SurfaceHolder.Callback, AutoCloseable {

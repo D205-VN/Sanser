@@ -61,6 +61,44 @@ class NativeEngine {
     'microphone': microphone,
     'deafened': deafened,
   });
+
+  /// The app left or returned to the screen. While [hidden] (and not in
+  /// picture in picture) a supporting host stops sending video; sound, voice
+  /// and chat continue.
+  Future<void> background({
+    required bool background,
+    required bool keepAlive,
+  }) => channel.invokeMethod<void>('background', {
+    'background': background,
+    'keepAlive': keepAlive,
+  });
+
+  /// Chat payload: the desktop chat JSON (see `collab.rs`).
+  Future<bool> collabSend(String sessionId, String payload) async =>
+      await channel.invokeMethod<bool>('collabSend', {
+        'sessionId': sessionId,
+        'payload': payload,
+      }) ??
+      false;
+
+  /// Lets the platform show the picture in a floating window when the app
+  /// leaves the screen.
+  Future<void> pictureInPicture(
+    bool enabled, {
+    int width = 0,
+    int height = 0,
+  }) => channel.invokeMethod<void>('pictureInPicture', {
+    'enabled': enabled,
+    'width': width,
+    'height': height,
+  });
+
+  /// A local notification (no server involved). Shown only while the app is
+  /// in the background; asks for permission the first time.
+  Future<void> notify(String title, String body) =>
+      channel.invokeMethod<void>('notify', {'title': title, 'body': body});
+  Future<bool> requestNotifications() async =>
+      await channel.invokeMethod<bool>('requestNotifications') ?? false;
   Future<void> key(int code, bool down) =>
       channel.invokeMethod<void>('key', {'code': code, 'down': down});
   Future<void> resetInput() => channel.invokeMethod<void>('resetInput');

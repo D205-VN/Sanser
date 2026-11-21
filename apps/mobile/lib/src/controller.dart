@@ -6,6 +6,7 @@ import 'api.dart';
 import 'native_engine.dart';
 import 'preferences.dart';
 import 'direct_connection.dart';
+import 'chat.dart';
 
 enum SessionPhase {
   idle,
@@ -39,6 +40,26 @@ class MobileController extends ChangeNotifier {
   bool busy = false;
   bool sound = true;
   bool voiceJoined = false, microphone = false, deafened = false;
+
+  /// In-session chat (memory only, cleared when the session ends).
+  final SessionChat chat = SessionChat();
+  int unreadChat = 0;
+  bool chatOpen = false;
+
+  /// The platform is showing the picture in a floating window.
+  bool pictureInPicture = false;
+  bool get chatAvailable =>
+      phase == SessionPhase.streaming && telemetry['collab'] == true;
+  String get chatName {
+    final name = account?['displayName'];
+    return name is String && name.trim().isNotEmpty ? name : 'Sanser $platform';
+  }
+
+  bool _background = false, _resumePending = false, _backgroundRecovery = false;
+  bool _notificationsAsked = false, _pipArmed = false;
+  int _pipWidth = 0, _pipHeight = 0;
+  DateTime? _foregroundAt;
+  Timer? _backgroundLimit;
   SessionPhase phase = SessionPhase.idle;
   Json telemetry = {};
   Json networkDetails = {};
@@ -89,6 +110,8 @@ class MobileController extends ChangeNotifier {
   bool get recovering => _recovering;
   String get recoveryStatus => !_networkAvailable
       ? 'Mất mạng · đang chờ Wi-Fi hoặc dữ liệu di động…'
+      : _backgroundRecovery
+      ? 'Đang kết nối lại sau khi quay lại Sanser ($recoveryAttempts/2)…'
       : 'Mạng đã thay đổi · đang xác minh lại kết nối ($recoveryAttempts/2)…';
   MobileController(this.api, this.engine);
   String get platform =>
@@ -515,6 +538,11 @@ class MobileController extends ChangeNotifier {
 
   void _nativeEvent(Json event) {
     if (_disposed) return;
+    if (event['state'] == 'pip') {
+      pictureInPicture = event['active'] == true;
+      notifyListeners();
+      return;
+    }
     if (event['state'] == 'network') {
       _networkEvent(event);
       return;
@@ -527,6 +555,10 @@ class MobileController extends ChangeNotifier {
     if (!_acceptNative ||
         (capabilities['networkRecovery'] == true &&
             event['engineAttempt'] != _engineAttempt)) {
+      return;
+    }
+    if (event['state'] == 'collab') {
+      _collabEvent(event);
       return;
     }
     final frames = event['videoFrames'];
@@ -604,6 +636,7 @@ class MobileController extends ChangeNotifier {
       if (_diagnosticSamples.length > 120) _diagnosticSamples.removeAt(0);
     }
     telemetry = {...telemetry, ...event};
+    if (event['state'] == 'dimensions') _syncPictureInPicture();
     switch (event['state']) {
       case 'frame':
         if (phase != SessionPhase.streaming && current['sharingId'] != null) {
@@ -630,6 +663,10 @@ class MobileController extends ChangeNotifier {
             );
           }
         }
+        if (phase != SessionPhase.streaming) {
+          _askNotifications();
+          _syncKeepAlive();
+        }
         phase = SessionPhase.streaming;
         if (_recovering) {
           _recovering = false;
@@ -637,9 +674,12 @@ class MobileController extends ChangeNotifier {
           _retryAfterRun = false;
           _recoveryTimer?.cancel();
           _recoveryDeadline?.cancel();
-          routeNotice = routeNotice == null
+          routeNotice = _backgroundRecovery
+              ? 'Đã kết nối lại sau khi quay lại Sanser.'
+              : routeNotice == null
               ? 'Đã khôi phục kết nối trên mạng hiện tại.'
               : 'Đã khôi phục kết nối. $routeNotice';
+          _backgroundRecovery = false;
         }
       case 'stopped':
         if (_recovering) {
@@ -648,11 +688,171 @@ class MobileController extends ChangeNotifier {
           _scheduleRecovery();
           break;
         }
+        // The host or network dropped the session while Sanser was in the
+        // background (or the OS paused it): reconnect instead of ending.
+        final foregroundAt = _foregroundAt;
+        if (preferences.backgroundMinutes > 0 &&
+            phase == SessionPhase.streaming &&
+            (_background ||
+                (foregroundAt != null &&
+                    DateTime.now().difference(foregroundAt) <
+                        const Duration(seconds: 30)))) {
+          _acceptNative = false;
+          if (_background) {
+            _resumePending = true;
+            phase = SessionPhase.reconnecting;
+            telemetry = {};
+            _notify(
+              'Sanser mất kết nối',
+              'Mở Sanser để kết nối lại với máy tính.',
+            );
+          } else {
+            _resumeFromBackground();
+          }
+          break;
+        }
         phase = SessionPhase.failed;
         error = event['message'] as String? ?? 'Luồng từ xa đã kết thúc.';
         unawaited(disconnect(keepError: true));
     }
+    _syncPictureInPicture();
     notifyListeners();
+  }
+
+  void _collabEvent(Json event) {
+    final payload = event['payload'];
+    if (payload is! String) return;
+    final message = chat.receive(payload);
+    if (message == null) return;
+    if (!chatOpen || _background) unreadChat++;
+    if (_background) _notify(message.name, message.text);
+    notifyListeners();
+  }
+
+  /// Sends one chat message. Returns false when the host has no chat yet,
+  /// the text is not allowed or the native rate limit refused it.
+  Future<bool> sendChat(String text) async {
+    final id = active?['id'];
+    if (id is! String || !chatAvailable) return false;
+    final composed = chat.compose(text, chatName);
+    if (composed == null) return false;
+    bool sent;
+    try {
+      sent = await engine.collabSend(id, composed.payload);
+    } catch (_) {
+      sent = false;
+    }
+    if (!sent || _disposed || active?['id'] != id) return false;
+    chat.add(composed.message);
+    notifyListeners();
+    return true;
+  }
+
+  void setChatOpen(bool open) {
+    chatOpen = open;
+    if (open) unreadChat = 0;
+    notifyListeners();
+  }
+
+  void _notify(String title, String body) {
+    if (!preferences.notifications || !_background) return;
+    unawaited(engine.notify(title, body).catchError((Object _) {}));
+  }
+
+  void _askNotifications() {
+    if (_notificationsAsked ||
+        !preferences.notifications ||
+        preferences.backgroundMinutes <= 0) {
+      return;
+    }
+    _notificationsAsked = true;
+    unawaited(
+      engine.requestNotifications().then((_) {}).catchError((Object _) {}),
+    );
+  }
+
+  /// Tells the platform whether this session may continue in the background
+  /// (Android starts its ongoing-notification service while still visible).
+  void _syncKeepAlive() {
+    if (active == null || _background) return;
+    unawaited(
+      engine
+          .background(
+            background: false,
+            keepAlive: preferences.backgroundMinutes > 0,
+          )
+          .catchError((Object _) {}),
+    );
+  }
+
+  void _syncPictureInPicture({bool force = false}) {
+    final want =
+        preferences.pictureInPicture &&
+        active != null &&
+        phase == SessionPhase.streaming;
+    final w = telemetry['videoWidth'], h = telemetry['videoHeight'];
+    final width = w is num ? w.toInt() : 0, height = h is num ? h.toInt() : 0;
+    if (!force &&
+        want == _pipArmed &&
+        (!want || (width == _pipWidth && height == _pipHeight))) {
+      return;
+    }
+    _pipArmed = want;
+    _pipWidth = width;
+    _pipHeight = height;
+    unawaited(
+      engine
+          .pictureInPicture(want, width: width, height: height)
+          .catchError((Object _) {}),
+    );
+  }
+
+  /// Sanser left the screen. Keeps the session (sound, voice and chat go on,
+  /// the host stops sending video) for the chosen number of minutes.
+  Future<void> backgrounded() async {
+    if (_background) return;
+    _background = true;
+    final current = active;
+    if (current == null) return;
+    final minutes = preferences.backgroundMinutes;
+    if (minutes <= 0) {
+      await disconnect();
+      return;
+    }
+    _backgroundLimit?.cancel();
+    _backgroundLimit = Timer(Duration(minutes: minutes), () {
+      if (!_background || active?['id'] != current['id']) return;
+      _notify(
+        'Sanser đã ngắt kết nối',
+        'Phiên đã ở nền $minutes phút. Bạn có thể đổi thời gian trong Cài đặt.',
+      );
+      unawaited(disconnect());
+    });
+    try {
+      await engine.background(background: true, keepAlive: true);
+    } catch (_) {
+      /* Older engines keep sending video; the session still continues. */
+    }
+  }
+
+  Future<void> foregrounded() async {
+    if (!_background) return;
+    _background = false;
+    _foregroundAt = DateTime.now();
+    _backgroundLimit?.cancel();
+    _backgroundLimit = null;
+    if (active == null) return;
+    try {
+      await engine.background(background: false, keepAlive: true);
+    } catch (_) {}
+    if (_resumePending && active != null) _resumeFromBackground();
+  }
+
+  void _resumeFromBackground() {
+    _resumePending = false;
+    _backgroundRecovery = true;
+    _pathRevision++;
+    _beginRecovery();
   }
 
   void setForeground(bool value) {
@@ -698,6 +898,10 @@ class MobileController extends ChangeNotifier {
       return;
     }
     _pathRevision++;
+    _beginRecovery();
+  }
+
+  void _beginRecovery() {
     if (!_recovering) {
       _recovering = true;
       _generation++;
@@ -804,9 +1008,33 @@ class MobileController extends ChangeNotifier {
   }
 
   void _failRecovery() {
-    error =
-        'Không khôi phục được kết nối sau khi đổi mạng. Kiểm tra mạng và kết nối lại.';
-    unawaited(disconnect(keepError: true));
+    final old = active;
+    final fresh =
+        _backgroundRecovery &&
+        old != null &&
+        old['sharingId'] == null &&
+        _foreground;
+    final wasBackground = _backgroundRecovery;
+    _backgroundRecovery = false;
+    error = wasBackground
+        ? 'Phiên cũ đã kết thúc khi Sanser ở nền. Hãy kết nối lại.'
+        : 'Không khôi phục được kết nối sau khi đổi mạng. Kiểm tra mạng và kết nối lại.';
+    if (!fresh) {
+      unawaited(disconnect(keepError: true));
+      return;
+    }
+    // The host already closed the old session: ask for a new one to the same
+    // computer instead of sending the user back to the list.
+    unawaited(() async {
+      await disconnect(keepError: true);
+      Json? device;
+      for (final item in devices) {
+        if (item['id'] == old['hostDeviceId']) device = item;
+      }
+      if (device == null || _disposed || active != null) return;
+      error = null;
+      await connect(device, viewOnly: old['accessMode'] == 'view-only');
+    }());
   }
 
   Future<void> disconnect({bool keepError = false}) async {
@@ -842,6 +1070,13 @@ class MobileController extends ChangeNotifier {
     microphone = false;
     deafened = false;
     telemetry = {};
+    chat.clear();
+    unreadChat = 0;
+    _resumePending = false;
+    _backgroundRecovery = false;
+    _backgroundLimit?.cancel();
+    _backgroundLimit = null;
+    if (_pipArmed) _syncPictureInPicture();
     notifyListeners();
     try {
       await engine.disconnect();
@@ -887,7 +1122,11 @@ class MobileController extends ChangeNotifier {
   }
 
   Future<void> setPreferences(MobilePreferences value) async {
+    final keepAliveChanged =
+        (value.backgroundMinutes > 0) != (preferences.backgroundMinutes > 0);
     preferences = value;
+    _syncPictureInPicture();
+    if (keepAliveChanged && phase == SessionPhase.streaming) _syncKeepAlive();
     notifyListeners();
     final encoded = jsonEncode(value.toJson());
     _preferenceWrites = _preferenceWrites
@@ -919,7 +1158,7 @@ class MobileController extends ChangeNotifier {
       error = null;
     } catch (e) {
       if (_disposed || generation != _generation || active?['id'] != id) return;
-      error = e.toString();
+      error = e is PlatformException ? (e.message ?? e.code) : e.toString();
     }
     notifyListeners();
   }
@@ -959,6 +1198,7 @@ class MobileController extends ChangeNotifier {
     _events?.cancel();
     _recoveryTimer?.cancel();
     _recoveryDeadline?.cancel();
+    _backgroundLimit?.cancel();
     _recoveryEpisode++;
     final direct = _direct;
     if (direct != null) unawaited(direct.cancel());

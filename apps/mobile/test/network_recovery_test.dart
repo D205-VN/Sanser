@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sanser_mobile/src/api.dart';
 import 'package:sanser_mobile/src/controller.dart';
@@ -14,6 +15,32 @@ class RecoveryEngine extends TestEngine {
   final order = <String>[];
   final keys = <(String, int, int, bool)>[];
   Completer<void>? inputReply, muteReply, voiceReply;
+  PlatformException? voiceError;
+  final backgrounds = <bool>[], pip = <bool>[];
+  final chats = <String>[];
+  final notifications = <(String, String)>[];
+  @override
+  Future<void> background({
+    required bool background,
+    required bool keepAlive,
+  }) async => backgrounds.add(background);
+  @override
+  Future<bool> collabSend(String sessionId, String payload) async {
+    chats.add(payload);
+    return true;
+  }
+
+  @override
+  Future<void> pictureInPicture(
+    bool enabled, {
+    int width = 0,
+    int height = 0,
+  }) async => pip.add(enabled);
+  @override
+  Future<void> notify(String title, String body) async =>
+      notifications.add((title, body));
+  @override
+  Future<bool> requestNotifications() async => true;
   @override
   Future<Json> capabilities() async => {
     'available': true,
@@ -65,6 +92,7 @@ class RecoveryEngine extends TestEngine {
     required bool deafened,
   }) async {
     await voiceReply?.future;
+    if (voiceError != null) throw voiceError!;
   }
 
   void frame({int? attempt}) => events.add({
@@ -386,6 +414,26 @@ void main() {
       await f.close();
     },
   );
+
+  testWidgets('a refused microphone shows the platform message and stays off', (
+    tester,
+  ) async {
+    final f = RecoveryFixture();
+    await f.open();
+    f.native.voiceError = PlatformException(
+      code: 'microphone_denied',
+      message: 'Sanser chưa được phép dùng micro.',
+    );
+    await f.c.setVoice(joined: true, mic: true);
+    expect(f.c.error, 'Sanser chưa được phép dùng micro.');
+    expect(f.c.microphone, false);
+    expect(f.c.voiceJoined, false);
+    f.native.voiceError = null;
+    await f.c.setVoice(joined: true, mic: false);
+    expect(f.c.voiceJoined, true);
+    expect(f.c.microphone, false);
+    await f.close();
+  });
 
   testWidgets(
     'pending input and audio/voice replies cannot leak into the recovered generation',

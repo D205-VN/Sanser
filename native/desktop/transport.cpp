@@ -521,7 +521,7 @@ bool Peer::transmit(snv2::PacketType type,const Bytes& body,std::uint32_t stream
   // A text edit can be declined before taking a sequence. It must not tear
   // down a healthy video session merely because the input window is full.
   if(reliable && !body.empty() && body[0]==Input::Text && pending_.size()>=64) return false;
-  if(type==snv2::PacketType::Video && !(flags & snv2::kFlagRetransmitted) && videoPaused_) return false;
+  if(type==snv2::PacketType::Video && !(flags & snv2::kFlagRetransmitted) && (videoPaused_ || peerVideoHidden_)) return false;
   if (stream > 2 || (reliable && pending_.size() >= 64)) { stopReason_=4; running_=false; return false; }
   snv2::Header h; h.packetType=type; h.streamId=stream; h.sequence=++sequences_[stream]; h.frameId=frame; h.flags=flags; h.keyId=generation_;
   auto b=codec_.seal(h,body);
@@ -562,7 +562,7 @@ PreparedFrame prepareFrame(Frame frame) {
 void Peer::videoPrepared(std::shared_ptr<const PreparedFrame> prepared) {
   const auto& frame=*prepared;
   std::lock_guard lock(videoMutex_);
-  if (!ready_ || !running_ || videoPaused_) return;
+  if (!ready_ || !running_ || videoPaused_ || peerVideoHidden_) return;
   if (outgoingNeedsKeyframe_ && !frame.keyframe) { if (onKeyframe) onKeyframe(); return; }
   if (frame.keyframe) outgoingNeedsKeyframe_ = false;
   const auto& bytes=frame.payload;
@@ -915,6 +915,21 @@ void Peer::setAudioMuted(bool muted) {
   if(onAudioReset) onAudioReset();
   transmit(snv2::PacketType::Keepalive,Bytes{'S','A','M','1',static_cast<std::uint8_t>(muted)});
 }
+void Peer::setVideoHidden(bool hidden) {
+  if(options_.host) return;
+  const bool was=videoHidden_.exchange(hidden);
+  if(running_) transmit(snv2::PacketType::Keepalive,Bytes{'S','V','H','1',static_cast<std::uint8_t>(hidden)});
+  if(was && !hidden) requestKeyframe();
+}
+void Peer::observeVideoHidden(bool hidden) {
+  if(peerVideoHidden_.exchange(hidden)==hidden) return;
+  std::lock_guard lock(sendMutex_);
+  // Same rule as pauseVideo: drop queued fresh video and restart on an IDR.
+  tx_.clearRealtimeVideo();
+  outgoingNeedsKeyframe_=true;
+  offeredBytes_=0;
+  sendReady_.notify_one();
+}
 void Peer::setVoiceState(voice::State state) {
   if(!options_.groupVoice) return;
   if(!state.joined) state.microphone=state.deafened=false;
@@ -971,7 +986,7 @@ void Peer::process(const Bytes& bytes) {
     { std::lock_guard lock(sendMutex_);tx_.clearUserData(); }
     for(auto& callback:cancelled)callback(5,{});
     receivedRecoverySerial_=receivedRecoveryFence_=0; inputLeaseArmed_=false;
-    lastAudio_=0; lastAudioPreference_=0; receivingOpus_=false; peerAudioOpus_=false; peerAudioMuted_=false;
+    lastAudio_=0; lastAudioPreference_=0; lastVideoHidden_=0; if(peerVideoHidden_) observeVideoHidden(false); receivingOpus_=false; peerAudioOpus_=false; peerAudioMuted_=false;
     peerVoiceJoined_=peerVoiceMic_=peerVoiceDeaf_=peerVoiceRedundant_=false; peerVoiceAt_=0; lastVoicePreference_=0;
     if(!options_.host) voiceSlot_=255;
     if(audioReceiver_) audioReceiver_->reset(h.keyId);
@@ -1120,6 +1135,7 @@ void Peer::process(const Bytes& bytes) {
   if (options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','P','1'})) peerAudio_=true;
   if(options_.host && options_.audio && options_.audioOpus && (audioEncoder_ || options_.sharedAudioEncoder) && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b==Bytes({'S','A','O','1'})) { peerAudio_=true; peerAudioOpus_=true; }
   if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b.size()==5 && std::equal(b.begin(),b.begin()+4,"SAM1") && b[4]<=1 && h.sequence>lastAudioPreference_) { lastAudioPreference_=h.sequence; peerAudioMuted_=b[4]!=0; }
+  if(options_.host && h.streamId==0 && h.packetType==snv2::PacketType::Keepalive && b.size()==5 && std::equal(b.begin(),b.begin()+4,"SVH1") && b[4]<=1 && h.sequence>lastVideoHidden_) { lastVideoHidden_=h.sequence; observeVideoHidden(b[4]!=0); }
   if(h.packetType==snv2::PacketType::Audio) {
     if(voice::isPacket(b)) {
       if(!options_.groupVoice || h.streamId!=0 || !onVoice) return;
@@ -1534,6 +1550,8 @@ void Peer::loop() {
         if(options_.files && options_.input && !options_.sharing)transmit(snv2::PacketType::Keepalive,Bytes{'S','F','T','1'});
         // Optional chat/annotation capability; older engines ignore it.
         if(options_.collab)transmit(snv2::PacketType::Keepalive,Bytes{'S','C','O','1'});
+        // Repeated so a lost toggle cannot leave a host paused or sending.
+        if(!options_.host && videoHidden_) transmit(snv2::PacketType::Keepalive,Bytes{'S','V','H','1',1});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','A','K','1'});
         transmit(snv2::PacketType::Keepalive,Bytes{'S','I','C','1'});
 #if defined(__APPLE__)

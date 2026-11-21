@@ -45,6 +45,29 @@ rendered system sound plus conversation as a reference before microphone Opus
 encoding. This is distinct from PLC, noise gating and automatic gain control.
 Physical speaker/microphone routes still need verification on both machines.
 
+## Phones (iOS and Android)
+
+A phone watching a shared screen can join the same room. The voice buttons
+appear on the phone's session screen only in view-only sharing sessions; a
+phone that controls a computer has no group voice, as on desktop.
+
+- **Join voice** listens only. **Bật mic** asks for microphone permission the
+  first time; if it is refused, the app says so and the mic stays off.
+- The native mobile client (`native/mobile/client.cpp`) runs the same Opus
+  encoder, jitter mixer and speaker slots as desktop on its own 5 ms worker.
+  The platform only supplies 48 kHz mono microphone PCM and plays the mixed
+  voice output (`sanser_mobile_voice_*`, the `voice` callback).
+- Echo cancellation comes from the phone: iOS voice processing on the audio
+  engine that also plays screen sound, and Android's `VOICE_COMMUNICATION`
+  recorder with `AcousticEchoCanceler` and `NoiseSuppressor` when available.
+  Desktop's SpeexDSP canceller is not used on phones.
+- Voice continues while Sanser is in the background when *Giữ kết nối khi
+  thoát ra* is on (see `apps/mobile/README.md`); the host stops sending video
+  meanwhile.
+- Test: `sanser-mobile-contract` checks consent, mic to host with the assigned
+  speaker slot, host voice played back, mute and that control sessions have no
+  voice.
+
 ## Group voice playback and panel update after 2.2.19
 
 The next source update replaces the expanded icon grid with a single Join action

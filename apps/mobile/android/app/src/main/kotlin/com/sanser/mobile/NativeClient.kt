@@ -6,7 +6,9 @@ import java.util.concurrent.atomic.AtomicLong
 class NativeClient(
     val video: (ByteArray, Int, Int, Boolean) -> Unit,
     val audio: (ShortArray) -> Unit,
-    val stopped: (Int) -> Unit
+    val stopped: (Int) -> Unit,
+    val voice: (ShortArray) -> Unit = {},
+    val collab: (ByteArray) -> Unit = {}
 ) : AutoCloseable {
     companion object { init { System.loadLibrary("sanser_mobile") } }
     private var handle = 0L
@@ -34,6 +36,21 @@ class NativeClient(
     private external fun clipboard(handle:Long,request:Long,write:Boolean,utf8:ByteArray):Boolean
     private external fun filePump(handle:Long,files:Long)
     @Synchronized fun pumpFiles(files:Long){if(handle!=0L && files!=0L)filePump(handle,files)}
+    private external fun voiceAvailable(handle:Long):Boolean
+    private external fun voiceState(handle:Long,joined:Boolean,microphone:Boolean,deafened:Boolean):Boolean
+    private external fun voiceCapture(handle:Long,samples:ShortArray,count:Int)
+    @Synchronized fun voiceAvailable():Boolean=handle!=0L && voiceAvailable(handle)
+    @Synchronized fun voiceState(joined:Boolean,microphone:Boolean,deafened:Boolean):Boolean=handle!=0L && voiceState(handle,joined,microphone,deafened)
+    /** 48 kHz mono PCM from the echo-cancelled voice recorder. */
+    @Synchronized fun voiceCapture(samples:ShortArray,count:Int){if(handle!=0L)voiceCapture(handle,samples,count)}
+    private external fun collabAvailable(handle:Long):Boolean
+    private external fun collabSend(handle:Long,payload:ByteArray):Boolean
+    private external fun videoHidden(handle:Long,hidden:Boolean)
+    @Synchronized fun collabAvailable():Boolean=handle!=0L && collabAvailable(handle)
+    /** One chat JSON payload, 1..4096 bytes. */
+    @Synchronized fun collabSend(payload:ByteArray):Boolean=handle!=0L && payload.size in 1..4096 && collabSend(handle,payload)
+    /** The picture is off screen: a supporting host stops sending video. */
+    @Synchronized fun videoHidden(hidden:Boolean){if(handle!=0L)videoHidden(handle,hidden)}
     private external fun keyframe(handle: Long)
     private external fun rtt(handle: Long): Double
     private external fun stats(handle:Long):LongArray
@@ -69,6 +86,8 @@ class NativeClient(
     // Called from native workers; these methods never acquire the handle lock.
     fun onVideo(bytes: ByteArray, width: Int, height: Int, keyframe: Boolean) = video(bytes, width, height, keyframe)
     fun onAudio(samples: ShortArray) = audio(samples)
+    fun onVoice(samples: ShortArray) = voice(samples)
+    fun onCollab(payload: ByteArray) = collab(payload)
     fun onStopped(reason: Int) = stopped(reason)
     fun onClipboard(request:Long,status:Int,utf8:ByteArray){clipboardReplies.remove(request)?.invoke(status,String(utf8,Charsets.UTF_8))}
 }

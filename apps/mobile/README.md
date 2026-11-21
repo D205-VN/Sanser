@@ -95,13 +95,40 @@ Initial preview limits:
   The floating panel shows the selected transport and measured native RTT.
 - Group sessions honor the host's network mode; the phone's preference applies
   when requesting a new session. No fixed Internet latency promise is made.
-- **Group voice and microphone capture are not enabled on mobile.** System audio
-  is separate and supported in source. The UI hides unavailable voice actions.
+- **Group voice** works when the phone watches a shared screen (view-only
+  sharing session), as on desktop. Join voice with the headset button, then
+  turn on the mic; the app asks for microphone permission the first time.
+  iOS uses voice processing (echo cancellation, noise suppression) on the
+  same audio engine that plays screen sound; Android records from the
+  `VOICE_COMMUNICATION` source with the platform echo canceller and plays
+  voice as a separate voice-call stream. Headphones avoid echo from loud
+  screen sound on Android.
+- **Chat** (session action **Chat**) uses the desktop in-session chat: plain
+  text, 1 KB per message, memory only, rate limited natively. In sharing
+  sessions the host relays it to the other viewers. Desktop drawing is not
+  shown on phones.
+- **Keep the session in the background** (Settings → *Giữ kết nối khi thoát
+  ra*: off, 5, 15 (default) or 60 minutes). Leaving Sanser no longer ends the
+  session: sound, voice and chat continue and the phone sends `SVH1` so an
+  updated host stops sending video until the picture is visible again (older
+  hosts keep sending; nothing breaks). iOS keeps running through the `audio`
+  background mode (a silent, mixable audio session when screen sound is off);
+  Android runs `SessionService`, a `mediaPlayback` foreground service (plus
+  `microphone` while the mic is on) with an ongoing notification. If the
+  session dropped while away, returning reconnects it (same session first,
+  then a new request to the same computer) instead of showing the list.
+- **Picture in picture** (Settings, on by default) shows the computer screen
+  in a floating window when you leave the app: `AVPictureInPictureController`
+  on the iOS sample-buffer display layer, Android's activity PiP (automatic
+  on Android 12+). Video keeps flowing while the window is visible.
+- **Notifications** are local only: a chat message or a dropped session while
+  Sanser is in the background. No message goes through Apple or Google push.
 - Updated SNV2 hosts support committed Unicode typing from **Bàn phím**. The
   **Clipboard** sheet is available in control sessions after the desktop host
   enables **Settings → Host → Text clipboard** and reconnects. Text transfer is
   manual and capped at 8 KiB; received text is reviewed before local copy.
-- No mobile host, host-context IME composition or background control. Physical
+- No mobile host or host-context IME composition. Touch control pauses while
+  the app is in the background. Physical
   controller keyboard mapping and optional Windows analog input are described above.
   File transfer requires the updated SNV2 control host described above.
 - Requires a Sanser server accepting **2.3.x clients**; desktop
