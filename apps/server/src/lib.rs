@@ -91,6 +91,14 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/auth/email/resend",
             post(routes::email_verification::resend),
         )
+        .route(
+            "/api/v2/auth/password/forgot",
+            post(routes::password_reset::forgot),
+        )
+        .route(
+            "/api/v2/auth/password/reset",
+            post(routes::password_reset::reset),
+        )
         .route("/api/v2/account", get(routes::account::get_account))
         .route(
             "/api/v2/guest/grants",

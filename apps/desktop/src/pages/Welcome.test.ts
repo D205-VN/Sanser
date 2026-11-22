@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CONFIGURED_SERVER_URL, DEFAULT_PREFERENCES, preferences } from '../stores/preferences';
-const auth = vi.hoisted(() => ({ login: vi.fn(), register: vi.fn(), initialize: vi.fn(), logout: vi.fn().mockResolvedValue(undefined) }));
+const auth = vi.hoisted(() => ({ login: vi.fn(), register: vi.fn(), forgotPassword: vi.fn(), initialize: vi.fn(), logout: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../stores/session', async () => {
   const { writable } = await import('svelte/store');
   return { session: { ...writable({ busy: false, error: null }), ...auth } };
@@ -66,4 +66,20 @@ it('rejects mismatched registration passwords before calling the server', async 
   await fireEvent.submit(form);
   expect(screen.getByRole('alert')).toHaveTextContent('Passwords do not match');
   expect(auth.register).not.toHaveBeenCalled();
+});
+
+it('asks only for the email when the password is forgotten', async () => {
+  const { container } = render(Welcome);
+  await fireEvent.click(screen.getByRole('button', { name: 'Forgot password?' }));
+  expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
+  await fireEvent.input(screen.getByLabelText('Email'), { target: { value: 'test@example.test' } });
+  const endpoint = screen.queryByLabelText('Sanser server URL');
+  if (endpoint) await fireEvent.input(endpoint, { target: { value: 'https://sanser.example' } });
+  const form = container.querySelector('form');
+  if (!form) throw new Error('Missing form');
+  await fireEvent.submit(form);
+  await waitFor(() => expect(auth.forgotPassword).toHaveBeenCalledWith(expect.any(String), 'test@example.test', false));
+  expect(auth.login).not.toHaveBeenCalled();
+  await fireEvent.click(screen.getByRole('button', { name: 'Back to sign in' }));
+  expect(screen.getByLabelText('Password')).toBeInTheDocument();
 });

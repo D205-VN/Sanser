@@ -218,6 +218,65 @@ class MobileController extends ChangeNotifier {
     }
   }
 
+  /// Forgot password: emails a reset code to the address, if it has an account.
+  Future<void> forgotPassword(String email, String server) async {
+    busy = true;
+    error = null;
+    emailCode = null;
+    emailNotice = null;
+    notifyListeners();
+    try {
+      api.useServer(server);
+      emailCode = await api.forgotPassword(
+        email,
+        deviceName: 'Sanser $platform',
+        platform: platform,
+      );
+    } on ApiFailure catch (failure) {
+      error = failure.status == 503
+          ? 'Máy chủ chưa bật gửi email nên chưa đặt lại mật khẩu được.'
+          : failure.status == 429
+          ? 'Bạn đã xin quá nhiều mã. Hãy thử lại sau.'
+          : failure.message;
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Sets the new password with the emailed code, then signs in here.
+  Future<void> resetPassword(String code, String newPassword) async {
+    final challenge = emailCode;
+    if (challenge == null || !challenge.reset || busy) return;
+    busy = true;
+    error = null;
+    emailNotice = null;
+    notifyListeners();
+    try {
+      await api.resetPassword(challenge.challengeToken, code, newPassword);
+      emailCode = null;
+      await _signedIn();
+    } on ApiFailure catch (failure) {
+      if (failure.status == 401) {
+        emailCode = null;
+        error = 'Mã đã hết hạn. Hãy xin mã đặt lại mới.';
+      } else if (failure.status == 422) {
+        error = failure.message.contains('password')
+            ? 'Mật khẩu cần 10–128 ký tự, có chữ hoa, chữ thường và số.'
+            : 'Mã không đúng. Hãy xem email Sanser mới nhất.';
+      } else {
+        error = failure.message;
+      }
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
   /// Emails a new code (the server allows one a minute, five in all).
   Future<void> resendEmailCode() async {
     final challenge = emailCode;

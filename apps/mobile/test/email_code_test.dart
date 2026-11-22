@@ -123,4 +123,52 @@ void main() {
     );
     api.close();
   });
+
+  test('forgot password emails a code, then sets the new password', () async {
+    final secrets = MemorySecrets();
+    final requests = <http.Request>[];
+    final api = SanserApi(
+      secrets,
+      client: MockClient((request) async {
+        requests.add(request);
+        if (request.url.path.endsWith('/password/forgot')) {
+          return http.Response(
+            jsonEncode({
+              'challengeToken': 'sn2_e_reset',
+              'challengeExpiresAt': 2000000000,
+              'emailHint': 'te****@example.com',
+            }),
+            202,
+          );
+        }
+        return http.Response(
+          jsonEncode({'accessToken': 'a', 'refreshToken': 'r'}),
+          200,
+        );
+      }),
+    )..useServer('https://server.example');
+    final step = await api.forgotPassword(
+      ' Test@Example.com ',
+      deviceName: 'phone',
+      platform: 'iOS',
+    );
+    expect(step.reset, isTrue);
+    expect(step.challengeToken, 'sn2_e_reset');
+    expect(step.emailHint, 'te****@example.com');
+    final forgot = jsonDecode(requests.first.body) as Map<String, dynamic>;
+    expect(requests.first.url.path, '/api/v2/auth/password/forgot');
+    expect(forgot['email'], 'test@example.com');
+    expect(forgot['installationId'], isA<String>());
+    expect(requests.first.headers['authorization'], isNull);
+
+    await api.resetPassword(step.challengeToken, '123-456', 'NewPass12345');
+    expect(requests.last.url.path, '/api/v2/auth/password/reset');
+    expect(jsonDecode(requests.last.body), {
+      'challengeToken': 'sn2_e_reset',
+      'code': '123456',
+      'newPassword': 'NewPass12345',
+    });
+    expect(await secrets.read('mobile.https://server.example.refresh'), 'r');
+    api.close();
+  });
 }

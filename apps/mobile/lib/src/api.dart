@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
 typedef Json = Map<String, dynamic>;
-const mobileVersion = '2.3.26';
+const mobileVersion = '2.3.27';
 
 abstract interface class SecretStore {
   Future<String?> read(String key);
@@ -45,7 +45,15 @@ class EmailCodeRequired implements Exception {
   final String challengeToken;
   final String emailHint;
   final bool register;
-  const EmailCodeRequired(this.challengeToken, this.emailHint, this.register);
+
+  /// Forgot password: the code comes with a new password.
+  final bool reset;
+  const EmailCodeRequired(
+    this.challengeToken,
+    this.emailHint,
+    this.register, {
+    this.reset = false,
+  });
   @override
   String toString() => 'Mã xác nhận đã được gửi đến $emailHint.';
 }
@@ -240,6 +248,59 @@ class SanserApi {
       body: {
         'challengeToken': challengeToken,
         'code': code.replaceAll(RegExp(r'[\s-]'), ''),
+      },
+    );
+    await _signedIn(result, generation);
+    return result;
+  }
+
+  /// Forgot password: emails a reset code. The answer is the same whether or
+  /// not the address has an account.
+  Future<EmailCodeRequired> forgotPassword(
+    String email, {
+    required String deviceName,
+    required String platform,
+  }) async {
+    final result = await request(
+      '/api/v2/auth/password/forgot',
+      method: 'POST',
+      auth: false,
+      body: {
+        'email': email.trim().toLowerCase(),
+        'deviceName': deviceName,
+        'platform': platform,
+        'installationId': await identity('installation'),
+      },
+    );
+    final token = result['challengeToken'];
+    if (token is! String) {
+      throw const ApiFailure(0, 'Máy chủ trả dữ liệu không hợp lệ.');
+    }
+    final hint = result['emailHint'];
+    return EmailCodeRequired(
+      token,
+      hint is String ? hint : '',
+      false,
+      reset: true,
+    );
+  }
+
+  /// Sets a new password with the emailed code. Every other session of the
+  /// account is signed out; this phone is signed in.
+  Future<Json> resetPassword(
+    String challengeToken,
+    String code,
+    String newPassword,
+  ) async {
+    final generation = ++_generation;
+    final result = await request(
+      '/api/v2/auth/password/reset',
+      method: 'POST',
+      auth: false,
+      body: {
+        'challengeToken': challengeToken,
+        'code': code.replaceAll(RegExp(r'[\s-]'), ''),
+        'newPassword': newPassword,
       },
     );
     await _signedIn(result, generation);

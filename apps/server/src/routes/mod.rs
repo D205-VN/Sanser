@@ -6,6 +6,7 @@ pub mod email_verification;
 pub mod guest;
 pub mod history;
 pub mod network;
+pub mod password_reset;
 pub mod recording;
 pub mod sessions;
 pub mod sharing;

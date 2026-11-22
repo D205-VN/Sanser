@@ -31,7 +31,7 @@ use crate::{
     time::now_unix,
 };
 
-const CHALLENGE_PREFIX: &str = "sn2_e_";
+pub(crate) const CHALLENGE_PREFIX: &str = "sn2_e_";
 pub const CHALLENGE_TTL_SECONDS: i64 = 10 * 60;
 pub const CHALLENGE_MAX_ATTEMPTS: i32 = 5;
 pub const RESEND_INTERVAL_SECONDS: i64 = 60;
@@ -213,7 +213,12 @@ async fn issue(
     .execute(&state.pool)
     .await
     .map_err(AppError::from_db)?;
-    if let Err(error) = deliver(state, email, &code, pending.is_some(), origin).await {
+    let purpose = if pending.is_some() {
+        "register"
+    } else {
+        "login"
+    };
+    if let Err(error) = deliver(state, email, &code, purpose, origin).await {
         let _ = sqlx::query("DELETE FROM email_challenges WHERE digest = $1")
             .bind(&digest)
             .execute(&state.pool)
@@ -259,6 +264,7 @@ pub async fn verify(
     let row = sqlx::query(
         "UPDATE email_challenges SET attempts = attempts + 1 \
          WHERE digest = $1 AND consumed_at IS NULL AND expires_at > $2 AND attempts < $3 \
+           AND purpose <> 'reset' \
          RETURNING purpose, user_id, email, display_name, password_hash, code_mac, \
                    device_name, platform, installation_id",
     )
@@ -383,7 +389,7 @@ pub async fn resend(
              last_sent_at = $3, expires_at = $4 \
          WHERE digest = $1 AND consumed_at IS NULL AND expires_at > $3 \
            AND sends < $5 AND last_sent_at <= $3 - $6 \
-         RETURNING email, purpose, device_name, platform, installation_id",
+         RETURNING email, purpose, user_id, device_name, platform, installation_id",
     )
     .bind(&digest)
     .bind(code_mac(&state, &digest, &code))
@@ -403,12 +409,17 @@ pub async fn resend(
     let purpose: String = row.try_get("purpose").map_err(AppError::from_db)?;
     let device_name: String = row.try_get("device_name").map_err(AppError::from_db)?;
     let platform: String = row.try_get("platform").map_err(AppError::from_db)?;
+    let user_id: Option<String> = row.try_get("user_id").map_err(AppError::from_db)?;
     let origin = Origin {
         device_name: &device_name,
         platform: &platform,
         installation_id: None,
     };
-    deliver(&state, &email, &code, purpose == "register", &origin).await?;
+    // A reset for an address without an account is a decoy: same answer,
+    // no email.
+    if purpose != "reset" || user_id.is_some() {
+        deliver(&state, &email, &code, &purpose, &origin).await?;
+    }
     Ok(Json(ResendResponse {
         challenge_expires_at: expires_at,
         email_hint: email_hint(&email),
@@ -426,38 +437,43 @@ pub async fn cleanup(pool: &sqlx::PgPool, now: i64) {
     }
 }
 
-async fn deliver(
+pub(crate) async fn deliver(
     state: &AppState,
     email: &str,
     code: &str,
-    signup: bool,
+    purpose: &str,
     origin: &Origin<'_>,
 ) -> Result<(), AppError> {
-    let message = verification_email(email, code, signup, origin);
+    let message = verification_email(email, code, purpose, origin);
     state.mailer.send(message).await.map_err(|error| {
         tracing::warn!(error = %error, "verification email was not sent");
         AppError::Unavailable
     })
 }
 
+/// `purpose` is the challenge purpose: "login", "register" or "reset".
 pub fn verification_email(
     email: &str,
     code: &str,
-    signup: bool,
+    purpose: &str,
     origin: &Origin<'_>,
 ) -> OutgoingEmail {
-    let (subject, purpose_vi, purpose_en) = if signup {
-        (
+    let (subject, purpose_vi, purpose_en) = match purpose {
+        "register" => (
             format!("Mã xác nhận tạo tài khoản Sanser: {code}"),
             "tạo tài khoản Sanser",
             "create your Sanser account",
-        )
-    } else {
-        (
+        ),
+        "reset" => (
+            format!("Mã đặt lại mật khẩu Sanser: {code}"),
+            "đặt lại mật khẩu Sanser",
+            "reset your Sanser password",
+        ),
+        _ => (
             format!("Mã đăng nhập Sanser: {code}"),
             "đăng nhập Sanser trên một máy mới",
             "sign in to Sanser on a new computer",
-        )
+        ),
     };
     let body = format!(
         "Mã xác nhận để {purpose_vi} là:\n\n    {code}\n\n\
@@ -479,7 +495,7 @@ pub fn verification_email(
     }
 }
 
-async fn load_account(state: &AppState, user_id: &str) -> Result<Account, AppError> {
+pub(crate) async fn load_account(state: &AppState, user_id: &str) -> Result<Account, AppError> {
     let row = sqlx::query("SELECT id, email, display_name, created_at FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(&state.pool)
@@ -494,7 +510,7 @@ async fn load_account(state: &AppState, user_id: &str) -> Result<Account, AppErr
     })
 }
 
-fn new_code() -> String {
+pub(crate) fn new_code() -> String {
     format!("{:06}", OsRng.gen_range(0..1_000_000_u32))
 }
 
@@ -509,11 +525,11 @@ pub fn normalize_code(value: &str) -> Option<String> {
 
 /// The code is bound to its challenge, so a code mailed for one challenge
 /// never completes another.
-fn code_mac(state: &AppState, digest: &str, code: &str) -> String {
+pub(crate) fn code_mac(state: &AppState, digest: &str, code: &str) -> String {
     hex::encode(mac(state, digest, code).finalize().into_bytes())
 }
 
-fn code_matches(state: &AppState, digest: &str, code: &str, stored: &str) -> bool {
+pub(crate) fn code_matches(state: &AppState, digest: &str, code: &str, stored: &str) -> bool {
     hex::decode(stored)
         .is_ok_and(|expected| mac(state, digest, code).verify_slice(&expected).is_ok())
 }
@@ -537,11 +553,11 @@ pub fn email_hint(email: &str) -> String {
 
 /// 401: the challenge is unknown, used, expired or out of attempts; the
 /// client starts the sign-in again.
-const fn expired() -> AppError {
+pub(crate) const fn expired() -> AppError {
     AppError::Unauthorized
 }
 
-fn invalid_code() -> AppError {
+pub(crate) fn invalid_code() -> AppError {
     AppError::Validation("The code is incorrect. Check the latest Sanser email.".into())
 }
 
@@ -576,14 +592,17 @@ mod tests {
             platform: "macos",
             installation_id: None,
         };
-        let login = verification_email("someone@example.com", "042917", false, &origin);
+        let login = verification_email("someone@example.com", "042917", "login", &origin);
         assert_eq!(login.to, "someone@example.com");
         assert!(login.subject.contains("042917"));
         assert!(login.body.contains("042917"));
         assert!(login.body.contains("Office Mac (macos)"));
         assert!(login.body.contains("đăng nhập"));
         assert!(login.body.contains("sign in"));
-        let signup = verification_email("someone@example.com", "042917", true, &origin);
+        let signup = verification_email("someone@example.com", "042917", "register", &origin);
         assert!(signup.subject.contains("tạo tài khoản"));
+        let reset = verification_email("someone@example.com", "042917", "reset", &origin);
+        assert!(reset.subject.contains("đặt lại mật khẩu") && reset.subject.contains("042917"));
+        assert!(reset.body.contains("reset your Sanser password"));
     }
 }

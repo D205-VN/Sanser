@@ -3523,6 +3523,130 @@
     },
     "security": []
    }
+  },
+  "/api/v2/auth/password/forgot": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Email a 6-digit password reset code. The answer is the same whether or not the address has an account; a new code is asked for with /api/v2/auth/email/resend",
+    "operationId": "post_api_v2_auth_password_forgot",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ForgotPasswordRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "202": {
+      "description": "Code sent if the account exists",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/ForgotPasswordResponse"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "503": {
+      "description": "Email is not configured on this server.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
+  "/api/v2/auth/password/reset": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Set a new password with the emailed code. Signs out every session of the account, then signs in this computer or phone",
+    "operationId": "post_api_v2_auth_password_reset",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/ResetPasswordRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/AuthTokens"
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "The code expired or was used.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Wrong code or weak password.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
   }
  },
  "components": {
@@ -4621,6 +4745,71 @@
     "required": [
      "challengeExpiresAt",
      "emailHint"
+    ],
+    "additionalProperties": false
+   },
+   "ForgotPasswordRequest": {
+    "type": "object",
+    "properties": {
+     "email": {
+      "type": "string",
+      "format": "email"
+     },
+     "deviceName": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "installationId": {
+      "type": "string",
+      "format": "uuid"
+     }
+    },
+    "required": [
+     "email"
+    ],
+    "additionalProperties": false
+   },
+   "ForgotPasswordResponse": {
+    "type": "object",
+    "properties": {
+     "challengeToken": {
+      "type": "string"
+     },
+     "challengeExpiresAt": {
+      "type": "integer",
+      "format": "int64"
+     },
+     "emailHint": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "challengeToken",
+     "challengeExpiresAt",
+     "emailHint"
+    ],
+    "additionalProperties": false
+   },
+   "ResetPasswordRequest": {
+    "type": "object",
+    "properties": {
+     "challengeToken": {
+      "type": "string"
+     },
+     "code": {
+      "type": "string"
+     },
+     "newPassword": {
+      "type": "string",
+      "format": "password"
+     }
+    },
+    "required": [
+     "challengeToken",
+     "code",
+     "newPassword"
     ],
     "additionalProperties": false
    }

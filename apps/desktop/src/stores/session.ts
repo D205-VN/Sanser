@@ -9,6 +9,8 @@ const ACTIVITY_WRITE_INTERVAL_MS = 60_000;
 const CLOCK_SKEW_MS = 5 * 60_000;
 /** `guest`: a support session joined with a host's code, without an account. */
 export type SessionMode = 'signedOut' | 'cloud' | 'guest';
+/** `reset`: forgot password; the code comes with a new password. */
+export type EmailCodePurpose = 'login' | 'register' | 'reset';
 
 export interface SessionState {
   ready: boolean;
@@ -19,7 +21,7 @@ export interface SessionState {
   error: string | null;
   /** Set after a correct password on a new computer, or a sign-up: a code
    *  was emailed to `emailHint` (masked) and must be entered. */
-  emailCode: { expiresAt: number; emailHint: string; purpose: 'login' | 'register' } | null;
+  emailCode: { expiresAt: number; emailHint: string; purpose: EmailCodePurpose } | null;
   guest: { hostName: string; deviceId: string } | null;
 }
 
@@ -40,7 +42,7 @@ let credentialSaved = false;
 let lastActivityWrite = 0;
 const initial: SessionState = { ready: false, busy: false, mode: 'signedOut', account: null, serverUrl: '', error: null, emailCode: null, guest: null };
 /** The pending email-code step; the challenge token lives only in memory. */
-let pendingChallenge: { serverUrl: string; token: string; remember: boolean; purpose: 'login' | 'register' } | null = null;
+let pendingChallenge: { serverUrl: string; token: string; remember: boolean; purpose: EmailCodePurpose } | null = null;
 
 class EmailCodeChallenge extends Error {
   constructor(readonly token: string, readonly expiresAt: number, readonly emailHint: string) { super('An email code is required'); }
@@ -165,7 +167,7 @@ async function clearAuth(): Promise<number> {
 function createSessionStore() {
   const store = writable<SessionState>(initial);
 
-  async function authenticate(serverUrl: string, request: (client: ApiClient) => Promise<AuthResult>, success: string, remember: boolean, purpose: 'login' | 'register' = 'login'): Promise<void> {
+  async function authenticate(serverUrl: string, request: (client: ApiClient) => Promise<AuthResult>, success: string, remember: boolean, purpose: EmailCodePurpose = 'login'): Promise<void> {
     const generation = ++authGeneration;
     store.update((state) => ({ ...state, busy: true, error: null }));
     try {
@@ -276,6 +278,38 @@ function createSessionStore() {
         if (error instanceof ApiError && error.status === 401) {
           pendingChallenge = null;
           store.update((state) => ({ ...state, emailCode: null, error: 'This code expired. Sign in again.' }));
+        } else {
+          store.update((state) => ({ ...state, error: null }));
+        }
+        throw error;
+      }
+    },
+    /** Forgot password: emails a reset code to the address, if it has an account. */
+    async forgotPassword(serverUrl: string, email: string, remember = false): Promise<void> {
+      const generation = ++authGeneration;
+      pendingChallenge = null;
+      store.update((state) => ({ ...state, busy: true, error: null }));
+      try {
+        const result = await makeClient(serverUrl).forgotPassword(email.trim().toLowerCase(), await loginDevice());
+        if (generation !== authGeneration) return;
+        pendingChallenge = { serverUrl, token: result.challengeToken, remember, purpose: 'reset' };
+        store.update((state) => ({ ...state, busy: false, error: null, emailCode: { expiresAt: result.challengeExpiresAt, emailHint: result.emailHint, purpose: 'reset' } }));
+        diagnostics.add({ level: 'info', category: 'auth', message: 'Password reset code requested' });
+      } catch (error) {
+        if (generation === authGeneration) store.update((state) => ({ ...state, busy: false }));
+        throw error;
+      }
+    },
+    /** Sets the new password with the emailed code, then signs in here. */
+    async completePasswordReset(code: string, newPassword: string): Promise<void> {
+      const pending = pendingChallenge;
+      if (!pending || pending.purpose !== 'reset') throw new Error('Sign in again to continue.');
+      try {
+        await authenticate(pending.serverUrl, (client) => client.resetPassword(pending.token, code.replace(/[\s-]/g, ''), newPassword), 'Password changed. Other computers and phones were signed out.', pending.remember, 'reset');
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) {
+          pendingChallenge = null;
+          store.update((state) => ({ ...state, emailCode: null, error: 'This code expired. Ask for a new reset code.' }));
         } else {
           store.update((state) => ({ ...state, error: null }));
         }

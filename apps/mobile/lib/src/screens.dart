@@ -178,7 +178,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.26',
+                          'Sanser 2.3.27',
                           style: TextStyle(color: SanserTokens.muted),
                         ),
                         const SizedBox(height: 24),
@@ -523,6 +523,9 @@ class EmailCodeStep extends StatefulWidget {
 
 class _EmailCodeStepState extends State<EmailCodeStep> {
   final code = TextEditingController();
+  final newPassword = TextEditingController();
+  final confirmPassword = TextEditingController();
+  bool visible = false;
   Timer? timer;
   int wait = 60;
 
@@ -546,15 +549,26 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
   void dispose() {
     timer?.cancel();
     code.dispose();
+    newPassword.dispose();
+    confirmPassword.dispose();
     super.dispose();
   }
 
+  bool get reset => widget.controller.emailCode?.reset ?? false;
+
   bool get valid =>
-      RegExp(r'^\d{6}$').hasMatch(code.text.replaceAll(RegExp(r'[\s-]'), ''));
+      RegExp(r'^\d{6}$').hasMatch(code.text.replaceAll(RegExp(r'[\s-]'), '')) &&
+      (!reset ||
+          (newPassword.text.length >= 10 &&
+              newPassword.text == confirmPassword.text));
 
   void submit() {
     if (!valid || widget.controller.busy) return;
-    unawaited(widget.controller.verifyEmailCode(code.text));
+    if (reset) {
+      unawaited(widget.controller.resetPassword(code.text, newPassword.text));
+    } else {
+      unawaited(widget.controller.verifyEmailCode(code.text));
+    }
     code.clear();
   }
 
@@ -575,14 +589,16 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
                   const Align(alignment: Alignment.centerLeft, child: Brand()),
                   const SizedBox(height: 56),
                   Text(
-                    'Kiểm tra email',
+                    challenge.reset ? 'Đặt lại mật khẩu' : 'Kiểm tra email',
                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
                   ),
                   const SizedBox(height: 14),
                   Text(
-                    challenge.register
+                    challenge.reset
+                        ? 'Nếu ${challenge.emailHint} có tài khoản Sanser, mã 6 số đã được gửi đến đó. Nhập mã và chọn mật khẩu mới.'
+                        : challenge.register
                         ? 'Nhập mã 6 số đã gửi đến ${challenge.emailHint} để xác nhận email và tạo tài khoản.'
                         : 'Điện thoại này chưa từng đăng nhập tài khoản của bạn. Nhập mã 6 số đã gửi đến ${challenge.emailHint}.',
                     style: const TextStyle(
@@ -614,6 +630,48 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
                           'Mã hết hạn sau 10 phút. Không thấy email thì xem thư mục Spam.',
                     ),
                   ),
+                  if (challenge.reset) ...[
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: newPassword,
+                      obscureText: !visible,
+                      autofillHints: const [AutofillHints.newPassword],
+                      onChanged: (_) => setState(() {}),
+                      decoration: InputDecoration(
+                        labelText: 'Mật khẩu mới',
+                        prefixIcon: const Icon(Icons.lock_reset_rounded),
+                        helperText:
+                            'Ít nhất 10 ký tự, có chữ hoa, chữ thường và số. Mọi máy đang đăng nhập sẽ bị đăng xuất.',
+                        helperMaxLines: 3,
+                        suffixIcon: IconButton(
+                          tooltip: visible ? 'Ẩn mật khẩu' : 'Hiện mật khẩu',
+                          onPressed: () => setState(() => visible = !visible),
+                          icon: Icon(
+                            visible
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: confirmPassword,
+                      obscureText: !visible,
+                      autofillHints: const [AutofillHints.newPassword],
+                      onChanged: (_) => setState(() {}),
+                      onSubmitted: (_) => submit(),
+                      decoration: InputDecoration(
+                        labelText: 'Nhập lại mật khẩu mới',
+                        prefixIcon: const Icon(Icons.lock_outline_rounded),
+                        errorText:
+                            confirmPassword.text.isNotEmpty &&
+                                confirmPassword.text != newPassword.text
+                            ? 'Mật khẩu không khớp'
+                            : null,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 22),
                   FilledButton(
                     onPressed: c.busy || !valid ? null : submit,
@@ -623,7 +681,7 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
                             width: 22,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('Xác nhận'),
+                        : Text(challenge.reset ? 'Đổi mật khẩu' : 'Xác nhận'),
                   ),
                   TextButton(
                     onPressed: c.busy || wait > 0
@@ -667,7 +725,7 @@ class _SignInState extends State<SignIn> {
         ),
       );
   final form = GlobalKey<FormState>();
-  bool create = false, visible = false;
+  bool create = false, visible = false, forgot = false;
   @override
   void dispose() {
     email.dispose();
@@ -677,16 +735,19 @@ class _SignInState extends State<SignIn> {
   }
 
   void submit() {
-    if (form.currentState!.validate()) {
-      unawaited(
-        widget.controller.login(
-          email.text,
-          password.text,
-          server.text,
-          register: create,
-        ),
-      );
+    if (!form.currentState!.validate()) return;
+    if (forgot) {
+      unawaited(widget.controller.forgotPassword(email.text, server.text));
+      return;
     }
+    unawaited(
+      widget.controller.login(
+        email.text,
+        password.text,
+        server.text,
+        register: create,
+      ),
+    );
   }
 
   @override
@@ -705,7 +766,9 @@ class _SignInState extends State<SignIn> {
                   const Align(alignment: Alignment.centerLeft, child: Brand()),
                   const SizedBox(height: 56),
                   Text(
-                    'Máy tính của bạn.\nTrong tầm tay.',
+                    forgot
+                        ? 'Quên mật khẩu'
+                        : 'Máy tính của bạn.\nTrong tầm tay.',
                     style: Theme.of(context).textTheme.headlineLarge?.copyWith(
                       fontWeight: FontWeight.w700,
                       height: 1.17,
@@ -713,9 +776,14 @@ class _SignInState extends State<SignIn> {
                     ),
                   ),
                   const SizedBox(height: 14),
-                  const Text(
-                    'Dùng cùng tài khoản Sanser trên điện thoại và máy tính.',
-                    style: TextStyle(color: SanserTokens.muted, height: 1.5),
+                  Text(
+                    forgot
+                        ? 'Nhập email tài khoản. Sanser sẽ gửi mã 6 số để bạn đặt mật khẩu mới.'
+                        : 'Dùng cùng tài khoản Sanser trên điện thoại và máy tính.',
+                    style: const TextStyle(
+                      color: SanserTokens.muted,
+                      height: 1.5,
+                    ),
                   ),
                   const SizedBox(height: 30),
                   if (widget.controller.error != null)
@@ -733,33 +801,45 @@ class _SignInState extends State<SignIn> {
                         ? null
                         : 'Nhập email của bạn',
                   ),
-                  const SizedBox(height: 14),
-                  TextFormField(
-                    controller: password,
-                    obscureText: !visible,
-                    autofillHints: [
-                      create
-                          ? AutofillHints.newPassword
-                          : AutofillHints.password,
-                    ],
-                    onFieldSubmitted: (_) => submit(),
-                    decoration: InputDecoration(
-                      labelText: 'Mật khẩu',
-                      prefixIcon: const Icon(Icons.lock_outline_rounded),
-                      suffixIcon: IconButton(
-                        tooltip: visible ? 'Ẩn mật khẩu' : 'Hiện mật khẩu',
-                        onPressed: () => setState(() => visible = !visible),
-                        icon: Icon(
-                          visible
-                              ? Icons.visibility_off_outlined
-                              : Icons.visibility_outlined,
+                  if (!forgot) ...[
+                    const SizedBox(height: 14),
+                    TextFormField(
+                      controller: password,
+                      obscureText: !visible,
+                      autofillHints: [
+                        create
+                            ? AutofillHints.newPassword
+                            : AutofillHints.password,
+                      ],
+                      onFieldSubmitted: (_) => submit(),
+                      decoration: InputDecoration(
+                        labelText: 'Mật khẩu',
+                        prefixIcon: const Icon(Icons.lock_outline_rounded),
+                        suffixIcon: IconButton(
+                          tooltip: visible ? 'Ẩn mật khẩu' : 'Hiện mật khẩu',
+                          onPressed: () => setState(() => visible = !visible),
+                          icon: Icon(
+                            visible
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined,
+                          ),
                         ),
                       ),
+                      validator: (value) => value != null && value.isNotEmpty
+                          ? null
+                          : 'Nhập mật khẩu',
                     ),
-                    validator: (value) => value != null && value.isNotEmpty
-                        ? null
-                        : 'Nhập mật khẩu',
-                  ),
+                    if (!create)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: widget.controller.busy
+                              ? null
+                              : () => setState(() => forgot = true),
+                          child: const Text('Quên mật khẩu?'),
+                        ),
+                      ),
+                  ],
                   const SizedBox(height: 22),
                   FilledButton(
                     onPressed: widget.controller.busy ? null : submit,
@@ -769,14 +849,28 @@ class _SignInState extends State<SignIn> {
                             width: 22,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : Text(create ? 'Tạo tài khoản' : 'Đăng nhập'),
+                        : Text(
+                            forgot
+                                ? 'Gửi mã'
+                                : create
+                                ? 'Tạo tài khoản'
+                                : 'Đăng nhập',
+                          ),
                   ),
                   TextButton(
                     onPressed: widget.controller.busy
                         ? null
-                        : () => setState(() => create = !create),
+                        : () => setState(() {
+                            if (forgot) {
+                              forgot = false;
+                            } else {
+                              create = !create;
+                            }
+                          }),
                     child: Text(
-                      create
+                      forgot
+                          ? 'Quay lại đăng nhập'
+                          : create
                           ? 'Đã có tài khoản? Đăng nhập'
                           : 'Chưa có tài khoản? Đăng ký',
                     ),

@@ -467,6 +467,20 @@ export class ApiClient {
     });
   }
 
+  /** Emails a password reset code. The answer is the same whether or not the address has an account. */
+  async forgotPassword(email: string, device?: LoginDevice): Promise<{ challengeToken: string; challengeExpiresAt: number; emailHint: string }> {
+    return this.request('/api/v2/auth/password/forgot', {
+      method: 'POST', body: { email, ...device }, authenticated: false
+    });
+  }
+
+  /** Sets a new password with the emailed code; every other session is signed out. */
+  async resetPassword(challengeToken: string, code: string, newPassword: string): Promise<AuthResult> {
+    return this.request('/api/v2/auth/password/reset', {
+      method: 'POST', body: { challengeToken, code, newPassword }, authenticated: false
+    });
+  }
+
   /** Emails a fresh code; the previous one stops working. */
   async resendEmailCode(challengeToken: string): Promise<{ challengeExpiresAt: number; emailHint: string }> {
     return this.request('/api/v2/auth/email/resend', {

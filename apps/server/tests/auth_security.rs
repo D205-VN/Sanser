@@ -527,6 +527,116 @@ async fn signing_out_another_computer_forgets_it() {
 
 #[tokio::test]
 #[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn forgot_password_resets_with_the_emailed_code_and_signs_out_everywhere() {
+    const NEW_PASSWORD: &str = "BrandNewPass456";
+    let (server, outbox) = TestServer::with_email().await;
+    let first = signup_verified(&server, &outbox, "owner@example.com").await;
+    let forgot = |email: &'static str| {
+        server.post(
+            "/api/v2/auth/password/forgot",
+            json!({"email": email, "deviceName": "Phone", "platform": "test", "installationId": OTHER_INSTALLATION}),
+            None,
+        )
+    };
+    // An unknown address gets the same answer, but no email and no usable code.
+    let sent_before = outbox.lock().await.len();
+    let (status, decoy) = forgot("nobody@example.com").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{decoy}");
+    assert_eq!(decoy["emailHint"], "no****@example.com");
+    assert_eq!(
+        outbox.lock().await.len(),
+        sent_before,
+        "no email for an unknown address"
+    );
+    let decoy_challenge = decoy["challengeToken"].as_str().unwrap();
+    for code in ["000000", "123456"] {
+        let (status, _) = server
+            .post(
+                "/api/v2/auth/password/reset",
+                json!({"challengeToken": decoy_challenge, "code": code, "newPassword": NEW_PASSWORD}),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let (status, body) = forgot("owner@example.com").await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let challenge = body["challengeToken"].as_str().unwrap().to_owned();
+    let email = outbox.lock().await.last().cloned().unwrap();
+    assert!(
+        email.subject.contains("đặt lại mật khẩu"),
+        "{}",
+        email.subject
+    );
+    let code = last_code(&outbox, "owner@example.com").await;
+    // A reset code never works as a sign-in code.
+    let (status, _) = verify(&server, &challenge, &code).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // The new password must follow the password rules.
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/password/reset",
+            json!({"challengeToken": challenge, "code": code, "newPassword": "short"}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/password/reset",
+            json!({"challengeToken": challenge, "code": wrong, "newPassword": NEW_PASSWORD}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, tokens) = server
+        .post(
+            "/api/v2/auth/password/reset",
+            json!({"challengeToken": challenge, "code": code, "newPassword": NEW_PASSWORD}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tokens}");
+    assert_eq!(tokens["account"]["email"], "owner@example.com");
+    // Used once only.
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/password/reset",
+            json!({"challengeToken": challenge, "code": code, "newPassword": NEW_PASSWORD}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // The old session is signed out; the new one works.
+    let (status, _) = server.get("/api/v2/account", &token(&first)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = server.get("/api/v2/account", &token(&tokens)).await;
+    assert_eq!(status, StatusCode::OK);
+    // The old password no longer works; the new one does, on the phone that
+    // reset it, without another code.
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/login",
+            login_body("owner@example.com", INSTALLATION),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body) = server
+        .post(
+            "/api/v2/auth/login",
+            json!({"email": "owner@example.com", "password": NEW_PASSWORD, "deviceName": "Phone", "platform": "test", "installationId": OTHER_INSTALLATION}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
 async fn without_smtp_sign_in_needs_only_the_password_and_trusts_the_computer() {
     let server = TestServer::new(false).await;
     server.register("plain@example.com").await;

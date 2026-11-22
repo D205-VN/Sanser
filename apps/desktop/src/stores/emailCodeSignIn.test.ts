@@ -51,6 +51,38 @@ describe('email code sign-in', () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe(`${origin}/api/v2/auth/email/verify`);
   });
 
+  it('resets a forgotten password with the emailed code and signs in', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json({ challengeToken: 'sn2_e_reset', challengeExpiresAt: 2_000_000_000, emailHint: 'te****@example.test' }, 202))
+      .mockResolvedValueOnce(json(tokens));
+    vi.stubGlobal('fetch', fetchMock);
+    const { session } = await import('./session');
+    await session.forgotPassword(origin, ' Test@Example.test ');
+    expect(get(session).emailCode).toEqual({ expiresAt: 2_000_000_000, emailHint: 'te****@example.test', purpose: 'reset' });
+    const [forgotUrl, forgotInit] = fetchMock.mock.calls[0] ?? [];
+    expect(forgotUrl).toBe(`${origin}/api/v2/auth/password/forgot`);
+    expect(JSON.parse(forgotInit?.body as string)).toMatchObject({ email: 'test@example.test', installationId: '11111111-1111-4111-8111-111111111111' });
+    await session.completePasswordReset('123-456', 'A-new-passphrase1');
+    expect(get(session).mode).toBe('cloud');
+    expect(get(session).emailCode).toBeNull();
+    const [url, init] = fetchMock.mock.calls[1] ?? [];
+    expect(url).toBe(`${origin}/api/v2/auth/password/reset`);
+    expect(JSON.parse(init?.body as string)).toEqual({ challengeToken: 'sn2_e_reset', code: '123456', newPassword: 'A-new-passphrase1' });
+  });
+
+  it('returns to sign-in when a reset code expired', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json({ challengeToken: 'sn2_e_reset', challengeExpiresAt: 2_000_000_000, emailHint: 'te****@example.test' }, 202))
+      .mockResolvedValueOnce(json({ error: { code: 'unauthorized', message: 'Authentication is required' } }, 401));
+    vi.stubGlobal('fetch', fetchMock);
+    const { session } = await import('./session');
+    await session.forgotPassword(origin, 'test@example.test');
+    await expect(session.completePasswordReset('123456', 'A-new-passphrase1')).rejects.toThrow();
+    expect(get(session).emailCode).toBeNull();
+    expect(get(session).error).toBe('This code expired. Ask for a new reset code.');
+    expect(get(session).mode).toBe('signedOut');
+  });
+
   it('resends a code and updates its expiry', async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(json(challenge, 401))
