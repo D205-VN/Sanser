@@ -131,6 +131,9 @@ void main() {
       secrets,
       client: MockClient((request) async {
         requests.add(request);
+        if (request.url.path.endsWith('/password/check')) {
+          return http.Response('', 204);
+        }
         if (request.url.path.endsWith('/password/forgot')) {
           return http.Response(
             jsonEncode({
@@ -160,6 +163,14 @@ void main() {
     expect(forgot['email'], 'test@example.com');
     expect(forgot['installationId'], isA<String>());
     expect(requests.first.headers['authorization'], isNull);
+
+    await api.checkResetCode(step.challengeToken, '123 456');
+    expect(requests.last.url.path, '/api/v2/auth/password/check');
+    expect(jsonDecode(requests.last.body), {
+      'challengeToken': 'sn2_e_reset',
+      'code': '123456',
+    });
+    expect(await secrets.read('mobile.https://server.example.refresh'), isNull);
 
     await api.resetPassword(step.challengeToken, '123-456', 'NewPass12345');
     expect(requests.last.url.path, '/api/v2/auth/password/reset');

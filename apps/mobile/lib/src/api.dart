@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
 typedef Json = Map<String, dynamic>;
-const mobileVersion = '2.3.27';
+const mobileVersion = '2.3.28';
 
 abstract interface class SecretStore {
   Future<String?> read(String key);
@@ -282,6 +282,20 @@ class SanserApi {
       hint is String ? hint : '',
       false,
       reset: true,
+    );
+  }
+
+  /// Checks a reset code before the new password is asked for. Counts as one
+  /// of the code's attempts; the code stays usable for [resetPassword].
+  Future<void> checkResetCode(String challengeToken, String code) async {
+    await request(
+      '/api/v2/auth/password/check',
+      method: 'POST',
+      auth: false,
+      body: {
+        'challengeToken': challengeToken,
+        'code': code.replaceAll(RegExp(r'[\s-]'), ''),
+      },
     );
   }
 

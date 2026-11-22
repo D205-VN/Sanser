@@ -48,6 +48,13 @@ pub struct ForgotResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CheckRequest {
+    challenge_token: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResetRequest {
     challenge_token: String,
     code: String,
@@ -131,42 +138,29 @@ pub async fn forgot(
     ))
 }
 
+/// Checks the emailed code before the new password is asked for. 204 when it
+/// is right; it stays valid for `reset`. Each check counts as an attempt.
+pub async fn check(
+    State(state): State<AppState>,
+    ApiJson(request): ApiJson<CheckRequest>,
+) -> Result<StatusCode, AppError> {
+    attempt(&state, &request.challenge_token, &request.code).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Sets the new password with the emailed code. Signs out every session of
 /// the account, then signs in the computer or phone that asked.
 pub async fn reset(
     State(state): State<AppState>,
     ApiJson(request): ApiJson<ResetRequest>,
 ) -> Result<Json<AuthTokens>, AppError> {
-    let token = request.challenge_token.trim();
-    if !valid_token_shape(token, CHALLENGE_PREFIX) {
-        return Err(expired());
-    }
-    let Some(code) = normalize_code(&request.code) else {
-        return Err(invalid_code());
-    };
     validate_password(&request.new_password)?;
-    let digest = token_digest(token);
-    let now = now_unix();
-    // Count the attempt first, atomically, as for sign-in codes.
-    let row = sqlx::query(
-        "UPDATE email_challenges SET attempts = attempts + 1 \
-         WHERE digest = $1 AND purpose = 'reset' AND consumed_at IS NULL AND expires_at > $2 \
-           AND attempts < $3 \
-         RETURNING user_id, code_mac, device_name, platform, installation_id",
-    )
-    .bind(&digest)
-    .bind(now)
-    .bind(CHALLENGE_MAX_ATTEMPTS)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(AppError::from_db)?
-    .ok_or_else(expired)?;
-    let user_id: Option<String> = row.try_get("user_id").map_err(AppError::from_db)?;
-    let stored: String = row.try_get("code_mac").map_err(AppError::from_db)?;
-    // A decoy (no account) never matches.
-    let Some(user_id) = user_id.filter(|_| code_matches(&state, &digest, &code, &stored)) else {
-        return Err(invalid_code());
-    };
+    let Attempt {
+        digest,
+        now,
+        user_id,
+        row,
+    } = attempt(&state, &request.challenge_token, &request.code).await?;
     let consumed = sqlx::query(
         "UPDATE email_challenges SET consumed_at = $1 WHERE digest = $2 AND consumed_at IS NULL",
     )
@@ -225,6 +219,53 @@ pub async fn reset(
     )
     .await;
     Ok(Json(tokens))
+}
+
+struct Attempt {
+    digest: String,
+    now: i64,
+    user_id: String,
+    row: sqlx::postgres::PgRow,
+}
+
+/// Counts one attempt at the code (atomically, as for sign-in codes) and
+/// checks it. Five attempts per challenge, whether checked or used.
+async fn attempt(state: &AppState, challenge_token: &str, code: &str) -> Result<Attempt, AppError> {
+    let token = challenge_token.trim();
+    if !valid_token_shape(token, CHALLENGE_PREFIX) {
+        return Err(expired());
+    }
+    let Some(code) = normalize_code(code) else {
+        return Err(invalid_code());
+    };
+    let digest = token_digest(token);
+    let now = now_unix();
+    // Count the attempt first, atomically, as for sign-in codes.
+    let row = sqlx::query(
+        "UPDATE email_challenges SET attempts = attempts + 1 \
+         WHERE digest = $1 AND purpose = 'reset' AND consumed_at IS NULL AND expires_at > $2 \
+           AND attempts < $3 \
+         RETURNING user_id, code_mac, device_name, platform, installation_id",
+    )
+    .bind(&digest)
+    .bind(now)
+    .bind(CHALLENGE_MAX_ATTEMPTS)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(AppError::from_db)?
+    .ok_or_else(expired)?;
+    let user_id: Option<String> = row.try_get("user_id").map_err(AppError::from_db)?;
+    let stored: String = row.try_get("code_mac").map_err(AppError::from_db)?;
+    // A decoy (no account) never matches.
+    let Some(user_id) = user_id.filter(|_| code_matches(state, &digest, &code, &stored)) else {
+        return Err(invalid_code());
+    };
+    Ok(Attempt {
+        digest,
+        now,
+        user_id,
+        row,
+    })
 }
 
 fn default_device_name() -> String {

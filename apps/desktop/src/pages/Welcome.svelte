@@ -28,6 +28,18 @@
     if (!canVerify || $session.busy) return;
     formError = null;
     resendMessage = null;
+    if (isReset && !codeChecked) {
+      try {
+        await session.checkResetCode(emailCode);
+        codeChecked = true;
+        password = '';
+        confirmPassword = '';
+      } catch (error) {
+        emailCode = '';
+        formError = $session.emailCode ? (error instanceof Error ? error.message : $t('Unable to continue')) : null;
+      }
+      return;
+    }
     if (isReset && password !== confirmPassword) { formError = $t('Passwords do not match.'); return; }
     try {
       if (isReset) await session.completePasswordReset(emailCode, password);
@@ -35,10 +47,19 @@
       emailCode = '';
       password = '';
       confirmPassword = '';
+      codeChecked = false;
     } catch (error) {
-      emailCode = '';
-      formError = $session.emailCode ? (error instanceof Error ? error.message : $t('Unable to continue')) : null;
+      const message = error instanceof Error ? error.message : $t('Unable to continue');
+      // A weak password keeps the checked code; anything else asks for the code again.
+      if (!isReset || !/password/i.test(message)) { emailCode = ''; codeChecked = false; }
+      formError = $session.emailCode ? message : null;
     }
+  }
+
+  function enterAnotherCode(): void {
+    emailCode = '';
+    codeChecked = false;
+    formError = null;
   }
 
   async function resendEmailCode(): Promise<void> {
@@ -50,6 +71,8 @@
       resendAt = Date.now() + 60_000;
       now = Date.now();
       resendMessage = 'A new code was sent. Earlier codes no longer work.';
+      emailCode = '';
+      codeChecked = false;
     } catch (error) {
       formError = error instanceof Error ? error.message : $t('Unable to continue');
     }
@@ -61,6 +84,7 @@
     resendMessage = null;
     password = '';
     confirmPassword = '';
+    codeChecked = false;
     if (isReset) mode = 'login';
     session.cancelEmailCode();
   }
@@ -77,7 +101,10 @@
   const needsServerSettings = $derived(!serverUrl.trim() || serverUrl !== CONFIGURED_SERVER_URL);
   let formError = $state<string | null>(null);
   const isReset = $derived($session.emailCode?.purpose === 'reset');
-  const canVerify = $derived(/^\d{6}$/.test(emailCode.replace(/[\s-]/g, '')) && (!isReset || password.length >= 12));
+  /** Forgot password: the code is checked first, then the new password is asked for. */
+  let codeChecked = $state(false);
+  const codeValid = $derived(/^\d{6}$/.test(emailCode.replace(/[\s-]/g, '')));
+  const canVerify = $derived(codeValid && (!isReset || !codeChecked || password.length >= 12));
 
   const canSubmit = $derived(
     serverUrl.trim().length > 0 &&
@@ -137,29 +164,33 @@
       <header>
         <h2>{isReset ? $t('Reset your password') : $t('Check your email')}</h2>
         <p>{isReset
-          ? $t('If {email} has a Sanser account, a 6-digit code was sent to it. Enter the code and choose a new password.', { email: $session.emailCode.emailHint })
+          ? codeChecked
+            ? $t('The code is correct. Choose a new password for your account.')
+            : $t('If {email} has a Sanser account, a 6-digit code was sent to it. Enter the code to continue.', { email: $session.emailCode.emailHint })
           : $session.emailCode.purpose === 'register'
           ? $t('Enter the 6-digit code sent to {email} to confirm this address and create your account.', { email: $session.emailCode.emailHint })
           : $t('This computer has not signed in to your account before. Enter the 6-digit code sent to {email}.', { email: $session.emailCode.emailHint })}</p>
       </header>
+      {#if !isReset || !codeChecked}
       <div class="field">
         <label for="email-code">{$t('Verification code')}</label>
         <!-- svelte-ignore a11y_autofocus -->
         <input id="email-code" class="input" bind:value={emailCode} required autofocus autocomplete="one-time-code" inputmode="numeric" spellcheck="false" maxlength="7" placeholder="123456" />
         <p class="muted">{$t('The code expires in 10 minutes. Check spam if it does not arrive.')}</p>
       </div>
-      {#if isReset}
+      {:else}
       <div class="field">
         <label for="new-password">{$t('New password')}</label>
-        <div class="password-input"><input id="new-password" class="input" type={showPassword ? 'text' : 'password'} bind:value={password} required minlength="12" maxlength="256" autocomplete="new-password" placeholder={$t('At least 12 characters')} /><button type="button" class="password-visibility" aria-label={showPassword ? $t('Hide password') : $t('Show password')} aria-pressed={showPassword} onclick={() => (showPassword = !showPassword)}>{showPassword ? $t('Hide') : $t('Show')}</button></div>
+        <div class="password-input"><!-- svelte-ignore a11y_autofocus --><input id="new-password" autofocus class="input" type={showPassword ? 'text' : 'password'} bind:value={password} required minlength="12" maxlength="256" autocomplete="new-password" placeholder={$t('At least 12 characters')} /><button type="button" class="password-visibility" aria-label={showPassword ? $t('Hide password') : $t('Show password')} aria-pressed={showPassword} onclick={() => (showPassword = !showPassword)}>{showPassword ? $t('Hide') : $t('Show')}</button></div>
         <small>{$t('Every computer and phone signed in to this account will be signed out.')}</small>
       </div>
       <div class="field"><label for="confirm-new-password">{$t('Confirm password')}</label><input id="confirm-new-password" class="input" type={showPassword ? 'text' : 'password'} bind:value={confirmPassword} required minlength="12" maxlength="256" autocomplete="new-password" placeholder={$t('Enter your password again')} /></div>
       {/if}
       {#if formError}<div class="notice error" role="alert">{$t(formError)}</div>{/if}
       {#if resendMessage}<div class="notice" role="status">{$t(resendMessage)}</div>{/if}
-      <button class="button primary auth-submit" type="submit" disabled={$session.busy || !canVerify}>{$session.busy ? $t('Please wait…') : isReset ? $t('Change password') : $t('Verify')}</button>
+      <button class="button primary auth-submit" type="submit" disabled={$session.busy || !canVerify}>{$session.busy ? $t('Please wait…') : isReset ? (codeChecked ? $t('Change password') : $t('Continue')) : $t('Verify')}</button>
       <div class="auth-footer">
+        {#if isReset && codeChecked}<button class="text-button" type="button" disabled={$session.busy} onclick={enterAnotherCode}>{$t('Enter a different code')}</button>{/if}
         <button class="text-button" type="button" disabled={$session.busy || resendWait > 0} onclick={resendEmailCode}>{resendWait > 0 ? $t('Send a new code in {seconds}s', { seconds: resendWait }) : $t('Send a new code')}</button>
         <button class="text-button" type="button" disabled={$session.busy} onclick={cancelEmailCode}>{$t('Back to sign in')}</button>
       </div>

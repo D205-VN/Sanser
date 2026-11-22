@@ -19,8 +19,10 @@ replaces the two-step verification (TOTP) of 2.3.17 and 2.3.18.
   Settings → Account → login sessions forgets it, so it needs a code next time.
   Signing out on the computer itself keeps it remembered.
 - **Forgot password** (since 2.3.27): *Forgot password?* on the sign-in
-  screen asks for the account email. The server emails a reset code; the
-  code and a new password together set the password, sign out **every**
+  screen asks for the account email. The server emails a reset code. The
+  code is entered and checked first (since 2.3.28); only a correct code
+  leads to the new-password step. The code and the new password then set the
+  password, sign out **every**
   computer and phone of the account, and sign in the one that asked (it is
   remembered, so it needs no second code). The answer to the request is the
   same whether or not the address has an account: an unknown address gets a
@@ -52,6 +54,7 @@ installation IDs to any client.
 | Enter code | `POST /api/v2/auth/email/verify` `{challengeToken, code}` | `AuthTokens` (201 for a sign-up). **422** wrong code; **401** expired, used or out of attempts; **409** the address was registered meanwhile. |
 | New code | `POST /api/v2/auth/email/resend` `{challengeToken}` | `{challengeExpiresAt, emailHint}`; **409** too soon or too many codes. Also used for reset codes. |
 | Forgot password | `POST /api/v2/auth/password/forgot` `{email, deviceName?, platform?, installationId?}` | **202** `{challengeToken, challengeExpiresAt, emailHint}` for any address; **503** when email is not configured. |
+| Check reset code | `POST /api/v2/auth/password/check` `{challengeToken, code}` | **204** right code (it stays usable for the next step); **422** wrong code; **401** expired, used or out of attempts. Each check counts as one of the five attempts. |
 | Set new password | `POST /api/v2/auth/password/reset` `{challengeToken, code, newPassword}` | `AuthTokens`. **422** wrong code or weak password; **401** expired, used or out of attempts. |
 
 Older apps that do not know the code step show the server message asking to

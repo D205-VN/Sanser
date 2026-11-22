@@ -96,6 +96,10 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::password_reset::forgot),
         )
         .route(
+            "/api/v2/auth/password/check",
+            post(routes::password_reset::check),
+        )
+        .route(
             "/api/v2/auth/password/reset",
             post(routes::password_reset::reset),
         )

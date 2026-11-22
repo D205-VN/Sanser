@@ -54,6 +54,7 @@ describe('email code sign-in', () => {
   it('resets a forgotten password with the emailed code and signs in', async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(json({ challengeToken: 'sn2_e_reset', challengeExpiresAt: 2_000_000_000, emailHint: 'te****@example.test' }, 202))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(json(tokens));
     vi.stubGlobal('fetch', fetchMock);
     const { session } = await import('./session');
@@ -62,10 +63,15 @@ describe('email code sign-in', () => {
     const [forgotUrl, forgotInit] = fetchMock.mock.calls[0] ?? [];
     expect(forgotUrl).toBe(`${origin}/api/v2/auth/password/forgot`);
     expect(JSON.parse(forgotInit?.body as string)).toMatchObject({ email: 'test@example.test', installationId: '11111111-1111-4111-8111-111111111111' });
+    await session.checkResetCode('123 456');
+    const [checkUrl, checkInit] = fetchMock.mock.calls[1] ?? [];
+    expect(checkUrl).toBe(`${origin}/api/v2/auth/password/check`);
+    expect(JSON.parse(checkInit?.body as string)).toEqual({ challengeToken: 'sn2_e_reset', code: '123456' });
+    expect(get(session).emailCode?.purpose).toBe('reset');
     await session.completePasswordReset('123-456', 'A-new-passphrase1');
     expect(get(session).mode).toBe('cloud');
     expect(get(session).emailCode).toBeNull();
-    const [url, init] = fetchMock.mock.calls[1] ?? [];
+    const [url, init] = fetchMock.mock.calls[2] ?? [];
     expect(url).toBe(`${origin}/api/v2/auth/password/reset`);
     expect(JSON.parse(init?.body as string)).toEqual({ challengeToken: 'sn2_e_reset', code: '123456', newPassword: 'A-new-passphrase1' });
   });

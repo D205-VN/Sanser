@@ -559,6 +559,14 @@ async fn forgot_password_resets_with_the_emailed_code_and_signs_out_everywhere()
             .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
+    let (status, _) = server
+        .post(
+            "/api/v2/auth/password/check",
+            json!({"challengeToken": decoy_challenge, "code": "123456"}),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (status, body) = forgot("owner@example.com").await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
@@ -583,6 +591,18 @@ async fn forgot_password_resets_with_the_emailed_code_and_signs_out_everywhere()
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let wrong = if code == "000000" { "111111" } else { "000000" };
+    // The code is checked on its own before the new password is asked for.
+    let check = |code: &str| {
+        server.post(
+            "/api/v2/auth/password/check",
+            json!({"challengeToken": challenge, "code": code}),
+            None,
+        )
+    };
+    let (status, _) = check(wrong).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = check(&code).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = server
         .post(
             "/api/v2/auth/password/reset",

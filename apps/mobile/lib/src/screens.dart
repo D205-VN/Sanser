@@ -178,7 +178,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.27',
+                          'Sanser 2.3.28',
                           style: TextStyle(color: SanserTokens.muted),
                         ),
                         const SizedBox(height: 24),
@@ -556,16 +556,22 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
 
   bool get reset => widget.controller.emailCode?.reset ?? false;
 
-  bool get valid =>
-      RegExp(r'^\d{6}$').hasMatch(code.text.replaceAll(RegExp(r'[\s-]'), '')) &&
-      (!reset ||
-          (newPassword.text.length >= 10 &&
-              newPassword.text == confirmPassword.text));
+  /// Forgot password: the code was checked, so ask for the new password.
+  bool get choosingPassword => reset && widget.controller.resetCode != null;
+
+  bool get valid => choosingPassword
+      ? newPassword.text.length >= 10 &&
+            newPassword.text == confirmPassword.text
+      : RegExp(r'^\d{6}$').hasMatch(code.text.replaceAll(RegExp(r'[\s-]'), ''));
 
   void submit() {
     if (!valid || widget.controller.busy) return;
+    if (choosingPassword) {
+      unawaited(widget.controller.resetPassword(newPassword.text));
+      return;
+    }
     if (reset) {
-      unawaited(widget.controller.resetPassword(code.text, newPassword.text));
+      unawaited(widget.controller.checkResetCode(code.text));
     } else {
       unawaited(widget.controller.verifyEmailCode(code.text));
     }
@@ -596,8 +602,10 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
                   ),
                   const SizedBox(height: 14),
                   Text(
-                    challenge.reset
-                        ? 'Nếu ${challenge.emailHint} có tài khoản Sanser, mã 6 số đã được gửi đến đó. Nhập mã và chọn mật khẩu mới.'
+                    choosingPassword
+                        ? 'Mã đúng. Hãy chọn mật khẩu mới cho tài khoản.'
+                        : challenge.reset
+                        ? 'Nếu ${challenge.emailHint} có tài khoản Sanser, mã 6 số đã được gửi đến đó. Nhập mã để tiếp tục.'
                         : challenge.register
                         ? 'Nhập mã 6 số đã gửi đến ${challenge.emailHint} để xác nhận email và tạo tài khoản.'
                         : 'Điện thoại này chưa từng đăng nhập tài khoản của bạn. Nhập mã 6 số đã gửi đến ${challenge.emailHint}.',
@@ -613,27 +621,28 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
                       padding: const EdgeInsets.only(bottom: 14),
                       child: Text(c.emailNotice!),
                     ),
-                  TextField(
-                    controller: code,
-                    autofocus: true,
-                    keyboardType: TextInputType.number,
-                    autofillHints: const [AutofillHints.oneTimeCode],
-                    maxLength: 7,
-                    onChanged: (_) => setState(() {}),
-                    onSubmitted: (_) => submit(),
-                    decoration: const InputDecoration(
-                      labelText: 'Mã xác nhận',
-                      hintText: '123456',
-                      counterText: '',
-                      prefixIcon: Icon(Icons.mark_email_read_outlined),
-                      helperText:
-                          'Mã hết hạn sau 10 phút. Không thấy email thì xem thư mục Spam.',
+                  if (!choosingPassword)
+                    TextField(
+                      controller: code,
+                      autofocus: true,
+                      keyboardType: TextInputType.number,
+                      autofillHints: const [AutofillHints.oneTimeCode],
+                      maxLength: 7,
+                      onChanged: (_) => setState(() {}),
+                      onSubmitted: (_) => submit(),
+                      decoration: const InputDecoration(
+                        labelText: 'Mã xác nhận',
+                        hintText: '123456',
+                        counterText: '',
+                        prefixIcon: Icon(Icons.mark_email_read_outlined),
+                        helperText:
+                            'Mã hết hạn sau 10 phút. Không thấy email thì xem thư mục Spam.',
+                      ),
                     ),
-                  ),
-                  if (challenge.reset) ...[
-                    const SizedBox(height: 14),
+                  if (choosingPassword) ...[
                     TextField(
                       controller: newPassword,
+                      autofocus: true,
                       obscureText: !visible,
                       autofillHints: const [AutofillHints.newPassword],
                       onChanged: (_) => setState(() {}),
@@ -681,8 +690,19 @@ class _EmailCodeStepState extends State<EmailCodeStep> {
                             width: 22,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : Text(challenge.reset ? 'Đổi mật khẩu' : 'Xác nhận'),
+                        : Text(
+                            choosingPassword
+                                ? 'Đổi mật khẩu'
+                                : challenge.reset
+                                ? 'Tiếp tục'
+                                : 'Xác nhận',
+                          ),
                   ),
+                  if (choosingPassword)
+                    TextButton(
+                      onPressed: c.busy ? null : c.enterAnotherResetCode,
+                      child: const Text('Nhập mã khác'),
+                    ),
                   TextButton(
                     onPressed: c.busy || wait > 0
                         ? null

@@ -1,9 +1,9 @@
-# Sanser 2.3.27
+# Sanser 2.3.28
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.3.27
+Product:  Sanser 2.3.28
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,6 +20,9 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
+Sanser 2.3.28 splits password reset into two steps: the emailed code is
+checked first, then the new password is asked for; see
+[2.3.28 notes](docs/releases/v2.3.28.md).
 Sanser 2.3.27 adds "Forgot password?" on the computer and phone sign-in
 screens: a 6-digit code emailed to the account sets a new password and signs
 out every other device; see [2.3.27 notes](docs/releases/v2.3.27.md).

@@ -474,6 +474,13 @@ export class ApiClient {
     });
   }
 
+  /** Checks a reset code before the new password is asked for (counts as an attempt). */
+  async checkResetCode(challengeToken: string, code: string): Promise<void> {
+    await this.request('/api/v2/auth/password/check', {
+      method: 'POST', body: { challengeToken, code }, authenticated: false
+    });
+  }
+
   /** Sets a new password with the emailed code; every other session is signed out. */
   async resetPassword(challengeToken: string, code: string, newPassword: string): Promise<AuthResult> {
     return this.request('/api/v2/auth/password/reset', {

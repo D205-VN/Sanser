@@ -37,6 +37,10 @@ class MobileController extends ChangeNotifier {
 
   /// A short status after a new code was sent.
   String? emailNotice;
+
+  /// Forgot password: the code, once the server has confirmed it. The new
+  /// password is asked for only then.
+  String? resetCode;
   bool busy = false;
   bool sound = true;
   bool voiceJoined = false, microphone = false, deafened = false;
@@ -246,8 +250,8 @@ class MobileController extends ChangeNotifier {
     }
   }
 
-  /// Sets the new password with the emailed code, then signs in here.
-  Future<void> resetPassword(String code, String newPassword) async {
+  /// Forgot password, step 1: checks the emailed code.
+  Future<void> checkResetCode(String code) async {
     final challenge = emailCode;
     if (challenge == null || !challenge.reset || busy) return;
     busy = true;
@@ -255,17 +259,60 @@ class MobileController extends ChangeNotifier {
     emailNotice = null;
     notifyListeners();
     try {
-      await api.resetPassword(challenge.challengeToken, code, newPassword);
-      emailCode = null;
-      await _signedIn();
+      await api.checkResetCode(challenge.challengeToken, code);
+      if (emailCode == challenge) {
+        resetCode = code.replaceAll(RegExp(r'[\s-]'), '');
+      }
     } on ApiFailure catch (failure) {
       if (failure.status == 401) {
         emailCode = null;
         error = 'Mã đã hết hạn. Hãy xin mã đặt lại mới.';
       } else if (failure.status == 422) {
-        error = failure.message.contains('password')
-            ? 'Mật khẩu cần 10–128 ký tự, có chữ hoa, chữ thường và số.'
-            : 'Mã không đúng. Hãy xem email Sanser mới nhất.';
+        error = 'Mã không đúng. Hãy xem email Sanser mới nhất.';
+      } else {
+        error = failure.message;
+      }
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Forgot password: go back and type the code again.
+  void enterAnotherResetCode() {
+    resetCode = null;
+    error = null;
+    notifyListeners();
+  }
+
+  /// Forgot password, step 2: sets the new password with the checked code,
+  /// then signs in here.
+  Future<void> resetPassword(String newPassword) async {
+    final challenge = emailCode;
+    final code = resetCode;
+    if (challenge == null || !challenge.reset || code == null || busy) return;
+    busy = true;
+    error = null;
+    emailNotice = null;
+    notifyListeners();
+    try {
+      await api.resetPassword(challenge.challengeToken, code, newPassword);
+      emailCode = null;
+      resetCode = null;
+      await _signedIn();
+    } on ApiFailure catch (failure) {
+      if (failure.status == 401) {
+        emailCode = null;
+        resetCode = null;
+        error = 'Mã đã hết hạn. Hãy xin mã đặt lại mới.';
+      } else if (failure.status == 422 &&
+          failure.message.contains('password')) {
+        error = 'Mật khẩu cần 10–128 ký tự, có chữ hoa, chữ thường và số.';
+      } else if (failure.status == 422) {
+        resetCode = null;
+        error = 'Mã không đúng. Hãy xem email Sanser mới nhất.';
       } else {
         error = failure.message;
       }
@@ -285,6 +332,7 @@ class MobileController extends ChangeNotifier {
     emailNotice = null;
     try {
       await api.resendEmailCode(challenge.challengeToken);
+      resetCode = null;
       emailNotice = 'Đã gửi mã mới. Các mã trước không còn dùng được.';
     } on ApiFailure catch (failure) {
       error = failure.status == 409
@@ -296,6 +344,7 @@ class MobileController extends ChangeNotifier {
 
   void cancelEmailCode() {
     emailCode = null;
+    resetCode = null;
     emailNotice = null;
     error = null;
     notifyListeners();

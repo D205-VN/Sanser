@@ -1,10 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { CONFIGURED_SERVER_URL, DEFAULT_PREFERENCES, preferences } from '../stores/preferences';
-const auth = vi.hoisted(() => ({ login: vi.fn(), register: vi.fn(), forgotPassword: vi.fn(), initialize: vi.fn(), logout: vi.fn().mockResolvedValue(undefined) }));
+const auth = vi.hoisted(() => ({ store: null as unknown as { set(value: Record<string, unknown>): void }, login: vi.fn(), register: vi.fn(), forgotPassword: vi.fn(), checkResetCode: vi.fn().mockResolvedValue(undefined), completePasswordReset: vi.fn().mockResolvedValue(undefined), completeEmailCode: vi.fn(), initialize: vi.fn(), logout: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../stores/session', async () => {
   const { writable } = await import('svelte/store');
-  return { session: { ...writable({ busy: false, error: null }), ...auth } };
+  const store = writable<Record<string, unknown>>({ busy: false, error: null, emailCode: null });
+  auth.store = store;
+  return { session: { ...store, ...auth } };
 });
 import Welcome from './Welcome.svelte';
 beforeEach(async () => { await preferences.save(structuredClone(DEFAULT_PREFERENCES)); });
@@ -82,4 +84,21 @@ it('asks only for the email when the password is forgotten', async () => {
   expect(auth.login).not.toHaveBeenCalled();
   await fireEvent.click(screen.getByRole('button', { name: 'Back to sign in' }));
   expect(screen.getByLabelText('Password')).toBeInTheDocument();
+});
+
+it('checks the reset code first, then asks for the new password', async () => {
+  const { container } = render(Welcome);
+  auth.store.set({ busy: false, error: null, emailCode: { purpose: 'reset', emailHint: 'te****@example.test', expiresAt: 2_000_000_000 } });
+  await waitFor(() => expect(screen.getByLabelText('Verification code')).toBeInTheDocument());
+  expect(screen.queryByLabelText('New password')).not.toBeInTheDocument();
+  await fireEvent.input(screen.getByLabelText('Verification code'), { target: { value: '123456' } });
+  const form = () => { const found = container.querySelector('form'); if (!found) throw new Error('Missing form'); return found; };
+  await fireEvent.submit(form());
+  await waitFor(() => expect(auth.checkResetCode).toHaveBeenCalledWith('123456'));
+  await waitFor(() => expect(screen.getByLabelText('New password')).toBeInTheDocument());
+  expect(screen.queryByLabelText('Verification code')).not.toBeInTheDocument();
+  await fireEvent.input(screen.getByLabelText('New password'), { target: { value: 'A-new-passphrase1' } });
+  await fireEvent.input(screen.getByLabelText('Confirm password'), { target: { value: 'A-new-passphrase1' } });
+  await fireEvent.submit(form());
+  await waitFor(() => expect(auth.completePasswordReset).toHaveBeenCalledWith('123456', 'A-new-passphrase1'));
 });

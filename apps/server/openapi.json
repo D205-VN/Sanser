@@ -3586,6 +3586,61 @@
     "security": []
    }
   },
+  "/api/v2/auth/password/check": {
+   "post": {
+    "tags": [
+     "Auth"
+    ],
+    "summary": "Check the emailed reset code before asking for the new password. Counts as one of the code's five attempts; the code stays usable for /api/v2/auth/password/reset",
+    "operationId": "post_api_v2_auth_password_check",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/CheckResetCodeRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "204": {
+      "description": "The code is right"
+     },
+     "401": {
+      "description": "The code expired, was used or is out of attempts.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Wrong code.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": []
+   }
+  },
   "/api/v2/auth/password/reset": {
    "post": {
     "tags": [
@@ -4810,6 +4865,22 @@
      "challengeToken",
      "code",
      "newPassword"
+    ],
+    "additionalProperties": false
+   },
+   "CheckResetCodeRequest": {
+    "type": "object",
+    "properties": {
+     "challengeToken": {
+      "type": "string"
+     },
+     "code": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "challengeToken",
+     "code"
     ],
     "additionalProperties": false
    }

@@ -300,6 +300,25 @@ function createSessionStore() {
         throw error;
       }
     },
+    /** Forgot password, step 1: checks the emailed code. */
+    async checkResetCode(code: string): Promise<void> {
+      const pending = pendingChallenge;
+      if (!pending || pending.purpose !== 'reset') throw new Error('Sign in again to continue.');
+      store.update((state) => ({ ...state, busy: true, error: null }));
+      try {
+        await makeClient(pending.serverUrl).checkResetCode(pending.token, code.replace(/[\s-]/g, ''));
+        if (pendingChallenge === pending) store.update((state) => ({ ...state, busy: false }));
+      } catch (error) {
+        if (pendingChallenge !== pending) throw error;
+        if (error instanceof ApiError && error.status === 401) {
+          pendingChallenge = null;
+          store.update((state) => ({ ...state, busy: false, emailCode: null, error: 'This code expired. Ask for a new reset code.' }));
+        } else {
+          store.update((state) => ({ ...state, busy: false }));
+        }
+        throw error;
+      }
+    },
     /** Sets the new password with the emailed code, then signs in here. */
     async completePasswordReset(code: string, newPassword: string): Promise<void> {
       const pending = pendingChallenge;
