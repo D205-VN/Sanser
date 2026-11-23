@@ -20,6 +20,7 @@ import 'adaptive_layout.dart';
 import 'gamepad_keys.dart';
 import 'host_shortcuts.dart';
 import 'chat_sheet.dart';
+import 'direct_keyboard.dart';
 
 class SanserHome extends StatefulWidget {
   final MobileController controller;
@@ -149,6 +150,8 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
             padding: const EdgeInsets.fromLTRB(22, 16, 22, 28),
             children: [
               if (c.error != null) ErrorNote(c.error!),
+              if (c.notice != null)
+                InfoNote(c.notice!, onDismiss: c.dismissNotice),
               Text(
                 [
                   'Máy tính của bạn',
@@ -390,6 +393,46 @@ class ErrorNote extends StatelessWidget {
             style: const TextStyle(color: SanserTokens.text, height: 1.45),
           ),
         ),
+      ],
+    ),
+  );
+}
+
+/// A neutral status, such as the computer having stopped sharing.
+class InfoNote extends StatelessWidget {
+  final String message;
+  final VoidCallback? onDismiss;
+  const InfoNote(this.message, {super.key, this.onDismiss});
+  @override
+  Widget build(BuildContext context) => Container(
+    key: const ValueKey('info-note'),
+    margin: const EdgeInsets.only(bottom: 18),
+    padding: const EdgeInsets.fromLTRB(16, 8, 4, 8),
+    decoration: BoxDecoration(
+      color: SanserTokens.surface,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: SanserTokens.border),
+    ),
+    child: Row(
+      children: [
+        const Icon(
+          Icons.info_outline_rounded,
+          size: 20,
+          color: SanserTokens.muted,
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            message,
+            style: const TextStyle(color: SanserTokens.text, height: 1.45),
+          ),
+        ),
+        if (onDismiss != null)
+          IconButton(
+            tooltip: 'Đóng',
+            onPressed: onDismiss,
+            icon: const Icon(Icons.close_rounded, size: 18),
+          ),
       ],
     ),
   );
@@ -973,6 +1016,9 @@ class _RemoteSessionState extends State<RemoteSession>
   late TouchMode mode;
   bool gameControls = false;
   bool externalKeyboard = false;
+
+  /// The phone's keyboard is open and typing straight into the computer.
+  bool directTyping = false;
   bool controllerKeys = false,
       controllerAnalog = false,
       _gamepadUpdatePending = false;
@@ -1120,12 +1166,25 @@ class _RemoteSessionState extends State<RemoteSession>
     }
   }
 
+  /// Opens the phone's own keyboard over the stream; what you type appears
+  /// on the computer at once.
   Future<void> _keyboard() async {
     if (!inputReady) return;
     gamepadInput.setCapture(false);
     await input.releaseAll();
     if (!mounted || !inputReady) return;
-    setState(() => modifiers.clear());
+    setState(() {
+      modifiers.clear();
+      directTyping = !directTyping;
+    });
+  }
+
+  /// Compose a longer text on the phone, then send it in one go.
+  Future<void> _composeKeyboard() async {
+    if (!inputReady) return;
+    setState(() => directTyping = false);
+    await input.releaseAll();
+    if (!mounted || !inputReady) return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -1315,6 +1374,14 @@ class _RemoteSessionState extends State<RemoteSession>
       ],
       SessionActionGrid(
         children: [
+          SessionActionButton(
+            icon: c.unreadChat > 0
+                ? Icons.mark_chat_unread_outlined
+                : Icons.chat_bubble_outline_rounded,
+            label: c.unreadChat > 0 ? 'Chat (${c.unreadChat})' : 'Chat',
+            selected: c.unreadChat > 0,
+            onPressed: streamReady && c.chatAvailable ? _chat : null,
+          ),
           if (c.capabilities['audio'] == true)
             SessionActionButton(
               icon: c.sound
@@ -1393,14 +1460,6 @@ class _RemoteSessionState extends State<RemoteSession>
               selected: files.invitation,
               onPressed: inputReady && files.available ? _files : null,
             ),
-          SessionActionButton(
-            icon: c.unreadChat > 0
-                ? Icons.mark_chat_unread_outlined
-                : Icons.chat_bubble_outline_rounded,
-            label: c.unreadChat > 0 ? 'Chat (${c.unreadChat})' : 'Chat',
-            selected: c.unreadChat > 0,
-            onPressed: streamReady && c.chatAvailable ? _chat : null,
-          ),
           SessionActionButton(
             icon: Icons.center_focus_strong,
             label: 'Vừa khung',
@@ -1635,6 +1694,9 @@ class _RemoteSessionState extends State<RemoteSession>
       },
       child: Scaffold(
         backgroundColor: Colors.black,
+        // The keyboard covers the bottom of the picture instead of squeezing
+        // it; pinch to zoom shows what is under it.
+        resizeToAvoidBottomInset: false,
         body: Stack(
           children: [
             Positioned.fill(child: IgnorePointer(child: _video)),
@@ -1718,6 +1780,19 @@ class _RemoteSessionState extends State<RemoteSession>
                   ),
                 ),
               ),
+              if (directTyping && inputReady)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: MediaQuery.viewInsetsOf(context).bottom,
+                  child: DirectKeyboard(
+                    input: input,
+                    unicodeSupported: c.telemetry['unicodeInput'] == true,
+                    current: () => mounted && inputReady,
+                    onClose: () => setState(() => directTyping = false),
+                    onCompose: () => unawaited(_composeKeyboard()),
+                  ),
+                ),
               if (files.invitation)
                 Positioned(
                   left: 12,

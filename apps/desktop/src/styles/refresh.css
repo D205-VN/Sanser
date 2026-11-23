@@ -257,3 +257,7 @@ body {
 .computer-card:hover { transform: none; }
 .computer-card:has(.device-menu[open]) { z-index: 20; }
 .device-menu-items { z-index: 30; backdrop-filter: none; background: var(--sn-raised); }
+
+/* The language card holds one row; the settings-card minimum height left
+   it a mostly empty box above the account card. */
+.settings-card.language-card { min-height: 0; }

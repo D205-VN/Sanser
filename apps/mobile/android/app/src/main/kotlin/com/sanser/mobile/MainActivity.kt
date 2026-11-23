@@ -54,6 +54,7 @@ class MainActivity : FlutterActivity() {
     // Background session: the picture is hidden unless picture in picture shows it.
     private var inBackground=false;private var keepAlive=false;private var serviceMicrophone:Boolean?=null
     private var pipEnabled=false;private var pipActive=false
+    @Volatile private var smoothVideo=false
     private var notificationPermission:((Boolean)->Unit)?=null
     private var notificationId=7400
     private fun applyVisibility(){client?.videoHidden(inBackground && !pipActive)}
@@ -94,7 +95,7 @@ class MainActivity : FlutterActivity() {
         flutterEngine.platformViewsController.registry.registerViewFactory("com.sanser.mobile/video",object:PlatformViewFactory(StandardMessageCodec.INSTANCE){
             override fun create(context:Context,viewId:Int,args:Any?):PlatformView {
                 val native = RemoteVideo(context,{client}) { main.post { if(!frameShown && sessionId!=null){frameShown=true;startup?.let{main.removeCallbacks(it)};emit("frame");updatePip()} } }
-                video=native
+                native.smooth=smoothVideo;video=native
                 return object:PlatformView {
                     override fun getView():View = native
                     override fun dispose(){native.close();if(video===native)video=null}
@@ -169,6 +170,7 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "pictureInPicture" -> {pipEnabled=call.argument<Boolean>("enabled")==true;updatePip();result.success(null)}
+                    "smoothVideo" -> {smoothVideo=call.argument<Boolean>("enabled")==true;video?.smooth=smoothVideo;result.success(null)}
                     "collabSend" -> {
                         val payload=call.argument<String>("payload")?.toByteArray(Charsets.UTF_8)
                         val matches=sessionId!=null && call.argument<String>("sessionId")==sessionId && frameShown

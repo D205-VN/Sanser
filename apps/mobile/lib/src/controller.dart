@@ -17,6 +17,28 @@ enum SessionPhase {
   failed,
 }
 
+/// Plain words for a native stop ("Engine native đã dừng (N)."). Returns the
+/// text and whether the computer simply ended the session (not an error).
+(String, bool) stopMessage(String? raw, {required bool sharing}) {
+  final reason = RegExp(r'\((\d)\)').firstMatch(raw ?? '')?.group(1);
+  return switch (reason) {
+    '1' => (
+      sharing
+          ? 'Máy tính đã dừng chia sẻ màn hình.'
+          : 'Máy tính đã kết thúc phiên điều khiển.',
+      true,
+    ),
+    '2' => (
+      'Mất kết nối với máy tính: không còn nhận được hình. Kiểm tra mạng rồi kết nối lại.',
+      false,
+    ),
+    '3' ||
+    '4' => ('Kết nối chập chờn nên phiên đã dừng. Hãy kết nối lại.', false),
+    '5' => ('Mạng trên điện thoại bị lỗi. Hãy kết nối lại.', false),
+    _ => (raw ?? 'Luồng từ xa đã kết thúc.', false),
+  };
+}
+
 class _MobileRouteChanged implements Exception {
   const _MobileRouteChanged();
 }
@@ -38,6 +60,10 @@ class MobileController extends ChangeNotifier {
   String? newInvitationHost;
   String deviceId = '';
   String? error;
+
+  /// A normal ending (for example the computer stopped sharing), shown
+  /// without the error styling until the next connection or dismissal.
+  String? notice;
 
   /// Set while the emailed sign-in or sign-up code is awaited.
   EmailCodeRequired? emailCode;
@@ -138,6 +164,7 @@ class MobileController extends ChangeNotifier {
     } catch (_) {
       /* Invalid/old preferences fall back to safe defaults. */
     }
+    _syncSmoothVideo();
     try {
       capabilities = await engine.capabilities();
       _events = engine.updates.listen(
@@ -481,6 +508,7 @@ class MobileController extends ChangeNotifier {
     final generation = ++_generation;
     busy = true;
     error = null;
+    notice = null;
     sound = preferences.soundOnConnect;
     notifyListeners();
     try {
@@ -647,6 +675,7 @@ class MobileController extends ChangeNotifier {
       );
       if (generation != _generation) return;
       if (accept) {
+        notice = null;
         sound = preferences.soundOnConnect;
         final members = updated['members'] as List? ?? [];
         final joined = members
@@ -853,9 +882,18 @@ class MobileController extends ChangeNotifier {
           }
           break;
         }
-        phase = SessionPhase.failed;
-        error = event['message'] as String? ?? 'Luồng từ xa đã kết thúc.';
-        unawaited(disconnect(keepError: true));
+        final (text, ended) = stopMessage(
+          event['message'] as String?,
+          sharing: active?['sharingId'] != null,
+        );
+        if (ended) {
+          notice = text;
+          unawaited(disconnect());
+        } else {
+          phase = SessionPhase.failed;
+          error = text;
+          unawaited(disconnect(keepError: true));
+        }
     }
     _syncPictureInPicture();
     notifyListeners();
@@ -888,6 +926,11 @@ class MobileController extends ChangeNotifier {
     chat.add(composed.message);
     notifyListeners();
     return true;
+  }
+
+  void dismissNotice() {
+    notice = null;
+    notifyListeners();
   }
 
   void setChatOpen(bool open) {
@@ -924,6 +967,12 @@ class MobileController extends ChangeNotifier {
             keepAlive: preferences.backgroundMinutes > 0,
           )
           .catchError((Object _) {}),
+    );
+  }
+
+  void _syncSmoothVideo() {
+    unawaited(
+      engine.smoothVideo(preferences.smoothVideo).catchError((Object _) {}),
     );
   }
 
@@ -1266,8 +1315,10 @@ class MobileController extends ChangeNotifier {
   Future<void> setPreferences(MobilePreferences value) async {
     final keepAliveChanged =
         (value.backgroundMinutes > 0) != (preferences.backgroundMinutes > 0);
+    final smoothChanged = value.smoothVideo != preferences.smoothVideo;
     preferences = value;
     _syncPictureInPicture();
+    if (smoothChanged) _syncSmoothVideo();
     if (keepAliveChanged && phase == SessionPhase.streaming) _syncKeepAlive();
     notifyListeners();
     final encoded = jsonEncode(value.toJson());

@@ -59,8 +59,59 @@ final class MobileVideoView: UIView {
         let stream=decoder.stream()
         return {[weak decoder] data,_,_,key in decoder?.push(data,key:key,stream:stream)}
     }
+    // Smooth mode: decoded images wait in order and leave one per measured
+    // frame interval, about one and a half frames behind, so uneven arrival
+    // over Wi-Fi does not reach the screen. Off: newest image at once.
+    private var smooth=false,buffered=[(CVPixelBuffer,TimeInterval)](),primed=false
+    private var frameInterval:TimeInterval=1.0/60,lastDecoded:TimeInterval=0,nextDue:TimeInterval=0
+    func smoothPlayback(_ on:Bool){
+        guard on != smooth else{return}
+        smooth=on;buffered.removeAll();primed=false;lastDecoded=0;decoder.setSmooth(on)
+    }
+    private func presentPaced(){
+        for (image,at) in decoder.takeOrdered(){
+            if lastDecoded>0{let gap=at-lastDecoded;if gap>0.004 && gap<0.2{frameInterval=frameInterval*0.9+gap*0.1}}
+            lastDecoded=at;buffered.append((image,at))
+        }
+        if buffered.count>5{buffered.removeFirst(buffered.count-5)}
+        let now=ProcessInfo.processInfo.systemUptime
+        if !primed{
+            // Start with a small reserve, or after a short wait on a slow stream.
+            guard let first=buffered.first,buffered.count>=2 || now-first.1>=frameInterval*1.5 else{return}
+            primed=true;nextDue=now
+        }
+        guard !buffered.isEmpty else{
+            if now-nextDue>0.25{primed=false}
+            return
+        }
+        guard now+0.002>=nextDue else{return}
+        guard display.isReadyForMoreMediaData else{displayBusy+=1;return}
+        present(buffered.removeFirst().0)
+        // Hold about two images: run a little faster when more pile up and
+        // a little slower when the reserve runs dry.
+        let pace=buffered.count>=3 ? frameInterval*0.85 : buffered.isEmpty ? frameInterval*1.08 : frameInterval
+        nextDue=max(nextDue+pace,now+pace*0.5)
+    }
+    private var shownAt=[TimeInterval](),timingSince:TimeInterval=0
+    private func gaps(_ times:[TimeInterval])->String{
+        guard times.count>1 else{return "n=\(times.count)"}
+        var g=zip(times.dropFirst(),times).map{($0-$1)*1000}.sorted()
+        let p50=g[g.count/2],p95=g[min(g.count-1,g.count*95/100)],mx=g.last!
+        let slow=g.filter{$0>p50*1.8}.count;g.removeAll()
+        return String(format:"n=%d p50=%.1f p95=%.1f max=%.1f slow=%d",times.count,p50,p95,mx,slow)
+    }
+    private func logTiming(){
+        let now=ProcessInfo.processInfo.systemUptime
+        if timingSince==0{timingSince=now;return}
+        guard now-timingSince>=2 else{return}
+        timingSince=now
+        let (arrived,decoded)=decoder.takeTiming(),shown=shownAt;shownAt.removeAll()
+        sanserVoiceLog("video smooth=\(smooth) depth=\(buffered.count) busy=\(displayBusy) | arrive \(gaps(arrived)) | decode \(gaps(decoded)) | show \(gaps(shown))")
+    }
     fileprivate func presentLatest(){
+        logTiming()
         if display.status == .failed{displayFailures+=1;display.flush()}
+        if smooth{presentPaced();return}
         guard display.isReadyForMoreMediaData else{displayBusy+=1;return}
         guard let image=decoder.takeLatest() else{return}
         present(image)
@@ -75,6 +126,7 @@ final class MobileVideoView: UIView {
         if let attachments=CMSampleBufferGetSampleAttachmentsArray(sample,createIfNecessary:true) as? [NSMutableDictionary],let attributes=attachments.first {attributes[kCMSampleAttachmentKey_DisplayImmediately]=true}
         display.enqueue(sample)
         presented+=1
+        if shownAt.count<2000{shownAt.append(ProcessInfo.processInfo.systemUptime)}
         if !shown && display.status != .failed {shown=true;firstFrame?()}
     }
     private func touch(_ touches:Set<UITouch>,down:Bool?){
@@ -91,7 +143,7 @@ final class MobileVideoView: UIView {
     override func touchesEnded(_ touches:Set<UITouch>,with event:UIEvent?){touch(touches,down:false)}
     override func touchesCancelled(_ touches:Set<UITouch>,with event:UIEvent?){input?(lastX,lastY,false)}
     func stats()->[String:UInt64]{decoder.stats().merging(["iOSPresentedFrames":presented,"iOSDisplayBusyTicks":displayBusy,"iOSDisplayFailures":displayFailures]){_,new in new}}
-    func reset(){decoder.reset();display.flushAndRemoveImage();format=nil;shown=false;presented=0;displayBusy=0;displayFailures=0}
+    func reset(){decoder.reset();buffered.removeAll();primed=false;lastDecoded=0;display.flushAndRemoveImage();format=nil;shown=false;presented=0;displayBusy=0;displayFailures=0}
     // Picture in picture shows this same display layer in a system window.
     private var pip:MobilePictureInPicture?
     var pictureInPictureChanged:((Bool)->Void)?

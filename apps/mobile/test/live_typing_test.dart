@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sanser_mobile/src/keyboard.dart';
+import 'package:sanser_mobile/src/keyboard_sheet.dart';
 import 'keyboard_sheet_test.dart' show ImeEngine, open, edit;
 
 void main() {
+  setUp(() => RemoteKeyboardSheet.liveTyping = true);
+  tearDown(() => RemoteKeyboardSheet.liveTyping = false);
   test('live edits are the smallest Backspace + text change', () {
     expect(liveEdit('', 'abc'), (0, 'abc'));
     expect(liveEdit('abc', 'ab'), (1, ''));

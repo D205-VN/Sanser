@@ -70,6 +70,8 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: SanserHome(controller: c)));
     await tester.tap(find.text('Cài đặt'));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Tự xoay ngang khi kết nối'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Tự xoay ngang khi kết nối'));
     await tester.pumpAndSettle();
     expect(c.preferences.autoLandscape, false);

@@ -96,7 +96,6 @@ Future<void> finish(WidgetTester tester, MobileController c) async {
 void main() {
   // These cover compose-then-send; live typing has its own tests.
   setUp(() => RemoteKeyboardSheet.liveTyping = false);
-  tearDown(() => RemoteKeyboardSheet.liveTyping = true);
   testWidgets(
     'view-only actions allow local viewing but expose no keyboard or game controls',
     (tester) async {
@@ -255,8 +254,9 @@ void main() {
         .toList();
     expect(keys.map((event) => event.$1), ['session-b', 'session-b']);
     expect(keys.map((event) => event.$4), [true, false]);
-    Navigator.of(tester.element(find.text('Bàn phím từ xa'))).pop();
+    await tester.tap(find.byKey(const ValueKey('direct-keyboard-close')));
     await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('direct-keyboard')), findsNothing);
     await tester.pump(const Duration(milliseconds: 500));
     await finish(tester, c);
   }, variant: TargetPlatformVariant.only(TargetPlatform.linux));
@@ -311,6 +311,9 @@ void main() {
       final c = active(engine)..telemetry = {'unicodeInput': true};
       await showControls(tester, c);
       await tester.tap(find.text('Bàn phím'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Soạn rồi gửi'));
+      await tester.tap(find.text('Soạn rồi gửi'));
       await tester.pumpAndSettle();
       expect(find.text('Nhập văn bản · tiếng Việt và emoji'), findsOneWidget);
       await tester.enterText(find.byType(TextField), 'Tiếng Việt 😀');

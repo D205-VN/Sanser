@@ -74,26 +74,54 @@ class _ChatSheetState extends State<ChatSheet> {
     final messages = c.chat.messages;
     final tooLong =
         !SessionChat.valid(text.text) && text.text.trim().isNotEmpty;
+    final size = MediaQuery.sizeOf(context);
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom;
     return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      padding: EdgeInsets.only(bottom: keyboard),
       child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.6,
+        // Tall enough to read a conversation; with the keyboard up the
+        // sheet shrinks so the newest messages stay above it.
+        height: keyboard > 0
+            ? (size.height - keyboard) * 0.85
+            : size.height * 0.8,
         child: Column(
           children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 4, 20, 8),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 12, 10),
               child: Row(
                 children: [
-                  Icon(Icons.chat_bubble_outline_rounded, size: 20),
-                  SizedBox(width: 10),
-                  Text(
-                    'Chat trong phiên',
-                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                  const Icon(
+                    Icons.chat_bubble_rounded,
+                    size: 22,
+                    color: SanserTokens.accent,
                   ),
-                  Spacer(),
-                  Text(
-                    'Không lưu sau khi ngắt',
-                    style: TextStyle(fontSize: 12, color: SanserTokens.muted),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Chat',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 18,
+                          ),
+                        ),
+                        Text(
+                          'Không lưu sau khi ngắt kết nối',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: SanserTokens.muted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    key: const ValueKey('chat-close'),
+                    tooltip: 'Đóng chat',
+                    onPressed: () => Navigator.of(context).maybePop(),
+                    icon: const Icon(Icons.close_rounded),
                   ),
                 ],
               ),
@@ -102,55 +130,102 @@ class _ChatSheetState extends State<ChatSheet> {
             Expanded(
               child: messages.isEmpty
                   ? const Center(
-                      child: Text(
-                        'Chưa có tin nhắn.',
-                        style: TextStyle(color: SanserTokens.muted),
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.forum_outlined,
+                              size: 40,
+                              color: SanserTokens.mutedLow,
+                            ),
+                            SizedBox(height: 12),
+                            Text(
+                              'Chưa có tin nhắn.\nNhắn gì đó cho máy tính bên kia.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: SanserTokens.muted,
+                                fontSize: 15,
+                                height: 1.4,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     )
                   : ListView.builder(
                       controller: scroll,
-                      padding: const EdgeInsets.all(14),
+                      padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
                       itemCount: messages.length,
-                      itemBuilder: (context, index) => _Bubble(messages[index]),
+                      itemBuilder: (context, index) => _Bubble(
+                        messages[index],
+                        // Group a run from one sender under one name.
+                        showName:
+                            !messages[index].own &&
+                            (index == 0 ||
+                                messages[index - 1].own ||
+                                messages[index - 1].name !=
+                                    messages[index].name),
+                      ),
                     ),
             ),
             if (problem != null || tooLong)
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
                 child: Text(
                   tooLong ? 'Tin nhắn tối đa 1 KB, chỉ văn bản.' : problem!,
                   style: const TextStyle(
                     color: SanserTokens.warning,
-                    fontSize: 12,
+                    fontSize: 13,
                   ),
                 ),
               ),
             SafeArea(
               top: false,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Expanded(
                       child: TextField(
                         key: const ValueKey('chat-input'),
                         controller: text,
                         enabled: c.chatAvailable,
+                        autofocus: messages.isEmpty,
                         minLines: 1,
                         maxLines: 4,
+                        textCapitalization: TextCapitalization.sentences,
                         textInputAction: TextInputAction.send,
                         onSubmitted: (_) => _send(),
+                        style: const TextStyle(fontSize: 16),
                         decoration: InputDecoration(
                           hintText: c.chatAvailable
-                              ? 'Nhắn cho máy tính…'
+                              ? 'Nhắn tin…'
                               : 'Máy tính chưa hỗ trợ chat',
-                          isDense: true,
+                          filled: true,
+                          fillColor: SanserTokens.raised,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(22),
+                            borderSide: BorderSide.none,
+                          ),
                         ),
                       ),
                     ),
-                    IconButton(
+                    const SizedBox(width: 8),
+                    IconButton.filled(
                       key: const ValueKey('chat-send'),
                       tooltip: 'Gửi',
+                      style: IconButton.styleFrom(
+                        minimumSize: const Size(46, 46),
+                        backgroundColor: const Color(0xff4f8bff),
+                        foregroundColor: Colors.white,
+                      ),
                       onPressed:
                           c.chatAvailable &&
                               !sending &&
@@ -170,37 +245,82 @@ class _ChatSheetState extends State<ChatSheet> {
   }
 }
 
+String _clock(DateTime at) =>
+    '${at.hour.toString().padLeft(2, '0')}:${at.minute.toString().padLeft(2, '0')}';
+
 class _Bubble extends StatelessWidget {
   final ChatMessage message;
-  const _Bubble(this.message);
+  final bool showName;
+  const _Bubble(this.message, {this.showName = false});
   @override
   Widget build(BuildContext context) {
-    final time =
-        '${message.at.hour.toString().padLeft(2, '0')}:${message.at.minute.toString().padLeft(2, '0')}';
-    return Align(
-      alignment: message.own ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.75,
-        ),
-        decoration: BoxDecoration(
-          color: message.own ? SanserTokens.selected : SanserTokens.surface,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              message.own ? 'Bạn · $time' : '${message.name} · $time',
-              style: const TextStyle(fontSize: 11, color: SanserTokens.muted),
+    final own = message.own;
+    return Padding(
+      padding: EdgeInsets.only(top: showName ? 10 : 3, bottom: 3),
+      child: Column(
+        crossAxisAlignment: own
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
+        children: [
+          if (showName)
+            Padding(
+              padding: const EdgeInsets.only(left: 12, bottom: 4),
+              child: Text(
+                message.name,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: SanserTokens.accent,
+                ),
+              ),
             ),
-            const SizedBox(height: 2),
-            // Plain text only: never interpreted as markup or links.
-            SelectableText(message.text),
-          ],
-        ),
+          Container(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.78,
+            ),
+            decoration: BoxDecoration(
+              color: own ? null : SanserTokens.raised,
+              gradient: own
+                  ? const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xff4f8bff), Color(0xff8b5cff)],
+                    )
+                  : null,
+              borderRadius: BorderRadius.only(
+                topLeft: const Radius.circular(18),
+                topRight: const Radius.circular(18),
+                bottomLeft: Radius.circular(own ? 18 : 6),
+                bottomRight: Radius.circular(own ? 6 : 18),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                // Plain text only: never interpreted as markup or links.
+                SelectableText(
+                  message.text,
+                  style: TextStyle(
+                    fontSize: 16,
+                    height: 1.35,
+                    color: own ? Colors.white : SanserTokens.text,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  _clock(message.at),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: own
+                        ? Colors.white.withValues(alpha: 0.7)
+                        : SanserTokens.mutedLow,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

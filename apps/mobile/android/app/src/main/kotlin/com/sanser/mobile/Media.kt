@@ -179,14 +179,31 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
             finally {pending.decrementAndGet()}
         }
     }
+    /// Smooth mode: every decoded image is shown, spaced at the measured frame
+    /// interval about one and a half frames late, so uneven Wi-Fi arrival no
+    /// longer reaches the screen. Off: only the newest image, at once.
+    @Volatile var smooth=false
+    private var intervalNs=16_666_667L;private var lastOutputNs=0L;private var lastRenderNs=0L
+    private fun renderAt(now:Long):Long{
+        if(lastOutputNs>0){val gap=now-lastOutputNs;if(gap in 4_000_000L..200_000_000L)intervalNs=(intervalNs*9+gap)/10}
+        lastOutputNs=now
+        var at=maxOf(lastRenderNs+intervalNs,now+intervalNs/2)
+        // Too far behind (a long stall then a burst): catch up instead of
+        // letting the delay grow.
+        if(at>now+intervalNs*3)at=now+intervalNs*3/2
+        lastRenderNs=at
+        return at
+    }
     private fun drain(current:MediaCodec){
         val info=MediaCodec.BufferInfo();var newest = -1
+        val paced=smooth
         try {
             for(attempt in 0 until 16){
                 val index=current.dequeueOutputBuffer(info,0)
                 if(index==MediaCodec.INFO_OUTPUT_FORMAT_CHANGED)continue
                 if(index<0)break
                 queuedFrames=maxOf(0,queuedFrames-1)
+                if(paced){current.releaseOutputBuffer(index,renderAt(System.nanoTime()));continue}
                 if(newest>=0)current.releaseOutputBuffer(newest,false)
                 newest=index
             }
@@ -195,6 +212,6 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
             if(newest>=0)current.releaseOutputBuffer(newest,System.nanoTime())
         }
     }
-    private fun releaseCodec(){decoder.removeCallbacks(drainTask);drainScheduled=false;queuedFrames=0;try{codec?.stop()}catch(_:Exception){};try{codec?.release()}catch(_:Exception){};codec=null}
+    private fun releaseCodec(){decoder.removeCallbacks(drainTask);drainScheduled=false;queuedFrames=0;lastOutputNs=0;lastRenderNs=0;try{codec?.stop()}catch(_:Exception){};try{codec?.release()}catch(_:Exception){};codec=null}
     override fun close(){if(closing.getAndSet(true))return;attached=false;surface.holder.removeCallback(this);decoder.post{releaseCodec();decoderThread.quitSafely()}}
 }

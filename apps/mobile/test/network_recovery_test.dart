@@ -36,6 +36,9 @@ class RecoveryEngine extends TestEngine {
     int width = 0,
     int height = 0,
   }) async => pip.add(enabled);
+  final smooth = <bool>[];
+  @override
+  Future<void> smoothVideo(bool enabled) async => smooth.add(enabled);
   @override
   Future<void> notify(String title, String body) async =>
       notifications.add((title, body));

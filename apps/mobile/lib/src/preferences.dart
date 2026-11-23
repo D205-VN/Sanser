@@ -14,7 +14,10 @@ class MobilePreferences {
       showLatency,
       haptics,
       pictureInPicture,
-      notifications;
+      notifications,
+      /// Holds one or two frames so the picture moves evenly on uneven
+      /// Wi-Fi, at the cost of that much extra delay.
+      smoothVideo;
   const MobilePreferences({
     this.networkMode = 'auto',
     this.pointerMode = 'direct',
@@ -27,6 +30,7 @@ class MobilePreferences {
     this.haptics = false,
     this.pictureInPicture = true,
     this.notifications = true,
+    this.smoothVideo = false,
   });
   static const backgroundChoices = [0, 5, 15, 60];
   factory MobilePreferences.fromJson(Json json) => MobilePreferences(
@@ -55,6 +59,7 @@ class MobilePreferences {
         ? json['pictureInPicture']
         : true,
     notifications: json['notifications'] is bool ? json['notifications'] : true,
+    smoothVideo: json['smoothVideo'] is bool ? json['smoothVideo'] : false,
   );
   MobilePreferences copyWith({
     String? networkMode,
@@ -68,6 +73,7 @@ class MobilePreferences {
     int? backgroundMinutes,
     bool? pictureInPicture,
     bool? notifications,
+    bool? smoothVideo,
   }) => MobilePreferences(
     networkMode: networkMode ?? this.networkMode,
     pointerMode: pointerMode ?? this.pointerMode,
@@ -80,6 +86,7 @@ class MobilePreferences {
     backgroundMinutes: backgroundMinutes ?? this.backgroundMinutes,
     pictureInPicture: pictureInPicture ?? this.pictureInPicture,
     notifications: notifications ?? this.notifications,
+    smoothVideo: smoothVideo ?? this.smoothVideo,
   );
   Json toJson() => {
     'networkMode': networkMode,
@@ -93,5 +100,6 @@ class MobilePreferences {
     'backgroundMinutes': backgroundMinutes,
     'pictureInPicture': pictureInPicture,
     'notifications': notifications,
+    'smoothVideo': smoothVideo,
   };
 }

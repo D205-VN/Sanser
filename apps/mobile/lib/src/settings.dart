@@ -179,6 +179,20 @@ class MobileSettings extends StatelessWidget {
                     'Áp dụng cho phiên tiếp theo. Mức thấp hơn giảm tải mạng; Host có thể tự giảm thêm khi RTT tăng.',
                     style: TextStyle(color: SanserTokens.muted, fontSize: 12),
                   ),
+                  const SizedBox(height: 8),
+                  SwitchListTile.adaptive(
+                    key: const ValueKey('smooth-video'),
+                    contentPadding: EdgeInsets.zero,
+                    secondary: const Icon(Icons.waves_outlined),
+                    title: const Text('Chế độ Mượt'),
+                    subtitle: const Text(
+                      'Hình chạy đều hơn khi Wi‑Fi chập chờn, đổi lại trễ thêm 1–2 khung hình (khoảng 20–35 ms). Hợp để xem video; gõ phím và chơi game nên tắt. Có hiệu lực ngay.',
+                    ),
+                    value: p.smoothVideo,
+                    onChanged: (value) => controller.setPreferences(
+                      p.copyWith(smoothVideo: value),
+                    ),
+                  ),
                 ],
               ),
             ),

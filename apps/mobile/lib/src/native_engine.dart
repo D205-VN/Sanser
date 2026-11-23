@@ -81,6 +81,11 @@ class NativeEngine {
       }) ??
       false;
 
+  /// Smooth playback: the platform paces decoded frames evenly instead of
+  /// showing each one the moment it is ready.
+  Future<void> smoothVideo(bool enabled) =>
+      channel.invokeMethod<void>('smoothVideo', {'enabled': enabled});
+
   /// Lets the platform show the picture in a floating window when the app
   /// leaves the screen.
   Future<void> pictureInPicture(

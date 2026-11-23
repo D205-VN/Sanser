@@ -20,6 +20,11 @@ final class MobileVideoDecoder {
     private var sps:Data?,pps:Data?,format:CMVideoFormatDescription?,session:VTDecompressionSession?
     private var waiting=true,lastRequest:TimeInterval=0
     private var latest:(CVPixelBuffer,Int,TimeInterval)?,presentationPending=false
+    // Smooth mode keeps every decoded image in order (bounded) for paced
+    // presentation instead of only the newest one.
+    private var smooth=false,ordered=[(CVPixelBuffer,TimeInterval)]()
+    // Timing diagnostics: when pictures arrive and when they finish decoding.
+    private var arrivals=[TimeInterval](),decodes=[TimeInterval]()
     private let automaticPresentation:Bool
     private var decoded:UInt64=0,replaced:UInt64=0,expired:UInt64=0,overflows:UInt64=0
     private var decodeSamples:UInt64=0,decodeWorkUs:UInt64=0,decodeQueueUs:UInt64=0
@@ -32,7 +37,7 @@ final class MobileVideoDecoder {
     init(automaticPresentation:Bool=true){self.automaticPresentation=automaticPresentation}
 
     func reset(){
-        lock.lock();generation+=1;streamGeneration+=1;latest=nil
+        lock.lock();generation+=1;streamGeneration+=1;latest=nil;ordered.removeAll()
         pending.removeAll();pendingBytes=0;resetPending=true;recoveryPending=false;requireKeyframe=false
         decoded=0;replaced=0;expired=0;overflows=0;decodeSamples=0;decodeWorkUs=0;decodeQueueUs=0;presented=0;presentWaitUs=0
         scheduleWorker();lock.unlock()
@@ -49,6 +54,7 @@ final class MobileVideoDecoder {
     func stream()->Int{lock.lock();defer{lock.unlock()};return streamGeneration}
     func push(_ data:Data,key:Bool,stream:Int){
         lock.lock()
+        if arrivals.count<2000{arrivals.append(ProcessInfo.processInfo.systemUptime)}
         guard stream==streamGeneration else{lock.unlock();return}
         guard !requireKeyframe || key else{lock.unlock();return}
         if data.count>maxPendingBytes || pending.count>=maxPendingFrames || data.count>maxPendingBytes-pendingBytes {
@@ -148,8 +154,16 @@ final class MobileVideoDecoder {
     }
     private func publish(_ image:CVPixelBuffer,epoch:Int){
         lock.lock();guard epoch==generation else{lock.unlock();return}
-        decoded+=1;if latest != nil{replaced+=1}
-        latest=(image,epoch,ProcessInfo.processInfo.systemUptime)
+        decoded+=1
+        let now=ProcessInfo.processInfo.systemUptime
+        if decodes.count<2000{decodes.append(now)}
+        if smooth{
+            ordered.append((image,now))
+            if ordered.count>6{ordered.removeFirst(ordered.count-6);replaced+=1}
+        }else{
+            if latest != nil{replaced+=1}
+            latest=(image,epoch,now)
+        }
         // Wake the presenter immediately, with at most one main-thread job.
         // Display-link polling alone imposed an extra half-refresh of delay.
         guard automaticPresentation || imageReady != nil else{lock.unlock();return}
@@ -165,6 +179,17 @@ final class MobileVideoDecoder {
     }
     // Caller consumes only when the display layer can accept an image. While
     // busy, newer decoded images replace the slot without losing references.
+    func takeTiming()->([TimeInterval],[TimeInterval]){
+        lock.lock();defer{lock.unlock()}
+        let result=(arrivals,decodes);arrivals.removeAll();decodes.removeAll();return result
+    }
+    func setSmooth(_ on:Bool){lock.lock();smooth=on;ordered.removeAll();latest=nil;lock.unlock()}
+    /// Smooth mode: every image decoded since the last call, oldest first,
+    /// with the time it was decoded.
+    func takeOrdered()->[(CVPixelBuffer,TimeInterval)]{
+        lock.lock();defer{lock.unlock()}
+        let images=ordered;ordered.removeAll();presented+=UInt64(images.count);return images
+    }
     func takeLatest()->CVPixelBuffer?{
         lock.lock();defer{lock.unlock()}
         guard let (image,epoch,at)=latest else{return nil};latest=nil

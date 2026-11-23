@@ -57,4 +57,18 @@ void main() {
     c.dispose();
     await native.events.close();
   });
+  test('a computer that stops sharing is a notice, not an error', () {
+    expect(stopMessage('Engine native đã dừng (1).', sharing: true), (
+      'Máy tính đã dừng chia sẻ màn hình.',
+      true,
+    ));
+    expect(stopMessage('Engine native đã dừng (1).', sharing: false).$2, true);
+    final (lost, ended) = stopMessage(
+      'Engine native đã dừng (2).',
+      sharing: true,
+    );
+    expect(ended, false);
+    expect(lost, contains('Mất kết nối'));
+    expect(stopMessage('khác', sharing: true), ('khác', false));
+  });
 }

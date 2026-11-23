@@ -42,7 +42,7 @@
   </div>
 {/snippet}
 
-<div><h3>{$t('Signed-in sessions')}</h3><p>{$t('These are account sign-ins, not a list of online computers.')}</p></div>
+<div class="login-sessions-head"><h3>{$t('Signed-in sessions')}</h3><p>{$t('These are account sign-ins, not a list of online computers.')}</p></div>
 {#if identified.length > 0}{@render rows(identified)}{/if}
 {#if earlier.length > 0}
   <details class="earlier-sign-ins">
@@ -53,6 +53,9 @@
 {/if}
 
 <style>
+  /* Below the card title in size, like every other section heading. */
+  .login-sessions-head h3 { margin: 4px 0 4px; font-size: 15px; font-weight: 650; }
+  .login-sessions-head p { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
   .earlier-sign-ins summary { cursor: pointer; color: var(--muted); padding-block: 8px; }
   .earlier-sign-ins p { margin-block: 8px 16px; }
   .login-session-list > div { flex-wrap: wrap; }

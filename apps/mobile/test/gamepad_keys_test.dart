@@ -69,7 +69,6 @@ class PadEngine extends ActionEngine {
 void main() {
   // These cover compose-then-send; live typing has its own tests.
   setUp(() => RemoteKeyboardSheet.liveTyping = false);
-  tearDown(() => RemoteKeyboardSheet.liveTyping = true);
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
     'no held-before-capture input; neutral sample arms once; availability is not a sample',
@@ -427,6 +426,9 @@ void main() {
       expect(e.input.where((v) => v.$2 == 2).last, ('session-a', 2, 44, true));
       await tester.ensureVisible(find.text('Bàn phím'));
       await tester.tap(find.text('Bàn phím'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Soạn rồi gửi'));
+      await tester.tap(find.text('Soạn rồi gửi'));
       await tester.pumpAndSettle();
       expect(e.captures.last.$4, false);
       final count = e.input.length;

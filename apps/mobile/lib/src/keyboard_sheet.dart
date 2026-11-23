@@ -17,9 +17,9 @@ class RemoteKeyboardSheet extends StatefulWidget {
   final bool Function() current;
   final bool unicodeSupported;
 
-  /// Live typing (the default) or compose-then-send; remembered while the
-  /// app runs.
-  static bool liveTyping = true;
+  /// Live typing or compose-then-send (the default here: the session's
+  /// keyboard button already types live); remembered while the app runs.
+  static bool liveTyping = false;
   @override
   State<RemoteKeyboardSheet> createState() => _RemoteKeyboardSheetState();
 }

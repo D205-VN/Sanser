@@ -152,7 +152,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
     private var gamepadHighest=0
     private var gamepadAnalog=false,analogStatus = -1
     // Background session: the picture is hidden unless picture in picture shows it.
-    private var inBackground=false,keepAlive=false,pipEnabled=false,pipActive=false
+    private var inBackground=false,keepAlive=false,pipEnabled=false,pipActive=false,smoothVideo=false
     private func applyVisibility(){
         session?.videoHidden(inBackground && !pipActive)
         audio?.keepAlive(inBackground && keepAlive)
@@ -215,6 +215,7 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
             guard let self=self else{return};self.pipActive=active;self.applyVisibility();self.sink?(["state":"pip","active":active])
         }}
         native.pictureInPicture(pipEnabled)
+        native.smoothPlayback(smoothVideo)
         // Flutter may create/replace the platform view after media has started.
         // Attach it atomically and ask for a fresh reference chain.
         session?.video=native.receiver();session?.keyframe()
@@ -287,6 +288,8 @@ final class MobileEngine:NSObject,FlutterPlugin,FlutterStreamHandler,FlutterPlat
         case "background":
             inBackground=args["background"] as? Bool == true;keepAlive=args["keepAlive"] as? Bool == true
             applyVisibility();result(nil)
+        case "smoothVideo":
+            smoothVideo=args["enabled"] as? Bool == true;video?.smoothPlayback(smoothVideo);result(nil)
         case "pictureInPicture":
             pipEnabled=args["enabled"] as? Bool == true;video?.pictureInPicture(pipEnabled);result(nil)
         case "collabSend":

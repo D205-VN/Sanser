@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sanser_mobile/src/preferences.dart';
 import 'package:sanser_mobile/src/chat_sheet.dart';
 import 'package:sanser_mobile/src/chat.dart';
 import 'package:sanser_mobile/src/controller.dart';
@@ -172,6 +173,24 @@ void main() {
     await tester.pump(const Duration(minutes: 5, seconds: 1));
     expect(f.c.active, isNull);
     expect(f.native.notifications.last.$1, 'Sanser đã ngắt kết nối');
+    await f.close();
+  });
+
+  testWidgets('smooth playback setting reaches the native player', (
+    tester,
+  ) async {
+    final f = RecoveryFixture();
+    await f.open();
+    expect(f.native.smooth.last, false);
+    await f.c.setPreferences(f.c.preferences.copyWith(smoothVideo: true));
+    expect(f.native.smooth.last, true);
+    final count = f.native.smooth.length;
+    await f.c.setPreferences(f.c.preferences.copyWith(haptics: true));
+    expect(f.native.smooth.length, count);
+    expect(
+      MobilePreferences.fromJson(f.c.preferences.toJson()).smoothVideo,
+      true,
+    );
     await f.close();
   });
 
