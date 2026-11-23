@@ -226,14 +226,16 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
               if (widget.mode == TouchMode.touchpad &&
                   widget.input.enabled &&
                   widget.pointerVisible)
+                // The arrow's tip is its hot spot: it sits exactly where the
+                // host clicks.
                 Positioned(
-                  left: cursor.dx - 5,
-                  top: cursor.dy - 5,
+                  key: const ValueKey('touchpad-pointer'),
+                  left: cursor.dx,
+                  top: cursor.dy,
                   child: const IgnorePointer(
-                    child: Icon(
-                      Icons.navigation_rounded,
-                      size: 22,
-                      color: Colors.white,
+                    child: CustomPaint(
+                      size: pointerArrowSize,
+                      painter: PointerArrowPainter(),
                     ),
                   ),
                 ),
@@ -410,4 +412,39 @@ class _MobileGameControlsState extends State<MobileGameControls> {
     unawaited(widget.input.releaseAll());
     super.dispose();
   }
+}
+
+/// Size of the touchpad pointer; its tip is the top-left corner.
+const pointerArrowSize = Size(14, 21);
+
+/// A classic mouse arrow drawn with its tip at (0, 0), white with a dark
+/// outline so it shows on light and dark screens.
+class PointerArrowPainter extends CustomPainter {
+  const PointerArrowPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final arrow = Path()
+      ..moveTo(0, 0)
+      ..lineTo(0, 17)
+      ..lineTo(4.2, 13.2)
+      ..lineTo(7, 19.6)
+      ..lineTo(9.8, 18.4)
+      ..lineTo(7.1, 12.2)
+      ..lineTo(12.6, 12.2)
+      ..close();
+    canvas
+      ..drawPath(arrow, Paint()..color = Colors.white)
+      ..drawPath(
+        arrow,
+        Paint()
+          ..color = Colors.black
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2
+          ..strokeJoin = StrokeJoin.round,
+      );
+  }
+
+  @override
+  bool shouldRepaint(PointerArrowPainter oldDelegate) => false;
 }

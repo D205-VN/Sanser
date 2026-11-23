@@ -229,4 +229,50 @@ void main() {
     active.dispose();
     await active.drain();
   });
+
+  testWidgets('the touchpad pointer tip sits exactly on the click point', (
+    tester,
+  ) async {
+    final engine = InputEngine();
+    final active = MobileInput(engine, 'session-a', enabled: true);
+    tester.view.physicalSize = const Size(800, 600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox.expand(
+          child: MobileTouchSurface(
+            input: active,
+            mode: TouchMode.touchpad,
+            videoSize: const Size(1920, 1080),
+          ),
+        ),
+      ),
+    );
+    final surface = tester.getTopLeft(
+      find.byKey(const ValueKey('mobile-touch-surface')),
+    );
+    Offset tip() =>
+        tester.getTopLeft(find.byKey(const ValueKey('touchpad-pointer'))) -
+        surface;
+    // 800x600 shows 1920x1080 as 800x450, 75 px from the top.
+    expect(tip(), const Offset(400, 300));
+    active.move(const Offset(.25, .1));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox.expand(
+          child: MobileTouchSurface(
+            input: active,
+            mode: TouchMode.touchpad,
+            videoSize: const Size(1920, 1080),
+            resetZoom: 1,
+          ),
+        ),
+      ),
+    );
+    expect(tip(), const Offset(200, 75 + 45));
+    await tester.pumpWidget(const SizedBox.shrink());
+    active.dispose();
+    await active.drain();
+  });
 }
