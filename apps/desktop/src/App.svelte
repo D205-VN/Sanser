@@ -57,6 +57,8 @@
   });
 
   // Each new invitation alerts once, even while Sanser is in the background.
+  // Bookkeeping only: a reactive set would re-run the effect that fills it.
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity
   const announcedInvitations = new Set<string>();
   $effect(() => {
     for (const { group, member } of invitations) {
