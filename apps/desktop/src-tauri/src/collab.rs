@@ -203,6 +203,8 @@ struct State {
     strokes: VecDeque<Event>,
     view: Option<View>,
     dropped: u64,
+    /// Name this computer last chatted under, reused for panel messages.
+    name: String,
 }
 impl State {
     fn new() -> Self {
@@ -217,6 +219,7 @@ impl State {
             strokes: VecDeque::new(),
             view: None,
             dropped: 0,
+            name: String::new(),
         }
     }
 }
@@ -312,6 +315,10 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }
+/// Text from a `SNUSER_PANEL_CHAT` record.
+pub fn panel_text(encoded: &str) -> Option<String> {
+    unhex(encoded).and_then(|bytes| String::from_utf8(bytes).ok())
+}
 fn random_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -323,6 +330,24 @@ pub fn send_command(target: &str, wire: &Wire) -> Option<Vec<u8>> {
     let payload = serde_json::to_vec(wire).ok()?;
     (payload.len() <= PAYLOAD_BYTES)
         .then(|| format!("collab-send\t{target}\t{}\n", hex(&payload)).into_bytes())
+}
+/// `panel-chat` stdin command: shows one chat in the native floating panel.
+pub fn panel_command(own: bool, name: &str, text: &str) -> Vec<u8> {
+    format!(
+        "panel-chat\t{}\t{}\t{}\n",
+        u8::from(own),
+        hex(clean_name(name).as_bytes()),
+        hex(text.as_bytes())
+    )
+    .into_bytes()
+}
+fn plain_error(error: DesktopError) -> String {
+    match error {
+        DesktopError::InvalidRequest(message)
+        | DesktopError::Unavailable(message)
+        | DesktopError::Process(message) => message,
+        other => other.to_string(),
+    }
 }
 fn with_from(wire: &Wire, source: &str) -> Wire {
     let mut wire = wire.clone();
@@ -347,6 +372,14 @@ impl Hub {
     pub fn configure(&self, host: bool) {
         if let Ok(mut state) = self.state.lock() {
             state.host = host;
+        }
+    }
+    /// Best effort: the floating panel shows chat only while it is running.
+    fn panel(&self, own: bool, name: &str, text: &str) {
+        if let Ok(pipe) = self.pipe.lock()
+            && let Some(pipe) = pipe.as_ref()
+        {
+            let _ = pipe.try_send(panel_command(own, name, text));
         }
     }
     fn send(&self, target: &str, wire: &Wire) -> bool {
@@ -455,6 +488,11 @@ impl Hub {
             return;
         };
         let now = Instant::now();
+        let shown = match &wire {
+            Wire::Chat { name, text, .. } => Some((name.clone(), text.clone())),
+            _ => None,
+        };
+        let mut accepted = false;
         let relay = {
             let Ok(mut state) = self.state.lock() else {
                 return;
@@ -473,6 +511,7 @@ impl Hub {
                 }
                 let stamped = with_from(&wire, source);
                 Self::record(&mut state, &stamped, source, false);
+                accepted = true;
                 let targets = state
                     .peers
                     .iter()
@@ -495,11 +534,15 @@ impl Hub {
                             .unwrap_or("host")
                             .to_owned();
                         Self::record(&mut state, &wire, &from, false);
+                        accepted = true;
                     }
                 }
                 None
             }
         };
+        if accepted && let Some((name, text)) = &shown {
+            self.panel(false, name, text);
+        }
         if let Some((stamped, targets)) = relay {
             for target in targets {
                 if !self.send(&target, &stamped) {
@@ -561,6 +604,30 @@ impl Hub {
     }
     /// Send a message composed locally. Returns its event sequence.
     pub fn post(&self, message: Outgoing) -> Result<u64, DesktopError> {
+        self.post_as(message, false)
+    }
+    /// Text typed in the native floating panel, sent under this computer's
+    /// chat name. A failure is shown in the panel only.
+    pub fn post_from_panel(&self, text: &str) {
+        let name = self
+            .state
+            .lock()
+            .map(|state| state.name.clone())
+            .unwrap_or_default();
+        let name = if name.is_empty() {
+            let host = self.state.lock().is_ok_and(|state| state.host);
+            if host { "Host" } else { "Viewer" }.to_owned()
+        } else {
+            name
+        };
+        if let Err(error) = self.post(Outgoing::Chat {
+            name,
+            text: text.to_owned(),
+        }) {
+            self.panel(false, "Sanser", &plain_error(error));
+        }
+    }
+    fn post_as(&self, message: Outgoing, system: bool) -> Result<u64, DesktopError> {
         let wire = match message {
             Outgoing::Chat { name, text } => Wire::Chat {
                 id: random_id()[..16].to_owned(),
@@ -621,15 +688,26 @@ impl Hub {
         }
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         Self::record(&mut state, &wire, "self", true);
-        Ok(state.seq)
+        let seq = state.seq;
+        if let Wire::Chat { name, text, .. } = &wire {
+            if !system && !name.is_empty() {
+                state.name.clone_from(name);
+            }
+            drop(state);
+            self.panel(!system, name, text);
+        }
+        Ok(seq)
     }
     /// A notice from Sanser itself, sent as chat to every viewer. Ignored when
     /// no viewer supports chat; the session continues either way.
     pub fn announce(&self, text: &str) {
-        let _ = self.post(Outgoing::Chat {
-            name: "Sanser".into(),
-            text: text.into(),
-        });
+        let _ = self.post_as(
+            Outgoing::Chat {
+                name: "Sanser".into(),
+                text: text.into(),
+            },
+            true,
+        );
     }
     /// Host only: turn annotations on or off for the whole group.
     pub fn set_annotations(&self, enabled: bool) -> Result<(), DesktopError> {
@@ -715,12 +793,61 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap_or(Wire::Policy { annotations: false }),
         )
     }
-    fn hub(host: bool) -> (Hub, mpsc::Receiver<Vec<u8>>) {
+    /// Engine stdin as the tests see it: peer commands, with the floating
+    /// panel's `panel-chat` lines kept apart.
+    struct Commands {
+        receiver: mpsc::Receiver<Vec<u8>>,
+        panel: std::cell::RefCell<Vec<Vec<u8>>>,
+    }
+    impl Commands {
+        fn split(&self, command: Vec<u8>) -> Option<Vec<u8>> {
+            if command.starts_with(b"panel-chat\t") {
+                self.panel.borrow_mut().push(command);
+                None
+            } else {
+                Some(command)
+            }
+        }
+        fn try_iter(&self) -> std::vec::IntoIter<Vec<u8>> {
+            let all = self.receiver.try_iter().collect::<Vec<_>>();
+            all.into_iter()
+                .filter_map(|command| self.split(command))
+                .collect::<Vec<_>>()
+                .into_iter()
+        }
+        fn try_recv(&self) -> Result<Vec<u8>, mpsc::TryRecvError> {
+            loop {
+                if let Some(command) = self.split(self.receiver.try_recv()?) {
+                    return Ok(command);
+                }
+            }
+        }
+        fn panel(&self) -> Vec<(String, String, String)> {
+            let _ = self.try_iter().count();
+            self.panel
+                .take()
+                .into_iter()
+                .map(|line| {
+                    let line = String::from_utf8(line).unwrap_or_default();
+                    let fields = line.trim_end().split('\t').collect::<Vec<_>>();
+                    let text = |hex: &str| panel_text(hex).unwrap_or_default();
+                    (fields[1].to_owned(), text(fields[2]), text(fields[3]))
+                })
+                .collect()
+        }
+    }
+    fn hub(host: bool) -> (Hub, Commands) {
         let (sender, receiver) = mpsc::sync_channel(64);
         let hub = Hub::default();
         hub.connect(sender);
         hub.configure(host);
-        (hub, receiver)
+        (
+            hub,
+            Commands {
+                receiver,
+                panel: std::cell::RefCell::new(Vec::new()),
+            },
+        )
     }
     fn encoded(wire: &Wire) -> String {
         hex(&serde_json::to_vec(wire).unwrap_or_default())
@@ -994,5 +1121,39 @@ mod tests {
         assert_eq!(clean_name(&"n".repeat(200)).chars().count(), NAME_CHARS);
         assert!(send_command("bad target", &chat("x")).is_none());
         assert!(send_command("*", &chat("x")).is_some());
+    }
+    #[test]
+    fn floating_panel_sees_chat_and_sends_under_the_last_name() -> Result<(), DesktopError> {
+        let (host, commands) = hub(true);
+        host.observe_capability("viewer-a", true);
+        host.observe_message("viewer-a", &encoded(&chat("hello")));
+        host.post(Outgoing::Chat {
+            name: "MacBook".into(),
+            text: "hi there".into(),
+        })?;
+        host.post_from_panel("from the panel");
+        host.announce("control revoked");
+        let lines = commands.panel();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].0, "0");
+        assert_eq!(lines[0].2, "hello");
+        assert_eq!(lines[1], ("1".into(), "MacBook".into(), "hi there".into()));
+        assert_eq!(
+            lines[2],
+            ("1".into(), "MacBook".into(), "from the panel".into())
+        );
+        assert_eq!(
+            lines[3],
+            ("0".into(), "Sanser".into(), "control revoked".into())
+        );
+        // A panel message that cannot be sent is explained in the panel only.
+        let (lonely, commands) = hub(true);
+        lonely.post_from_panel("nobody here");
+        let lines = commands.panel();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].1, "Sanser");
+        assert!(lines[0].2.contains("Chat needs"));
+        assert_eq!(lonely.snapshot(0).events.len(), 0);
+        Ok(())
     }
 }

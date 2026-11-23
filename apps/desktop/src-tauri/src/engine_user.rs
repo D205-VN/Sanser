@@ -364,6 +364,15 @@ impl UserControl {
             }
             _ => {}
         }
+        if let Some(encoded) = line[position..]
+            .trim_end_matches(['\n', '\r'])
+            .strip_prefix("SNUSER_PANEL_CHAT\t")
+        {
+            if let Some(text) = crate::collab::panel_text(encoded) {
+                self.collab.post_from_panel(&text);
+            }
+            return;
+        }
         if line[position..].starts_with("SNUSER_COLLAB") {
             let fields = line[position..]
                 .trim_end_matches(['\n', '\r'])

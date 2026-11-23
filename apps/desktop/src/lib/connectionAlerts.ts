@@ -52,3 +52,16 @@ export async function showChatAlert(name: string, text: string, title: string, c
   const clean = (value: string, limit: number) => value.replace(/\p{Cc}/gu, ' ').trim().slice(0, limit);
   sendNotification({ title, body: `${clean(name, 64)}: ${clean(text, 140)}` });
 }
+/** A screen-sharing invitation, which may arrive while Sanser is in the
+ * background: flash the window in the Dock/taskbar and, when allowed, show a
+ * system notification. Never prompts. */
+export async function showSharingInvitationAlert(title: string, body: string): Promise<void> {
+  if (!isTauriRuntime()) return;
+  try {
+    const { getCurrentWindow, UserAttentionType } = await import('@tauri-apps/api/window');
+    await getCurrentWindow().requestUserAttention(UserAttentionType.Informational);
+  } catch { /* attention is best effort */ }
+  if (await alertPermission() !== 'granted') return;
+  const { sendNotification } = await import('@tauri-apps/plugin-notification');
+  sendNotification({ title, body: body.replace(/\p{Cc}/gu, ' ').slice(0, 200) });
+}

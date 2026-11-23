@@ -698,7 +698,7 @@ int runWindows(bool host,int argc,char** argv) {
     if(options.ultraLowLatency && !encoder->usingGpuInput())
       throw std::runtime_error("Ultra Low Latency requires GPU capture and hardware encoding on Windows. Choose Balanced if the GPU path is unavailable.");
     VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
-    VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{});
+    VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{},options.sharing && options.collab);
     peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
     peer.onGamepadAvailable=[&]{return gamepad.available();};
     peer.onInput=[&](Input event) {
@@ -815,7 +815,7 @@ int runWindows(bool host,int argc,char** argv) {
     for(const auto& event:clipboardSync->gate.route(std::move(batch))) peer.input(event);
   }; state.viewOnly=!options.input;
   VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State value) { peer.setVoiceState(value); });
-  VoicePanel voicePanel(options.groupVoice,voice);
+  VoicePanel voicePanel(options.groupVoice,voice,{},options.collab);
   peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
   AudioPlayer audio(options.audio);
   // Viewer-side recording of the already-received stream (no re-encode).

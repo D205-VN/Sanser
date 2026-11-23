@@ -18,7 +18,23 @@ class MobileWorkspace extends StatelessWidget {
     required this.body,
     required this.selectedIndex,
     required this.onSelected,
+    this.badges = const {},
   });
+
+  /// Counts shown on destinations, e.g. pending invitations.
+  final Map<int, int> badges;
+  Widget _icon(int index) {
+    final count = badges[index] ?? 0;
+    final icon = Icon(_destinations[index].$1);
+    return count > 0
+        ? Badge(
+            key: ValueKey('workspace-badge-$index'),
+            label: Text('$count'),
+            child: icon,
+          )
+        : icon;
+  }
+
   final PreferredSizeWidget appBar;
   final Widget body;
   final int selectedIndex;
@@ -42,9 +58,9 @@ class MobileWorkspace extends StatelessWidget {
                   labelType: NavigationRailLabelType.all,
                   scrollable: true,
                   destinations: [
-                    for (final item in _destinations)
+                    for (final (index, item) in _destinations.indexed)
                       NavigationRailDestination(
-                        icon: Icon(item.$1),
+                        icon: _icon(index),
                         label: Text(
                           item.$2,
                           maxLines: 2,
@@ -76,8 +92,8 @@ class MobileWorkspace extends StatelessWidget {
                 selectedIndex: selectedIndex,
                 onDestinationSelected: onSelected,
                 destinations: [
-                  for (final item in _destinations)
-                    NavigationDestination(icon: Icon(item.$1), label: item.$2),
+                  for (final (index, item) in _destinations.indexed)
+                    NavigationDestination(icon: _icon(index), label: item.$2),
                 ],
               ),
       );

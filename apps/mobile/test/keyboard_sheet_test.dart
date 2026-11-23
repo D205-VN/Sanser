@@ -84,6 +84,9 @@ Future<void> edit(
 }
 
 void main() {
+  // These cover compose-then-send; live typing has its own tests.
+  setUp(() => RemoteKeyboardSheet.liveTyping = false);
+  tearDown(() => RemoteKeyboardSheet.liveTyping = true);
   testWidgets(
     'IME candidates and selection stay local until committed; remote keys cannot interrupt',
     (tester) async {

@@ -172,6 +172,9 @@ final class MobileAudio {
         })
         for name in [AVAudioSession.routeChangeNotification,AVAudioSession.mediaServicesWereResetNotification,AVAudioSession.interruptionNotification] {
             observers.append(NotificationCenter.default.addObserver(forName:name,object:nil,queue:nil){[weak self] note in
+                // One line per audio event (no audio content) to find silent playback.
+                let route=AVAudioSession.sharedInstance().currentRoute.outputs.map{$0.portType.rawValue}
+                sanserVoiceLog("audio event \(name.rawValue) info=\(note.userInfo?.mapValues{"\($0)"} ?? [:]) outputs=\(route)")
                 // Our own setCategory/voice processing posts categoryChange and
                 // routeConfigurationChange. Rebuilding on those restarted the
                 // engine every ~0.45 s with the mic open, so no microphone
@@ -283,7 +286,7 @@ final class MobileAudio {
     private func ensure(mix:Bool=false) throws{
         if let engine=engine{
             if engine.isRunning{return}
-            if (try? engine.start()) != nil{return}
+            if (try? engine.start()) != nil{sanserVoiceLog("audio engine restarted");return}
             sanserVoiceLog("engine restart failed: rebuilding mic=\(microphone)")
         }
         reset();try start(mix:mix)

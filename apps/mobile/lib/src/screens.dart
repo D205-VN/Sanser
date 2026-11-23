@@ -31,15 +31,45 @@ class SanserHome extends StatefulWidget {
 class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
   int tab = 0;
   Timer? documentBackground;
+  int _invitationSignal = 0;
   MobileController get c => widget.controller;
   @override
   void initState() {
     super.initState();
+    _invitationSignal = c.invitationSignal;
+    c.addListener(_alertInvitation);
     WidgetsBinding.instance.addObserver(this);
     c.setForeground(
       WidgetsBinding.instance.lifecycleState == null ||
           WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
     );
+  }
+
+  /// A new screen-sharing invitation: a banner on any screen, once.
+  void _alertInvitation() {
+    if (c.invitationSignal == _invitationSignal || !mounted) return;
+    _invitationSignal = c.invitationSignal;
+    final host = c.newInvitationHost ?? 'Một máy tính';
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          key: const ValueKey('invitation-alert'),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 8),
+          content: Text('$host mời bạn xem màn hình'),
+          action: c.active == null
+              ? SnackBarAction(
+                  label: 'Xem',
+                  onPressed: () {
+                    if (mounted) setState(() => tab = 1);
+                  },
+                )
+              : null,
+        ),
+      );
   }
 
   @override
@@ -80,6 +110,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
   @override
   void dispose() {
     documentBackground?.cancel();
+    c.removeListener(_alertInvitation);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -99,6 +130,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
         );
       }
       return MobileWorkspace(
+        badges: {1: c.pendingInvitations.length},
         selectedIndex: tab,
         onSelected: (value) => setState(() => tab = value),
         appBar: AppBar(
@@ -213,67 +245,60 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
   );
   List<Widget> _invitations() {
     final cards = <Widget>[];
-    for (final group in c.sharing) {
-      for (final member
-          in (group['members'] as List? ?? []).whereType<Json>()) {
-        if (member['viewerDeviceId'] != c.deviceId ||
-            member['state'] != 'invited') {
-          continue;
-        }
-        cards.add(
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(
-                    Icons.screen_share_outlined,
-                    color: Color(0xff78dfc0),
-                    size: 32,
+    for (final (group, member) in c.pendingInvitations) {
+      cards.add(
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.screen_share_outlined,
+                  color: Color(0xff78dfc0),
+                  size: 32,
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  group['hostName'] as String? ?? 'Lời mời xem màn hình',
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w600,
                   ),
-                  const SizedBox(height: 14),
-                  Text(
-                    group['hostName'] as String? ?? 'Lời mời xem màn hình',
-                    style: const TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.w600,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Chỉ xem • Không điều khiển chuột hoặc bàn phím',
+                  style: TextStyle(color: SanserTokens.muted),
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: c.busy
+                            ? null
+                            : () => c.respond(group, member, false),
+                        child: const Text('Từ chối'),
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Chỉ xem • Không điều khiển chuột hoặc bàn phím',
-                    style: TextStyle(color: SanserTokens.muted),
-                  ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: c.busy
-                              ? null
-                              : () => c.respond(group, member, false),
-                          child: const Text('Từ chối'),
-                        ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: c.busy
+                            ? null
+                            : () => c.respond(group, member, true),
+                        child: const Text('Tham gia'),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: FilledButton(
-                          onPressed: c.busy
-                              ? null
-                              : () => c.respond(group, member, true),
-                          child: const Text('Tham gia'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
-        );
-        cards.add(const SizedBox(height: 14));
-      }
+        ),
+      );
+      cards.add(const SizedBox(height: 14));
     }
     return cards.isEmpty
         ? const [

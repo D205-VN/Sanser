@@ -30,6 +30,7 @@ export const VI: Record<string, string> = {
   "Sign out": "Đăng xuất",
   "Screen sharing invitations could not be loaded.": "Không tải được lời mời chia sẻ màn hình.",
   "Retry invitations": "Tải lại lời mời",
+  "Screen sharing invitation": "Lời mời xem màn hình",
   "{name} invited you to view its screen.": "{name} mời bạn xem màn hình của máy đó.",
   "A computer in your account": "Một máy tính trong tài khoản của bạn",
   "View only · Your keyboard and mouse remain on this computer.": "Chỉ xem · Bàn phím và chuột của bạn vẫn ở máy này.",

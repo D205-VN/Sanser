@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'native_engine.dart';
 
 /// USB HID usages, shared with the desktop input engine. The first mobile
@@ -117,4 +118,28 @@ bool _validText(String text) {
     }
   }
   return true;
+}
+
+/// Live typing: what to change on the computer so its text matches the
+/// phone's committed text. Counts are in characters (runes), since one remote
+/// Backspace removes one character, including an emoji.
+(int, String) liveEdit(String sent, String committed) {
+  final before = sent.runes.toList(), after = committed.runes.toList();
+  var same = 0;
+  while (same < before.length &&
+      same < after.length &&
+      before[same] == after[same]) {
+    same++;
+  }
+  return (before.length - same, String.fromCharCodes(after.skip(same)));
+}
+
+/// The phone's text without the part the IME is still composing (for
+/// example Vietnamese Telex before the letter is complete).
+String committedText(TextEditingValue value) {
+  final range = value.composing;
+  if (!range.isValid || range.isCollapsed || range.end > value.text.length) {
+    return value.text;
+  }
+  return value.text.substring(0, range.start) + value.text.substring(range.end);
 }

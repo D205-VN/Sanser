@@ -44,6 +44,7 @@ std::mutex nativeCommandMutex;
 std::vector<std::string> nativeCommands;
 std::vector<std::string> voiceCommands;
 std::vector<std::string> collabCommands;
+std::vector<std::string> panelChatCommands;
 std::atomic<int> collabExclude{-1};
 constexpr std::size_t chunkSize = 1000, maxFrame = 4 * 1024 * 1024;
 void u16(Bytes& b, std::uint16_t n) { b.push_back(static_cast<std::uint8_t>(n >> 8)); b.push_back(static_cast<std::uint8_t>(n)); }
@@ -165,6 +166,9 @@ Options parseOptions(bool host, int argc, char** argv) {
             voiceCommands.push_back(std::move(line));
           } else if(line=="collab-exclude\t1" || line=="collab-exclude\t0") {
             collabExclude.store(line.back()=='1' ? 1:0);
+          } else if(isPanelChatCommand(line)) {
+            if(panelChatCommands.size()>=16) panelChatCommands.erase(panelChatCommands.begin());
+            panelChatCommands.push_back(std::move(line));
           } else if(isCollabCommand(line)) {
             // Ephemeral: under pressure the oldest stroke/chat command is dropped.
             if(collabCommands.size()>=32) collabCommands.erase(collabCommands.begin());
@@ -231,6 +235,10 @@ std::vector<std::string> takeNativeCommands() {
 std::vector<std::string> takeCollabCommands() {
   std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
   result.swap(collabCommands); return result;
+}
+std::vector<std::string> takePanelChatCommands() {
+  std::lock_guard lock(nativeCommandMutex); std::vector<std::string> result;
+  result.swap(panelChatCommands); return result;
 }
 std::optional<bool> takeCollabExclude() {
   const auto value=collabExclude.exchange(-1); if(value<0) return std::nullopt; return value==1;

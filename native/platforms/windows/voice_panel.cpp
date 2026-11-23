@@ -8,10 +8,14 @@
 #include <uxtheme.h>
 #include "voice_panel.h"
 #include "external_voice.h"
+#include "collab.h"
+#include "transport.h"
 #include "../../common/design_tokens.h"
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
+#include <deque>
+#include <string>
 #include <stdexcept>
 #include <vector>
 #ifdef SANSER_CODEC_TEST
@@ -48,6 +52,20 @@ struct PaintBuffer {
     if(bitmap) { BitBlt(target,0,0,width,height,dc,0,0,SRCCOPY); SelectObject(dc,previous); DeleteObject(bitmap); DeleteDC(dc); }
   }
 };
+std::wstring wide(const std::string& value) {
+  if(value.empty()) return {};
+  const auto size=MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0);
+  std::wstring out(static_cast<std::size_t>(std::max(size,0)),L'\0');
+  if(size>0) MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),out.data(),size);
+  return out;
+}
+std::string narrow(const std::wstring& value) {
+  if(value.empty()) return {};
+  const auto size=WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
+  std::string out(static_cast<std::size_t>(std::max(size,0)),'\0');
+  if(size>0) WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),out.data(),size,nullptr,nullptr);
+  return out;
+}
 void roundedPath(Gdiplus::GraphicsPath& path,float left,float top,float right,float bottom,float diameter) {
   diameter=std::min(diameter,std::min(right-left,bottom-top));
   path.AddArc(left,top,diameter,diameter,180,90);
@@ -61,14 +79,30 @@ struct VoicePanel::Impl {
   std::function<VoiceRuntime::Status()> read;
   std::function<void(voice::State)> write;
   std::function<void()> stop;
+  std::function<std::vector<std::string>()> chatLines;
+  std::function<void(std::string)> chatSend;
   VoiceRuntime::Status current;
   HWND window=nullptr,toggle=nullptr,shortcut=nullptr,chevron=nullptr,stopButton=nullptr,join=nullptr,microphone=nullptr,deafen=nullptr,leave=nullptr,tooltip=nullptr,hovered=nullptr;
-  HFONT titleFont=nullptr,detailFont=nullptr,controlFont=nullptr;
-  bool expanded=false,voiceEnabled=true,hasSnapshot=false;
+  HWND chatLog=nullptr,chatInput=nullptr,chatButton=nullptr;
+  HFONT titleFont=nullptr,detailFont=nullptr,controlFont=nullptr,chatFont=nullptr;
+  HBRUSH logBrush=nullptr,inputBrush=nullptr;
+  bool expanded=false,voiceEnabled=true,chatEnabled=false,hasSnapshot=false;
+  std::deque<std::wstring> messages;
+  unsigned unread=0,shownUnread=0;
+  mutable std::wstring subtitleText;
   float scale=1;
+  static constexpr int voiceHeight=112,chatHeight=168;
   int px(double value) const { return static_cast<int>(std::lround(value*scale)); }
   int width() const { return stop ? 352 : 312; }
-  int height() const { return expanded ? 164 : 52; }
+  int height() const { return expanded ? 52+(voiceEnabled ? voiceHeight : 0)+(chatEnabled ? chatHeight : 0) : 52; }
+  int chatTop() const { return 52+(voiceEnabled ? voiceHeight : 0); }
+  // Enter in the message box sends; the box never inserts a new line.
+  static LRESULT CALLBACK inputProcedure(HWND input,UINT message,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR data) {
+    auto* self=reinterpret_cast<Impl*>(data);
+    if(message==WM_KEYDOWN && w==VK_RETURN) { self->sendChat(); return 0; }
+    if(message==WM_CHAR && (w==L'\r' || w==L'\n')) return 0;
+    return DefSubclassProc(input,message,w,l);
+  }
   static LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM w,LPARAM l) {
     auto* self=reinterpret_cast<Impl*>(GetWindowLongPtrW(window,GWLP_USERDATA));
     if(message==WM_NCCREATE) { self=static_cast<Impl*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self)); }
@@ -78,19 +112,39 @@ struct VoicePanel::Impl {
     if(self && message==WM_DRAWITEM) { self->drawButton(*reinterpret_cast<DRAWITEMSTRUCT*>(l)); return TRUE; }
     if(self && message==WM_PAINT) { self->paint(); return 0; }
     if(message==WM_ERASEBKGND) return 1;
-    if(message==WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    if(self && (message==WM_CTLCOLOREDIT || message==WM_CTLCOLORSTATIC) && (reinterpret_cast<HWND>(l)==self->chatLog || reinterpret_cast<HWND>(l)==self->chatInput)) {
+      const auto dc=reinterpret_cast<HDC>(w); const bool input=reinterpret_cast<HWND>(l)==self->chatInput;
+      SetTextColor(dc,ink); SetBkColor(dc,input ? surface : panelColor(design::surface));
+      return reinterpret_cast<LRESULT>(input ? self->inputBrush : self->logBrush);
+    }
+    // The panel never takes focus, except to type in the open chat box.
+    if(message==WM_MOUSEACTIVATE) {
+      if(self && self->expanded && self->chatEnabled) {
+        POINT cursor{}; GetCursorPos(&cursor); ScreenToClient(window,&cursor);
+        const auto child=ChildWindowFromPointEx(window,cursor,CWP_SKIPINVISIBLE);
+        if(child==self->chatInput || child==self->chatLog) return MA_ACTIVATE;
+      }
+      return MA_NOACTIVATE;
+    }
     // Empty space is a drag handle. Native child buttons keep their own hit tests.
     if(self && message==WM_NCHITTEST) {
       const auto hit=DefWindowProcW(window,message,w,l); return hit==HTCLIENT ? HTCAPTION : hit;
     }
     return DefWindowProcW(window,message,w,l);
   }
-  Impl(bool enabled,VoiceRuntime& value,std::function<void()> stopSharing):Impl([&value] { return value.snapshot(); },[&value](voice::State state) { value.configure(state); },enabled,std::move(stopSharing)) {}
-  Impl(std::function<VoiceRuntime::Status()> readStatus,std::function<void(voice::State)> configure,bool enabled=true,std::function<void()> stopSharing={}):read(std::move(readStatus)),write(std::move(configure)),stop(std::move(stopSharing)),voiceEnabled(enabled) {
+  Impl(bool enabled,VoiceRuntime& value,std::function<void()> stopSharing,bool chat):Impl([&value] { return value.snapshot(); },[&value](voice::State state) { value.configure(state); },enabled,std::move(stopSharing),
+    chat ? std::function<std::vector<std::string>()>([] { return takePanelChatCommands(); }) : std::function<std::vector<std::string>()>{},
+    chat ? std::function<void(std::string)>([](std::string text) { panelChatSend(text); }) : std::function<void(std::string)>{}) {}
+  Impl(std::function<VoiceRuntime::Status()> readStatus,std::function<void(voice::State)> configure,bool enabled=true,std::function<void()> stopSharing={},
+       std::function<std::vector<std::string>()> lines={},std::function<void(std::string)> send={})
+    :read(std::move(readStatus)),write(std::move(configure)),stop(std::move(stopSharing)),chatLines(std::move(lines)),chatSend(std::move(send)),voiceEnabled(enabled) {
+    chatEnabled=chatLines && chatSend;
     const HDC dc=GetDC(nullptr); scale=GetDeviceCaps(dc,LOGPIXELSX)/96.f; ReleaseDC(nullptr,dc);
     titleFont=CreateFontW(-px(12),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     controlFont=CreateFontW(-px(11),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     detailFont=CreateFontW(-px(10),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    chatFont=CreateFontW(-px(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+    logBrush=CreateSolidBrush(panelColor(design::surface)); inputBrush=CreateSolidBrush(surface);
     WNDCLASSW klass{}; klass.lpfnWndProc=procedure; klass.hInstance=GetModuleHandleW(nullptr); klass.style=CS_DROPSHADOW;
     klass.lpszClassName=L"SanserGroupVoicePanel"; klass.hCursor=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)); RegisterClassW(&klass);
     RECT area{}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0);
@@ -110,6 +164,16 @@ struct VoicePanel::Impl {
     };
     toggle=button(L"Expand voice controls",10); shortcut=button(L"Unmute microphone",12); chevron=button(L"Expand voice controls",16); stopButton=button(L"Stop screen sharing",15);
     join=button(L"Join voice · listen only",11); microphone=button(L"Unmute microphone",12); deafen=button(L"Deafen voice and mute microphone",13); leave=button(L"Leave voice",14);
+    if(chatEnabled) {
+      chatLog=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(18)),klass.hInstance,nullptr);
+      chatInput=CreateWindowExW(0,L"EDIT",L"",WS_CHILD|WS_TABSTOP|ES_AUTOHSCROLL,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(19)),klass.hInstance,nullptr);
+      for(auto edit:{chatLog,chatInput}) SendMessageW(edit,WM_SETFONT,reinterpret_cast<WPARAM>(chatFont),TRUE);
+      SendMessageW(chatInput,EM_SETCUEBANNER,TRUE,reinterpret_cast<LPARAM>(L"Message everyone…"));
+      SendMessageW(chatInput,EM_SETLIMITTEXT,1024,0);
+      SetWindowSubclass(chatInput,inputProcedure,1,reinterpret_cast<DWORD_PTR>(this));
+      chatButton=button(L"Send message",17);
+      showChat();
+    }
     SetTimer(window,1,100,nullptr); layout(); refresh(); ShowWindow(window,SW_SHOWNOACTIVATE);
   }
   void label(HWND button,const wchar_t* text) {
@@ -125,20 +189,63 @@ struct VoicePanel::Impl {
     const auto actionWidth=(width()-92)/2;
     place(join,16,88,width()-32,36); place(microphone,16,88,actionWidth,36);
     place(deafen,24+actionWidth,88,actionWidth,36); place(leave,width()-52,88,36,36);
+    if(chatEnabled) {
+      place(chatLog,12,chatTop()+30,width()-24,chatHeight-78);
+      place(chatInput,16,chatTop()+chatHeight-40,width()-32-66,26);
+      place(chatButton,width()-76,chatTop()+chatHeight-41,60,28);
+    }
     showActions();
     ShowWindow(stopButton,stop ? SW_SHOWNOACTIVATE : SW_HIDE);
-    ShowWindow(shortcut,voiceEnabled ? SW_SHOWNOACTIVATE : SW_HIDE); ShowWindow(chevron,voiceEnabled ? SW_SHOWNOACTIVATE : SW_HIDE);
+    ShowWindow(shortcut,voiceEnabled ? SW_SHOWNOACTIVATE : SW_HIDE); ShowWindow(chevron,voiceEnabled || chatEnabled ? SW_SHOWNOACTIVATE : SW_HIDE);
     // Keep the sharing indicator legible, including engines without voice.
-    EnableWindow(toggle,voiceEnabled); InvalidateRect(window,nullptr,FALSE);
+    EnableWindow(toggle,voiceEnabled || chatEnabled); InvalidateRect(window,nullptr,FALSE);
   }
   void showActions() const {
-    ShowWindow(join,expanded && !current.state.joined ? SW_SHOWNOACTIVATE : SW_HIDE);
-    for(auto child:{microphone,deafen,leave}) ShowWindow(child,expanded && current.state.joined ? SW_SHOWNOACTIVATE : SW_HIDE);
+    const bool voice=expanded && voiceEnabled;
+    ShowWindow(join,voice && !current.state.joined ? SW_SHOWNOACTIVATE : SW_HIDE);
+    for(auto child:{microphone,deafen,leave}) ShowWindow(child,voice && current.state.joined ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if(chatEnabled) for(auto child:{chatLog,chatInput,chatButton}) ShowWindow(child,expanded ? SW_SHOWNOACTIVATE : SW_HIDE);
+  }
+  void showChat() {
+    std::wstring text;
+    if(messages.empty()) text=L"No messages yet. Chat is kept only for this session.";
+    for(const auto& line:messages) { if(!text.empty()) text+=L"\r\n"; text+=line; }
+    SetWindowTextW(chatLog,text.c_str());
+    const auto end=GetWindowTextLengthW(chatLog);
+    SendMessageW(chatLog,EM_SETSEL,end,end); SendMessageW(chatLog,EM_SCROLLCARET,0,0);
+  }
+  bool receiveChat() {
+    if(!chatLines) return false;
+    bool changed=false;
+    for(const auto& raw:chatLines()) {
+      const auto line=parsePanelChat(raw); if(!line) continue;
+      auto name=line->own ? std::wstring(L"You") : wide(line->name); if(name.empty()) name=L"Viewer";
+      auto body=wide(line->text); for(auto& c:body) if(c==L'\n') c=L' ';
+      messages.push_back(name+L": "+body); while(messages.size()>50) messages.pop_front();
+      if(!line->own && !expanded) ++unread;
+      changed=true;
+    }
+    if(changed) showChat();
+    return changed;
+  }
+  void sendChat() {
+    if(!chatInput || !chatSend) return;
+    const auto length=GetWindowTextLengthW(chatInput); if(length<=0) return;
+    std::wstring value(static_cast<std::size_t>(length)+1,L'\0'); GetWindowTextW(chatInput,value.data(),length+1); value.resize(static_cast<std::size_t>(length));
+    const auto first=value.find_first_not_of(L" \t"),last=value.find_last_not_of(L" \t");
+    if(first==std::wstring::npos) return;
+    const auto text=narrow(value.substr(first,last-first+1));
+    if(text.empty() || text.size()>panelChatMaxText) { MessageBeep(MB_ICONWARNING); return; }
+    chatSend(text); SetWindowTextW(chatInput,L"");
   }
   void activate(unsigned id) {
     if(id==15) { if(stop) { write({false,false,false}); stop(); } return; }
+    if(id==17) { sendChat(); return; }
+    if(id==10 || id==16) {
+      if(!voiceEnabled && !chatEnabled) return;
+      expanded=!expanded; if(expanded) unread=0; layout(); refresh(true); return;
+    }
     if(!voiceEnabled) return;
-    if(id==10 || id==16) { expanded=!expanded; layout(); refresh(true); return; }
     auto next=read().state;
     if(id==11 && !next.joined) next={true,false,false};
     if(id==12) { if(!next.joined) next={true,false,false}; else { next.microphone=!next.microphone; next.deafened=false; } }
@@ -147,7 +254,8 @@ struct VoicePanel::Impl {
     write(next); refresh();
   }
   const wchar_t* subtitle() const {
-    return !voiceEnabled ? L"Sharing is active" : current.capturing ? L"Microphone on" : current.state.microphone ? L"Opening microphone…" : current.state.deafened ? L"Voice muted · mic off" : current.state.joined ? L"Listening · mic off" : L"Voice is off";
+    if(unread) { subtitleText=unread==1 ? std::wstring(L"1 new message") : std::to_wstring(unread)+L" new messages"; return subtitleText.c_str(); }
+    return !voiceEnabled ? (stop ? L"Sharing is active" : L"Messages for this session") : current.capturing ? L"Microphone on" : current.state.microphone ? L"Opening microphone…" : current.state.deafened ? L"Voice muted · mic off" : current.state.joined ? L"Listening · mic off" : L"Voice is off";
   }
   const wchar_t* status() const {
     const auto& state=current.state;
@@ -162,6 +270,7 @@ struct VoicePanel::Impl {
       if(nextHover) InvalidateRect(nextHover,nullptr,FALSE);
       hovered=nextHover;
     }
+    if(receiveChat() || unread!=shownUnread) { force=true; shownUnread=unread; }
     const auto value=read(); const auto& state=value.state;
     if(!force && hasSnapshot && current.state.joined==state.joined && current.state.microphone==state.microphone && current.state.deafened==state.deafened && current.capturing==value.capturing && current.code==value.code) return;
     current=value; hasSnapshot=true;
@@ -169,9 +278,10 @@ struct VoicePanel::Impl {
     EnableWindow(shortcut,TRUE); EnableWindow(join,TRUE); EnableWindow(microphone,state.joined); EnableWindow(deafen,state.joined); EnableWindow(leave,state.joined);
     label(shortcut,!state.joined ? L"Join voice · listen only" : state.microphone ? L"Mute microphone" : L"Unmute microphone"); label(microphone,state.microphone ? L"Mute microphone" : L"Unmute microphone");
     label(deafen,state.deafened ? L"Hear voice" : L"Deafen voice and mute microphone");
-    label(toggle,stop ? (expanded ? L"Screen sharing active · collapse voice controls" : L"Screen sharing active · expand voice controls") : (expanded ? L"Collapse voice controls" : L"Expand voice controls"));
-    label(chevron,expanded ? L"Collapse voice controls" : L"Expand voice controls");
+    label(toggle,stop ? (expanded ? L"Screen sharing active · collapse voice and chat" : L"Screen sharing active · expand voice and chat") : (expanded ? L"Collapse voice and chat" : L"Expand voice and chat"));
+    label(chevron,expanded ? L"Collapse voice and chat" : L"Expand voice and chat");
     InvalidateRect(window,nullptr,FALSE); for(auto child:{toggle,shortcut,chevron,stopButton,join,microphone,deafen,leave}) InvalidateRect(child,nullptr,FALSE);
+    if(chatButton) InvalidateRect(chatButton,nullptr,FALSE);
   }
   void backdrop(HDC dc,RECT rect,int offsetY=0) const {
     Gdiplus::Graphics graphics(dc);
@@ -203,6 +313,9 @@ struct VoicePanel::Impl {
     if(id==15) {
       Gdiplus::GraphicsPath path; roundedPath(path,4,4,16,16,4);
       Gdiplus::SolidBrush brush(tint(color)); graphics.FillPath(&brush,&path);
+    } else if(id==17) {
+      // Paper plane.
+      line(2,9,18,2); line(18,2,11,18); line(11,18,9,11); line(9,11,2,9); line(9,11,18,2);
     } else if(id==16) {
       const float a=expanded ? 12.f : 8.f,b=expanded ? 8.f : 12.f; line(5,a,10,b); line(10,b,15,a);
     } else if(id==12) {
@@ -230,11 +343,11 @@ struct VoicePanel::Impl {
     const unsigned id=item.CtlID; PaintBuffer buffer(item.hDC,item.rcItem); auto dc=buffer.dc; const bool header=id==10;
     const bool enabled=!(item.itemState&ODS_DISABLED);
     const bool quick=item.hwndItem==shortcut;
-    COLORREF color=id==15 || id==14 ? red : id==11 || (quick && !current.state.joined) || (header && (stop || current.state.joined)) ? accent : id==12 && current.capturing ? accent : id==13 && current.state.deafened ? red : ink;
+    COLORREF color=id==15 || id==14 ? red : id==17 || id==11 || (quick && !current.state.joined) || (header && (stop || current.state.joined)) ? accent : id==12 && current.capturing ? accent : id==13 && current.state.deafened ? red : ink;
     if(!enabled && !header) color=RGB(76,85,102);
     POINT cursor{}; GetCursorPos(&cursor); RECT bounds{}; GetWindowRect(item.hwndItem,&bounds);
     const bool hover=enabled && PtInRect(&bounds,cursor);
-    const bool active=id==11 || (id==12 && current.state.microphone) || (id==13 && current.state.deafened);
+    const bool active=id==17 || id==11 || (id==12 && current.state.microphone) || (id==13 && current.state.deafened);
     RECT position{}; GetWindowRect(item.hwndItem,&position); MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&position),2);
     backdrop(dc,item.rcItem,position.top);
     if(!header && (id!=16 || hover))
@@ -242,10 +355,10 @@ struct VoicePanel::Impl {
     if(header) {
       RECT tile{0,px(2),px(28),px(30)}; fill(dc,tile,RGB(20,49,45),16); icon(dc,px(4),px(6),10,color);
       RECT title{px(36),-px(1),px(164),px(17)},detail{px(36),px(18),px(164),px(32)};
-      text(dc,stop ? L"Screen sharing" : L"Voice chat",title,titleFont,ink,DT_LEFT|DT_SINGLELINE);
-      text(dc,subtitle(),detail,detailFont,current.capturing ? accent : muted,DT_LEFT|DT_SINGLELINE);
+      text(dc,stop ? L"Screen sharing" : voiceEnabled ? L"Voice chat" : L"Chat",title,titleFont,ink,DT_LEFT|DT_SINGLELINE);
+      text(dc,subtitle(),detail,detailFont,current.capturing || unread ? accent : muted,DT_LEFT|DT_SINGLELINE);
     } else {
-      const wchar_t* caption=quick ? (!current.state.joined ? L"Join" : current.capturing ? L"Mic on" : current.state.microphone ? L"…" : L"Muted") : id==11 ? L"Join voice" : id==12 ? (current.state.microphone ? L"Mute mic" : L"Unmute") : id==13 ? (current.state.deafened ? L"Hear voice" : L"Mute voice") : nullptr;
+      const wchar_t* caption=id==17 ? L"Send" : quick ? (!current.state.joined ? L"Join" : current.capturing ? L"Mic on" : current.state.microphone ? L"…" : L"Muted") : id==11 ? L"Join voice" : id==12 ? (current.state.microphone ? L"Mute mic" : L"Unmute") : id==13 ? (current.state.deafened ? L"Hear voice" : L"Mute voice") : nullptr;
       const auto symbol=quick && !current.state.joined ? 11u : id;
       const auto top=(item.rcItem.bottom-px(20))/2;
       if(caption) {
@@ -267,9 +380,13 @@ struct VoicePanel::Impl {
       if(expanded) {
         Gdiplus::Pen separator(Gdiplus::Color(20,255,255,255),1.f);
         graphics.DrawLine(&separator,px(14),px(52),px(width()-14),px(52));
+        if(chatEnabled && voiceEnabled) graphics.DrawLine(&separator,px(14),px(chatTop()),px(width()-14),px(chatTop()));
       }
     }
-    if(expanded) {
+    if(expanded && chatEnabled) {
+      RECT section{px(16),px(chatTop()+11),px(166),px(chatTop()+27)}; text(dc,L"CHAT",section,detailFont,muted,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
+    }
+    if(expanded && voiceEnabled) {
       RECT section{px(16),px(63),px(166),px(79)}; text(dc,L"VOICE CHAT",section,detailFont,muted,DT_LEFT|DT_VCENTER|DT_SINGLELINE);
       RECT badge{px(width()-88),px(63),px(width()-16),px(79)}; fill(dc,badge,surface,8);
       text(dc,current.capturing ? L"MIC LIVE" : current.state.microphone ? L"OPENING" : current.state.joined ? L"MIC OFF" : L"NOT JOINED",badge,detailFont,current.capturing ? accent : muted,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
@@ -290,8 +407,8 @@ struct VoicePanel::Impl {
     {
       Gdiplus::Graphics graphics(&image); auto dc=graphics.GetHDC();
       RECT rect{0,0,px(width()),px(height())}; drawSurface(dc,rect);
-      for(auto child:{toggle,shortcut,chevron,stopButton,join,microphone,deafen,leave}) {
-        if(!IsWindowVisible(child)) continue;
+      for(auto child:{toggle,shortcut,chevron,stopButton,join,microphone,deafen,leave,chatButton}) {
+        if(!child || !IsWindowVisible(child)) continue;
         RECT position{}; GetWindowRect(child,&position); MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&position),2);
         const auto saved=SaveDC(dc); SetViewportOrgEx(dc,position.left,position.top,nullptr);
         DRAWITEMSTRUCT item{}; item.CtlID=GetDlgCtrlID(child); item.hwndItem=child; item.hDC=dc;
@@ -310,10 +427,15 @@ struct VoicePanel::Impl {
     throw std::runtime_error("PNG panel preview encoder unavailable");
   }
 #endif
-  ~Impl() { if(window) { KillTimer(window,1); if(tooltip) DestroyWindow(tooltip); DestroyWindow(window); } if(titleFont) DeleteObject(titleFont); if(detailFont) DeleteObject(detailFont); if(controlFont) DeleteObject(controlFont); }
+  ~Impl() {
+    if(chatInput) RemoveWindowSubclass(chatInput,inputProcedure,1);
+    if(window) { KillTimer(window,1); if(tooltip) DestroyWindow(tooltip); DestroyWindow(window); }
+    for(auto font:{titleFont,detailFont,controlFont,chatFont}) if(font) DeleteObject(font);
+    for(auto brush:{logBrush,inputBrush}) if(brush) DeleteObject(brush);
+  }
 };
-VoicePanel::VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> stopSharing) {
-  if(enabled || stopSharing) impl_=std::make_unique<Impl>(enabled,voice,std::move(stopSharing));
+VoicePanel::VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> stopSharing,bool chat) {
+  if(enabled || stopSharing || chat) impl_=std::make_unique<Impl>(enabled,voice,std::move(stopSharing),chat);
 }
 VoicePanel::~VoicePanel()=default;
 void VoicePanel::pump() {
@@ -357,6 +479,17 @@ void testVoicePanelControls() {
   VoicePanel::Impl screenOnly(read,write,false,[&] { ++stops; });
   if(!IsWindowVisible(screenOnly.stopButton) || IsWindowVisible(screenOnly.shortcut) || IsWindowVisible(screenOnly.chevron)) throw std::runtime_error("Host without voice must retain sharing indicator and stop");
   click(screenOnly,15); if(stops!=2) throw std::runtime_error("Screen-only Stop did not stop sharing");
+  std::vector<std::string> incoming,sent;
+  VoicePanel::Impl chatting(read,write,true,[&] { ++stops; },[&] { auto lines=std::move(incoming); incoming.clear(); return lines; },[&](std::string text) { sent.push_back(std::move(text)); });
+  incoming.push_back("panel-chat\t0\t"+userHex("iPhone")+"\t"+userHex("xin chào"));
+  chatting.refresh();
+  if(chatting.unread!=1 || chatting.messages.size()!=1 || std::wstring(chatting.subtitle())!=L"1 new message") throw std::runtime_error("Panel chat must count unread messages while collapsed");
+  click(chatting,16);
+  if(chatting.unread || !IsWindowVisible(chatting.chatInput) || !IsWindowVisible(chatting.chatLog)) throw std::runtime_error("Opening the panel must show chat and clear unread");
+  SetWindowTextW(chatting.chatInput,L"  ok thấy rồi  "); click(chatting,17);
+  if(sent.size()!=1 || sent[0]!="ok thấy rồi" || GetWindowTextLengthW(chatting.chatInput)) throw std::runtime_error("Send must post trimmed UTF-8 text and clear the box");
+  chatting.preview("host-chat.png");
+  if(chatting.height()!=52+112+168) throw std::runtime_error("Chat must sit below the voice controls");
 }
 #endif
 }

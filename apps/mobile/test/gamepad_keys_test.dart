@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sanser_mobile/src/keyboard_sheet.dart';
 import 'package:sanser_mobile/src/api.dart';
 import 'package:sanser_mobile/src/gamepad_keys.dart';
 import 'package:sanser_mobile/src/mobile_input.dart';
@@ -66,6 +67,9 @@ class PadEngine extends ActionEngine {
 }
 
 void main() {
+  // These cover compose-then-send; live typing has its own tests.
+  setUp(() => RemoteKeyboardSheet.liveTyping = false);
+  tearDown(() => RemoteKeyboardSheet.liveTyping = true);
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
     'no held-before-capture input; neutral sample arms once; availability is not a sample',

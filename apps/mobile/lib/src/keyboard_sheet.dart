@@ -16,6 +16,10 @@ class RemoteKeyboardSheet extends StatefulWidget {
   final MobileInput input;
   final bool Function() current;
   final bool unicodeSupported;
+
+  /// Live typing (the default) or compose-then-send; remembered while the
+  /// app runs.
+  static bool liveTyping = true;
   @override
   State<RemoteKeyboardSheet> createState() => _RemoteKeyboardSheetState();
 }
@@ -24,8 +28,70 @@ class _RemoteKeyboardSheetState extends State<RemoteKeyboardSheet> {
   final text = TextEditingController();
   final focus = FocusNode();
   bool busy = false;
+  bool live = RemoteKeyboardSheet.liveTyping;
   String message = '';
   int revision = 0;
+
+  /// What the computer already has from live typing in this box.
+  String sent = '';
+  Future<void> pending = Future.value();
+
+  @override
+  void initState() {
+    super.initState();
+    text.addListener(_typed);
+  }
+
+  /// Live mode: mirror each committed change with Backspaces and new text.
+  void _typed() {
+    if (!live || !widget.current()) return;
+    final committed = committedText(text.value);
+    if (committed == sent) return;
+    final (erase, insert) = liveEdit(sent, committed);
+    sent = committed;
+    final input = widget.input, attempt = revision;
+    final unicode = widget.unicodeSupported;
+    pending = pending.then((_) async {
+      if (!mounted || widget.input != input || revision != attempt) return;
+      try {
+        for (var i = 0; i < erase; i++) {
+          await input.tapKey(42);
+        }
+        final lines = insert.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+          if (i > 0) await input.tapKey(40);
+          if (lines[i].isEmpty) continue;
+          await input.drain();
+          await sendText(
+            input.engine,
+            lines[i],
+            sessionId: input.sessionId,
+            unicodeSupported: unicode,
+          );
+        }
+        if (mounted && message.isNotEmpty) setState(() => message = '');
+      } catch (error) {
+        if (mounted) setState(() => message = error.toString());
+      }
+    });
+    // Keep the box short; a fresh box needs no Backspaces to correct.
+    if (committed.length > 200 && committed == text.text) {
+      sent = '';
+      text.clear();
+    }
+  }
+
+  void _setLive(bool value) {
+    if (value == live) return;
+    setState(() {
+      live = RemoteKeyboardSheet.liveTyping = value;
+      message = '';
+      // Switching never sends the draft: the box starts empty either way.
+      sent = '';
+      text.clear();
+    });
+  }
+
   bool get composing =>
       text.value.composing.isValid && !text.value.composing.isCollapsed;
 
@@ -38,6 +104,7 @@ class _RemoteKeyboardSheetState extends State<RemoteKeyboardSheet> {
       message = '';
       // Session changes must never inherit drafts or composition from a peer.
       focus.unfocus();
+      sent = '';
       text.clear();
     }
   }
@@ -144,7 +211,27 @@ class _RemoteKeyboardSheetState extends State<RemoteKeyboardSheet> {
                 'Bàn phím từ xa',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
+              SegmentedButton<bool>(
+                key: const ValueKey('keyboard-mode'),
+                segments: const [
+                  ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.bolt_rounded),
+                    label: Text('Gõ trực tiếp'),
+                  ),
+                  ButtonSegment(
+                    value: false,
+                    icon: Icon(Icons.edit_note_rounded),
+                    label: Text('Soạn rồi gửi'),
+                  ),
+                ],
+                selected: {live},
+                onSelectionChanged: busy
+                    ? null
+                    : (value) => _setLive(value.first),
+              ),
+              const SizedBox(height: 12),
               TextField(
                 controller: text,
                 focusNode: focus,
@@ -153,21 +240,28 @@ class _RemoteKeyboardSheetState extends State<RemoteKeyboardSheet> {
                 minLines: 1,
                 maxLines: 4,
                 keyboardType: TextInputType.multiline,
-                textInputAction: TextInputAction.done,
+                textInputAction: live
+                    ? TextInputAction.newline
+                    : TextInputAction.done,
                 // Finalize via the framework on explicit Done/Chốt chữ. Send
                 // is a separate action after the final draft can be reviewed.
-                onEditingComplete: focus.unfocus,
+                onEditingComplete: live ? null : focus.unfocus,
                 onTapOutside: (_) {},
                 decoration: InputDecoration(
                   labelText: widget.unicodeSupported
                       ? 'Nhập văn bản · tiếng Việt và emoji'
                       : 'Nhập văn bản · chữ không dấu',
-                  helperText: composing
+                  helperText: live
+                      ? 'Gõ đến đâu hiện trên máy tính đến đó. Xoá ở đây cũng xoá bên máy tính.'
+                      : composing
                       ? 'Đang ghép chữ · chọn gợi ý hoặc bấm Chốt chữ.'
                       : 'Soạn và chọn chữ trên điện thoại, rồi Gửi vào ô trên máy tính.',
                   helperMaxLines: 3,
-                  counterText: '${value.text.length}/256 đơn vị Unicode',
-                  errorText: value.text.isNotEmpty && !valid && !composing
+                  counterText: live
+                      ? ''
+                      : '${value.text.length}/256 đơn vị Unicode',
+                  errorText:
+                      !live && value.text.isNotEmpty && !valid && !composing
                       ? value.text.length > 256
                             ? 'Văn bản quá dài. Chia thành đoạn ngắn hơn.'
                             : widget.unicodeSupported
@@ -177,16 +271,17 @@ class _RemoteKeyboardSheetState extends State<RemoteKeyboardSheet> {
                 ),
               ),
               const SizedBox(height: 12),
-              if (composing)
+              if (composing && !live)
                 OutlinedButton.icon(
                   onPressed: busy || !connected ? null : focus.unfocus,
                   icon: const Icon(Icons.done),
                   label: const Text('Chốt chữ'),
                 ),
-              FilledButton(
-                onPressed: canKey && valid ? send : null,
-                child: Text(busy ? 'Đang gửi…' : 'Gửi'),
-              ),
+              if (!live)
+                FilledButton(
+                  onPressed: canKey && valid ? send : null,
+                  child: Text(busy ? 'Đang gửi…' : 'Gửi'),
+                ),
               if (!connected)
                 const Text('Phiên điều khiển đã kết thúc. Bản nháp chưa gửi.'),
               if (message.isNotEmpty)

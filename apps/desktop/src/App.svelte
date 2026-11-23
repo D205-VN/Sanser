@@ -29,6 +29,8 @@
   import ConnectionAlerts from './components/ConnectionAlerts.svelte';
   import FileInvitations from './components/FileInvitations.svelte';
   import { incomingSharingInvitations } from './lib/sharingInvitations';
+  import { showSharingInvitationAlert } from './lib/connectionAlerts';
+  import { connectionAlerts } from './stores/connectionAlerts';
 
   let updater = $state<{ checkForUpdates: (manual?: boolean) => Promise<void> }>();
   let updateChecking = $state(false);
@@ -52,6 +54,17 @@
   $effect(() => {
     if (runtime && $session.mode === 'cloud' && !signingOut) void sharing.initialize(runtime);
     else if ($session.mode === 'signedOut') void sharing.shutdown();
+  });
+
+  // Each new invitation alerts once, even while Sanser is in the background.
+  const announcedInvitations = new Set<string>();
+  $effect(() => {
+    for (const { group, member } of invitations) {
+      if (member.state !== 'invited' || announcedInvitations.has(member.id)) continue;
+      announcedInvitations.add(member.id);
+      const name = $sharing.devices.find((device) => device.id === group.hostDeviceId)?.name ?? $t('A computer in your account');
+      void showSharingInvitationAlert($t('Screen sharing invitation'), $t('{name} invited you to view its screen.', { name }));
+    }
   });
 
   async function respondInvitation(group: SharingGroup, member: SharingMember, accept: boolean): Promise<void> {
@@ -255,7 +268,7 @@
         <FileInvitations hostSession={hostFileSession} clientSession={$connection.engineRunning && $connection.session?.accessMode !== 'view-only' ? $connection.session?.id ?? null : null} {navigate} />
         {#if $sharing.error && page !== 'host'}<div class="notice warning" role="status">{$t('Screen sharing invitations could not be loaded.')} {$t($sharing.error)} <button class="button small" onclick={() => sharing.refresh()}>{$t('Retry invitations')}</button></div>{/if}
         {#each invitations as invitation (invitation.member.id)}
-          <div class="notice sharing-invitation" role="status"><div><strong>{$t('{name} invited you to view its screen.', { name: $sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? $t('A computer in your account') })}</strong><p>{$t('View only · Your keyboard and mouse remain on this computer.')}</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? $t('Open shared screen') : $t('Join')}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>{$t('Decline')}</button>{/if}</span></div>
+          <div class="notice sharing-invitation" role="status"><div><strong>{$t('{name} invited you to view its screen.', { name: $sharing.devices.find((device) => device.id === invitation.group.hostDeviceId)?.name ?? $t('A computer in your account') })}</strong><p>{$t('View only · Your keyboard and mouse remain on this computer.')}</p></div><span class="button-row"><button class="button primary" disabled={$sharing.busy || $connection.session !== null} onclick={() => respondInvitation(invitation.group, invitation.member, true)}>{invitation.member.state === 'accepted' ? $t('Open shared screen') : $t('Join')}</button>{#if invitation.member.state === 'invited'}<button class="button" disabled={$sharing.busy} onclick={() => respondInvitation(invitation.group, invitation.member, false)}>{$t('Decline')}</button>{/if}{#if $connectionAlerts.permission === 'not-granted' || $connectionAlerts.permission === 'unknown'}<button class="button" onclick={() => connectionAlerts.checkPermission(true)}>{$t('Enable desktop alerts')}</button>{/if}</span></div>
         {/each}
         <HostRecordingNotice />
         {#if !browserOnline}<div class="notice warning" role="status">{$t('You are offline. Check your connection; your saved settings are still available.')}</div>{/if}

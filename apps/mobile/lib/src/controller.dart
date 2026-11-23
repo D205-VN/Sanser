@@ -29,6 +29,13 @@ class MobileController extends ChangeNotifier {
   Json capabilities = {};
   List<Json> devices = [];
   List<Json> sharing = [];
+
+  /// Screen-sharing invitations announced once each (by member id).
+  final Set<String> _announcedInvitations = {};
+
+  /// Bumped when a new invitation arrives, so the UI can alert once.
+  int invitationSignal = 0;
+  String? newInvitationHost;
   String deviceId = '';
   String? error;
 
@@ -384,6 +391,32 @@ class MobileController extends ChangeNotifier {
     );
   }
 
+  /// Invitations for this phone that still wait for an answer.
+  List<(Json, Json)> get pendingInvitations => [
+    for (final group in sharing)
+      if (group['state'] != 'stopped')
+        for (final member
+            in (group['members'] as List? ?? []).whereType<Json>())
+          if (member['viewerDeviceId'] == deviceId &&
+              member['state'] == 'invited')
+            (group, member),
+  ];
+
+  void _announceInvitations() {
+    String? host;
+    for (final (group, member) in pendingInvitations) {
+      final id = member['id'] as String? ?? '';
+      if (id.isEmpty || !_announcedInvitations.add(id)) continue;
+      host = group['hostName'] as String? ?? 'Một máy tính';
+    }
+    if (host == null) return;
+    newInvitationHost = host;
+    invitationSignal++;
+    if (preferences.haptics) {
+      unawaited(HapticFeedback.mediumImpact().catchError((Object _) {}));
+    }
+  }
+
   Future<void> refresh() async {
     if (account == null || _refreshing) return;
     _refreshing = true;
@@ -396,6 +429,7 @@ class MobileController extends ChangeNotifier {
           .where((d) => d['deviceRole'] == 'host' && d['id'] != deviceId)
           .toList();
       sharing = groups;
+      _announceInvitations();
       if (capabilities['available'] == true) {
         await api.request(
           '/api/v2/devices/heartbeat',
@@ -1289,6 +1323,8 @@ class MobileController extends ChangeNotifier {
         account = null;
         devices = [];
         sharing = [];
+        _announcedInvitations.clear();
+        newInvitationHost = null;
         notifyListeners();
       }
     }

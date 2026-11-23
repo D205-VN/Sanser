@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sanser_mobile/src/keyboard_sheet.dart';
 import 'package:sanser_mobile/src/api.dart';
 import 'package:sanser_mobile/src/controller.dart';
 import 'package:sanser_mobile/src/floating_controls.dart';
@@ -93,6 +94,9 @@ Future<void> finish(WidgetTester tester, MobileController c) async {
 }
 
 void main() {
+  // These cover compose-then-send; live typing has its own tests.
+  setUp(() => RemoteKeyboardSheet.liveTyping = false);
+  tearDown(() => RemoteKeyboardSheet.liveTyping = true);
   testWidgets(
     'view-only actions allow local viewing but expose no keyboard or game controls',
     (tester) async {

@@ -707,7 +707,7 @@ int runMac(bool host,int argc,char** argv) {
         HostOutput peer(options); Encoder encoder(options,peer); MacInputInjector injector(CGDisplayBounds(display.displayID));
         blockedApps.setBounds(CGDisplayBounds(display.displayID));
         VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
-        VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{});
+        VoicePanel voicePanel(options.groupVoice,voice,options.sharing ? std::function<void()>([&] { peer.stop(); }) : std::function<void()>{},options.sharing && options.collab);
         peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
         voice::PlaybackTap originalSound(voice::RenderSource::External);
         AudioPacketizer audio([&](const AudioSamples& samples) { peer.audio(samples); });
@@ -843,7 +843,7 @@ int runMac(bool host,int argc,char** argv) {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     Peer peer(options);peer.onClipboard=platformClipboard; Decoder decoder;
     VoiceRuntime voice(options.groupVoice,[&](voice::Packet packet) { peer.voicePacket(std::move(packet)); },[&](voice::State state) { peer.setVoiceState(state); });
-    VoicePanel voicePanel(options.groupVoice,voice);
+    VoicePanel voicePanel(options.groupVoice,voice,{},options.collab);
     peer.onVoice=[&](voice::Packet packet) { voice.receive(std::move(packet)); };
     AudioPlayer audio(options.audio);
     // Viewer-side recording of the already-received stream (no re-encode).

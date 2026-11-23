@@ -76,6 +76,8 @@ struct Options {
 Options parseOptions(bool host, int argc, char** argv);
 std::vector<std::string> takeVoiceCommands();
 std::vector<std::string> takeCollabCommands();
+/** Chat lines for the floating panel (`panel-chat` stdin commands). */
+std::vector<std::string> takePanelChatCommands();
 // Latest macOS host overlay-exclusion request, if any (collab-exclude).
 std::optional<bool> takeCollabExclude();
 Bytes encodeInput(const Input& input);

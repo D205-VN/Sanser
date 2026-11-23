@@ -88,6 +88,29 @@ public:
 private:
   std::optional<View> last_; Clock::time_point at_{};
 };
+// Chat in the native floating panel. The shell stays the only chat hub: it
+// pushes each chat it records and validates/sends what the panel posts.
+// stdin:  panel-chat\t<0|1 own>\t<hex name>\t<hex text>
+// stdout: SNUSER_PANEL_CHAT\t<hex text>
+inline constexpr std::size_t panelChatMaxText=1024,panelChatMaxName=64*4;
+struct PanelChatLine { bool own=false; std::string name,text; };
+inline bool isPanelChatCommand(std::string_view line) { return line.starts_with("panel-chat\t"); }
+inline std::optional<PanelChatLine> parsePanelChat(std::string_view line) {
+  if(!isPanelChatCommand(line)) return std::nullopt;
+  line.remove_prefix(11);
+  const auto a=line.find('\t'); if(a!=1 || (line[0]!='0' && line[0]!='1')) return std::nullopt;
+  const auto rest=line.substr(2); const auto b=rest.find('\t'); if(b==std::string_view::npos) return std::nullopt;
+  auto name=userUnhex(rest.substr(0,b)); auto text=userUnhex(rest.substr(b+1));
+  if(!name || !text || text->empty() || text->size()>panelChatMaxText || name->size()>panelChatMaxName) return std::nullopt;
+  for(auto& c:*name) if(static_cast<unsigned char>(c)<32) c=' ';
+  for(auto& c:*text) if(static_cast<unsigned char>(c)<32 && c!='\n') c=' ';
+  return PanelChatLine{line[0]=='1',std::move(*name),std::move(*text)};
+}
+inline std::string panelChatRecord(std::string_view text) { return "SNUSER_PANEL_CHAT\t"+userHex(text)+"\n"; }
+inline void panelChatSend(std::string_view text) {
+  if(text.empty() || text.size()>panelChatMaxText) return;
+  const auto line=panelChatRecord(text); std::fputs(line.c_str(),stdout); std::fflush(stdout);
+}
 inline std::string collabSource(const std::string& id) { return id.empty() ? std::string("-") : id; }
 inline void collabRecord(const std::string& source,const std::vector<std::uint8_t>& payload) {
   const auto encoded=userHex(std::string_view(reinterpret_cast<const char*>(payload.data()),payload.size()));

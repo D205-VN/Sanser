@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sanser_mobile/src/adaptive_layout.dart';
 import 'package:sanser_mobile/src/api.dart';
 import 'package:sanser_mobile/src/controller.dart';
 import 'package:sanser_mobile/src/floating_controls.dart';
@@ -340,4 +341,21 @@ void main() {
     expect(tester.takeException(), isNull);
     await finish(tester, c);
   }, variant: TargetPlatformVariant.only(TargetPlatform.linux));
+  testWidgets('pending invitations show a count on the Share tab', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MobileWorkspace(
+          appBar: AppBar(),
+          body: const SizedBox(),
+          selectedIndex: 0,
+          onSelected: (_) {},
+          badges: const {1: 2},
+        ),
+      ),
+    );
+    expect(find.byKey(const ValueKey('workspace-badge-1')), findsOneWidget);
+    expect(find.text('2'), findsOneWidget);
+  });
 }

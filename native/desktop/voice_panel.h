@@ -6,8 +6,9 @@ namespace sanser::desktop {
 class VoicePanel {
 public:
   // A stop callback identifies the sharing host. It gets one combined panel,
-  // even without voice support; viewers only get voice controls.
-  VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> stopSharing={});
+  // even without voice support; viewers only get voice controls. With chat,
+  // the panel also shows the session chat (and exists even without voice).
+  VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> stopSharing={},bool chat=false);
   ~VoicePanel();
   void pump();
 private:

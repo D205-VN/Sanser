@@ -1,5 +1,7 @@
 #include "voice_panel.h"
 #include "external_voice.h"
+#include "collab.h"
+#include "transport.h"
 #include "../../common/design_tokens.h"
 #import <Cocoa/Cocoa.h>
 #include <cstdlib>
@@ -15,14 +17,17 @@ static NSColor* panelAccent() { return panelColor(sanser::design::success); }
 static NSColor* panelRed() { return panelColor(sanser::design::danger); }
 
 // Clicking floating controls must not take keyboard focus from the desktop.
+// Only the open chat box may take it, and only when its field is clicked.
 @interface SanserCallPanel : NSPanel
+@property(nonatomic,assign) BOOL allowKey;
 @end
 @implementation SanserCallPanel
-- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeKeyWindow { return self.allowKey; }
 - (BOOL)canBecomeMainWindow { return NO; }
 @end
 
 @interface SanserCallSurface : NSView
+@property(nonatomic,assign) CGFloat chatDivider;
 @end
 @implementation SanserCallSurface
 - (void)drawRect:(NSRect)dirty {
@@ -35,7 +40,12 @@ static NSColor* panelRed() { return panelColor(sanser::design::danger); }
     [[NSColor colorWithWhite:1 alpha:0.08] setStroke];
     NSBezierPath* line=[NSBezierPath bezierPath];
     [line moveToPoint:NSMakePoint(14,self.bounds.size.height-52)];
-    [line lineToPoint:NSMakePoint(self.bounds.size.width-14,self.bounds.size.height-52)]; [line stroke];
+    [line lineToPoint:NSMakePoint(self.bounds.size.width-14,self.bounds.size.height-52)];
+    if(self.chatDivider>0 && self.chatDivider<self.bounds.size.height-52) {
+      [line moveToPoint:NSMakePoint(14,self.chatDivider)];
+      [line lineToPoint:NSMakePoint(self.bounds.size.width-14,self.chatDivider)];
+    }
+    [line stroke];
   }
 }
 @end
@@ -71,8 +81,11 @@ static NSColor* panelRed() { return panelColor(sanser::design::danger); }
   std::function<VoiceRuntime::Status()> read;
   std::function<void(sanser::voice::State)> write;
   std::function<void()> stop;
+  std::function<std::vector<std::string>()> chatLines;
+  std::function<void(std::string)> chatSend;
   VoiceRuntime::Status previous;
   bool hasSnapshot,lastExpanded;
+  unsigned unread,lastUnread;
 }
 @property(nonatomic,weak) NSPanel* panel;
 @property(nonatomic,strong) NSButton* toggle;
@@ -88,9 +101,17 @@ static NSColor* panelRed() { return panelColor(sanser::design::danger); }
 @property(nonatomic,strong) NSTextField* status;
 @property(nonatomic,strong) NSTextField* section;
 @property(nonatomic,strong) NSTextField* badge;
+@property(nonatomic,strong) NSTextField* chatSection;
+@property(nonatomic,strong) NSScrollView* chatScroll;
+@property(nonatomic,strong) NSTextView* chatView;
+@property(nonatomic,strong) NSTextField* chatInput;
+@property(nonatomic,strong) NSButton* chatButton;
+@property(nonatomic,strong) NSMutableArray<NSAttributedString*>* chatMessages;
 @property(nonatomic,assign) BOOL expanded;
 @property(nonatomic,assign) BOOL voiceEnabled;
+@property(nonatomic,assign) BOOL chatEnabled;
 - (void)activateVoice:(NSButton*)sender;
+- (void)sendChat:(id)sender;
 - (void)refreshVoice:(id)sender;
 @end
 
@@ -108,13 +129,61 @@ static void callControl(NSButton* button,NSString* symbol,NSString* title,NSStri
   button.imagePosition=NSImageLeft; button.imageHugsTitle=YES; button.title=title;
   button.font=[NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
 }
+static constexpr CGFloat voiceSectionHeight=112,chatSectionHeight=168;
 @implementation SanserVoicePanelActions
+- (CGFloat)expandedHeight {
+  return 52+(self.voiceEnabled ? voiceSectionHeight : 0)+(self.chatEnabled ? chatSectionHeight : 0);
+}
+- (void)showChat {
+  NSMutableAttributedString* text=[NSMutableAttributedString new];
+  if(!self.chatMessages.count)
+    [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"No messages yet. Chat is kept only for this session."
+      attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:11],NSForegroundColorAttributeName:panelMuted()}]];
+  for(NSAttributedString* line in self.chatMessages) {
+    if(text.length) [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
+    [text appendAttributedString:line];
+  }
+  [self.chatView.textStorage setAttributedString:text];
+  [self.chatView scrollToEndOfDocument:nil];
+}
+- (void)receiveChat {
+  if(!chatLines) return;
+  bool changed=false;
+  for(const auto& raw:chatLines()) {
+    const auto line=sanser::desktop::parsePanelChat(raw); if(!line) continue;
+    NSString* name=line->own ? @"You" : [NSString stringWithUTF8String:line->name.c_str()];
+    NSString* body=[NSString stringWithUTF8String:line->text.c_str()];
+    if(!name.length) name=@"Viewer";
+    if(!body) continue;
+    NSMutableAttributedString* entry=[[NSMutableAttributedString alloc] initWithString:[name stringByAppendingString:@": "]
+      attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:11 weight:NSFontWeightSemibold],NSForegroundColorAttributeName:line->own ? panelAccent() : panelInk()}];
+    [entry appendAttributedString:[[NSAttributedString alloc] initWithString:body
+      attributes:@{NSFontAttributeName:[NSFont systemFontOfSize:11],NSForegroundColorAttributeName:panelInk()}]];
+    [self.chatMessages addObject:entry];
+    while(self.chatMessages.count>50) [self.chatMessages removeObjectAtIndex:0];
+    if(!line->own && !self.expanded) ++unread;
+    changed=true;
+  }
+  if(changed) [self showChat];
+}
+- (void)sendChat:(id)sender {
+  (void)sender;
+  NSString* text=[self.chatInput.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if(!text.length || !chatSend) return;
+  const char* utf8=text.UTF8String; if(!utf8) return;
+  std::string value(utf8); if(value.size()>sanser::desktop::panelChatMaxText) { NSBeep(); return; }
+  chatSend(value); self.chatInput.stringValue=@"";
+}
 - (void)activateVoice:(NSButton*)sender {
   if(sender.tag==5) { if(stop) { write({false,false,false}); stop(); } return; }
+  if(sender.tag==6) { [self sendChat:sender]; return; }
   if(sender.tag==0) {
-    if(!self.voiceEnabled) return;
+    if(!self.voiceEnabled && !self.chatEnabled) return;
     self.expanded=!self.expanded;
-    NSRect frame=self.panel.frame; const auto height=self.expanded ? 164.0 : 52.0;
+    if(self.expanded) unread=0;
+    ((SanserCallPanel*)self.panel).allowKey=self.expanded && self.chatEnabled;
+    if(!self.expanded && self.panel.isKeyWindow) [self.panel resignKeyWindow];
+    NSRect frame=self.panel.frame; const auto height=self.expanded ? [self expandedHeight] : 52.0;
     frame.origin.y=NSMaxY(frame)-height; frame.size.height=height;
     [self.panel setFrame:frame display:YES]; [self refreshVoice:nil]; return;
   }
@@ -128,43 +197,59 @@ static void callControl(NSButton* button,NSString* symbol,NSString* title,NSStri
 }
 - (void)refreshVoice:(id)sender {
   (void)sender; if(!read) return;
+  [self receiveChat];
   const auto value=read(); const auto& state=value.state;
-  if(hasSnapshot && lastExpanded==static_cast<bool>(self.expanded) && previous.state.joined==state.joined && previous.state.microphone==state.microphone && previous.state.deafened==state.deafened && previous.capturing==value.capturing && previous.code==value.code) return;
-  previous=value; hasSnapshot=true; lastExpanded=self.expanded;
+  if(hasSnapshot && lastUnread==unread && lastExpanded==static_cast<bool>(self.expanded) && previous.state.joined==state.joined && previous.state.microphone==state.microphone && previous.state.deafened==state.deafened && previous.capturing==value.capturing && previous.code==value.code) return;
+  previous=value; hasSnapshot=true; lastExpanded=self.expanded; lastUnread=unread;
   const bool sharing=static_cast<bool>(stop);
   const auto width=self.panel.frame.size.width,height=self.panel.frame.size.height;
-  self.titleLabel.stringValue=sharing ? @"Screen sharing" : @"Voice chat";
-  self.subtitle.stringValue=!self.voiceEnabled ? @"Sharing is active" : value.capturing ? @"Microphone on" : state.microphone ? @"Opening microphone…" : state.deafened ? @"Voice muted · mic off" : state.joined ? @"Listening · mic off" : @"Voice is off";
+  self.titleLabel.stringValue=sharing ? @"Screen sharing" : self.voiceEnabled ? @"Voice chat" : @"Chat";
+  self.subtitle.stringValue=!self.voiceEnabled ? (sharing ? @"Sharing is active" : @"Messages for this session") : value.capturing ? @"Microphone on" : state.microphone ? @"Opening microphone…" : state.deafened ? @"Voice muted · mic off" : state.joined ? @"Listening · mic off" : @"Voice is off";
   self.subtitle.textColor=value.capturing ? panelAccent() : panelMuted();
+  if(unread) {
+    self.subtitle.stringValue=unread==1 ? @"1 new message" : [NSString stringWithFormat:@"%u new messages",unread];
+    self.subtitle.textColor=panelAccent();
+  }
   self.titleLabel.frame=NSMakeRect(48,height-25,124,17); self.subtitle.frame=NSMakeRect(48,height-40,124,13);
   self.toggle.frame=NSMakeRect(12,height-40,28,28);
-  callIcon(self.toggle,sharing ? @"display" : @"waveform",sharing ? @"Screen sharing active · open voice controls" : @"Open voice controls",sharing || state.joined ? panelAccent() : panelInk(),YES);
+  callIcon(self.toggle,sharing ? @"display" : self.voiceEnabled ? @"waveform" : @"bubble.left.and.bubble.right",sharing ? @"Screen sharing active · open voice controls" : self.voiceEnabled ? @"Open voice controls" : @"Open chat",sharing || state.joined ? panelAccent() : panelInk(),YES);
   self.shortcut.frame=NSMakeRect(width-(sharing ? 164 : 132),height-40,78,28);
   self.chevron.frame=NSMakeRect(width-(sharing ? 78 : 42),height-40,28,28);
   self.stopButton.frame=NSMakeRect(width-42,height-40,28,28);
   self.stopButton.hidden=!sharing;
-  self.shortcut.hidden=self.chevron.hidden=!self.voiceEnabled;
-  self.toggle.enabled=self.voiceEnabled; self.shortcut.enabled=YES;
+  self.shortcut.hidden=!self.voiceEnabled;
+  self.chevron.hidden=!self.voiceEnabled && !self.chatEnabled;
+  self.toggle.enabled=self.voiceEnabled || self.chatEnabled; self.shortcut.enabled=YES;
   self.shortcut.tag=state.joined ? 2 : 1;
   const auto micLabel=state.microphone ? @"Mute microphone" : @"Unmute microphone";
   callControl(self.shortcut,!state.joined ? @"headphones" : state.microphone ? @"mic.fill" : @"mic.slash",!state.joined ? @"Join" : value.capturing ? @"Mic on" : state.microphone ? @"…" : @"Muted",!state.joined ? @"Join voice · listen only" : micLabel,value.capturing ? panelAccent() : panelInk(),state.microphone);
   self.shortcut.symbolConfiguration=[NSImageSymbolConfiguration configurationWithPointSize:12 weight:NSFontWeightMedium];
-  callIcon(self.chevron,self.expanded ? @"chevron.up" : @"chevron.down",self.expanded ? @"Collapse voice controls" : @"Expand voice controls",panelMuted());
+  callIcon(self.chevron,self.expanded ? @"chevron.up" : @"chevron.down",self.expanded ? @"Collapse voice and chat" : @"Expand voice and chat",unread ? panelAccent() : panelMuted());
   ((SanserCallButton*)self.chevron).fill=NSColor.clearColor;
   callIcon(self.stopButton,@"stop.fill",@"Stop screen sharing",panelRed(),YES);
   const auto actionWidth=(width-92)/2;
-  self.join.frame=NSMakeRect(16,40,width-32,36);
-  self.microphone.frame=NSMakeRect(16,40,actionWidth,36);
-  self.deafen.frame=NSMakeRect(24+actionWidth,40,actionWidth,36);
-  self.leave.frame=NSMakeRect(width-52,40,36,36);
-  self.join.hidden=!self.expanded || state.joined;
-  self.microphone.hidden=self.deafen.hidden=self.leave.hidden=!self.expanded || !state.joined;
-  self.section.hidden=self.badge.hidden=self.status.hidden=!self.expanded;
-  self.section.frame=NSMakeRect(16,85,150,16); self.badge.frame=NSMakeRect(width-88,85,72,16);
+  const CGFloat base=self.chatEnabled ? chatSectionHeight : 0;
+  const bool voiceShown=self.expanded && self.voiceEnabled;
+  self.join.frame=NSMakeRect(16,base+40,width-32,36);
+  self.microphone.frame=NSMakeRect(16,base+40,actionWidth,36);
+  self.deafen.frame=NSMakeRect(24+actionWidth,base+40,actionWidth,36);
+  self.leave.frame=NSMakeRect(width-52,base+40,36,36);
+  self.join.hidden=!voiceShown || state.joined;
+  self.microphone.hidden=self.deafen.hidden=self.leave.hidden=!voiceShown || !state.joined;
+  self.section.hidden=self.badge.hidden=self.status.hidden=!voiceShown;
+  self.section.frame=NSMakeRect(16,base+85,150,16); self.badge.frame=NSMakeRect(width-88,base+85,72,16);
+  const bool chatShown=self.expanded && self.chatEnabled;
+  self.chatSection.hidden=self.chatScroll.hidden=self.chatInput.hidden=self.chatButton.hidden=!chatShown;
+  self.chatSection.frame=NSMakeRect(16,chatSectionHeight-24,150,16);
+  self.chatScroll.frame=NSMakeRect(12,50,width-24,chatSectionHeight-78);
+  self.chatInput.frame=NSMakeRect(16,14,width-32-64,26);
+  self.chatButton.frame=NSMakeRect(width-74,13,58,28);
+  callControl(self.chatButton,@"paperplane.fill",@"Send",@"Send message",panelAccent(),YES);
+  ((SanserCallSurface*)self.panel.contentView).chatDivider=self.voiceEnabled && self.chatEnabled ? chatSectionHeight : 0;
   self.section.stringValue=@"VOICE CHAT";
   self.badge.stringValue=value.capturing ? @"MIC LIVE" : state.microphone ? @"OPENING" : state.joined ? @"MIC OFF" : @"NOT JOINED";
   self.badge.textColor=value.capturing ? panelAccent() : panelMuted();
-  self.status.frame=NSMakeRect(16,8,width-32,24);
+  self.status.frame=NSMakeRect(16,base+8,width-32,24);
   self.join.enabled=YES; self.microphone.enabled=self.deafen.enabled=self.leave.enabled=state.joined;
   callControl(self.join,@"headphones",@"Join voice",@"Join voice · listen only",panelAccent(),YES);
   callControl(self.microphone,state.microphone ? @"mic.fill" : @"mic.slash",state.microphone ? @"Mute mic" : @"Unmute",micLabel,value.capturing ? panelAccent() : panelInk(),state.microphone);
@@ -180,8 +265,11 @@ struct VoicePanel::Impl {
   NSPanel* __strong panel=nil;
   SanserVoicePanelActions* __strong action=nil;
   NSTimer* __strong timer=nil;
-  Impl(bool enabled,VoiceRuntime& voice,std::function<void()> stop):Impl([&voice] { return voice.snapshot(); },[&voice](sanser::voice::State state) { voice.configure(state); },enabled,std::move(stop)) {}
-  Impl(std::function<VoiceRuntime::Status()> read,std::function<void(sanser::voice::State)> write,bool enabled=true,std::function<void()> stop={}) {
+  Impl(bool enabled,VoiceRuntime& voice,std::function<void()> stop,bool chat):Impl([&voice] { return voice.snapshot(); },[&voice](sanser::voice::State state) { voice.configure(state); },enabled,std::move(stop),
+    chat ? std::function<std::vector<std::string>()>([] { return takePanelChatCommands(); }) : std::function<std::vector<std::string>()>{},
+    chat ? std::function<void(std::string)>([](std::string text) { panelChatSend(text); }) : std::function<void(std::string)>{}) {}
+  Impl(std::function<VoiceRuntime::Status()> read,std::function<void(sanser::voice::State)> write,bool enabled=true,std::function<void()> stop={},
+       std::function<std::vector<std::string>()> chatLines={},std::function<void(std::string)> chatSend={}) {
     if(stop) [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     const auto area=NSScreen.mainScreen.visibleFrame; const auto width=stop ? 352.0 : 312.0;
     panel=[[SanserCallPanel alloc] initWithContentRect:NSMakeRect(NSMaxX(area)-width-20,NSMaxY(area)-72,width,52) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
@@ -191,6 +279,9 @@ struct VoicePanel::Impl {
     panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary;
     panel.contentView=[[SanserCallSurface alloc] initWithFrame:NSMakeRect(0,0,width,52)];
     action=[SanserVoicePanelActions new]; action->read=std::move(read); action->write=std::move(write); action->stop=std::move(stop); action.panel=panel; action.voiceEnabled=enabled;
+    action->chatLines=std::move(chatLines); action->chatSend=std::move(chatSend); action.chatEnabled=action->chatLines && action->chatSend;
+    action.chatMessages=[NSMutableArray new];
+    panel.becomesKeyOnlyIfNeeded=YES;
     const auto button=[&](NSInteger tag) {
       SanserCallButton* result=[[SanserCallButton alloc] initWithFrame:NSZeroRect];
       result.target=action; result.action=@selector(activateVoice:); result.bordered=NO; result.imagePosition=NSImageOnly;
@@ -209,14 +300,28 @@ struct VoicePanel::Impl {
     ((SanserCallLabel*)action.section).control=nil; ((SanserCallLabel*)action.badge).control=nil;
     action.status=label(10,panelMuted()); action.status.alignment=NSTextAlignmentLeft; action.status.maximumNumberOfLines=2;
     ((SanserCallLabel*)action.status).control=nil;
+    action.chatSection=label(9,panelMuted()); action.chatSection.stringValue=@"CHAT"; ((SanserCallLabel*)action.chatSection).control=nil;
+    action.chatScroll=[[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,width-24,90)];
+    action.chatScroll.drawsBackground=NO; action.chatScroll.hasVerticalScroller=YES; action.chatScroll.autohidesScrollers=YES; action.chatScroll.borderType=NSNoBorder;
+    action.chatView=[[NSTextView alloc] initWithFrame:NSMakeRect(0,0,width-24,90)];
+    action.chatView.editable=NO; action.chatView.selectable=YES; action.chatView.drawsBackground=NO; action.chatView.textContainerInset=NSMakeSize(4,2);
+    action.chatView.verticallyResizable=YES; action.chatView.horizontallyResizable=NO; action.chatView.autoresizingMask=NSViewWidthSizable;
+    action.chatView.textContainer.widthTracksTextView=YES;
+    action.chatScroll.documentView=action.chatView; [panel.contentView addSubview:action.chatScroll];
+    action.chatInput=[NSTextField textFieldWithString:@""]; action.chatInput.placeholderString=@"Message everyone…";
+    action.chatInput.font=[NSFont systemFontOfSize:12]; action.chatInput.bezelStyle=NSTextFieldRoundedBezel;
+    action.chatInput.target=action; action.chatInput.action=@selector(sendChat:);
+    [action.chatInput setAccessibilityLabel:@"Chat message"]; [panel.contentView addSubview:action.chatInput];
+    action.chatButton=button(6);
+    [action showChat];
     [action refreshVoice:nil];
     timer=[NSTimer timerWithTimeInterval:0.1 target:action selector:@selector(refreshVoice:) userInfo:nil repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes]; [panel orderFrontRegardless];
   }
   ~Impl() { [timer invalidate]; action->read={}; action->write={}; action->stop={}; [panel close]; }
 };
-VoicePanel::VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> stopSharing) {
-  if(enabled || stopSharing) impl_=std::make_unique<Impl>(enabled,voice,std::move(stopSharing));
+VoicePanel::VoicePanel(bool enabled,VoiceRuntime& voice,std::function<void()> stopSharing,bool chat) {
+  if(enabled || stopSharing || chat) impl_=std::make_unique<Impl>(enabled,voice,std::move(stopSharing),chat);
 }
 VoicePanel::~VoicePanel()=default;
 void VoicePanel::pump() {
@@ -278,6 +383,24 @@ void testVoicePanelControls() {
     VoicePanel::Impl screenOnly([&] { return status; },[&](voice::State next) { status.state=next; },false,[&] { ++stops; });
     if(screenOnly.action.stopButton.hidden || !screenOnly.action.shortcut.hidden || !screenOnly.action.chevron.hidden) throw std::runtime_error("Host without voice must retain sharing indicator and stop");
     [screenOnly.action.stopButton performClick:nil]; if(stops!=2) throw std::runtime_error("Screen-only Stop did not stop sharing");
+    std::vector<std::string> incoming,sent;
+    VoicePanel::Impl chatting([&] { return status; },[&](voice::State next) { status.state=next; },true,[&] { ++stops; },
+      [&] { auto lines=std::move(incoming); incoming.clear(); return lines; },[&](std::string text) { sent.push_back(std::move(text)); });
+    if(chatting.panel.canBecomeKeyWindow) throw std::runtime_error("Collapsed panel must not take keyboard focus");
+    incoming.push_back("panel-chat\t0\t"+userHex("iPhone")+"\t"+userHex("xin chào"));
+    [chatting.action refreshVoice:nil];
+    if(chatting.action->unread!=1 || ![chatting.action.subtitle.stringValue isEqualToString:@"1 new message"]) throw std::runtime_error("Panel chat must count unread messages while collapsed");
+    [chatting.action.chevron performClick:nil];
+    if(chatting.action->unread || chatting.action.chatInput.hidden || !chatting.panel.canBecomeKeyWindow) throw std::runtime_error("Opening the panel must show chat, clear unread and allow typing");
+    if(chatting.panel.frame.size.height!=52+112+168) throw std::runtime_error("Chat must sit below the voice controls");
+    chatting.action.chatInput.stringValue=@"  ok thấy rồi  "; [chatting.action.chatButton performClick:nil];
+    if(sent.size()!=1 || sent[0]!="ok thấy rồi" || chatting.action.chatInput.stringValue.length) throw std::runtime_error("Send must post trimmed UTF-8 text and clear the box");
+    incoming.push_back("panel-chat\t1\t"+userHex("MacBook")+"\t"+userHex("ok thấy rồi"));
+    [chatting.action refreshVoice:nil];
+    if(chatting.action.chatMessages.count!=2 || chatting.action->unread) throw std::runtime_error("Own messages must show without counting as unread");
+    preview(chatting,"host-chat.png");
+    [chatting.action.chevron performClick:nil];
+    if(chatting.panel.canBecomeKeyWindow) throw std::runtime_error("Collapsing must give keyboard focus back");
   }
 }
 #endif

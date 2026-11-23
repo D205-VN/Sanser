@@ -8,6 +8,7 @@
     "core:window:allow-close",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
+    "core:window:allow-request-user-attention",
     "updater:default",
     "process:allow-restart",
     "notification:default"

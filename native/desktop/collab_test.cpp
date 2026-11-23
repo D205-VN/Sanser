@@ -15,6 +15,12 @@ void commands(){
   check(parsed && parsed->target=="*" && std::string(parsed->payload.begin(),parsed->payload.end())=="{\"type\":\"chat\"}","parse fan-out command");
   check(parseCollabCommand("collab-send\t018f4d89-5e8b-7a80-bd1e-cb7cb9f43189\t61").has_value(),"viewer target rejected");
   check(!parseCollabCommand("collab-send\t-\t").has_value(),"empty payload accepted");
+  const auto panel=parsePanelChat("panel-chat\t1\t"+userHex("MacBook")+"\t"+userHex("xin ch\xc3\xa0o\x07"));
+  check(panel && panel->own && panel->name=="MacBook" && panel->text=="xin ch\xc3\xa0o ","panel chat line not parsed or not cleaned");
+  check(!parsePanelChat("panel-chat\t2\t\t61").has_value(),"bad own flag accepted");
+  check(!parsePanelChat("panel-chat\t0\t\t").has_value(),"empty panel chat accepted");
+  check(!parsePanelChat("panel-chat\t0\t\t"+userHex(std::string(panelChatMaxText+1,'a'))).has_value(),"oversized panel chat accepted");
+  check(panelChatRecord("hi")=="SNUSER_PANEL_CHAT\t6869\n","panel chat record changed");
   check(!parseCollabCommand("collab-send\tbad target\t61").has_value(),"unsafe target accepted");
   check(!parseCollabCommand("collab-send\t-\tzz").has_value(),"invalid hex accepted");
   check(!parseCollabCommand("collab-send\t-\t"+std::string((collabMaxPayload+1)*2,'a')).has_value(),"oversized payload accepted");
