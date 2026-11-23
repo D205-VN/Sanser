@@ -27,7 +27,7 @@ ASSETS = [
 
 def fetch_releases(repo, token):
     req = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/releases?per_page=30",
+        f"https://api.github.com/repos/{repo}/releases?per_page=100",
         headers={"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}"},
     )
     with urllib.request.urlopen(req, timeout=30) as res:

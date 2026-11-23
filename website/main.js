@@ -248,7 +248,7 @@
   // out; releases.json (written by the deploy, no quota) covers that case.
   function loadReleases() {
     if (!window.fetch) return;
-    getJSON('https://api.github.com/repos/' + REPO + '/releases?per_page=30', { Accept: 'application/vnd.github+json' })
+    getJSON('https://api.github.com/repos/' + REPO + '/releases?per_page=100', { Accept: 'application/vnd.github+json' })
       .then(slimReleases)
       .catch(function () { return getJSON('releases.json'); })
       .then(function (list) { if (list && list.length) applyReleases(list); })

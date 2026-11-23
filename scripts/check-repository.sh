@@ -48,4 +48,13 @@ if git grep -IEn 'postgres(ql)?://[^[:space:]]+@[^[:space:]]*neon[.]tech' -- \
   fail "a non-placeholder Neon connection string is tracked"
 fi
 
-printf 'repository policy: ok (%s, protocol v2)\n' "$expected_version"
+# The phone app is versioned separately: it changes only when the phone app
+# changes. Its version lives in pubspec.yaml and must match the app constant
+# and the native mobile library.
+mobile_version="$(sed -n 's/^version: \([0-9][0-9.]*\)+[0-9][0-9]*$/\1/p' apps/mobile/pubspec.yaml)"
+[[ -n "$mobile_version" ]] || fail "apps/mobile/pubspec.yaml needs version: X.Y.Z+BUILD"
+grep -Fq "const mobileVersion = '${mobile_version}';" apps/mobile/lib/src/api.dart || fail "mobileVersion is not ${mobile_version}"
+grep -Fq "project(sanser_mobile VERSION ${mobile_version} " native/mobile/CMakeLists.txt || fail "native mobile project version is not ${mobile_version}"
+[[ -f "docs/releases/mobile-v${mobile_version}.md" || -f "docs/releases/v${mobile_version}.md" ]] || fail "missing release notes for mobile ${mobile_version}"
+
+printf 'repository policy: ok (desktop %s, mobile %s, protocol v2)\n' "$expected_version" "$mobile_version"

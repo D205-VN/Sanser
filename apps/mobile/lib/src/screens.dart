@@ -178,7 +178,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.31',
+                          'Sanser $mobileVersion',
                           style: TextStyle(color: SanserTokens.muted),
                         ),
                         const SizedBox(height: 24),

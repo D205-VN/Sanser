@@ -9,10 +9,13 @@ if [[ ! -d "$DEVELOPER_DIR/Platforms/iPhoneOS.platform" ]]; then
   echo 'Set DEVELOPER_DIR to the full Xcode.app/Contents/Developer directory.' >&2
   exit 2
 fi
-output_dir="${1:-$repo_dir/artifacts/mobile-2.3.31}"
+# The phone app has its own version (apps/mobile/pubspec.yaml), separate from
+# the desktop apps.
+mobile_version="$(sed -n 's/^version: \([0-9.]*\)+.*/\1/p' "$repo_dir/apps/mobile/pubspec.yaml")"
+output_dir="${1:-$repo_dir/artifacts/mobile-$mobile_version}"
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
-ipa="$output_dir/Sanser-iOS-2.3.31-device-unsigned.ipa"
+ipa="$output_dir/Sanser-iOS-$mobile_version-device-unsigned.ipa"
 if [[ -e "$ipa" ]]; then echo "Already exists: $ipa" >&2; exit 2; fi
 bash "$repo_dir/scripts/build-mobile-ios.sh" iphoneos
 
