@@ -178,7 +178,7 @@ class _SanserHomeState extends State<SanserHome> with WidgetsBindingObserver {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Sanser 2.3.29',
+                          'Sanser 2.3.30',
                           style: TextStyle(color: SanserTokens.muted),
                         ),
                         const SizedBox(height: 24),
@@ -1282,7 +1282,7 @@ class _RemoteSessionState extends State<RemoteSession>
                 ? 'Rê 1 ngón · cuộn 2 ngón · giữ để nhấp phải'
                 : mode == TouchMode.pan
                 ? 'Chụm để zoom · kéo để di chuyển hình'
-                : 'Chạm để nhấp · kéo để di chuyển · giữ để nhấp phải',
+                : 'Chạm để nhấp · vuốt để cuộn · giữ để nhấp phải · giữ rồi kéo để kéo thả',
             textAlign: TextAlign.center,
             style: const TextStyle(fontSize: 12, color: SanserTokens.muted),
           ),

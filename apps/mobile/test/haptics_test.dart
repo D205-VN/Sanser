@@ -237,12 +237,15 @@ void main() {
       await tester.longPress(area);
       expect(taps, 1);
       expect(holds, 1);
+      // A swipe scrolls without feedback; hold-then-drag gives one.
+      await tester.drag(area, const Offset(0, -150));
+      await tester.pump(const Duration(seconds: 1));
+      expect(holds, 1);
       final finger = await tester.startGesture(const Offset(100, 200));
+      await tester.pump(const Duration(milliseconds: 600));
       await finger.moveTo(const Offset(180, 200));
       await tester.pump();
       await finger.moveTo(const Offset(260, 200));
-      await tester.pump();
-      await finger.moveTo(const Offset(310, 200));
       await tester.pump();
       await finger.up();
       expect(holds, 2);

@@ -35,6 +35,14 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
       startFocal = Offset.zero,
       lastFocal = Offset.zero;
   bool moved = false, multi = false, dragging = false;
+
+  /// Direct touch: a one-finger swipe scrolls like a phone app.
+  bool scrolling = false;
+  Timer? fling;
+  double flingVelocity = 0;
+
+  /// Direct touch: hold, then move, to drag.
+  Offset? holdOrigin;
   Size viewport = Size.zero;
   Timer? viewportTimer;
   final Set<int> fingers = {};
@@ -62,6 +70,7 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) {
+      _stopFling();
       unawaited(widget.input.releaseAll());
       dragging = false;
     }
@@ -90,7 +99,38 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
     if (p != null) widget.input.move(p);
   }
 
+  /// Screen pixels of finger travel per wheel step.
+  static const double scrollStep = 24;
+
+  void _scrollBy(double dy) {
+    scrollRemainder += dy;
+    final lines = (scrollRemainder / scrollStep).truncate();
+    if (lines != 0) {
+      scrollRemainder -= lines * scrollStep;
+      unawaited(widget.input.scroll(lines));
+    }
+  }
+
+  void _stopFling() {
+    fling?.cancel();
+    fling = null;
+  }
+
+  /// Keeps scrolling after a quick swipe, slowing down like a phone list.
+  void _startFling(double velocity) {
+    _stopFling();
+    if (velocity.abs() < 300) return;
+    flingVelocity = velocity.clamp(-6000.0, 6000.0);
+    fling = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+      if (!mounted) return timer.cancel();
+      _scrollBy(flingVelocity * .016);
+      flingVelocity *= .92;
+      if (flingVelocity.abs() < 120) _stopFling();
+    });
+  }
+
   void _start(ScaleStartDetails d) {
+    _stopFling();
     startScale = scale;
     startPan = pan;
     startFocal = lastFocal = d.localFocalPoint;
@@ -107,6 +147,7 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
       unawaited(widget.input.button(0, false));
       dragging = false;
     }
+    if (multi) scrolling = false;
     if ((d.localFocalPoint - startFocal).distance > 6 ||
         (d.scale - 1).abs() > .03) {
       moved = true;
@@ -151,14 +192,20 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
         setState(() {});
       }
     } else if (!multi && moved) {
-      // Preserve drag and drop; no button is held until this is a one-finger drag.
-      if (!dragging) {
+      // Direct touch: a one-finger swipe scrolls the window under the finger,
+      // and the content follows the finger as in phone apps. Dragging is
+      // hold-then-move (see the long-press handlers).
+      if (!scrolling) {
+        if (_position(dragOrigin ?? startFocal) == null) return;
+        scrolling = true;
+        scrollRemainder = 0;
         _point(dragOrigin ?? startFocal);
-        dragging = true;
-        unawaited(widget.input.button(0, true));
-        if (widget.input.enabled) widget.onHoldFeedback?.call();
+        // Count the travel since the finger touched down, so the content
+        // keeps up with the finger.
+        _scrollBy((d.localFocalPoint - (dragOrigin ?? startFocal)).dy);
+        return;
       }
-      _point(d.localFocalPoint);
+      _scrollBy(delta.dy);
     }
   }
 
@@ -166,6 +213,47 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
     if (dragging) {
       unawaited(widget.input.button(0, false));
       dragging = false;
+    }
+    if (scrolling) {
+      scrolling = false;
+      _startFling(d.velocity.pixelsPerSecond.dy);
+    }
+  }
+
+  void _holdStart(LongPressStartDetails d) {
+    if (widget.mode == TouchMode.pan) return;
+    if (widget.mode == TouchMode.touchpad) {
+      unawaited(widget.input.click(1));
+      if (widget.input.enabled) widget.onHoldFeedback?.call();
+      return;
+    }
+    if (_position(d.localPosition) == null) return;
+    _stopFling();
+    holdOrigin = d.localPosition;
+    _point(d.localPosition);
+    if (widget.input.enabled) widget.onHoldFeedback?.call();
+  }
+
+  void _holdMove(LongPressMoveUpdateDetails d) {
+    final origin = holdOrigin;
+    if (widget.mode != TouchMode.direct || origin == null) return;
+    if (!dragging) {
+      if ((d.localPosition - origin).distance < 6) return;
+      dragging = true;
+      unawaited(widget.input.button(0, true));
+    }
+    _point(d.localPosition);
+  }
+
+  void _holdEnd() {
+    if (widget.mode != TouchMode.direct || holdOrigin == null) return;
+    holdOrigin = null;
+    if (dragging) {
+      unawaited(widget.input.button(0, false));
+      dragging = false;
+    } else {
+      // Held without moving: right click where the finger was.
+      unawaited(widget.input.click(1));
     }
   }
 
@@ -188,13 +276,19 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
       );
       return Listener(
         onPointerDown: (event) {
-          if (fingers.isEmpty) dragOrigin = event.localPosition;
+          if (fingers.isEmpty) {
+            dragOrigin = event.localPosition;
+            _stopFling();
+          }
           fingers.add(event.pointer);
         },
         onPointerUp: (event) => fingers.remove(event.pointer),
         onPointerCancel: (event) {
           fingers.remove(event.pointer);
           dragging = false;
+          scrolling = false;
+          holdOrigin = null;
+          _stopFling();
           unawaited(widget.input.releaseAll());
         },
         child: GestureDetector(
@@ -212,14 +306,13 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
             unawaited(widget.input.click());
             if (widget.input.enabled) widget.onTapFeedback?.call();
           },
-          onLongPressStart: (d) {
-            if (widget.mode == TouchMode.pan) return;
-            if (widget.mode == TouchMode.direct) {
-              if (_position(d.localPosition) == null) return;
-              _point(d.localPosition);
-            }
-            unawaited(widget.input.click(1));
-            if (widget.input.enabled) widget.onHoldFeedback?.call();
+          onLongPressStart: _holdStart,
+          onLongPressMoveUpdate: _holdMove,
+          onLongPressEnd: (_) => _holdEnd(),
+          onLongPressCancel: () {
+            if (dragging) unawaited(widget.input.button(0, false));
+            dragging = false;
+            holdOrigin = null;
           },
           child: Stack(
             children: [
@@ -259,6 +352,7 @@ class _MobileTouchSurfaceState extends State<MobileTouchSurface>
   @override
   void dispose() {
     viewportTimer?.cancel();
+    _stopFling();
     WidgetsBinding.instance.removeObserver(this);
     unawaited(widget.input.releaseAll());
     super.dispose();

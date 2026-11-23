@@ -48,22 +48,86 @@ void main() {
           ),
         ),
       );
+      // Hold, then move: drag and drop from where the finger was held.
       final finger = await tester.startGesture(const Offset(100, 200));
+      await tester.pump(const Duration(milliseconds: 600));
       await finger.moveTo(const Offset(180, 200));
       await tester.pump(const Duration(milliseconds: 30));
       await finger.moveTo(const Offset(250, 200));
       await tester.pump(const Duration(milliseconds: 30));
       await finger.up();
+      await tester.pump();
       await input.drain();
       final down = engine.events.firstWhere((e) => e.$2 == 1 && e.$7);
       expect(down.$3, (100 / 800 * 65535).round());
+      expect(down.$5, 0);
       expect(engine.events.last.$2, 1);
       expect(engine.events.last.$7, false);
+      expect(engine.events.where((e) => e.$2 == 3), isEmpty);
+
+      // Held without moving: a right click, released on lift.
+      engine.events.clear();
+      final still = await tester.startGesture(const Offset(300, 300));
+      await tester.pump(const Duration(milliseconds: 600));
+      await still.up();
+      await tester.pump();
+      await input.drain();
+      final buttons = engine.events.where((e) => e.$2 == 1).toList();
+      expect(buttons.map((e) => (e.$5, e.$7)), [(1, true), (1, false)]);
       await tester.pumpWidget(const SizedBox.shrink());
       input.dispose();
       await input.drain();
     },
   );
+  testWidgets('a one-finger swipe scrolls the window under the finger', (
+    tester,
+  ) async {
+    final engine = InputEngine();
+    final input = MobileInput(engine, 'scroll', enabled: true);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox.expand(
+          child: MobileTouchSurface(
+            input: input,
+            mode: TouchMode.direct,
+            videoSize: const Size(800, 600),
+          ),
+        ),
+      ),
+    );
+    // Finger moves up: the page scrolls down, as in phone apps.
+    final finger = await tester.startGesture(const Offset(400, 400));
+    for (var y = 380.0; y >= 200; y -= 20) {
+      await finger.moveTo(Offset(400, y));
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    await finger.up();
+    await tester.pump();
+    await input.drain();
+    final wheel = engine.events.where((e) => e.$2 == 3).toList();
+    expect(wheel, isNotEmpty);
+    expect(wheel.every((e) => e.$6 < 0), isTrue);
+    expect(wheel.fold<int>(0, (sum, e) => sum + e.$6), -(200 ~/ 24));
+    expect(engine.events.where((e) => e.$2 == 1), isEmpty);
+    final point = engine.events.firstWhere((e) => e.$2 == 0);
+    expect(point.$3, (400 / 800 * 65535).round());
+    expect(point.$4, (400 / 600 * 65535).round());
+
+    // A quick flick keeps scrolling for a moment.
+    engine.events.clear();
+    await tester.fling(
+      find.byKey(const ValueKey('mobile-touch-surface')),
+      const Offset(0, 200),
+      2000,
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    await input.drain();
+    final flung = engine.events.where((e) => e.$2 == 3).toList();
+    expect(flung.fold<int>(0, (sum, e) => sum + e.$6), greaterThan(200 ~/ 24));
+    await tester.pumpWidget(const SizedBox.shrink());
+    input.dispose();
+    await input.drain();
+  });
   test('moves coalesce and flush before reliable button transitions', () async {
     final engine = InputEngine();
     final active = MobileInput(engine, 'session-a', enabled: true);
