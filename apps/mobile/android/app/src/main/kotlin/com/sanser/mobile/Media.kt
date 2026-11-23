@@ -160,12 +160,7 @@ internal class RemoteVideo(context: Context, private val client: () -> NativeCli
                 if(codec==null || width!=w || height!=h){
                     releaseCodec();width=w;height=h
                     post{fit()}
-                    val format=MediaFormat.createVideoFormat("video/avc",w,h).apply {
-                        setInteger(MediaFormat.KEY_MAX_INPUT_SIZE,4*1024*1024)
-                        if(Build.VERSION.SDK_INT>=30)setInteger(MediaFormat.KEY_LOW_LATENCY,1)
-                    }
-                    codec=MediaCodec.createDecoderByType("video/avc").apply {
-                        configure(format,surface.holder.surface,null,0);start()
+                    codec=LowLatencyDecoder.create(w,h,surface.holder.surface).apply {
                         if(Build.VERSION.SDK_INT>=23)setOnFrameRenderedListener({_,_,_->if(!firstFrame){firstFrame=true;rendered()}},decoder)
                     }
                 }

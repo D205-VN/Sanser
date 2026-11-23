@@ -70,7 +70,9 @@ class MobileInput {
       normalized.dy.clamp(0.0, 1.0),
     );
     _pendingMove = cursor;
-    _moveTimer ??= Timer(const Duration(milliseconds: 8), flushMove);
+    // Touches arrive once per screen frame; send right after this one
+    // instead of waiting a fixed 8 ms. Moves in the same frame still coalesce.
+    _moveTimer ??= Timer(Duration.zero, flushMove);
   }
 
   void flushMove() {

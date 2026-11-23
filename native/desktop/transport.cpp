@@ -26,6 +26,7 @@
 #include <bcrypt.h>
 #else
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #if defined(__ANDROID__)
@@ -433,6 +434,21 @@ std::vector<Reassembler::Repair> Reassembler::repairs(bool& expired,Clock::time_
   return result;
 }
 
+// Marks media packets as interactive video so Wi-Fi (WMM) sends them in the
+// video access category, and Apple Wi-Fi keeps the radio awake for them
+// (as Moonlight does). Best effort: a refusal changes nothing else.
+static void markInteractiveVideo(std::intptr_t socket) {
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
+  int service=NET_SERVICE_TYPE_VI;
+  setsockopt(static_cast<int>(socket),SOL_SOCKET,SO_NET_SERVICE_TYPE,&service,sizeof(service));
+#elif defined(__linux__) || defined(__ANDROID__)
+  int tos=0xA0; // DSCP CS5: WMM video.
+  setsockopt(static_cast<int>(socket),IPPROTO_IP,IP_TOS,&tos,sizeof(tos));
+#else
+  (void)socket;
+#endif
+}
+
 Peer::Peer(const Options& o,DatagramIo io) : options_(o), io_(io), codec_(o.token, o.host), reassembler_(o.bitrate,o.ultraLowLatency) {
   if(!io_.send) io_.send=sendDatagram;
   if(!io_.receive) io_.receive=receiveDatagram;
@@ -460,6 +476,7 @@ Peer::Peer(const Options& o,DatagramIo io) : options_(o), io_(io), codec_(o.toke
   // Retry bounded sizes rather than silently retaining a tiny default buffer.
   for(int buffer : {4*1024*1024,1024*1024,512*1024,256*1024,128*1024,64*1024})
     if(setsockopt(fd,SOL_SOCKET,SO_RCVBUF,reinterpret_cast<const char*>(&buffer),sizeof(buffer))==0) break;
+  markInteractiveVideo(static_cast<std::intptr_t>(fd));
   } catch(...) {
     if(socket_!=-1) closeSocket(static_cast<Socket>(socket_));
     socket_=-1;

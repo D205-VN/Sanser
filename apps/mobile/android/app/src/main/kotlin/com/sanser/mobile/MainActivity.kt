@@ -28,6 +28,7 @@ class MainActivity : FlutterActivity() {
     private val work = Executors.newSingleThreadExecutor()
     private val fileActions=Executors.newSingleThreadExecutor()
     private val generation = AtomicLong(0)
+    private val wifiLock by lazy { StreamingWifiLock(this) }
     private val documents by lazy { MobileFileDocuments(this) }
     @Volatile private var filesHandle=0L
     @Volatile private var filesRoot:java.io.File?=null
@@ -316,6 +317,7 @@ class MainActivity : FlutterActivity() {
                 if(epoch==generation.get() && id!=null)sink?.success(mapOf("state" to "collab","sessionId" to id,"engineAttempt" to engineAttempt,"payload" to text))
             }})
         client=native
+        wifiLock.hold(true)
         if(configuration["inputEnabled"]==true && configuration["sharingId"]==null){val root=documents.workspace();filesRoot=root;filesHandle=MobileFileBridge.open(root)}
         native.start(endpoint,configuration["sessionToken"] as String,configuration["inputEnabled"]==true,configuration["sharingId"]!=null,configuration["viewerId"] as? String ?: "",(configuration["localPort"] as? Number)?.toInt() ?: 0,((configuration["videoBitrateMbps"] as? Number)?.toInt() ?: 6)*1000000,(configuration["baselineRttMs"] as? Number)?.toDouble() ?: 0.0,filesHandle!=0L)
         native.mute(configuration["audioMuted"]==true)
@@ -343,6 +345,7 @@ class MainActivity : FlutterActivity() {
         val files=filesHandle;filesHandle=0;filesRoot=null;MobileFileBridge.close(files)
         mic?.close();mic=null
         val native=client;client=null;native?.input(4);native?.close()
+        wifiLock.hold(false)
         video?.resetStream()
         relay?.close();relay=null;audio?.close();audio=null;voiceOutput?.close();voiceOutput=null
     }

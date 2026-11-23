@@ -33,7 +33,10 @@ final class MobileVideoView: UIView {
         // Retry a busy layer on the display clock; normal frames do not wait
         // for this tick. The decoded mailbox stays newest-only in either case.
         let clock=CADisplayLink(target:target,selector:#selector(MobileVideoDisplayTick.tick))
-        clock.preferredFramesPerSecond=60;clock.isPaused=true
+        // ProMotion phones refresh at up to 120 Hz while streaming, so a
+        // decoded frame waits at most about 8 ms for the screen.
+        if #available(iOS 15.0,*){clock.preferredFrameRateRange=CAFrameRateRange(minimum:60,maximum:120,preferred:120)}else{clock.preferredFramesPerSecond=60}
+        clock.isPaused=true
         clock.add(to:.main,forMode:.common);displayLink=clock
     }
     required init?(coder:NSCoder){fatalError("init(coder:) has not been implemented")}

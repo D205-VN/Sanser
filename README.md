@@ -1,9 +1,9 @@
-# Sanser 2.3.30
+# Sanser 2.3.31
 
 Sanser is a low-latency remote desktop and remote game streaming platform. Version 2 is built as one Tauri application with a Svelte 5 interface, a Rust control plane, and native Windows/macOS media engines.
 
 ```text
-Product:  Sanser 2.3.30
+Product:  Sanser 2.3.31
 App ID:   com.sanser.desktop
 Protocol: v2
 Native:   Authenticated SNV2 media engines
@@ -20,6 +20,10 @@ Native:   Authenticated SNV2 media engines
 - Bounded SNV2 packet, input, audio, retransmission and diagnostic primitives.
 - Native Windows host/client and macOS host/client engines. Cross-platform H.264 sessions use the shared authenticated transport with separate OS backends; support is gated by packaged engine capabilities and server device roles.
 
+Sanser 2.3.31 cuts phone streaming lag (Wi-Fi priority marking, Android
+Wi-Fi low-latency lock and low-latency decoders, 120 Hz on ProMotion
+iPhones) and attaches the phone apps to each release; see
+[2.3.31 notes](docs/releases/v2.3.31.md).
 Sanser 2.3.30 makes direct touch on phones work like phone apps: swipe to
 scroll, hold to right-click, hold then drag to drag; see
 [2.3.30 notes](docs/releases/v2.3.30.md).
