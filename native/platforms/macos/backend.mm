@@ -79,8 +79,11 @@ public:
     if(CMTimeCompare(time,lastTime_)<=0) time=CMTimeAdd(lastTime_,CMTimeMake(1,options_.fps));
     lastTime_=time;
     pendingRefresh_=true;
-    if(ready_()) { pendingRefresh_=false; ++captured_; frames_->submit(CapturedFrame(pixels,time)); }
+    ++offered_;
+    if(ready_()) { pendingRefresh_=false; ++captured_; ++admitted_; frames_->submit(CapturedFrame(pixels,time)); }
   }
+  // Screen changes offered by capture, and how many the sender accepted.
+  std::pair<std::uint64_t,std::uint64_t> admission() const { return {offered_.load(),admitted_.load()}; }
   void refresh() {
     std::lock_guard lock(encodeMutex_);
     if(!lastPixels_ || !ready_()) return;
@@ -190,6 +193,7 @@ private:
   std::mutex sessionMutex_;
   std::unique_ptr<LatestFrameWorker<CapturedFrame>> frames_;
   std::atomic<std::uint64_t> captured_{0},submitted_{0},completed_{0},encoderDropped_{0},queueUs_{0},encodeAndPublishUs_{0};
+  std::atomic<std::uint64_t> offered_{0},admitted_{0};
   std::atomic<bool> force_{true},failed_{false},retry_{false},pendingRefresh_{false};
 };
 class Decoder {
@@ -754,7 +758,7 @@ int runMac(bool host,int argc,char** argv) {
         auto blockedCheckAt=Clock::time_point{};
         // Mobile viewers only: at a low budget, fast motion at full size limits
         // the paced sender to ~15-20 fps. Trade size for frame rate.
-        ResolutionPolicy resolution; bool reduced=false;
+        ResolutionPolicy resolution; unsigned level=0; CaptureAdmission admission;
         auto fullWidth=options.width,fullHeight=options.height;
         while(peer.running() && !capture.failed && !encoder.failed()) {
           peer.pumpControl();
@@ -765,8 +769,8 @@ int runMac(bool host,int argc,char** argv) {
             // then a fresh IDR at the new size (stale-size captures are dropped).
             SCDisplay* target=screens[*index];
             std::tie(fullWidth,fullHeight)=fitted(target);
-            const auto width=reduced ? ResolutionPolicy::reducedDimension(fullWidth) : fullWidth;
-            const auto height=reduced ? ResolutionPolicy::reducedDimension(fullHeight) : fullHeight;
+            const auto width=ResolutionPolicy::dimension(fullWidth,level);
+            const auto height=ResolutionPolicy::dimension(fullHeight,level);
             NSMutableArray<SCWindow*>* nextExcluded=[NSMutableArray arrayWithArray:excluded];
             if(blockedApps.enabled()) {
               // Never show the new display before its blocked windows are excluded.
@@ -820,16 +824,20 @@ int runMac(bool host,int argc,char** argv) {
           voicePanel.pump(); if(!peer.running()) break;
           const auto target=peer.bitrate();
           if(target!=bitrate && encoder.setBitrate(target)) bitrate=target;
-          if(peer.videoLimited() && resolution.update(target,Clock::now())!=reduced) {
-            reduced=resolution.reduced();
-            const auto width=reduced ? ResolutionPolicy::reducedDimension(fullWidth) : fullWidth;
-            const auto height=reduced ? ResolutionPolicy::reducedDimension(fullHeight) : fullHeight;
+          // Phones (video-limited viewers): keep the frame rate when the link
+          // cannot carry full-size pictures, by lowering the picture size.
+          const auto [offered,admitted]=encoder.admission();
+          const bool starved=peer.videoLimited() && admission.starved(offered,admitted,Clock::now());
+          if(peer.videoLimited() && (resolution.update(target,Clock::now(),starved),resolution.level()!=level)) {
+            level=resolution.level();
+            const auto width=ResolutionPolicy::dimension(fullWidth,level);
+            const auto height=ResolutionPolicy::dimension(fullHeight,level);
             encoder.resize(width,height);
             config.width=width; config.height=height;
             [stream updateConfiguration:config completionHandler:^(NSError* error) {
               if(error) std::cerr<<captureFailure(error,"Resize screen capture")<<std::endl;
             }];
-            std::cout<<"SNV2_RESOLUTION "<<(reduced ? "reduced" : "restored")<<"="<<width<<"x"<<height<<" targetBps="<<target<<std::endl;
+            std::cout<<"SNV2_RESOLUTION level="<<level<<" size="<<width<<"x"<<height<<" targetBps="<<target<<" starved="<<(starved ? 1 : 0)<<std::endl;
           }
           const bool retry=encoder.takeRetryRequest();
           if(peer.takeKeyframeRequest() || retry) { encoder.keyframe(); encoder.refresh(); }
@@ -863,6 +871,7 @@ int runMac(bool host,int argc,char** argv) {
     if (options.ultraLowLatency) { ((CAMetalLayer*)view.layer).displaySyncEnabled=NO; }
     window.contentView=view; window.acceptsMouseMovedEvents=options.input; [window center]; [window makeKeyAndOrderFront:nil]; [window makeFirstResponder:view]; [NSApp activateIgnoringOtherApps:YES];
     [view installTextControls];
+    if(options.input) [view acceptFileDrops];
     SanserShortcuts* shortcuts=nil;
     SanserControllerInput* controller=nil;
     ControllerSession controllerSession({

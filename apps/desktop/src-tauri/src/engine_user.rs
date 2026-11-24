@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
     io::{self, BufRead, BufReader, Read, Write},
+    path::PathBuf,
     sync::{Arc, Mutex, Weak, mpsc},
     thread,
     time::Duration,
@@ -226,6 +227,30 @@ impl UserControl {
         }
         Ok(())
     }
+    /// A file dropped on the remote-desktop window. The original is copied to
+    /// a private folder (the transfer removes its copy when it ends) and
+    /// offered; the other computer still has to accept it.
+    fn offer_dropped_file(&self, path: PathBuf) {
+        let Some(files) = self.files() else {
+            self.collab
+                .notice("File transfer is not available in this session.");
+            return;
+        };
+        let notice = self.collab.notifier();
+        thread::spawn(move || {
+            let message = match dropped_copy(&path) {
+                Ok((name, copy)) => match files.offer_source(name.clone(), copy.clone()) {
+                    Ok(_) => format!("Offered {name}. Waiting for the other computer to accept."),
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&copy);
+                        format!("Could not send {name}: {error}")
+                    }
+                },
+                Err(error) => error,
+            };
+            notice(&message);
+        });
+    }
     pub fn collab(&self) -> &crate::collab::Hub {
         &self.collab
     }
@@ -385,6 +410,15 @@ impl UserControl {
                 }
                 ["SNUSER_COLLAB_VIEW", rest @ ..] => self.collab.observe_view(rest),
                 _ => {}
+            }
+            return;
+        }
+        if let Some(encoded) = line[position..]
+            .trim_end_matches(['\n', '\r'])
+            .strip_prefix("SNUSER_FILE_DROP\t")
+        {
+            if let Some(path) = crate::collab::panel_text(encoded) {
+                self.offer_dropped_file(PathBuf::from(path));
             }
             return;
         }
@@ -579,9 +613,58 @@ pub fn command_writer(
     Ok(sender)
 }
 
+/// Checks a dropped path and copies the file into a fresh private folder.
+fn dropped_copy(path: &std::path::Path) -> Result<(String, PathBuf), String> {
+    const MAX: u64 = 25 * 1024 * 1024;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|_| path.is_absolute())
+        .ok_or("Only files can be sent.")?
+        .to_owned();
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| format!("{name} could not be read."))?;
+    if !metadata.is_file() {
+        return Err("Only files can be sent, not folders or links.".into());
+    }
+    if metadata.len() > MAX {
+        return Err(format!("{name} is larger than 25 MB."));
+    }
+    let folder = std::env::temp_dir().join("sanser-drops");
+    std::fs::create_dir_all(&folder).map_err(|_| "Could not prepare the file.".to_owned())?;
+    // The transfer deletes this private copy when it completes or stops.
+    let copy = folder.join(Uuid::new_v4().simple().to_string());
+    if std::fs::copy(path, &copy).is_err() {
+        let _ = std::fs::remove_file(&copy);
+        return Err(format!("{name} could not be read."));
+    }
+    Ok((name, copy))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_files_are_copied_privately_and_checked() -> Result<(), Box<dyn std::error::Error>> {
+        let folder = std::env::temp_dir().join(format!("sanser-drop-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder)?;
+        let original = folder.join("báo cáo.pdf");
+        std::fs::write(&original, b"hello")?;
+        let (name, copy) = dropped_copy(&original)?;
+        assert_eq!(name, "báo cáo.pdf");
+        assert_ne!(copy, original);
+        assert_eq!(std::fs::read(&copy)?, b"hello");
+        assert!(original.exists(), "the original is never moved or deleted");
+        std::fs::remove_file(copy)?;
+        assert!(dropped_copy(&folder).is_err(), "folders are refused");
+        assert!(dropped_copy(std::path::Path::new("relative.txt")).is_err());
+        let big = folder.join("big.bin");
+        std::fs::File::create(&big)?.set_len(25 * 1024 * 1024 + 1)?;
+        assert!(matches!(dropped_copy(&big), Err(error) if error.contains("25 MB")));
+        std::fs::remove_dir_all(folder)?;
+        Ok(())
+    }
     #[test]
     fn local_clipboard_is_explicit_and_independent_of_remote_permission()
     -> Result<(), Box<dyn std::error::Error>> {

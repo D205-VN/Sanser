@@ -1,6 +1,7 @@
 #import "ime_view.h"
 #include "keyboard.h"
 #include "text_input.h"
+#include "collab.h"
 #include <algorithm>
 
 using namespace sanser::desktop;
@@ -26,6 +27,29 @@ bool navigation(std::uint16_t hid) {
 
 @implementation SanserSnv2RemoteView
 @synthesize inputEnabled=_inputEnabled, released=_released, pointerHidden=_pointerHidden;
+// Files dragged from Finder onto the remote picture are sent to the other
+// computer (it still has to accept). Only plain local files, never folders.
+- (void)acceptFileDrops { [self registerForDraggedTypes:@[NSPasteboardTypeFileURL]]; }
+- (NSArray<NSURL*>*)droppedFiles:(id<NSDraggingInfo>)sender {
+  NSArray<NSURL*>* urls=[sender.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:@{NSPasteboardURLReadingFileURLsOnlyKey:@YES}];
+  NSMutableArray<NSURL*>* files=[NSMutableArray array];
+  for(NSURL* url in urls) {
+    NSNumber* regular=nil; [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+    if(regular.boolValue) [files addObject:url];
+  }
+  return files;
+}
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender { return [self droppedFiles:sender].count ? NSDragOperationCopy : NSDragOperationNone; }
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender { return [self draggingEntered:sender]; }
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+  // One transfer at a time: the first file is offered.
+  NSURL* file=[self droppedFiles:sender].firstObject;
+  if(!file) return NO;
+  const char* path=file.fileSystemRepresentation;
+  if(!path) return NO;
+  fileDropSend(path);
+  return YES;
+}
 - (void)setPointerHidden:(BOOL)value {
   if(_pointerHidden==value) return;
   _pointerHidden=value; [self.window invalidateCursorRectsForView:self];

@@ -111,6 +111,14 @@ inline void panelChatSend(std::string_view text) {
   if(text.empty() || text.size()>panelChatMaxText) return;
   const auto line=panelChatRecord(text); std::fputs(line.c_str(),stdout); std::fflush(stdout);
 }
+// A file dropped on the remote-desktop window. The shell checks the path,
+// copies the file privately and offers it through the consented transfer.
+constexpr std::size_t fileDropMaxPath=4096;
+inline std::string fileDropRecord(std::string_view path) { return "SNUSER_FILE_DROP\t"+userHex(path)+"\n"; }
+inline void fileDropSend(std::string_view path) {
+  if(path.empty() || path.size()>fileDropMaxPath) return;
+  const auto line=fileDropRecord(path); std::fputs(line.c_str(),stdout); std::fflush(stdout);
+}
 inline std::string collabSource(const std::string& id) { return id.empty() ? std::string("-") : id; }
 inline void collabRecord(const std::string& source,const std::vector<std::uint8_t>& payload) {
   const auto encoded=userHex(std::string_view(reinterpret_cast<const char*>(payload.data()),payload.size()));

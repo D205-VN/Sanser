@@ -608,6 +608,19 @@ impl Hub {
     }
     /// Text typed in the native floating panel, sent under this computer's
     /// chat name. A failure is shown in the panel only.
+    /// A line from Sanser itself in the floating panel (never sent to peers).
+    pub fn notice(&self, text: &str) {
+        self.panel(false, "Sanser", text);
+    }
+    /// Notices from another thread, after this call returns.
+    pub fn notifier(&self) -> impl Fn(&str) + Send + 'static {
+        let pipe = self.pipe.lock().ok().and_then(|pipe| pipe.clone());
+        move |text: &str| {
+            if let Some(pipe) = pipe.as_ref() {
+                let _ = pipe.try_send(panel_command(false, "Sanser", text));
+            }
+        }
+    }
     pub fn post_from_panel(&self, text: &str) {
         let name = self
             .state

@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mftransform.h>
@@ -37,6 +38,7 @@
 #include "desktop_duplication.h"
 #include "privacy_screen.h"
 #include "control_cutoff.h"
+#include "collab.h"
 #include "blocked_apps.h"
 #include "../../windows-uac/client.h"
 #include "mf_video_packet_encoder.h"
@@ -305,6 +307,27 @@ LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM w,LPARAM l) {
   auto* state=reinterpret_cast<WindowState*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE) { state=static_cast<WindowState*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(state)); }
   if(!state) return DefWindowProcW(window,message,w,l);
+  if(message==WM_DROPFILES) {
+    // A file dragged from Explorer onto the remote picture: offer the first
+    // plain file to the other computer, which still has to accept it.
+    const auto drop=reinterpret_cast<HDROP>(w);
+    const auto count=DragQueryFileW(drop,0xFFFFFFFF,nullptr,0);
+    for(UINT index=0;index<count;++index) {
+      const auto length=DragQueryFileW(drop,index,nullptr,0);
+      if(!length || length>=sanser::desktop::fileDropMaxPath) continue;
+      std::wstring path(length+1,L'\0');
+      DragQueryFileW(drop,index,path.data(),length+1); path.resize(length);
+      const auto attributes=GetFileAttributesW(path.c_str());
+      if(attributes==INVALID_FILE_ATTRIBUTES || (attributes&FILE_ATTRIBUTE_DIRECTORY)) continue;
+      const int bytes=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,path.c_str(),static_cast<int>(path.size()),nullptr,0,nullptr,nullptr);
+      if(bytes<=0) continue;
+      std::string utf8(static_cast<std::size_t>(bytes),'\0');
+      WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,path.c_str(),static_cast<int>(path.size()),utf8.data(),bytes,nullptr,nullptr);
+      sanser::desktop::fileDropSend(utf8);
+      break;
+    }
+    DragFinish(drop); return 0;
+  }
   if(message==WM_SYSCOMMAND && (w&0xfff0)==WindowState::fullscreenCommand) {
     if(!state->viewOnly) state->sendInput(Input{});
     setFullscreen(window,*state,!state->fullscreen); return 0;
@@ -851,6 +874,7 @@ int runWindows(bool host,int argc,char** argv) {
   const auto instance=GetModuleHandleW(nullptr); WNDCLASSW klass{}; klass.lpfnWndProc=windowProc; klass.hInstance=instance; klass.lpszClassName=L"SanserRemoteDesktop"; klass.hCursor=LoadCursor(nullptr,IDC_ARROW); RegisterClassW(&klass);
   HWND window=CreateWindowExW(0,klass.lpszClassName,options.input ? L"Sanser · Remote desktop · Ctrl+Alt+Enter: full screen · Ctrl+Alt+I: text input · Ctrl+Alt+Escape: release" : L"Sanser · View only · Ctrl+Alt+Enter: full screen",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1280,760,nullptr,nullptr,instance,&state);
   if(!window) throw std::runtime_error("Unable to create remote desktop window");
+  if(options.input) DragAcceptFiles(window,TRUE);
   if(auto menu=GetSystemMenu(window,FALSE)) AppendMenuW(menu,MF_STRING,WindowState::fullscreenCommand,L"Full screen\tCtrl+Alt+Enter");
   // Open full screen like the macOS viewer's full-screen mode; Ctrl+Alt+Enter
   // or the window menu returns to a normal window.

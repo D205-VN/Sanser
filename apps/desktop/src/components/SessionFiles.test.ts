@@ -95,3 +95,31 @@ it('reads bounded file slices, waits for write ACK and then finishes', async () 
   await waitFor(() => expect(mocks.action).toHaveBeenCalledWith('client', 'session-a', { operation: 'finish', id: 'file-a' }));
   expect(chunkLengths).toEqual([4096, 1]);
 });
+function dropEvent(type: string, files: File[]) {
+  const event = new Event(type, { bubbles: true, cancelable: true }) as DragEvent;
+  Object.defineProperty(event, 'dataTransfer', { value: { types: ['Files'], files, dropEffect: 'none' } });
+  return event;
+}
+it('offers a file dropped anywhere on the window, and only one at a time', async () => {
+  mocks.action.mockResolvedValue({ available: true, incoming: null, outgoing: transfer });
+  await open();
+  window.dispatchEvent(dropEvent('dragover', []));
+  await waitFor(() => expect(screen.getByText('Drop to send this file')).toBeInTheDocument());
+  const file = new File(['hello'], 'report.pdf');
+  window.dispatchEvent(dropEvent('drop', [file]));
+  await waitFor(() => expect(mocks.action).toHaveBeenCalledExactlyOnceWith('client', 'session-a', { operation: 'offer', name: 'report.pdf', size: 5 }));
+  expect(screen.queryByText('Drop to send this file')).not.toBeInTheDocument();
+  mocks.status.mockResolvedValue({ available: true, incoming: null, outgoing: { ...transfer, state: 'sending' } });
+  await waitFor(() => expect(screen.getByText(/Outgoing: notes.txt/)).toBeInTheDocument());
+  window.dispatchEvent(dropEvent('drop', [new File(['x'], 'second.txt')]));
+  await waitFor(() => expect(screen.getByText('Wait for the current transfer to finish.')).toBeInTheDocument());
+  expect(mocks.action).toHaveBeenCalledTimes(1);
+});
+it('refuses a dropped file over 25 MB without offering it', async () => {
+  await open();
+  const big = new File(['x'], 'big.iso');
+  Object.defineProperty(big, 'size', { value: 25 * 1048576 + 1 });
+  window.dispatchEvent(dropEvent('drop', [big]));
+  await waitFor(() => expect(screen.getByText('Choose a file no larger than 25 MB.')).toBeInTheDocument());
+  expect(mocks.action).not.toHaveBeenCalled();
+});

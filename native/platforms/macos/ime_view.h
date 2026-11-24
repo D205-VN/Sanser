@@ -35,4 +35,5 @@
 - (void)refreshTextControls;
 - (void)cancelComposition;
 - (void)suspendTextInput;
+- (void)acceptFileDrops;
 @end
