@@ -4,6 +4,7 @@
   import CapabilityNotice from '../components/CapabilityNotice.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import NativePerformance from '../components/NativePerformance.svelte';
+  import NetworkCheck from '../components/NetworkCheck.svelte';
   import { nativePerformance, metricIsFresh } from '../stores/nativePerformance';
   import { runtimeStatus } from '../lib/platform';
   import type { RuntimeStatus } from '../lib/types';
@@ -50,6 +51,7 @@
     <article class="card metric-card"><span>{$t('Frame rate')}</span><strong>{$connection.metrics ? `${$connection.metrics.fps} FPS` : '—'}</strong><small>{$connection.metrics ? `${$connection.metrics.droppedFrames} dropped` : $t('No media metrics')}</small></article>
   </div>
 
+  <NetworkCheck />
   <NativePerformance />
 
   <article class="card card-body stack">

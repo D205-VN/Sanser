@@ -15,6 +15,15 @@ export async function configureWindowsUac(enabled: boolean): Promise<WindowsUacS
   return invoke<WindowsUacStatus>('configure_windows_uac', { enabled });
 }
 
+export interface LoginItemStatus { available: boolean; enabled: boolean }
+export async function loginItemStatus(): Promise<LoginItemStatus> {
+  return isTauriRuntime() ? invoke<LoginItemStatus>('login_item_status') : { available: false, enabled: false };
+}
+export async function setLoginItem(enabled: boolean): Promise<LoginItemStatus> {
+  if (!isTauriRuntime()) throw new Error('Start at login requires the Sanser desktop app');
+  return invoke<LoginItemStatus>('set_login_item', { enabled });
+}
+
 export interface LoginDevice {
   installationId: string;
   deviceName: string;

@@ -10,6 +10,7 @@ mod engine_user;
 mod error;
 mod fec_health;
 mod file_transfer;
+mod login_item;
 mod models;
 mod problem_report;
 mod relay;
@@ -59,7 +60,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .setup(|app| {
             if cfg!(target_os = "windows") {
                 tray::install(app)?;
+                // Started by the login item: stay in the tray until opened.
+                if login_item::launched_at_login()
+                    && let Some(window) = app.get_webview_window("main")
+                {
+                    let _ = window.hide();
+                }
             }
+            login_item::refresh();
             #[cfg(debug_assertions)]
             eprintln!("Sanser lifecycle: setup completed");
             Ok(())
@@ -124,6 +132,8 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
     }
     let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         updater::check_update_via_github,
+        login_item::login_item_status,
+        login_item::set_login_item,
         windows_uac::windows_uac_status,
         windows_uac::configure_windows_uac,
         commands::get_runtime_status,

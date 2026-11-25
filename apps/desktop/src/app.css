@@ -647,9 +647,6 @@ body { background: var(--bg); }
 .computer-list .computer-top { margin: 0; }
 .computer-list .computer-actions { margin: 0; padding: 0; border: 0; align-self: center; }
 .computer-list .connect-reason { grid-column: 1 / -1; }
-.setup-checklist { display: grid; gap: 12px; padding: 0; margin: 24px auto; list-style: none; text-align: left; }
-.setup-checklist li { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-soft); }
-.setup-checklist li span { display: grid; place-items: center; width: 25px; height: 25px; flex-shrink: 0; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--accent); font-size: 12px; }
 .registration-notice { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .registration-notice > span { min-width: 0; }
 .registration-notice > .button { flex-shrink: 0; white-space: nowrap; overflow-wrap: normal; }

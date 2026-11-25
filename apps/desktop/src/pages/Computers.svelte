@@ -7,6 +7,8 @@
   import { onMount } from 'svelte';
   import Icon from '../components/Icon.svelte';
   import StatusPill from '../components/StatusPill.svelte';
+  import GettingStarted from '../components/GettingStarted.svelte';
+  import NetworkCheck from '../components/NetworkCheck.svelte';
   import type { Device, Page, RuntimeStatus } from '../lib/types';
   import { connection } from '../stores/connection';
   import { diagnostics } from '../stores/diagnostics';
@@ -274,6 +276,15 @@
     <div class="session-banner"><span><i></i>{$connection.engineRunning ? $t('Your remote window is open') : $t('A connection is in progress')}</span><button class="button small" onclick={() => navigate('session')}>{$t('Return to session →')}</button></div>
   {/if}
 
+  <GettingStarted
+    hasOtherDevice={remoteDevices.length > 0}
+    hostReachable={$hostStore.online || remoteDevices.some((device) => device.online && device.deviceRole !== 'client')}
+    connected={$connection.engineRunning}
+    hostAlwaysReady={$preferences.host.autoOnline}
+    {navigate}
+  />
+  <NetworkCheck compact />
+
   {#if $presence.error && !$presence.online && runtime.capabilities.clientEngine.state === 'available'}
     <div class="notice warning registration-notice" role="status"><span><strong>{$t('This computer is not ready to connect.')}</strong> {$t($presence.error)}</span><button class="button small" disabled={$presence.busy} onclick={() => presence.start(runtime)}>{$t('Retry registration')}</button></div>
   {/if}
@@ -292,7 +303,7 @@
     <div class="grid two computer-grid" aria-label={$t('Loading computers')}><div class="skeleton"></div><div class="skeleton"></div></div>
   {:else if visibleDevices.length === 0}
     <div class="card empty">
-      <div><div class="empty-mark"><Icon name="computers" /></div><h2>{remoteDevices.length === 0 ? $t('Add your first remote computer') : $t('No matching computers')}</h2><p>{remoteDevices.length === 0 ? $t('Install Sanser on a Windows PC or Mac and bring it online with this account.') : $t('Try another search or status filter.')}</p>{#if remoteDevices.length === 0}<ol class="setup-checklist"><li><span>1</span>{$t('Install Sanser on another computer')}</li><li><span>2</span>{$t('Sign in with this account and enable Host')}</li><li><span>3</span>{$t('Refresh this list and request a connection')}</li></ol>{/if}{#if remoteDevices.length > 0}<button class="button" onclick={() => { query = ''; filter = 'all'; }}>{$t('Clear filters')}</button>{:else}<button class="button primary" onclick={() => navigate(runtime.capabilities.hostEngine.state === 'available' ? 'host' : 'about')}>{$t('Set up your workspace →')}</button>{/if}</div>
+      <div><div class="empty-mark"><Icon name="computers" /></div><h2>{remoteDevices.length === 0 ? $t('Add your first remote computer') : $t('No matching computers')}</h2><p>{remoteDevices.length === 0 ? $t('Install Sanser on a Windows PC or Mac and bring it online with this account.') : $t('Try another search or status filter.')}</p>{#if remoteDevices.length > 0}<button class="button" onclick={() => { query = ''; filter = 'all'; }}>{$t('Clear filters')}</button>{:else}<button class="button primary" onclick={() => navigate(runtime.capabilities.hostEngine.state === 'available' ? 'host' : 'about')}>{$t('Set up your workspace →')}</button>{/if}</div>
     </div>
   {:else}
     <div class="grid two computer-grid" class:computer-list={layout === 'list'}>

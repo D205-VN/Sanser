@@ -9,7 +9,7 @@
   import ReportProblem from '../components/ReportProblem.svelte';
   import { normalizeServerUrl } from '../lib/api';
   import type { LoginSession, NetworkMode, Preferences, QualityProfile, RuntimeStatus, SettingsSection, VideoCodec } from '../lib/types';
-  import { exportDiagnostics } from '../lib/platform';
+  import { exportDiagnostics, loginItemStatus, setLoginItem, type LoginItemStatus } from '../lib/platform';
   import { syncWakeOnLan } from '../lib/wakeOnLan';
   import { host as hostStore } from '../stores/host';
   import { diagnostics } from '../stores/diagnostics';
@@ -26,6 +26,15 @@
   let saving = $state(false);
   let saveMessage = $state<string | null>(null);
   let loginSessions = $state<LoginSession[]>([]);
+  let loginItem = $state<LoginItemStatus>({ available: false, enabled: false });
+  let loginItemError = $state<string | null>(null);
+  void loginItemStatus().then((status) => { loginItem = status; }).catch(() => undefined);
+
+  async function changeLoginItem(enabled: boolean): Promise<void> {
+    loginItemError = null;
+    try { loginItem = await setLoginItem(enabled); }
+    catch (error) { loginItemError = error instanceof Error ? error.message : String(error); }
+  }
   let accountBusy = $state(false);
   let securityBusy = $state(false);
   let currentPassword = $state('');
@@ -277,6 +286,10 @@
             <strong>{$preferences.host.directUdpPort}</strong> {$t('to the same internal UDP port, and allow Sanser through the system firewall.')}
           </div>
           </details>
+          {#if loginItem.available}
+            <Toggle checked={loginItem.enabled} label={$t('Start Sanser when you sign in')} description={$t('Open Sanser in the background after this computer starts. Combine with automatic host to keep this computer reachable.')} onchange={(value) => { void changeLoginItem(value); }} />
+            {#if loginItemError}<p class="card-subtitle danger-text" role="alert">{$t(loginItemError)}</p>{/if}
+          {/if}
           <Toggle checked={$preferences.host.autoOnline} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('Bring host online automatically')} description={$t('Allow connection requests when you open Sanser.')} onchange={(value) => saveHost({ autoOnline: value })} />
           <Toggle checked={$preferences.host.autoAcceptOwnDevices} disabled={runtime.capabilities.hostEngine.state !== 'available'} label={$t('Auto accept trusted devices')} description={$preferences.trustedDeviceIds.length > 0 ? $t('{count} trusted computer(s) can connect without asking.', { count: $preferences.trustedDeviceIds.length }) : $t('No trusted computers yet. Choose Accept & trust on a request in Host to remember that computer.')} onchange={(value) => saveHost({ autoAcceptOwnDevices: value })} />
           {#if runtime.capabilities.hostAudio === true}<Toggle checked={$preferences.host.audioEnabled} label={$t('System audio')} description={$t('Share sound from this computer.')} onchange={(value) => saveHost({ audioEnabled: value })} />{/if}
