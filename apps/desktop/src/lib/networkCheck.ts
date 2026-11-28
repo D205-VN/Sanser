@@ -19,7 +19,8 @@ interface GatherResult {
   ipv6Available: boolean;
 }
 
-async function serverRoundTrip(serverUrl: string): Promise<number | null> {
+/** Median of three round trips to the server's health check, in ms. */
+export async function serverRoundTrip(serverUrl: string): Promise<number | null> {
   const samples: number[] = [];
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const started = performance.now();

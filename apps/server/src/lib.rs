@@ -1,3 +1,4 @@
+pub mod advisor_probe;
 pub mod auth;
 pub mod config;
 pub mod db;
@@ -223,8 +224,30 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::exams::heartbeat),
         )
         .route(
+            "/api/v2/exam-members/{member}/unlock",
+            post(routes::exams::unlock),
+        )
+        .route(
             "/api/v2/advisor/stream",
             get(routes::advisor::status).post(routes::advisor::advise),
+        )
+        .route(
+            "/api/v2/advisor/probes",
+            get(routes::probes::pending).post(routes::probes::create),
+        )
+        .route("/api/v2/advisor/probes/{probe}", get(routes::probes::show))
+        .route(
+            "/api/v2/advisor/probes/{probe}/upload",
+            post(routes::probes::upload)
+                .layer(DefaultBodyLimit::max(advisor_probe::CHUNK_BYTES + 1_024)),
+        )
+        .route(
+            "/api/v2/advisor/probes/{probe}/download",
+            get(routes::probes::download),
+        )
+        .route(
+            "/api/v2/advisor/probes/{probe}/result",
+            post(routes::probes::finish),
         )
         .route("/api/docs", get(routes::docs::page))
         .route("/api/openapi.json", get(routes::docs::openapi))

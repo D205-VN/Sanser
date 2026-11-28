@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   report: vi.fn(),
   stop: vi.fn(),
   capture: vi.fn(),
-  client: { joinExam: vi.fn(), examHeartbeat: vi.fn(), examPolicy: vi.fn() }
+  client: { joinExam: vi.fn(), examHeartbeat: vi.fn(), examPolicy: vi.fn(), unlockExam: vi.fn() }
 }));
 vi.mock('../lib/platform', () => ({
   examGuardApply: mocks.apply,
@@ -82,4 +82,37 @@ it('locks again after a restart and stays strict while the server is unreachable
   mocks.client.examPolicy.mockRejectedValue(Object.assign(new Error('gone'), { status: 404 }));
   await removed.resume();
   expect(removed.active()).toBe(false);
+});
+
+const unlock = { salt: 'AAECAwQFBgcICQoLDA0ODw==', hash: '7zlNmKeyQK+qOwTP1VPS4oD+8R31S77kGKQ0V3wl/rk=', iterations: 1000 };
+
+it('the emergency code unlocks through the server, and a wrong code does not', async () => {
+  vi.useRealTimers();
+  const seat = createExamSeat();
+  mocks.client.joinExam.mockResolvedValue(policy({ unlock }));
+  await seat.join('84DWNR', 'An', 'device-1');
+  mocks.client.unlockExam.mockRejectedValueOnce(Object.assign(new Error('the unlock code is not right'), { status: 422 }));
+  expect(await seat.unlock('ab3k-9mzq')).toBe(false);
+  expect(seat.active()).toBe(true);
+  mocks.client.unlockExam.mockResolvedValueOnce(policy({ memberState: 'removed' }));
+  expect(await seat.unlock('ab3k-9mzq')).toBe(true);
+  expect(mocks.client.unlockExam).toHaveBeenLastCalledWith('member-1', 'AB3K9MZQ');
+  expect(get(seat).finished).toBe('unlocked');
+  expect(seat.active()).toBe(false);
+  expect(mocks.stop).toHaveBeenCalled();
+});
+
+it('without the server the stored hash decides, even after a restart', async () => {
+  vi.useRealTimers();
+  const first = createExamSeat();
+  mocks.client.joinExam.mockResolvedValue(policy({ unlock }));
+  await first.join('84DWNR', 'An', 'device-1');
+  // A new store, as after Sanser restarts; the network is down.
+  const seat = createExamSeat();
+  mocks.client.unlockExam.mockRejectedValue(Object.assign(new Error('Unable to reach the server'), { status: 0 }));
+  expect(await seat.unlock('WRONGCOD')).toBe(false);
+  expect(seat.active()).toBe(true);
+  expect(await seat.unlock('AB3K 9MZQ')).toBe(true);
+  expect(get(seat).finished).toBe('unlocked');
+  expect(seat.active()).toBe(false);
 });

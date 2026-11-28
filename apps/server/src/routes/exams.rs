@@ -12,8 +12,10 @@ use axum::{
     extract::{Path, Query, State},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rand::{Rng, rngs::OsRng};
+use hmac::{Hmac, Mac};
+use rand::{Rng, RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -26,6 +28,10 @@ use crate::{
 };
 
 const CODE_LENGTH: usize = 6;
+/// Long enough that guessing it offline against the hash is hopeless.
+const UNLOCK_CODE_LENGTH: usize = 8;
+/// PBKDF2-HMAC-SHA256 rounds for the offline unlock check.
+pub const UNLOCK_ITERATIONS: u32 = 100_000;
 const CODE_ALPHABET: &[u8; 31] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const MAX_ALLOWED_APPS: usize = 12;
 const MAX_HOURS: i64 = 8;
@@ -128,6 +134,24 @@ pub struct RoomSummary {
     created_at: i64,
     expires_at: i64,
     ended_at: Option<i64>,
+    /// Read to one student whose computer is stuck; absent on older rooms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unlock_code: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlockCheck {
+    /// Base64 salt and PBKDF2-HMAC-SHA256 hash of the upper-case code.
+    salt: String,
+    hash: String,
+    iterations: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnlockRequest {
+    code: String,
 }
 
 #[derive(Serialize)]
@@ -187,6 +211,9 @@ pub struct Policy {
     block_ai: bool,
     heartbeat_seconds: u32,
     screen_seconds: u32,
+    /// Lets the computer accept the emergency code without the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unlock: Option<UnlockCheck>,
 }
 
 fn uuid(value: &str, field: &str) -> Result<String, AppError> {
@@ -239,10 +266,61 @@ pub fn normalize_code(value: &str) -> Option<String> {
         .then_some(code)
 }
 
-fn generate_code() -> String {
-    (0..CODE_LENGTH)
+fn random_code(length: usize) -> String {
+    (0..length)
         .map(|_| char::from(CODE_ALPHABET[OsRng.gen_range(0..CODE_ALPHABET.len())]))
         .collect()
+}
+
+fn generate_code() -> String {
+    random_code(CODE_LENGTH)
+}
+
+/// Upper case without spaces or dashes, as people type it.
+pub fn normalize_unlock_code(value: &str) -> String {
+    value
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// PBKDF2-HMAC-SHA256 with one 32-byte block (RFC 8018), as Web Crypto does.
+pub fn unlock_hash(code: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
+    let keyed = <Hmac<Sha256> as Mac>::new_from_slice(code.as_bytes())
+        .expect("HMAC accepts keys of any length");
+    let mut first = keyed.clone();
+    first.update(salt);
+    first.update(&1_u32.to_be_bytes());
+    let mut block: [u8; 32] = first.finalize().into_bytes().into();
+    let mut out = block;
+    for _ in 1..iterations {
+        let mut round = keyed.clone();
+        round.update(&block);
+        block = round.finalize().into_bytes().into();
+        for (target, byte) in out.iter_mut().zip(block) {
+            *target ^= byte;
+        }
+    }
+    out
+}
+
+/// A new emergency code with its salt and hash, all ready to store.
+fn new_unlock() -> (String, String, String) {
+    let code = random_code(UNLOCK_CODE_LENGTH);
+    let mut salt = [0_u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    let hash = unlock_hash(&code, &salt, UNLOCK_ITERATIONS);
+    (code, STANDARD.encode(salt), STANDARD.encode(hash))
+}
+
+fn codes_match(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left
+            .bytes()
+            .zip(right.bytes())
+            .fold(0_u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
 }
 
 /// Short free text from the student computer, made safe to store and show.
@@ -288,6 +366,7 @@ fn row_to_room(row: &sqlx::postgres::PgRow) -> Result<RoomSummary, AppError> {
         created_at: row.try_get("created_at").map_err(AppError::from_db)?,
         expires_at: row.try_get("expires_at").map_err(AppError::from_db)?,
         ended_at: row.try_get("ended_at").map_err(AppError::from_db)?,
+        unlock_code: row.try_get("unlock_code").map_err(AppError::from_db)?,
     })
 }
 
@@ -381,11 +460,16 @@ pub async fn create(
     let now = now_unix();
     let id = Uuid::new_v4().to_string();
     let apps_json = serde_json::to_string(&apps).map_err(|_| AppError::Internal)?;
+    // A hundred thousand hash rounds: keep them off the async workers.
+    let (unlock_code, unlock_salt, unlock_hash) = tokio::task::spawn_blocking(new_unlock)
+        .await
+        .map_err(|_| AppError::Internal)?;
     // A code collision with another open room is rare; try a few codes.
     for _ in 0..8 {
         let inserted = sqlx::query(
-            "INSERT INTO exam_rooms (id, owner_user_id, title, code, allowed_apps_json, block_ai, created_at, updated_at, expires_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8) ON CONFLICT DO NOTHING",
+            "INSERT INTO exam_rooms (id, owner_user_id, title, code, allowed_apps_json, block_ai, created_at, updated_at, expires_at, \
+             unlock_code, unlock_salt, unlock_hash) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING",
         )
         .bind(&id)
         .bind(&auth.user_id)
@@ -395,6 +479,9 @@ pub async fn create(
         .bind(request.block_ai)
         .bind(now)
         .bind(now + request.hours * 3600)
+        .bind(&unlock_code)
+        .bind(&unlock_salt)
+        .bind(&unlock_hash)
         .execute(&state.pool)
         .await
         .map_err(AppError::from_db)?;
@@ -657,7 +744,7 @@ pub async fn join(
 async fn policy(state: &AppState, user_id: &str, member_id: &str) -> Result<Policy, AppError> {
     let row = sqlx::query(
         "SELECT m.id AS member_id, m.state AS member_state, r.id AS room_id, r.title, r.state AS room_state, \
-         r.expires_at, r.allowed_apps_json, r.block_ai, u.display_name AS supervisor_name \
+         r.expires_at, r.allowed_apps_json, r.block_ai, r.unlock_salt, r.unlock_hash, u.display_name AS supervisor_name \
          FROM exam_members m JOIN exam_rooms r ON r.id = m.room_id JOIN users u ON u.id = r.owner_user_id \
          WHERE m.id=$1 AND m.user_id=$2",
     )
@@ -673,6 +760,13 @@ async fn policy(state: &AppState, user_id: &str, member_id: &str) -> Result<Poli
         room_state = "ended".into();
     }
     let watched = state.exam_live.is_watched(member_id).await;
+    let salt: Option<String> = row.try_get("unlock_salt").map_err(AppError::from_db)?;
+    let hash: Option<String> = row.try_get("unlock_hash").map_err(AppError::from_db)?;
+    let unlock = salt.zip(hash).map(|(salt, hash)| UnlockCheck {
+        salt,
+        hash,
+        iterations: UNLOCK_ITERATIONS,
+    });
     Ok(Policy {
         member_id: row.try_get("member_id").map_err(AppError::from_db)?,
         room_id: row.try_get("room_id").map_err(AppError::from_db)?,
@@ -695,7 +789,63 @@ async fn policy(state: &AppState, user_id: &str, member_id: &str) -> Result<Poli
         } else {
             NORMAL_SCREEN_SECONDS
         },
+        unlock,
     })
+}
+
+/// Student side: the supervisor read out the emergency code. The student
+/// leaves the room and the supervisor sees an "emergency-unlock" entry.
+pub async fn unlock(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(member): Path<String>,
+    ApiJson(request): ApiJson<UnlockRequest>,
+) -> Result<Json<Policy>, AppError> {
+    let member_id = uuid(&member, "memberId")?;
+    if !state
+        .exam_join_limiter
+        .check(format!("unlock:{member_id}"))
+        .await
+    {
+        return Err(AppError::RateLimited);
+    }
+    let current = policy(&state, &auth.user_id, &member_id).await?;
+    if current.room_state != "open" || current.member_state == "removed" {
+        return Ok(Json(current));
+    }
+    let expected: Option<String> =
+        sqlx::query_scalar("SELECT unlock_code FROM exam_rooms WHERE id=$1")
+            .bind(&current.room_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(AppError::from_db)?;
+    let typed = normalize_unlock_code(&request.code);
+    if !expected.is_some_and(|code| codes_match(&code, &typed)) {
+        return Err(AppError::Validation("the unlock code is not right".into()));
+    }
+    let now = now_unix();
+    let mut transaction = state.pool.begin().await.map_err(AppError::from_db)?;
+    sqlx::query(
+        "UPDATE exam_members SET state='removed', last_seen_at=$1, violation_count = violation_count + 1 WHERE id=$2",
+    )
+    .bind(now)
+    .bind(&member_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::from_db)?;
+    sqlx::query(
+        "INSERT INTO exam_violations (id, room_id, member_id, kind, detail, created_at) VALUES ($1,$2,$3,'emergency-unlock','',$4)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&current.room_id)
+    .bind(&member_id)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .map_err(AppError::from_db)?;
+    transaction.commit().await.map_err(AppError::from_db)?;
+    state.exam_live.forget_member(&member_id).await;
+    Ok(Json(policy(&state, &auth.user_id, &member_id).await?))
 }
 
 pub async fn heartbeat(
@@ -810,6 +960,37 @@ pub async fn cleanup(pool: &sqlx::PgPool, now: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn unlock_hash_is_standard_pbkdf2_sha256() {
+        assert_eq!(
+            hex(&unlock_hash("password", b"salt", 1)),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+        );
+        assert_eq!(
+            hex(&unlock_hash("password", b"salt", 2)),
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+        );
+    }
+
+    #[test]
+    fn unlock_codes_are_typed_loosely_and_compared_exactly() {
+        assert_eq!(normalize_unlock_code(" ab3k-9mz q "), "AB3K9MZQ");
+        assert!(codes_match("AB3K9MZQ", "AB3K9MZQ"));
+        assert!(!codes_match("AB3K9MZQ", "AB3K9MZ"));
+        assert!(!codes_match("AB3K9MZQ", "AB3K9MZR"));
+        let (code, salt, hash) = new_unlock();
+        assert_eq!(code.len(), UNLOCK_CODE_LENGTH);
+        let salt = STANDARD.decode(salt).expect("salt");
+        assert_eq!(
+            STANDARD.encode(unlock_hash(&code, &salt, UNLOCK_ITERATIONS)),
+            hash
+        );
+    }
 
     #[test]
     fn codes_are_six_unambiguous_characters_and_normalize() {

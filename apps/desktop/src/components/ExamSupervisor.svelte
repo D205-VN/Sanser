@@ -110,10 +110,22 @@
     finally { busy = false; }
   }
 
+  // The desktop web view has no window.confirm (it answers "no" silently),
+  // so a risky button asks for a second click within a few seconds instead.
+  let armed = $state<string | null>(null);
+  let armedTimer: number | null = null;
+  function confirmed(key: string): boolean {
+    if (armedTimer !== null) window.clearTimeout(armedTimer);
+    if (armed === key) { armed = null; armedTimer = null; return true; }
+    armed = key;
+    armedTimer = window.setTimeout(() => { armed = null; armedTimer = null; }, 5_000);
+    return false;
+  }
+
   async function act(memberId: string, action: 'pause' | 'resume' | 'remove' | 'watch', quiet = false): Promise<void> {
     const client = session.client();
     if (!client || !room) return;
-    if (action === 'remove' && !window.confirm($t('Remove this student from the exam? Their computer is unlocked.'))) return;
+    if (action === 'remove' && !confirmed(`remove:${memberId}`)) return;
     try {
       room = await client.examMemberAction(room.id, memberId, action);
       if (action === 'remove' && focused === memberId) focused = null;
@@ -127,7 +139,7 @@
 
   async function end(): Promise<void> {
     const client = session.client();
-    if (!client || !room || !window.confirm($t('End the exam for everyone? Every student computer is unlocked.'))) return;
+    if (!client || !room || !confirmed('end')) return;
     busy = true;
     try {
       room = await client.endExamRoom(room.id);
@@ -180,8 +192,10 @@
     'ai-site': tk('AI website opened'),
     'guard-failed': tk('Exam guard stopped'),
     'quit-attempt': tk('Tried to quit Sanser'),
-    disconnected: tk('Lost connection')
+    disconnected: tk('Lost connection'),
+    'emergency-unlock': tk('Used the emergency code and left the exam')
   };
+  let showUnlock = $state(false);
   function describe(violation: ExamViolation): string {
     if (violation.kind === 'disconnected') return $t('Lost connection for {seconds} s', { seconds: violation.detail });
     return `${$t(kinds[violation.kind] ?? violation.kind)}${violation.detail ? ` · ${violation.detail}` : ''}`;
@@ -206,13 +220,21 @@
         <p class="card-subtitle">{$t('Students enter this code in Sanser → Exam → Take an exam.')}</p>
       </div>
       <div class="code" aria-label={$t('Exam code')}>{room.code.slice(0, 3)} {room.code.slice(3)}</div>
-      <button class="button danger" disabled={busy} onclick={end}>{$t('End exam')}</button>
+      <button class="button danger" disabled={busy} onclick={end}>{armed === 'end' ? $t('Click again to end for everyone') : $t('End exam')}</button>
     </div>
     <div class="room-rules">
       <span>{$t('Allowed apps')}: {room.allowedApps.length ? [...new Set(room.allowedApps.map((app) => app.name))].join(', ') : $t('Sanser only')}</span>
       <span>{room.blockAi ? $t('AI apps and websites blocked') : $t('AI not blocked')}</span>
       <span>{$t('Ends by itself at {time}', { time: time(room.expiresAt) })}</span>
     </div>
+    {#if room.unlockCode}
+      <div class="room-unlock">
+        <span>{$t('Emergency code for a stuck computer')}:</span>
+        {#if showUnlock}<strong class="unlock-code">{room.unlockCode.slice(0, 4)}-{room.unlockCode.slice(4)}</strong>{:else}<strong aria-hidden="true">••••-••••</strong>{/if}
+        <button class="button small ghost" onclick={() => (showUnlock = !showUnlock)}>{showUnlock ? $t('Hide') : $t('Show')}</button>
+        <small>{$t('Read it only to the student who is stuck; it unlocks that computer even without internet.')}</small>
+      </div>
+    {/if}
     <details class="room-settings">
       <summary>{$t('Change allowed apps')}</summary>
       {@render appPicker(room.allowedApps, room.blockAi)}
@@ -240,7 +262,7 @@
         <div class="button-row">
           {#if focusedMember.state === 'paused'}<button class="button primary" onclick={() => act(focusedMember.id, 'resume')}>{$t('Let them continue')}</button>
           {:else}<button class="button" onclick={() => act(focusedMember.id, 'pause')}>{$t('Pause this computer')}</button>{/if}
-          <button class="button danger" onclick={() => act(focusedMember.id, 'remove')}>{$t('Remove from exam')}</button>
+          <button class="button danger" onclick={() => act(focusedMember.id, 'remove')}>{armed === `remove:${focusedMember.id}` ? $t('Click again to remove') : $t('Remove from exam')}</button>
           <button class="button ghost" onclick={() => (focused = null)}>{$t('Close')}</button>
         </div>
       </div>
@@ -301,6 +323,9 @@
 {/snippet}
 
 <style>
+  .room-unlock { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+  .room-unlock strong { color: var(--text); letter-spacing: 0.12em; font-family: ui-monospace, monospace; }
+  .room-unlock small { flex-basis: 100%; }
   .exam-room { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }
   .room-head { display: flex; align-items: center; gap: 16px; justify-content: space-between; flex-wrap: wrap; }
   .code { font-size: 32px; font-weight: 700; letter-spacing: 6px; font-variant-numeric: tabular-nums; color: var(--accent); }

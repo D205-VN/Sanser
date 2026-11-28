@@ -39,6 +39,8 @@ pub struct MachineProfile {
     #[serde(default)]
     gpu: String,
     #[serde(default)]
+    cpu_model: String,
+    #[serde(default)]
     cpu_cores: Option<u32>,
     #[serde(default)]
     memory_gb: Option<u32>,
@@ -64,6 +66,24 @@ pub struct NetworkProfile {
     udp_works: Option<bool>,
     #[serde(default)]
     server_ms: Option<u32>,
+    /// Measured just now: the viewer's download speed from the server.
+    #[serde(default)]
+    download_mbps: Option<f64>,
+    /// Measured just now: the host's upload speed to the server.
+    #[serde(default)]
+    upload_mbps: Option<f64>,
+}
+
+impl NetworkProfile {
+    /// What the path between the two computers carried in the live test:
+    /// the slower of the host's upload and the viewer's download.
+    fn measured_mbps(&self) -> Option<f64> {
+        let sane = |value: Option<f64>| value.filter(|mbps| mbps.is_finite() && *mbps > 0.0);
+        match (sane(self.download_mbps), sane(self.upload_mbps)) {
+            (Some(down), Some(up)) => Some(down.min(up)),
+            (one, other) => one.or(other),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -75,6 +95,42 @@ pub struct AdviceRequest {
     network: NetworkProfile,
     #[serde(default)]
     locale: Option<String>,
+    /// What the person cares about most: `balanced` (default), `smooth`,
+    /// `sharp` or `responsive`.
+    #[serde(default)]
+    goal: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Goal {
+    Balanced,
+    Smooth,
+    Sharp,
+    Responsive,
+}
+
+impl Goal {
+    fn of(request: &AdviceRequest) -> Self {
+        match request.goal.as_deref() {
+            Some("smooth") => Self::Smooth,
+            Some("sharp") => Self::Sharp,
+            Some("responsive") => Self::Responsive,
+            _ => Self::Balanced,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Balanced => "a balance of smoothness and sharpness",
+            Self::Smooth => {
+                "smooth and stable motion first (high fps, fewer stutters), sharpness second"
+            }
+            Self::Sharp => "a sharp and stable picture first (high resolution), fps second",
+            Self::Responsive => {
+                "the fastest response to input first (small frames, high fps, low bitrate)"
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -182,6 +238,19 @@ fn resolution_rank(value: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Moves a resolution one step up or down, between 720p and the cap.
+/// `auto` counts as the cap.
+fn step_resolution(value: &str, up: bool, cap: &'static str) -> &'static str {
+    let top = resolution_rank(cap).max(1);
+    let rank = if value == "auto" {
+        top
+    } else {
+        resolution_rank(value).max(1)
+    };
+    let next = if up { rank + 1 } else { rank.saturating_sub(1) };
+    RESOLUTIONS[next.clamp(1, top)]
+}
+
 /// Keeps a model answer inside what both computers and the route can do.
 pub fn clamp(mut settings: Settings, request: &AdviceRequest) -> Settings {
     if !RESOLUTIONS.contains(&settings.resolution.as_str()) {
@@ -207,6 +276,9 @@ pub fn clamp(mut settings: Settings, request: &AdviceRequest) -> Settings {
         || (settings.codec == "hevc" && !both_support_hevc(request))
     {
         settings.codec = "auto".into();
+    }
+    if Goal::of(request) == Goal::Responsive && settings.codec == "hevc" {
+        settings.codec = "h264".into();
     }
     if !NETWORK_MODES.contains(&settings.network_mode.as_str()) {
         settings.network_mode = "auto".into();
@@ -237,7 +309,31 @@ pub fn rule_settings(request: &AdviceRequest, vietnamese: bool) -> (Settings, Ve
         .rtt_ms
         .or(request.network.server_ms.map(|ms| ms * 2));
     let relay = on_relay(request);
-    let (mut resolution, mut fps, bitrate) = if relay {
+    let measured = request.network.measured_mbps();
+    let (mut resolution, mut fps, bitrate): (&'static str, u32, u32) = if let Some(mbps) = measured
+    {
+        // Leave about 40% unused so short dips do not stall the picture.
+        let budget = (mbps * 0.6).floor().clamp(2.0, 80.0) as u32;
+        reasons.push(if vietnamese {
+            format!("Đo được khoảng {mbps:.0} Mb/s giữa hai máy; dùng {budget} Mb/s để còn dư cho ổn định.")
+        } else {
+            format!("Measured about {mbps:.0} Mb/s between the computers; {budget} Mb/s leaves headroom for stability.")
+        });
+        let (resolution, fps) = match budget {
+            0..5 => ("720p", 30),
+            5..9 => ("720p", 60),
+            9..16 => ("1080p", 60),
+            16..28 => ("1440p", 60),
+            _ => ("auto", 60),
+        };
+        if rtt.is_some_and(|ms| ms > 150) {
+            reasons.push(say(
+                "Độ trễ cao: thao tác sẽ hơi chậm dù hình vẫn mượt.",
+                "Latency is high: input will feel a little slow even though the picture stays smooth.",
+            ));
+        }
+        (resolution, fps, budget)
+    } else if relay {
         reasons.push(say(
             "Mạng đang đi qua relay nên giữ bitrate thấp để hình không bị giật.",
             "The connection uses the relay, so a low bitrate keeps the picture smooth.",
@@ -283,14 +379,62 @@ pub fn rule_settings(request: &AdviceRequest, vietnamese: bool) -> (Settings, Ve
         .refresh_hz
         .unwrap_or(60)
         .min(request.host.refresh_hz.unwrap_or(60));
-    if !relay && refresh >= 120 && rtt.is_some_and(|ms| ms <= 30) {
+    let goal = Goal::of(request);
+    if goal == Goal::Balanced && !relay && refresh >= 120 && rtt.is_some_and(|ms| ms <= 30) {
         fps = 120;
         reasons.push(say(
             "Cả hai màn hình đều 120 Hz nên dùng 120 FPS.",
             "Both screens run at 120 Hz, so 120 FPS is used.",
         ));
     }
-    let codec = if both_support_hevc(request) {
+    let fast_screens = !relay && refresh >= 120 && rtt.is_none_or(|ms| ms <= 80);
+    let mut bitrate = bitrate;
+    match goal {
+        Goal::Balanced => {}
+        Goal::Smooth => {
+            fps = if fast_screens { 120 } else { fps.max(60) };
+            if relay || rtt.is_some_and(|ms| ms > 30) {
+                resolution = step_resolution(resolution, false, cap);
+            }
+            bitrate = bitrate * 4 / 5;
+            reasons.insert(
+                0,
+                say(
+                    "Ưu tiên mượt và ổn định: giữ khung hình cao, giảm độ phân giải và bitrate một chút để ít giật.",
+                    "Smooth and stable first: a high frame rate, with resolution and bitrate a little lower to avoid stutters.",
+                ),
+            );
+        }
+        Goal::Sharp => {
+            resolution = cap;
+            if relay || rtt.is_some_and(|ms| ms > 80) {
+                fps = 30;
+            } else {
+                fps = fps.min(60);
+            }
+            bitrate = bitrate * 13 / 10;
+            reasons.insert(
+                0,
+                say(
+                    "Ưu tiên nét và ổn định: độ phân giải cao nhất màn hình cho phép, khung hình vừa phải để mạng không quá tải.",
+                    "Sharp and stable first: the highest resolution the screen allows, with a moderate frame rate so the network keeps up.",
+                ),
+            );
+        }
+        Goal::Responsive => {
+            resolution = step_resolution(resolution, false, "1080p");
+            fps = if fast_screens { 120 } else { fps.max(60) };
+            bitrate = bitrate * 7 / 10;
+            reasons.insert(
+                0,
+                say(
+                    "Ưu tiên phản hồi nhanh: hình nhỏ hơn, bitrate thấp và H.264 để mỗi khung hình đến sớm nhất.",
+                    "Fastest response first: smaller frames, a low bitrate and H.264 so every frame arrives as early as possible.",
+                ),
+            );
+        }
+    }
+    let codec = if goal != Goal::Responsive && both_support_hevc(request) {
         reasons.push(say(
             "Cả hai máy giải mã được HEVC: hình nét hơn với cùng băng thông.",
             "Both computers handle HEVC: a sharper picture for the same bandwidth.",
@@ -308,6 +452,11 @@ pub fn rule_settings(request: &AdviceRequest, vietnamese: bool) -> (Settings, Ve
     } else {
         "auto"
     };
+    if let Some(mbps) = measured {
+        // Goals may lean either way, but never past 80% of what was measured.
+        bitrate = bitrate.min(((mbps * 0.8).floor() as u32).max(2));
+    }
+    reasons.truncate(3);
     let settings = Settings {
         resolution: resolution.into(),
         fps,
@@ -359,17 +508,21 @@ fn prompt(request: &AdviceRequest, rules: &Settings, vietnamese: bool) -> String
         "host": request.host,
         "network": request.network,
         "startingPoint": rules,
+        "goal": Goal::of(request).describe(),
     });
     format!(
         "You tune Sanser, a low-latency remote desktop app. The viewer computer shows the host computer's screen.\n\
-         Pick stream settings that feel smooth first and sharp second.\n\
+         Pick stream settings for this goal: {goal}.\n\
          Rules: on the relay or when udpWorks is false keep bitrate at most {RELAY_MAX_MBPS}; \
          use hevc only when both computers list hevc; fps above 60 only when both refreshHz are at least that; \
          resolution no larger than the viewer display; prefer networkMode auto unless UDP is blocked (then relay).\n\
+         downloadMbps and uploadMbps, when present, were measured just now between the computers and this server; \
+         keep bitrateMbps below 80% of the smaller one.\n\
          startingPoint is what measured rules suggest; keep it unless a fact clearly calls for a change.\n\
          Give 1 to 3 reasons in {language}, each a full sentence for a non-technical person.\n\
          Facts (JSON): {facts}",
         language = if vietnamese { "Vietnamese" } else { "English" },
+        goal = Goal::of(request).describe(),
     )
 }
 
@@ -484,8 +637,11 @@ mod tests {
                 rtt_ms: Some(rtt),
                 udp_works: Some(udp),
                 server_ms: None,
+                download_mbps: None,
+                upload_mbps: None,
             },
             locale: None,
+            goal: None,
         }
     }
 
@@ -506,6 +662,59 @@ mod tests {
         // The viewer screen is 60 Hz, so 120 FPS would be wasted.
         assert_eq!(settings.fps, 60);
         assert_eq!(settings.network_mode, "auto");
+    }
+
+    #[test]
+    fn each_goal_leans_its_own_way_from_the_same_facts() {
+        let pick = |goal: &str, rtt: u32| {
+            let mut request = request("direct", rtt, true);
+            request.goal = Some(goal.into());
+            let (settings, reasons) = rule_settings(&request, true);
+            assert!(reasons.len() <= 3);
+            (
+                settings.resolution,
+                settings.fps,
+                settings.bitrate_mbps,
+                settings.codec,
+            )
+        };
+        let tuple = |r: &str, f: u32, b: u32, c: &str| (r.to_owned(), f, b, c.to_owned());
+        assert_eq!(pick("balanced", 200), tuple("720p", 30, 8, "hevc"));
+        assert_eq!(pick("smooth", 200), tuple("720p", 60, 6, "hevc"));
+        assert_eq!(pick("sharp", 200), tuple("1080p", 30, 10, "hevc"));
+        assert_eq!(pick("responsive", 200), tuple("720p", 60, 5, "h264"));
+        assert_eq!(pick("smooth", 20), tuple("auto", 60, 24, "hevc"));
+        assert_eq!(pick("sharp", 20), tuple("1080p", 60, 39, "hevc"));
+        assert_eq!(pick("responsive", 20), tuple("720p", 60, 21, "h264"));
+    }
+
+    #[test]
+    fn measured_bandwidth_sets_the_bitrate_instead_of_latency() {
+        let plan = |down: f64, up: f64, goal: &str| {
+            let mut request = request("direct", 200, true);
+            request.network.download_mbps = Some(down);
+            request.network.upload_mbps = Some(up);
+            request.goal = Some(goal.into());
+            let (settings, reasons) = rule_settings(&request, true);
+            let measured = down.is_finite() && down > 0.0;
+            assert_eq!(
+                reasons.iter().any(|reason| reason.contains("Mb/s")),
+                measured,
+                "{reasons:?}"
+            );
+            (settings.resolution, settings.fps, settings.bitrate_mbps)
+        };
+        let tuple = |r: &str, f: u32, b: u32| (r.to_owned(), f, b);
+        // The slower side decides: 12 Mb/s upload → 7 Mb/s budget.
+        assert_eq!(plan(300.0, 12.0, "balanced"), tuple("720p", 60, 7));
+        assert_eq!(plan(25.0, 90.0, "balanced"), tuple("1080p", 60, 15));
+        // The viewer screen is 1080p, so 1440p is capped.
+        assert_eq!(plan(40.0, 40.0, "balanced"), tuple("1080p", 60, 24));
+        assert_eq!(plan(200.0, 200.0, "balanced"), tuple("auto", 60, 80));
+        // Sharp leans up but stays under 80% of what was measured.
+        assert_eq!(plan(25.0, 25.0, "sharp"), tuple("1080p", 30, 19));
+        // Nothing usable measured: back to the latency rules.
+        assert_eq!(plan(f64::NAN, 0.0, "balanced"), tuple("720p", 30, 8));
     }
 
     #[test]

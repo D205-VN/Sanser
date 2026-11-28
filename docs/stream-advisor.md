@@ -7,6 +7,29 @@ used, host latency, Network check UDP result and server round trip). The
 server answers resolution, FPS, bitrate, codec and network mode plus 1–3
 reasons. **Use these settings** saves them as the Custom profile.
 
+A goal (balanced, smooth and stable, sharp and stable, fastest response)
+leans the answer one way: more FPS, more resolution, or smaller frames with
+H.264.
+
+## Live measurement
+
+**Suggest** first measures for a few seconds (`/api/v2/advisor/probes`, memory
+only, 10 per account per 10 minutes):
+
+1. The viewer opens a probe for one of its own online hosts.
+2. The host, polling every 2 s while online, claims it, measures its round
+   trip to the server and uploads 256 KiB chunks for 2.5 s, then reports its
+   upload Mb/s plus CPU, memory, GPU, main screen and refresh rate (read with
+   `sysctl`/`system_profiler` on macOS, CIM on Windows). A host in a session
+   reports its machine only, so the session keeps its bandwidth.
+3. The viewer measures its own round trip and downloads chunks for 2.5 s.
+
+The relay runs on the server, so viewer→server plus server→host is the relay
+path; a direct path is usually at least as good. The rules then budget 60% of
+the slower of the two speeds (goals never go past 80%), and pick resolution
+and FPS from that budget. Without an answer from the host (offline, older
+Sanser or older server) the app says so and the latency rules answer.
+
 ## LM Studio behind the server
 
 The language model is reached only by the Sanser server, never directly by

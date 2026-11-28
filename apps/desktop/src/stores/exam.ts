@@ -1,5 +1,5 @@
 import { get, writable } from 'svelte/store';
-import { examLocked, guardApps, type ExamHeartbeat, type ExamPolicy } from '../lib/exam';
+import { examLocked, guardApps, normalizeUnlockCode, verifyUnlockCode, type ExamHeartbeat, type ExamPolicy, type ExamUnlockCheck } from '../lib/exam';
 import { examCaptureScreen, examGuardApply, examGuardReport, examGuardStop } from '../lib/platform';
 import { session } from './session';
 
@@ -15,16 +15,20 @@ export interface ExamSeatState {
   error: string | null;
   /** Unix ms of the last heartbeat the server answered. */
   lastSyncAt: number | null;
-  /** Set when the exam ended or the supervisor removed this computer. */
-  finished: 'ended' | 'removed' | null;
+  /** Set when the exam ended, the supervisor removed this computer or the emergency code was used. */
+  finished: 'ended' | 'removed' | 'unlocked' | null;
 }
 
-interface Seat { memberId: string; lockedAt: number }
+/** `unlock` is kept so the emergency code still works after a restart offline. */
+interface Seat { memberId: string; lockedAt: number; unlock?: ExamUnlockCheck }
 
 function readSeat(): Seat | null {
   try {
     const value = JSON.parse(localStorage.getItem(SEAT_KEY) ?? 'null') as Partial<Seat> | null;
-    return value && typeof value.memberId === 'string' ? { memberId: value.memberId, lockedAt: Number(value.lockedAt) || Date.now() } : null;
+    if (!value || typeof value.memberId !== 'string') return null;
+    const unlock = value.unlock && typeof value.unlock.salt === 'string' && typeof value.unlock.hash === 'string' && Number.isInteger(value.unlock.iterations)
+      ? value.unlock : undefined;
+    return { memberId: value.memberId, lockedAt: Number(value.lockedAt) || Date.now(), unlock };
   } catch { return null; }
 }
 function writeSeat(seat: Seat | null): void {
@@ -65,6 +69,8 @@ export function createExamSeat() {
       return;
     }
     await examGuardApply(guardApps(policy), policy.blockAi, policy.memberState === 'paused');
+    const seat = readSeat();
+    if (seat && policy.unlock && seat.unlock?.hash !== policy.unlock.hash) writeSeat({ ...seat, unlock: policy.unlock });
     store.update((state) => ({ ...state, policy, finished: null }));
   }
 
@@ -115,7 +121,7 @@ export function createExamSeat() {
       try {
         const policy = await client.joinExam(code, deviceId, displayName);
         if (!examLocked(policy)) { await release('ended', policy); return; }
-        writeSeat({ memberId: policy.memberId, lockedAt: Date.now() });
+        writeSeat({ memberId: policy.memberId, lockedAt: Date.now(), unlock: policy.unlock });
         await enforce(policy);
         store.update((state) => ({ ...state, busy: false, lastSyncAt: Date.now() }));
         startLoop();
@@ -145,6 +151,32 @@ export function createExamSeat() {
         store.update((state) => ({ ...state, policy: state.policy ?? strict, error: message(error, 'The supervisor could not be reached') }));
       }
       startLoop();
+    },
+
+    /**
+     * The supervisor read out the emergency code. The server checks it and
+     * records it; when the server is out of reach the stored hash decides.
+     * Resolves false for a wrong code.
+     */
+    async unlock(code: string): Promise<boolean> {
+      const seat = readSeat();
+      const normalized = normalizeUnlockCode(code);
+      if (!seat || !normalized) return false;
+      const client = session.client();
+      try {
+        if (!client) throw new Error('offline');
+        const policy = await client.unlockExam(seat.memberId, normalized);
+        if (examLocked(policy)) return false;
+        await release('unlocked', policy);
+        return true;
+      } catch (error) {
+        // Only the server's "not right" is final; anything else may be the network.
+        if ((error as { status?: number }).status === 422) return false;
+        const check = seat.unlock ?? get(store).policy?.unlock;
+        if (!check || !(await verifyUnlockCode(normalized, check))) return false;
+        await release('unlocked', get(store).policy);
+        return true;
+      }
     },
 
     dismiss(): void {

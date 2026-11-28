@@ -171,6 +171,20 @@ export async function sessionUserAction(sessionId: string, operation: SessionUse
   return invoke('session_user_action', { sessionId, operation, text });
 }
 
+/** CPU, memory and main screen as the system reports them; empty outside the app. */
+export interface MachineInfo {
+  cpuModel?: string;
+  cpuCores?: number;
+  memoryGb?: number;
+  gpu?: string;
+  displayWidth?: number;
+  displayHeight?: number;
+  refreshHz?: number;
+}
+export async function machineInfo(): Promise<MachineInfo> {
+  return isTauriRuntime() ? invoke<MachineInfo>('machine_info') : {};
+}
+
 /** Host-validated display list; `available` stays false for older hosts and shares. */
 export interface SessionDisplay { index: number; width: number; height: number; primary: boolean }
 export interface SessionDisplays { available: boolean; selected: number; displays: SessionDisplay[] }

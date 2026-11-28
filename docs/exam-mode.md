@@ -39,6 +39,20 @@ While the room is open and the student is not removed:
 - Offline: the lock stays and violations are kept and sent later. After 9 h
   without the server the seat is released.
 
+## Emergency unlock
+
+Each room has an 8-character emergency code. The supervisor reveals it under
+the room code (hidden by default, so a projector does not show it) and reads
+it only to a stuck student. The student types it on the lock screen under
+**Emergency unlock**: the server checks it, removes that student and records
+an `emergency-unlock` entry. When the server is out of reach the computer
+checks the code against a salted PBKDF2-HMAC-SHA256 hash (100 000 rounds) it
+received when joining and kept with its seat, so it works offline and after a
+restart. Rooms created before 2.3.37 have no code.
+
+The guard scripts also stop by themselves when Sanser is closed or killed, so
+apps never stay hidden without Sanser.
+
 ## Server
 
 `/api/v2/exams…` (supervisor) and `/api/v2/exam-members…` (student); see

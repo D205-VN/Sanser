@@ -12,6 +12,8 @@ export interface ExamRoom {
   createdAt: number;
   expiresAt: number;
   endedAt: number | null;
+  /** Emergency code for one stuck student; only the supervisor sees it. */
+  unlockCode?: string;
 }
 
 export interface ExamMember {
@@ -26,7 +28,7 @@ export interface ExamMember {
   violationCount: number;
 }
 
-export type ExamViolationKind = 'left-app' | 'ai-app' | 'ai-site' | 'guard-failed' | 'quit-attempt' | 'disconnected';
+export type ExamViolationKind = 'left-app' | 'ai-app' | 'ai-site' | 'guard-failed' | 'quit-attempt' | 'disconnected' | 'emergency-unlock';
 
 export interface ExamViolation {
   memberId: string;
@@ -55,6 +57,38 @@ export interface ExamPolicy {
   blockAi: boolean;
   heartbeatSeconds: number;
   screenSeconds: number;
+  /** Lets this computer accept the emergency code while the server is out of reach. */
+  unlock?: ExamUnlockCheck;
+}
+
+/** Base64 salt and PBKDF2-HMAC-SHA256 hash of the upper-case emergency code. */
+export interface ExamUnlockCheck { salt: string; hash: string; iterations: number }
+
+/** Upper case without spaces or dashes, as the server compares it. */
+export function normalizeUnlockCode(value: string): string {
+  return value.replace(/[^a-z0-9]/gi, '').toUpperCase();
+}
+
+function fromBase64(value: string): Uint8Array<ArrayBuffer> {
+  const text = atob(value);
+  const bytes = new Uint8Array(text.length);
+  for (let index = 0; index < text.length; index += 1) bytes[index] = text.charCodeAt(index);
+  return bytes;
+}
+
+/** Checks the code offline against the hash the server gave this computer. */
+export async function verifyUnlockCode(code: string, check: ExamUnlockCheck): Promise<boolean> {
+  const normalized = normalizeUnlockCode(code);
+  if (!normalized) return false;
+  try {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(normalized), 'PBKDF2', false, ['deriveBits']);
+    const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: fromBase64(check.salt), iterations: check.iterations }, key, 256));
+    const expected = fromBase64(check.hash);
+    if (bits.length !== expected.length) return false;
+    let difference = 0;
+    for (let index = 0; index < bits.length; index += 1) difference |= (bits[index] ?? 0) ^ (expected[index] ?? 0);
+    return difference === 0;
+  } catch { return false; }
 }
 
 export interface ExamHeartbeat {

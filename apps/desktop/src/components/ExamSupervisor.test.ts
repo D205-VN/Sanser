@@ -53,9 +53,11 @@ it('reopens the open exam and ends it after confirmation', async () => {
   mocks.client.examRooms.mockResolvedValue([room]);
   mocks.client.examRoom.mockResolvedValue(room);
   mocks.client.endExamRoom.mockResolvedValue({ ...room, state: 'ended' });
-  vi.spyOn(window, 'confirm').mockReturnValue(true);
   render(ExamSupervisor);
   await fireEvent.click(await screen.findByRole('button', { name: 'End exam' }));
+  // The first click only arms the button; the web view has no confirm dialog.
+  expect(mocks.client.endExamRoom).not.toHaveBeenCalled();
+  await fireEvent.click(screen.getByRole('button', { name: 'Click again to end for everyone' }));
   expect(mocks.client.endExamRoom).toHaveBeenCalledWith('room-1');
   expect(await screen.findByText(/has ended/)).toBeInTheDocument();
 });

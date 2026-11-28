@@ -58,6 +58,8 @@ $lastTitle = $null
 $tick = 0
 while ($true) {
   $tick += 1
+  # Sanser was closed or killed: stop guarding, or apps stay hidden for good.
+  if (-not (Get-Process -Id $self -ErrorAction SilentlyContinue)) { exit 0 }
   if ($config.blockAi -and ($tick % 3) -eq 0) {
     foreach ($process in Get-Process) {
       if ($process.Id -eq $self -or $process.MainWindowHandle -eq [IntPtr]::Zero) { continue }

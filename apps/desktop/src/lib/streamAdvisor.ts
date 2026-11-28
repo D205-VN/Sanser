@@ -1,3 +1,4 @@
+import type { MachineInfo } from './platform';
 import type { Device, NetworkMode, Preferences, RuntimeStatus, VideoCodec } from './types';
 
 /** What the advisor knows about one computer. Unknown values are left out. */
@@ -5,6 +6,7 @@ export interface MachineProfile {
   platform: string;
   osVersion?: string;
   gpu?: string;
+  cpuModel?: string;
   cpuCores?: number;
   memoryGb?: number;
   displayWidth?: number;
@@ -16,9 +18,22 @@ export interface MachineProfile {
 export interface StreamAdviceRequest {
   viewer: MachineProfile;
   host: MachineProfile;
-  network: { path?: 'direct' | 'relay' | 'unknown'; rttMs?: number; udpWorks?: boolean; serverMs?: number };
+  network: {
+    path?: 'direct' | 'relay' | 'unknown';
+    rttMs?: number;
+    udpWorks?: boolean;
+    serverMs?: number;
+    /** Measured just now: this computer's download speed from the server. */
+    downloadMbps?: number;
+    /** Measured just now: the host's upload speed to the server. */
+    uploadMbps?: number;
+  };
   locale: 'vi' | 'en';
+  goal: AdviceGoal;
 }
+
+/** What the person cares about most; the server leans the settings that way. */
+export type AdviceGoal = 'balanced' | 'smooth' | 'sharp' | 'responsive';
 
 export interface StreamAdvice {
   source: 'model' | 'rules';
@@ -56,24 +71,42 @@ export function nearestRefresh(rate: number): number | undefined {
   return [30, 60, 75, 90, 100, 120, 144, 165, 240].reduce((best, value) => (Math.abs(value - rate) < Math.abs(best - rate) ? value : best));
 }
 
-export function viewerProfile(runtime: RuntimeStatus, refreshHz?: number): MachineProfile {
+/** What the host measured and reported in a live probe. */
+export interface HostMeasurement extends MachineInfo {
+  /** The host was in a session and skipped the speed test. */
+  busy?: boolean;
+  serverMs?: number | null;
+  uploadMbps?: number | null;
+}
+
+/** The system's own numbers win; the web view's estimates fill the gaps. */
+export function viewerProfile(runtime: RuntimeStatus, refreshHz?: number, info: MachineInfo = {}): MachineProfile {
   const ratio = window.devicePixelRatio || 1;
   const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
   return {
     platform: runtime.platform,
-    cpuCores: navigator.hardwareConcurrency || undefined,
-    memoryGb: typeof memory === 'number' ? memory : undefined,
-    displayWidth: Math.round(window.screen.width * ratio),
-    displayHeight: Math.round(window.screen.height * ratio),
-    refreshHz,
+    gpu: info.gpu,
+    cpuModel: info.cpuModel,
+    cpuCores: info.cpuCores ?? (navigator.hardwareConcurrency || undefined),
+    memoryGb: info.memoryGb ?? (typeof memory === 'number' ? memory : undefined),
+    displayWidth: info.displayWidth ?? Math.round(window.screen.width * ratio),
+    displayHeight: info.displayHeight ?? Math.round(window.screen.height * ratio),
+    refreshHz: info.refreshHz ?? refreshHz,
     codecs: runtime.capabilities.clientCodecs ?? ['h264']
   };
 }
 
-export function hostProfile(device: Device): MachineProfile {
+export function hostProfile(device: Device, measured?: HostMeasurement): MachineProfile {
+  const reported = device.gpu && device.gpu !== 'Not reported' ? device.gpu : undefined;
   return {
     platform: device.platform,
-    gpu: device.gpu && device.gpu !== 'Not reported' ? device.gpu : undefined,
+    gpu: measured?.gpu ?? reported,
+    cpuModel: measured?.cpuModel,
+    cpuCores: measured?.cpuCores,
+    memoryGb: measured?.memoryGb,
+    displayWidth: measured?.displayWidth,
+    displayHeight: measured?.displayHeight,
+    refreshHz: measured?.refreshHz,
     codecs: device.capabilities.codecs
   };
 }

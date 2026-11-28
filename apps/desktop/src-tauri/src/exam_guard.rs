@@ -237,7 +237,7 @@ fn encoded_powershell(script: &str) -> String {
 }
 
 #[cfg(windows)]
-fn powershell(script: &str) -> Command {
+pub(crate) fn powershell(script: &str) -> Command {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new("powershell.exe");

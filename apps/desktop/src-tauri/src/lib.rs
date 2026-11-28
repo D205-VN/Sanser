@@ -12,6 +12,7 @@ mod exam_guard;
 mod fec_health;
 mod file_transfer;
 mod login_item;
+mod machine_info;
 mod models;
 mod problem_report;
 mod relay;
@@ -159,6 +160,7 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         exam_guard::exam_guard_report,
         exam_guard::exam_guard_stop,
         exam_guard::exam_capture_screen,
+        machine_info::machine_info,
         device_identity::get_device_identity,
         device_identity::get_login_device,
         commands::load_preferences,

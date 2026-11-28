@@ -22,7 +22,7 @@ import type {
 } from './types';
 import type { LoginDevice } from './platform';
 import type { ExamApp, ExamHeartbeat, ExamPolicy, ExamRoom, ExamRoomDetail, ExamScreen } from './exam';
-import type { StreamAdvice, StreamAdviceRequest } from './streamAdvisor';
+import type { HostMeasurement, StreamAdvice, StreamAdviceRequest } from './streamAdvisor';
 
 export class ApiError extends Error {
   constructor(
@@ -602,6 +602,10 @@ export class ApiClient {
     return this.request<ExamPolicy>('/api/v2/exam-members', { method: 'POST', body: { code, deviceId, displayName } });
   }
 
+  async unlockExam(memberId: string, code: string): Promise<ExamPolicy> {
+    return this.request<ExamPolicy>(`/api/v2/exam-members/${encodeURIComponent(memberId)}/unlock`, { method: 'POST', body: { code } });
+  }
+
   async examPolicy(memberId: string): Promise<ExamPolicy> {
     return this.request<ExamPolicy>(`/api/v2/exam-members/${encodeURIComponent(memberId)}`);
   }
@@ -616,6 +620,56 @@ export class ApiClient {
 
   async streamAdvice(request: StreamAdviceRequest): Promise<StreamAdvice> {
     return this.request<StreamAdvice>('/api/v2/advisor/stream', { method: 'POST', body: request });
+  }
+
+  async createAdvisorProbe(hostDeviceId: string): Promise<{ probeId: string; expiresInSeconds: number; chunkBytes: number }> {
+    return this.request('/api/v2/advisor/probes', { method: 'POST', body: { hostDeviceId } });
+  }
+
+  async pendingAdvisorProbes(deviceId: string): Promise<{ items: string[] }> {
+    return this.request(`/api/v2/advisor/probes?deviceId=${encodeURIComponent(deviceId)}`);
+  }
+
+  async advisorProbe(probeId: string): Promise<{ hostAnswered: boolean; host?: HostMeasurement }> {
+    return this.request(`/api/v2/advisor/probes/${encodeURIComponent(probeId)}`);
+  }
+
+  async finishAdvisorProbe(probeId: string, measurement: HostMeasurement): Promise<void> {
+    await this.request(`/api/v2/advisor/probes/${encodeURIComponent(probeId)}/result`, { method: 'POST', body: measurement });
+  }
+
+  /** One timed upload chunk; resolves with the bytes sent. */
+  async uploadProbeChunk(probeId: string, chunk: Blob): Promise<number> {
+    await this.rawTransfer(`/api/v2/advisor/probes/${encodeURIComponent(probeId)}/upload`, 'POST', chunk);
+    return chunk.size;
+  }
+
+  /** One timed download chunk; resolves with the bytes received. */
+  async downloadProbeChunk(probeId: string): Promise<number> {
+    const response = await this.rawTransfer(`/api/v2/advisor/probes/${encodeURIComponent(probeId)}/download`, 'GET');
+    return (await response.arrayBuffer()).byteLength;
+  }
+
+  private async rawTransfer(path: string, method: 'GET' | 'POST', body?: Blob): Promise<Response> {
+    const token = await this.tokenProvider();
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers: {
+          ...(body ? { 'Content-Type': 'application/octet-stream' } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body,
+        cache: 'no-store',
+        credentials: 'omit',
+        redirect: 'error'
+      });
+    } catch {
+      throw new ApiError('Unable to reach the server', 0, 'network_error', null);
+    }
+    if (!response.ok) throw new ApiError(`Request failed (${String(response.status)})`, response.status, 'request_failed', response.headers.get('x-request-id'));
+    return response;
   }
 
   private async request<T = unknown>(

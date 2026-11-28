@@ -34,6 +34,8 @@ function run(argv) {
   out({ t: 'ready' });
   while (true) {
     tick += 1;
+    // Sanser was closed or killed: stop guarding, or apps stay hidden for good.
+    if ($.NSRunningApplication.runningApplicationWithProcessIdentifier(config.selfPid).isNil()) return;
     if (config.blockAi && tick % 3 === 0) {
       var apps = workspace.runningApplications;
       for (var i = 0; i < apps.count; i += 1) {

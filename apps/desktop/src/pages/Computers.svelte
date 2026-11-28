@@ -185,16 +185,23 @@
     } finally { actionId = null; revision += 1; }
   }
 
+  // The desktop web view has no window.confirm (it answers "no" silently),
+  // so a risky menu item shows its question and asks for a second click.
+  let armed = $state<string | null>(null);
+  let armedTimer: number | null = null;
+  function confirmed(key: string): boolean {
+    if (armedTimer !== null) window.clearTimeout(armedTimer);
+    if (armed === key) { armed = null; armedTimer = null; return true; }
+    armed = key;
+    armedTimer = window.setTimeout(() => { armed = null; armedTimer = null; }, 6_000);
+    return false;
+  }
+
   async function toggleTrust(device: Computer): Promise<void> {
     const requesterId = device.requesterId;
     if (!requesterId) return;
     const trusted = $preferences.trustedDeviceIds.includes(requesterId);
-    if (
-      !trusted &&
-      !window.confirm(
-        $t('Trust “{name}” for unattended access? Requests from this device may be accepted automatically by this host.', { name: device.name })
-      )
-    ) return;
+    if (!trusted && !confirmed(`trust:${device.id}`)) return;
     try {
       const trustedDeviceIds = trusted
         ? $preferences.trustedDeviceIds.filter((id) => id !== requesterId)
@@ -231,8 +238,7 @@
 
   async function remove(device: Computer): Promise<void> {
     const client = session.client();
-    if (!client || !window.confirm($t('Remove “{name}” from your account?', { name: device.name }))) return;
-    if (actionId) return;
+    if (!client || actionId || !confirmed(`remove:${device.id}`)) return;
     actionId = device.id;
     revision += 1;
     error = null;
@@ -338,8 +344,10 @@
               <div class="device-menu-items">
                 <button disabled={actionId !== null} onclick={() => beginRename(device)}>{$t('Rename computer')}</button>
                 <button onclick={() => inspect(device)}>{$t('View diagnostics')}</button>
-                {#if runtime.capabilities.hostEngine.state === 'available' && device.requesterId}<button disabled={actionId !== null} onclick={() => toggleTrust(device)}>{$preferences.trustedDeviceIds.includes(device.requesterId) ? $t('Revoke trust') : $t('Trust device')}</button>{/if}
-                <button class="danger-text" disabled={actionId !== null || device.streaming} onclick={() => remove(device)}>{$t('Remove computer')}</button>
+                {#if runtime.capabilities.hostEngine.state === 'available' && device.requesterId}<button disabled={actionId !== null} onclick={() => toggleTrust(device)}>{$preferences.trustedDeviceIds.includes(device.requesterId) ? $t('Revoke trust') : armed === `trust:${device.id}` ? $t('Click again to trust') : $t('Trust device')}</button>{/if}
+                <button class="danger-text" disabled={actionId !== null || device.streaming} onclick={() => remove(device)}>{armed === `remove:${device.id}` ? $t('Click again to remove') : $t('Remove computer')}</button>
+                {#if armed === `trust:${device.id}`}<p class="menu-note" role="alert">{$t('Trust “{name}” for unattended access? Requests from this device may be accepted automatically by this host.', { name: device.name })}</p>
+                {:else if armed === `remove:${device.id}`}<p class="menu-note" role="alert">{$t('Remove “{name}” from your account?', { name: device.name })}</p>{/if}
               </div>
             </details>
           </div>

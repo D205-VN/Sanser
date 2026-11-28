@@ -1,4 +1,5 @@
 import { get, writable, type Readable } from 'svelte/store';
+import { answerProbe } from '../lib/advisorProbe';
 import { deviceIdentity } from '../lib/deviceIdentity';
 import { ApiError } from '../lib/api';
 import { engineStatus, getLocalRouteAddress, launchEngine, startRelay, stopEngine, stopRelay } from '../lib/platform';
@@ -264,6 +265,34 @@ export function createHostStore(): HostStore {
     sessionTimer = null;
   }
 
+  let probeInFlight = false;
+  let probesUnsupported = false;
+
+  /** Answers "Suggest settings" measurements another of this account's computers started. */
+  async function answerAdvisorProbes(): Promise<void> {
+    const current = get(store);
+    const client = session.client();
+    if (probeInFlight || probesUnsupported || !client || !current.online || !current.deviceId) return;
+    probeInFlight = true;
+    try {
+      let items: string[];
+      try {
+        ({ items } = await client.pendingAdvisorProbes(current.deviceId));
+      } catch (error) {
+        // An older server has no probes; stop asking until the host goes online again.
+        if (!(error instanceof ApiError) || error.status === 404 || error.status === 405) probesUnsupported = true;
+        return;
+      }
+      const live = get(store);
+      // A running session keeps its bandwidth: report the machine only.
+      const busy = live.engineRunning || Boolean(live.sharingActive) || live.launchingSessionId !== null;
+      const [probeId] = items;
+      if (probeId) await answerProbe(client, probeId, busy).catch(() => undefined);
+    } finally {
+      probeInFlight = false;
+    }
+  }
+
   async function refreshSessions(reportError = false): Promise<void> {
     const current = get(store);
     const client = session.client();
@@ -462,7 +491,11 @@ export function createHostStore(): HostStore {
       }, HEARTBEAT_INTERVAL_MS);
       await refreshSessions();
       if (generation !== lifecycleGeneration) return;
-      sessionTimer = window.setInterval(() => void refreshSessions(), 2_000);
+      probesUnsupported = false;
+      sessionTimer = window.setInterval(() => {
+        void refreshSessions();
+        void answerAdvisorProbes();
+      }, 2_000);
       diagnostics.add({ level: 'info', category: 'engine', message: 'Host is online', details: { deviceId } });
     } catch (error) {
       if (generation !== lifecycleGeneration) return;

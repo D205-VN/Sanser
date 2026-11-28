@@ -39,6 +39,9 @@ pub struct AppState {
     pub exam_join_limiter: RateLimiter,
     /// Stream advisor requests per account (each may run a language model).
     pub advisor_limiter: RateLimiter,
+    /// Live advisor measurements a viewer may start, per user.
+    pub advisor_probe_limiter: RateLimiter,
+    pub advisor_probes: Arc<crate::advisor_probe::ProbeStore>,
 }
 
 impl AppState {
@@ -74,6 +77,8 @@ impl AppState {
             exam_heartbeat_limiter: RateLimiter::new(40, Duration::from_secs(60)),
             exam_join_limiter: RateLimiter::new(20, Duration::from_secs(600)),
             advisor_limiter: RateLimiter::new(10, Duration::from_secs(600)),
+            advisor_probe_limiter: RateLimiter::new(10, Duration::from_secs(600)),
+            advisor_probes: Arc::default(),
         }
     }
 }

@@ -476,6 +476,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .device-menu-items { position: absolute; right: 0; top: calc(100% + 6px); z-index: 10; display: grid; min-width: 185px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 10px; background: #1b2734; box-shadow: var(--shadow); }
 .device-menu-items button { padding: 11px 12px; border: 0; border-radius: 6px; background: transparent; text-align: left; font-size: 13px; cursor: pointer; }
 .device-menu-items button:hover { background: var(--surface-active); }
+.device-menu-items .menu-note { max-width: 240px; margin: 4px 6px 2px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .danger-text { color: var(--red); }
 .connect-reason { color: var(--muted); font-size: 13px; }
 .workspace-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-top: 24px; color: var(--muted-2); font-size: 12px; line-height: 1.6; }

@@ -2822,3 +2822,261 @@ async fn stream_advisor_answers_with_rules_when_no_model_is_configured() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     server.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn advisor_probes_carry_live_measurements_from_host_to_viewer() {
+    let Some(server) = TestServer::new().await else {
+        return;
+    };
+    let auth = server.register("probe@example.test").await;
+    let access = auth["accessToken"].as_str().expect("token");
+    let host = Uuid::new_v4().to_string();
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(json!({
+                "id":host,"computerId":Uuid::new_v4().to_string(),"deviceRole":"host",
+                "name":"Probe host","platform":"windows-x86_64","sanserVersion":"2.3.37",
+                "crossPlatform":true,"nativeTransport":true,"codecs":["h264"]
+            })),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/offline",
+            Some(json!({"deviceId": host})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    // Offline hosts cannot be measured.
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/advisor/probes",
+            Some(json!({"hostDeviceId": host})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/heartbeat",
+            Some(json!({"deviceId":host,"streaming":false})),
+            Some(access),
+        )
+        .await;
+    assert!(status.is_success(), "{body}");
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/advisor/probes",
+            Some(json!({"hostDeviceId": host})),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let probe = body["probeId"].as_str().expect("probe id").to_owned();
+    let chunk = usize::try_from(body["chunkBytes"].as_u64().expect("chunk")).expect("size");
+
+    let pending = format!("/api/v2/advisor/probes?deviceId={host}");
+    let (status, body, _) = server
+        .request(Method::GET, &pending, None, Some(access))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["items"], json!([probe]));
+    let (_, body, _) = server
+        .request(Method::GET, &pending, None, Some(access))
+        .await;
+    assert_eq!(body["items"], json!([]));
+
+    let raw = |method: Method, path: String, bytes: Vec<u8>| {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {access}"))
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(bytes))
+            .expect("request");
+        server.app.clone().oneshot(request)
+    };
+    let response = raw(
+        Method::POST,
+        format!("/api/v2/advisor/probes/{probe}/upload"),
+        vec![7; chunk],
+    )
+    .await
+    .expect("upload");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = raw(
+        Method::POST,
+        format!("/api/v2/advisor/probes/{probe}/upload"),
+        vec![7; chunk + 4_096],
+    )
+    .await
+    .expect("oversized upload");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let response = raw(
+        Method::GET,
+        format!("/api/v2/advisor/probes/{probe}/download"),
+        Vec::new(),
+    )
+    .await
+    .expect("download");
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    assert_eq!(bytes.len(), chunk);
+
+    let show = format!("/api/v2/advisor/probes/{probe}");
+    let (_, body, _) = server.request(Method::GET, &show, None, Some(access)).await;
+    assert_eq!(body["hostAnswered"], false);
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/advisor/probes/{probe}/result"),
+            Some(
+                json!({"serverMs": 40, "uploadMbps": 18.5, "displayWidth": 2560,
+                        "displayHeight": 1440, "refreshHz": 144, "cpuCores": 12,
+                        "cpuModel": "AMD Ryzen 5 5600X", "memoryGb": 32}),
+            ),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let (_, body, _) = server.request(Method::GET, &show, None, Some(access)).await;
+    assert_eq!(body["hostAnswered"], true);
+    assert_eq!(body["host"]["refreshHz"], 144);
+    assert_eq!(body["host"]["uploadMbps"], 18.5);
+
+    // Another account sees nothing.
+    let other = server.register("probe-other@example.test").await;
+    let other_access = other["accessToken"].as_str().expect("token");
+    let (status, _, _) = server
+        .request(Method::GET, &show, None, Some(other_access))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/advisor/probes",
+            Some(json!({"hostDeviceId": host})),
+            Some(other_access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn exam_emergency_code_unlocks_one_student() {
+    let Some(server) = TestServer::new().await else {
+        return;
+    };
+    let token = |auth: Value| auth["accessToken"].as_str().expect("token").to_owned();
+    let teacher = token(server.register("unlock-teacher@example.test").await);
+    let student = token(server.register("unlock-student@example.test").await);
+    let other = token(server.register("unlock-other@example.test").await);
+    let device = Uuid::new_v4().to_string();
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(json!({"id": device, "name": "Lab PC 9", "platform": "windows-x86_64", "deviceRole": "host", "nativeTransport": true, "codecs": ["h264"]})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, room, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exams",
+            Some(json!({"title": "Lý 11B", "allowedApps": [{"id": "Code.exe", "name": "VS Code"}], "hours": 1})),
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{room}");
+    let room_id = room["id"].as_str().expect("room id").to_owned();
+    let unlock_code = room["unlockCode"].as_str().expect("unlock code").to_owned();
+    assert_eq!(unlock_code.len(), 8);
+    let (status, policy, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exam-members",
+            Some(json!({"code": room["code"], "deviceId": device, "displayName": "Bình"})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let member = policy["memberId"].as_str().expect("member").to_owned();
+    // The student gets only the salted hash, never the code.
+    assert_eq!(policy["unlock"]["iterations"], 100_000);
+    assert!(policy["unlock"]["hash"].is_string());
+    assert!(!policy.to_string().contains(&unlock_code));
+
+    let path = format!("/api/v2/exam-members/{member}/unlock");
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &path,
+            Some(json!({"code": "WRONGCOD"})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &path,
+            Some(json!({"code": unlock_code})),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let typed = format!(
+        " {}-{} ",
+        unlock_code[..4].to_lowercase(),
+        &unlock_code[4..]
+    );
+    let (status, policy, _) = server
+        .request(
+            Method::POST,
+            &path,
+            Some(json!({"code": typed})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    assert_eq!(policy["memberState"], "removed");
+    assert_eq!(policy["roomState"], "open");
+
+    let (status, detail, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exams/{room_id}"),
+            None,
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        detail["violations"]
+            .as_array()
+            .expect("violations")
+            .iter()
+            .any(|item| item["kind"] == "emergency-unlock"),
+        "{detail}"
+    );
+    server.close().await;
+}
