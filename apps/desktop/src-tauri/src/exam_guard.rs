@@ -4,7 +4,13 @@
 //! apps and spots AI websites by window title. It prints what it sees; the
 //! exam page drains that report into the heartbeat. While a guard runs
 //! Sanser refuses to quit. The supervisor (or the room's time limit) ends it.
-#![allow(clippy::needless_pass_by_value)] // Tauri commands take owned state handles.
+// Tauri commands take owned state handles.
+#![allow(clippy::needless_pass_by_value)]
+// Linux (CI only) has no guard script; the shared lists stay for the tests.
+#![cfg_attr(
+    not(any(target_os = "macos", windows)),
+    allow(dead_code, unused_imports)
+)]
 
 use std::{
     io::{BufRead, BufReader},
