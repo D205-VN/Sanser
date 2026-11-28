@@ -21,7 +21,7 @@ import type {
   WakeInterface
 } from './types';
 import type { LoginDevice } from './platform';
-import type { ExamApp, ExamHeartbeat, ExamPolicy, ExamRoom, ExamRoomDetail, ExamScreen } from './exam';
+import type { ExamApp, ExamHeartbeat, ExamPolicy, ExamRoom, ExamRoomDetail, ExamScreen, ExamScreenPace } from './exam';
 import type { HostMeasurement, StreamAdvice, StreamAdviceRequest } from './streamAdvisor';
 
 export class ApiError extends Error {
@@ -594,8 +594,15 @@ export class ApiClient {
     return this.request<ExamRoomDetail>(`/api/v2/exams/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/action`, { method: 'POST', body: { action } });
   }
 
-  async examScreens(id: string, since: number): Promise<ExamScreen[]> {
-    return this.request<ExamScreen[]>(`/api/v2/exams/${encodeURIComponent(id)}/screens?since=${String(Math.max(0, Math.floor(since)))}`);
+  /** `after` is the newest `seq` already seen (newer servers); `since` is the old Unix-seconds filter. */
+  async examScreens(id: string, since: number, after?: number): Promise<ExamScreen[]> {
+    const query = after === undefined ? `since=${String(Math.max(0, Math.floor(since)))}` : `after=${String(Math.max(0, Math.floor(after)))}`;
+    return this.request<ExamScreen[]>(`/api/v2/exams/${encodeURIComponent(id)}/screens?${query}`);
+  }
+
+  /** One screen between heartbeats; 409 until the first heartbeat of this seat. The answer sets the pace. */
+  async examScreen(memberId: string, screenshot: string): Promise<ExamScreenPace> {
+    return this.request<ExamScreenPace>(`/api/v2/exam-members/${encodeURIComponent(memberId)}/screen`, { method: 'POST', body: { screenshot } });
   }
 
   async joinExam(code: string, deviceId: string, displayName: string): Promise<ExamPolicy> {

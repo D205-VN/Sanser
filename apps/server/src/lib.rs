@@ -228,6 +228,10 @@ pub fn build_router(state: AppState) -> Router {
             post(routes::exams::unlock),
         )
         .route(
+            "/api/v2/exam-members/{member}/screen",
+            post(routes::exams::screen),
+        )
+        .route(
             "/api/v2/advisor/stream",
             get(routes::advisor::status).post(routes::advisor::advise),
         )

@@ -8,10 +8,15 @@ Sanser account and computer with a 6-character code.
 - **Start an exam**: name, longest duration (1–8 h, then the room ends by
   itself), allowed apps (presets carry both the macOS bundle id and the Windows
   `.exe`, or add any app), and **Block AI**.
-- The room shows the code, a grid of student screens (every 10 s), the app each
-  student has in front, a violation count and a violation feed.
-- Clicking a student opens a large view and asks that computer for a picture
-  every 2 s for the next 90 s (renewed while the view stays open).
+- The room shows the code, a grid of student screens (refreshed every second,
+  each picture arriving only when that screen changed), the app each student
+  has in front, a violation count and a violation feed.
+- Clicking a student opens a large live view: that computer sends about four
+  sharp pictures a second (1280 px, JPEG quality 45, ≈ 80 KB, still only when
+  the screen changed) for the next 90 s, renewed while the view stays open,
+  and the supervisor polls four times a second. One student at a time; closing
+  the view takes them back to the grid pace. It is fast pictures, not video:
+  enough to read code, but scrolling looks jerky.
 - **Pause this computer** covers the student's screen with Sanser (full screen,
   always on top) until **Let them continue**. **Remove from exam** unlocks that
   computer; it cannot rejoin the same room. **End exam** unlocks everyone.
@@ -34,8 +39,19 @@ While the room is open and the student is not removed:
   session, takes Host offline, and refuses to quit (Cmd+Q, Dock, tray, window
   close) and to sign out. The seat is stored locally, so after a crash or
   restart the lock comes back at once.
-- Heartbeat every 5 s (2 s while watched) with the front app, violations and a
-  JPEG screenshot (≤ 180 KB). The answer carries pause/end/remove.
+- Heartbeat every 5 s (2 s while watched) with the front app and violations.
+  The answer carries pause/end/remove.
+- Screens go on their own (`POST /api/v2/exam-members/{member}/screen`, newer
+  servers announce it with `liveScreenSeconds`/`liveScreenMs`): one capture a
+  second, about 640 px at JPEG quality 35 (≈ 20–30 KB); every 250 ms at
+  1280 px and quality 45 while watched. Each picture's answer carries the
+  pace, so opening a student takes effect within a second, not at the next
+  heartbeat. Each is
+  reduced to a 64×36 grayscale fingerprint and sent only when a cell moved by
+  more than 10, or after 10 s unchanged. Windows keeps one hidden PowerShell
+  for captures instead of starting one per picture; it ends with the exam or
+  with Sanser. Against an older server the picture rides in the heartbeat
+  every 10 s (2 s while watched) as before.
 - Offline: the lock stays and violations are kept and sent later. After 9 h
   without the server the seat is released.
 
@@ -60,7 +76,12 @@ apps never stay hidden without Sanser.
 memory (`exam_live.rs`) and are dropped after 3 minutes or when the room ends.
 A silence over 30 s is written as a `disconnected` violation when the student
 returns. Exam heartbeats skip the per-address limit (a class shares one school
-address) and use a per-seat limit of 40/min instead. Ended rooms are deleted
+address) and use a per-seat limit of 40/min instead; screens 90/min (320/min
+for the watched student). The supervisor's screen polling skips it too and
+has a per-account limit of 400/min. A seat
+may send screens for 30 s after each heartbeat without a database lookup, and
+each screen gets a sequence number, so the supervisor polls every second with
+`?after=<seq>` and gets only pictures it has not seen. Ended rooms are deleted
 after 30 days.
 
 ## Limits (what it cannot stop)

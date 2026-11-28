@@ -33,9 +33,10 @@ pub async fn request_id(mut request: Request, next: Next) -> Response {
 }
 
 pub async fn rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    // A whole class may share one school address; the exam heartbeat has
-    // its own per-seat limit instead (routes::exams::heartbeat).
-    if exam_heartbeat(request.uri().path()) {
+    // A whole class may share one school address; the exam heartbeat and
+    // screen have their own per-seat limits instead, and the supervisor's
+    // screen polling a per-account one (routes::exams).
+    if exam_heartbeat(request.uri().path()) || exam_screens(request.uri().path()) {
         return next.run(request).await;
     }
     let key = request
@@ -57,8 +58,17 @@ pub async fn timeout(State(state): State<AppState>, request: Request, next: Next
 
 fn exam_heartbeat(path: &str) -> bool {
     path.strip_prefix("/api/v2/exam-members/")
-        .and_then(|rest| rest.strip_suffix("/heartbeat"))
+        .and_then(|rest| {
+            rest.strip_suffix("/heartbeat")
+                .or_else(|| rest.strip_suffix("/screen"))
+        })
         .is_some_and(|member| !member.is_empty() && !member.contains('/'))
+}
+
+fn exam_screens(path: &str) -> bool {
+    path.strip_prefix("/api/v2/exams/")
+        .and_then(|rest| rest.strip_suffix("/screens"))
+        .is_some_and(|room| !room.is_empty() && !room.contains('/'))
 }
 
 fn valid_request_id(value: &HeaderValue) -> bool {
@@ -68,4 +78,20 @@ fn valid_request_id(value: &HeaderValue) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exam_heartbeat, exam_screens};
+
+    #[test]
+    fn only_exam_seat_and_screen_paths_skip_the_address_limit() {
+        assert!(exam_heartbeat("/api/v2/exam-members/abc/heartbeat"));
+        assert!(exam_heartbeat("/api/v2/exam-members/abc/screen"));
+        assert!(exam_screens("/api/v2/exams/abc/screens"));
+        assert!(!exam_screens("/api/v2/exams/abc/end"));
+        assert!(!exam_screens("/api/v2/exams//screens"));
+        assert!(!exam_screens("/api/v2/exams/a/b/screens"));
+        assert!(!exam_heartbeat("/api/v2/exam-members/abc/unlock"));
+    }
 }

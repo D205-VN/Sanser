@@ -28,6 +28,25 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it('polls screens every second after the newest sequence number', async () => {
+  vi.useFakeTimers();
+  try {
+    mocks.client.examRooms.mockResolvedValue([room]);
+    mocks.client.examRoom.mockResolvedValue(room);
+    mocks.client.examScreens.mockResolvedValueOnce([{ memberId: 'm1', jpegBase64: '/9j/AAA=', capturedAt: 5, seq: 41 }]).mockResolvedValue([]);
+    render(ExamSupervisor);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(mocks.client.examScreens).toHaveBeenCalledWith('room-1', 0, undefined);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.client.examScreens).toHaveBeenLastCalledWith('room-1', 5, 41);
+    const idle = mocks.client.examScreens.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.client.examScreens.mock.calls.length - idle).toBeLessThanOrEqual(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it('starts an exam with the chosen apps and shows the code, students and violations', async () => {
   mocks.client.createExamRoom.mockResolvedValue(room);
   mocks.client.examMemberAction.mockResolvedValueOnce(room).mockResolvedValueOnce({ ...room, members: [{ ...student, state: 'paused' }] });

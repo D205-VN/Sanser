@@ -374,6 +374,7 @@ pub fn exam_guard_report(state: tauri::State<'_, ExamGuard>) -> GuardReport {
 #[tauri::command]
 pub fn exam_guard_stop(app: tauri::AppHandle, state: tauri::State<'_, ExamGuard>) {
     state.stop_child();
+    stop_shooter();
     state.locked.store(false, Ordering::SeqCst);
     cover_screen(&app, false);
 }
@@ -398,13 +399,15 @@ fn cover_screen(app: &tauri::AppHandle, cover: bool) {
 /// One JPEG of the main screen as base64, sized for the supervisor grid.
 #[tauri::command]
 pub async fn exam_capture_screen(large: bool) -> Result<String, DesktopError> {
-    tauri::async_runtime::spawn_blocking(move || capture(if large { 1280 } else { 960 }))
+    // The grid wants a small picture every second; the watched student a sharp one.
+    let (width, quality) = if large { (1280, 45) } else { (640, 35) };
+    tauri::async_runtime::spawn_blocking(move || capture(width, quality))
         .await
         .map_err(|_| DesktopError::Unavailable("screenshot failed".into()))?
 }
 
 #[cfg(target_os = "macos")]
-fn capture(width: u32) -> Result<String, DesktopError> {
+fn capture(width: u32, quality: u32) -> Result<String, DesktopError> {
     use base64::Engine;
     let failed = || DesktopError::Unavailable("screenshot failed".into());
     let directory = std::env::temp_dir().join(format!("sanser-exam-{}", uuid::Uuid::new_v4()));
@@ -421,7 +424,7 @@ fn capture(width: u32) -> Result<String, DesktopError> {
         if !status.success() {
             return Err(failed());
         }
-        for (size, quality) in [(width, "45"), (720, "35")] {
+        for (size, quality) in [(width, quality), (width.min(720), 30)] {
             let status = Command::new("/usr/bin/sips")
                 .args([
                     "-Z",
@@ -431,7 +434,7 @@ fn capture(width: u32) -> Result<String, DesktopError> {
                     "jpeg",
                     "-s",
                     "formatOptions",
-                    quality,
+                    &quality.to_string(),
                 ])
                 .arg(&raw)
                 .arg("--out")
@@ -454,31 +457,101 @@ fn capture(width: u32) -> Result<String, DesktopError> {
     result
 }
 
+/// One PowerShell kept running for screenshots: starting a new one every
+/// second would cost far more than the picture itself.
 #[cfg(windows)]
-fn capture(width: u32) -> Result<String, DesktopError> {
+struct Shooter {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+#[cfg(windows)]
+static SHOOTER: Mutex<Option<Shooter>> = Mutex::new(None);
+
+#[cfg(windows)]
+fn start_shooter() -> std::io::Result<Shooter> {
+    let mut child = powershell(include_str!("exam_guard/screenshot_windows.ps1"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdin = child.stdin.take().ok_or(std::io::ErrorKind::BrokenPipe)?;
+    let stdout = child.stdout.take().ok_or(std::io::ErrorKind::BrokenPipe)?;
+    Ok(Shooter {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+    })
+}
+
+#[cfg(windows)]
+fn shoot(shooter: &mut Shooter, width: u32, quality: u32) -> std::io::Result<String> {
+    use std::io::Write;
+    writeln!(shooter.stdin, "{width} {quality}")?;
+    shooter.stdin.flush()?;
+    let mut line = String::new();
+    if shooter.stdout.read_line(&mut line)? == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(line.trim().to_owned())
+}
+
+/// Ends the screenshot process with the exam.
+#[cfg(windows)]
+pub(crate) fn stop_shooter() {
+    if let Ok(mut shooter) = SHOOTER.lock()
+        && let Some(mut running) = shooter.take()
+    {
+        let _ = running.child.kill();
+        let _ = running.child.wait();
+    }
+}
+
+/// Only Windows keeps a screenshot process.
+#[cfg(not(windows))]
+pub(crate) const fn stop_shooter() {}
+
+#[cfg(windows)]
+fn capture(width: u32, quality: u32) -> Result<String, DesktopError> {
     let failed = || DesktopError::Unavailable("screenshot failed".into());
-    for (size, quality) in [(width, 45), (720, 35)] {
-        let output = powershell(include_str!("exam_guard/screenshot_windows.ps1"))
-            .env("SANSER_SHOT_WIDTH", size.to_string())
-            .env("SANSER_SHOT_QUALITY", quality.to_string())
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|_| failed())?;
-        let encoded = String::from_utf8(output.stdout).map_err(|_| failed())?;
-        let encoded = encoded.trim();
-        if !output.status.success() || encoded.is_empty() {
+    // A capture still running (a stuck PowerShell) must not pile up callers.
+    let Ok(mut slot) = SHOOTER.try_lock() else {
+        return Err(failed());
+    };
+    for (size, quality) in [(width, quality), (width.min(720), 30)] {
+        let mut answer = None;
+        for _ in 0..2 {
+            if slot.is_none() {
+                *slot = Some(start_shooter().map_err(|_| failed())?);
+            }
+            let Some(shooter) = slot.as_mut() else { break };
+            match shoot(shooter, size, quality) {
+                Ok(encoded) => {
+                    answer = Some(encoded);
+                    break;
+                }
+                Err(_) => {
+                    if let Some(mut dead) = slot.take() {
+                        let _ = dead.child.kill();
+                        let _ = dead.child.wait();
+                    }
+                }
+            }
+        }
+        let encoded = answer.ok_or_else(failed)?;
+        if encoded.is_empty() {
             return Err(failed());
         }
         if encoded.len() <= 225_000 {
-            return Ok(encoded.to_owned());
+            return Ok(encoded);
         }
     }
     Err(failed())
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn capture(_width: u32) -> Result<String, DesktopError> {
+fn capture(_width: u32, _quality: u32) -> Result<String, DesktopError> {
     Err(DesktopError::Unavailable(
         "exam mode needs macOS or Windows".into(),
     ))

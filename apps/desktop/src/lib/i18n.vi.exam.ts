@@ -56,7 +56,7 @@ export const VI_EXAM: Record<string, string> = {
   "No picture yet": "Chưa có hình",
   "Violations": "Vi phạm",
   "Student detail": "Chi tiết học sinh",
-  "Pictures every 2 seconds while this is open": "Hình cập nhật mỗi 2 giây khi đang mở mục này",
+  "Live view: about 4 pictures a second while this is open": "Xem trực tiếp: khoảng 4 hình mỗi giây khi đang mở mục này",
   "Let them continue": "Cho làm tiếp",
   "Pause this computer": "Tạm khoá máy này",
   "Remove from exam": "Mời ra khỏi phòng",

@@ -8,9 +8,13 @@
   import Toggle from './Toggle.svelte';
 
   // Supervisor side of exam mode. Polls the room every few seconds and the
-  // screenshots separately, fetching only pictures newer than the last one.
+  // screenshots every second, or four times a second while one student is
+  // open (that computer then sends about four sharp pictures a second).
+  // Only pictures newer than the last one arrive (by sequence number on
+  // newer servers, so two in one second both arrive).
   const ROOM_POLL_MS = 3_000;
-  const SCREEN_POLL_MS = 2_000;
+  const SCREEN_POLL_MS = 1_000;
+  const FOCUSED_SCREEN_POLL_MS = 250;
   const WATCH_REPEAT_MS = 60_000;
 
   let rooms = $state<ExamRoom[]>([]);
@@ -31,6 +35,9 @@
   let screenTimer: number | null = null;
   let watchTimer: number | null = null;
   let screensSince = 0;
+  let screensAfter: number | undefined;
+  let screensBusy = false;
+  let screensPolledAt = 0;
 
   const focusedMember = $derived(room?.members.find((member) => member.id === focused) ?? null);
 
@@ -54,6 +61,7 @@
     room = await client.examRoom(id);
     screens = {};
     screensSince = 0;
+    screensAfter = undefined;
     startPolling();
   }
 
@@ -66,7 +74,9 @@
     stopPolling();
     void pollScreens();
     roomTimer = window.setInterval(() => void pollRoom(), ROOM_POLL_MS);
-    screenTimer = window.setInterval(() => void pollScreens(), SCREEN_POLL_MS);
+    screenTimer = window.setInterval(() => {
+      if (focused || Date.now() - screensPolledAt >= SCREEN_POLL_MS - 50) void pollScreens();
+    }, FOCUSED_SCREEN_POLL_MS);
     watchTimer = window.setInterval(() => { if (focused) void act(focused, 'watch', true); }, WATCH_REPEAT_MS);
   }
 
@@ -80,19 +90,27 @@
     } catch (cause) { fail(cause, 'Unable to refresh the exam'); }
   }
 
+  /** Read fresh: the room may have changed while a request was out. */
+  function openRoomId(): string | undefined { return room?.id; }
+
   async function pollScreens(): Promise<void> {
     const client = session.client();
-    if (!client || !room || room.state !== 'open') return;
+    if (!client || !room || room.state !== 'open' || screensBusy) return;
+    screensBusy = true;
+    screensPolledAt = Date.now();
+    const roomId = room.id;
     try {
-      const fresh = await client.examScreens(room.id, screensSince);
-      if (fresh.length === 0) return;
+      const fresh = await client.examScreens(roomId, screensSince, screensAfter);
+      if (fresh.length === 0 || openRoomId() !== roomId) return;
       const next = { ...screens };
       for (const screen of fresh) {
         next[screen.memberId] = { src: `data:image/jpeg;base64,${screen.jpegBase64}`, capturedAt: screen.capturedAt };
         screensSince = Math.max(screensSince, screen.capturedAt);
+        if (typeof screen.seq === 'number') screensAfter = Math.max(screensAfter ?? 0, screen.seq);
       }
       screens = next;
     } catch { /* the next poll retries */ }
+    finally { screensBusy = false; }
   }
 
   async function create(event: SubmitEvent): Promise<void> {
@@ -104,6 +122,7 @@
       room = await client.createExamRoom(title.trim(), allowed, blockAi, hours);
       screens = {};
       screensSince = 0;
+      screensAfter = undefined;
       startPolling();
       void loadRooms();
     } catch (cause) { fail(cause, 'Unable to start the exam'); }
@@ -258,7 +277,7 @@
   {#if focusedMember}
     <article class="card card-body focus" aria-label={$t('Student detail')}>
       <div class="room-head">
-        <div><h2 class="card-title">{focusedMember.displayName}</h2><p class="card-subtitle">{statusLabel(focusedMember)} · {$t('Pictures every 2 seconds while this is open')}</p></div>
+        <div><h2 class="card-title">{focusedMember.displayName}</h2><p class="card-subtitle">{statusLabel(focusedMember)} · {$t('Live view: about 4 pictures a second while this is open')}</p></div>
         <div class="button-row">
           {#if focusedMember.state === 'paused'}<button class="button primary" onclick={() => act(focusedMember.id, 'resume')}>{$t('Let them continue')}</button>
           {:else}<button class="button" onclick={() => act(focusedMember.id, 'pause')}>{$t('Pause this computer')}</button>{/if}

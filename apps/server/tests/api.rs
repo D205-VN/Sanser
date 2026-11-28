@@ -3080,3 +3080,144 @@ async fn exam_emergency_code_unlocks_one_student() {
     );
     server.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn exam_screens_flow_between_heartbeats_with_sequence_numbers() {
+    let Some(server) = TestServer::new().await else {
+        return;
+    };
+    let token = |auth: Value| auth["accessToken"].as_str().expect("token").to_owned();
+    let teacher = token(server.register("grid-teacher@example.test").await);
+    let student = token(server.register("grid-student@example.test").await);
+    let device = Uuid::new_v4().to_string();
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(json!({"id": device, "name": "Lab PC 3", "platform": "macos-aarch64", "deviceRole": "host", "nativeTransport": true, "codecs": ["h264"]})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (_, room, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exams",
+            Some(json!({"title": "Hoá", "allowedApps": [], "hours": 1})),
+            Some(&teacher),
+        )
+        .await;
+    let room_id = room["id"].as_str().expect("room").to_owned();
+    let (_, policy, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exam-members",
+            Some(json!({"code": room["code"], "deviceId": device, "displayName": "Chi"})),
+            Some(&student),
+        )
+        .await;
+    let member = policy["memberId"].as_str().expect("member").to_owned();
+    assert_eq!(policy["liveScreenSeconds"], 1);
+    assert_eq!(policy["liveScreenMs"], 1000);
+    assert_eq!(policy["screenLarge"], false);
+
+    let jpeg = STANDARD.encode([0xFF, 0xD8, 0xFF, 0xE0, 0, 16]);
+    let screen = format!("/api/v2/exam-members/{member}/screen");
+    // No heartbeat yet: the seat has no pass.
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &screen,
+            Some(json!({"screenshot": jpeg})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/exam-members/{member}/heartbeat"),
+            Some(json!({"violations": []})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..2 {
+        let (status, body, _) = server
+            .request(
+                Method::POST,
+                &screen,
+                Some(json!({"screenshot": jpeg})),
+                Some(&student),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["liveScreenMs"], 1000);
+    }
+    // Only the student may send for the seat.
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &screen,
+            Some(json!({"screenshot": jpeg})),
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, screens, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exams/{room_id}/screens?after=0"),
+            None,
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let seq = screens[0]["seq"].as_u64().expect("seq");
+    assert!(seq >= 2, "the second picture replaced the first: {screens}");
+    let (_, newer, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exams/{room_id}/screens?after={seq}"),
+            None,
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(newer, json!([]));
+
+    // Opened by the supervisor: about four sharp pictures a second.
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/exams/{room_id}/members/{member}/action"),
+            Some(json!({"action": "watch"})),
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, watched, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/exam-members/{member}/heartbeat"),
+            Some(json!({"violations": []})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(watched["liveScreenMs"], 250);
+    assert_eq!(watched["screenLarge"], true);
+    for _ in 0..100 {
+        let (status, body, _) = server
+            .request(
+                Method::POST,
+                &screen,
+                Some(json!({"screenshot": jpeg})),
+                Some(&student),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["screenLarge"], true);
+    }
+    server.close().await;
+}

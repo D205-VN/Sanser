@@ -43,7 +43,11 @@ export interface ExamRoomDetail extends ExamRoom {
   violations: ExamViolation[];
 }
 
-export interface ExamScreen { memberId: string; jpegBase64: string; capturedAt: number }
+/** `seq` (newer servers) orders screens even within one second. */
+/** How fast and how sharp the next picture should be, answered with each picture. */
+export interface ExamScreenPace { liveScreenMs: number; screenLarge: boolean }
+
+export interface ExamScreen { memberId: string; jpegBase64: string; capturedAt: number; seq?: number }
 
 /** What the student computer must enforce, as the server sees it now. */
 export interface ExamPolicy {
@@ -57,6 +61,12 @@ export interface ExamPolicy {
   blockAi: boolean;
   heartbeatSeconds: number;
   screenSeconds: number;
+  /** Newer servers: send screens on their own every this many seconds, outside the heartbeat. */
+  liveScreenSeconds?: number;
+  /** Newest servers: the same in milliseconds, about 250 while the supervisor has this computer open. */
+  liveScreenMs?: number;
+  /** The supervisor is watching this computer: send the sharp picture. */
+  screenLarge?: boolean;
   /** Lets this computer accept the emergency code while the server is out of reach. */
   unlock?: ExamUnlockCheck;
 }

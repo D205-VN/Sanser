@@ -4604,6 +4604,94 @@
     }
    }
   },
+  "/api/v2/exam-members/{member}/screen": {
+   "post": {
+    "tags": [
+     "Exams"
+    ],
+    "summary": "Student: one small picture of the screen between heartbeats (memory only)",
+    "operationId": "post_api_v2_exam_members_member_screen",
+    "parameters": [
+     {
+      "name": "member",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "description": "JSON object; see the handler for its fields."
+        }
+       }
+      }
+     },
+     "401": {
+      "description": "Authentication is required.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "404": {
+      "description": "Not found.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "422": {
+      "description": "Validation failed.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     },
+     "429": {
+      "description": "Too many requests.",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/Error"
+        }
+       }
+      }
+     }
+    },
+    "security": [
+     {
+      "bearerAuth": []
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "description": "{screenshot: base64 JPEG}"
+       }
+      }
+     }
+    }
+   }
+  },
   "/api/v2/advisor/stream": {
    "get": {
     "tags": [

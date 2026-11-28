@@ -37,6 +37,10 @@ pub struct AppState {
     pub exam_heartbeat_limiter: RateLimiter,
     /// Exam code attempts per account.
     pub exam_join_limiter: RateLimiter,
+    /// Screens sent between heartbeats, per exam seat.
+    pub exam_screen_limiter: RateLimiter,
+    pub exam_watched_screen_limiter: RateLimiter,
+    pub exam_screens_poll_limiter: RateLimiter,
     /// Stream advisor requests per account (each may run a language model).
     pub advisor_limiter: RateLimiter,
     /// Live advisor measurements a viewer may start, per user.
@@ -76,6 +80,11 @@ impl AppState {
             exam_live: Arc::default(),
             exam_heartbeat_limiter: RateLimiter::new(40, Duration::from_secs(60)),
             exam_join_limiter: RateLimiter::new(20, Duration::from_secs(600)),
+            exam_screen_limiter: RateLimiter::new(90, Duration::from_secs(60)),
+            // Four a second while the supervisor has the student open.
+            exam_watched_screen_limiter: RateLimiter::new(320, Duration::from_secs(60)),
+            // The supervisor polls four times a second while a student is open.
+            exam_screens_poll_limiter: RateLimiter::new(400, Duration::from_secs(60)),
             advisor_limiter: RateLimiter::new(10, Duration::from_secs(600)),
             advisor_probe_limiter: RateLimiter::new(10, Duration::from_secs(600)),
             advisor_probes: Arc::default(),

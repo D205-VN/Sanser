@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   report: vi.fn(),
   stop: vi.fn(),
   capture: vi.fn(),
-  client: { joinExam: vi.fn(), examHeartbeat: vi.fn(), examPolicy: vi.fn(), unlockExam: vi.fn() }
+  client: { joinExam: vi.fn(), examHeartbeat: vi.fn(), examPolicy: vi.fn(), unlockExam: vi.fn(), examScreen: vi.fn() }
 }));
 vi.mock('../lib/platform', () => ({
   examGuardApply: mocks.apply,
@@ -82,6 +82,43 @@ it('locks again after a restart and stays strict while the server is unreachable
   mocks.client.examPolicy.mockRejectedValue(Object.assign(new Error('gone'), { status: 404 }));
   await removed.resume();
   expect(removed.active()).toBe(false);
+});
+
+it('a newer server gets screens every second outside the heartbeat, large while watched', async () => {
+  const seat = createExamSeat();
+  const live = policy({ liveScreenSeconds: 1, screenSeconds: 10 });
+  mocks.client.joinExam.mockResolvedValue(live);
+  mocks.client.examHeartbeat.mockResolvedValue(live);
+  mocks.client.examScreen.mockRejectedValueOnce(Object.assign(new Error('send a heartbeat first'), { status: 409 })).mockResolvedValue({ liveScreenMs: 1000, screenLarge: false });
+  await seat.join('ABC234', 'An', 'device-1');
+  await vi.advanceTimersByTimeAsync(600);
+  // The heartbeat carries no picture any more.
+  expect(mocks.client.examHeartbeat).toHaveBeenCalledWith('member-1', expect.not.objectContaining({ screenshot: expect.anything() }));
+  await vi.advanceTimersByTimeAsync(3_000);
+  // The test web view cannot decode JPEG, so every picture counts as changed.
+  expect(mocks.client.examScreen.mock.calls.length).toBeGreaterThanOrEqual(3);
+  expect(mocks.client.examScreen).toHaveBeenLastCalledWith('member-1', '/9j/AAA=');
+  expect(mocks.capture).toHaveBeenLastCalledWith(false);
+
+  // Opened by the supervisor: the picture's answer speeds up the next one at once.
+  mocks.client.examScreen.mockResolvedValue({ liveScreenMs: 250, screenLarge: true });
+  // One more second-paced picture brings the answer; the next comes 250 ms later.
+  await vi.advanceTimersByTimeAsync(1_300);
+  expect(mocks.capture).toHaveBeenLastCalledWith(true);
+  const before = mocks.client.examScreen.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(mocks.client.examScreen.mock.calls.length - before).toBeGreaterThanOrEqual(3);
+
+  // Closed again: back to one small picture a second.
+  mocks.client.examScreen.mockResolvedValue({ liveScreenMs: 1000, screenLarge: false });
+  await vi.advanceTimersByTimeAsync(1_500);
+  expect(mocks.capture).toHaveBeenLastCalledWith(false);
+
+  mocks.client.examHeartbeat.mockResolvedValue(policy({ roomState: 'ended' }));
+  await vi.advanceTimersByTimeAsync(5_000);
+  const sent = mocks.client.examScreen.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(3_000);
+  expect(mocks.client.examScreen.mock.calls.length).toBe(sent);
 });
 
 const unlock = { salt: 'AAECAwQFBgcICQoLDA0ODw==', hash: '7zlNmKeyQK+qOwTP1VPS4oD+8R31S77kGKQ0V3wl/rk=', iterations: 1000 };

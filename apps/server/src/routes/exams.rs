@@ -43,6 +43,11 @@ const GAP_VIOLATION_SECONDS: i64 = 30;
 const NORMAL_HEARTBEAT_SECONDS: u32 = 5;
 const NORMAL_SCREEN_SECONDS: u32 = 10;
 const WATCHED_SECONDS: u32 = 2;
+/// New student apps send a small picture this often, and only when the screen changed.
+const LIVE_SCREEN_SECONDS: u32 = 1;
+/// The same in milliseconds, and faster for the student the supervisor opened.
+const LIVE_SCREEN_MS: u32 = 1_000;
+const WATCHED_SCREEN_MS: u32 = 250;
 const ENDED_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 const CLIENT_VIOLATIONS: [&str; 5] = [
     "left-app",
@@ -118,8 +123,27 @@ pub struct Heartbeat {
 
 #[derive(Deserialize)]
 pub struct ScreensQuery {
+    /// Unix seconds; kept for supervisors on 2.3.37 and older.
     #[serde(default)]
     since: i64,
+    /// Sequence number of the newest screen already shown.
+    #[serde(default)]
+    after: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScreenUpload {
+    screenshot: String,
+}
+
+/// Lets the student computer speed up within a second of being opened,
+/// without waiting for its next heartbeat.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenAnswer {
+    live_screen_ms: u32,
+    screen_large: bool,
 }
 
 #[derive(Serialize)]
@@ -193,6 +217,7 @@ pub struct ScreenView {
     member_id: String,
     jpeg_base64: String,
     captured_at: i64,
+    seq: u64,
 }
 
 /// What the student computer must enforce right now.
@@ -210,7 +235,14 @@ pub struct Policy {
     allowed_apps: Vec<AllowedApp>,
     block_ai: bool,
     heartbeat_seconds: u32,
+    /// Screenshot interval inside the heartbeat, for student apps before 2.3.38.
     screen_seconds: u32,
+    /// Newer student apps: send a picture this often to `/screen` when it changed.
+    live_screen_seconds: u32,
+    /// Newest student apps: the same in milliseconds, 250 while watched.
+    live_screen_ms: u32,
+    /// The supervisor is looking at this student: send a sharper picture.
+    screen_large: bool,
     /// Lets the computer accept the emergency code without the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     unlock: Option<UnlockCheck>,
@@ -636,17 +668,26 @@ pub async fn screens(
     Path(id): Path<String>,
     Query(query): Query<ScreensQuery>,
 ) -> Result<Json<Vec<ScreenView>>, AppError> {
+    if !state
+        .exam_screens_poll_limiter
+        .check(auth.user_id.clone())
+        .await
+    {
+        return Err(AppError::RateLimited);
+    }
     let room = owned_room(&state, &auth.user_id, &uuid(&id, "id")?).await?;
+    let screens = match query.after {
+        Some(after) => state.exam_live.room_screens_after(&room.id, after).await,
+        None => state.exam_live.room_screens(&room.id, query.since).await,
+    };
     Ok(Json(
-        state
-            .exam_live
-            .room_screens(&room.id, query.since)
-            .await
+        screens
             .into_iter()
             .map(|(member_id, screen)| ScreenView {
                 member_id,
                 jpeg_base64: screen.jpeg_base64,
                 captured_at: screen.captured_at,
+                seq: screen.seq,
             })
             .collect(),
     ))
@@ -789,6 +830,13 @@ async fn policy(state: &AppState, user_id: &str, member_id: &str) -> Result<Poli
         } else {
             NORMAL_SCREEN_SECONDS
         },
+        live_screen_seconds: LIVE_SCREEN_SECONDS,
+        live_screen_ms: if watched {
+            WATCHED_SCREEN_MS
+        } else {
+            LIVE_SCREEN_MS
+        },
+        screen_large: watched,
         unlock,
     })
 }
@@ -916,6 +964,10 @@ pub async fn heartbeat(
         .map_err(AppError::from_db)?;
     }
     transaction.commit().await.map_err(AppError::from_db)?;
+    state
+        .exam_live
+        .allow_seat(&member_id, &auth.user_id, &current.room_id)
+        .await;
     if let Some(screenshot) = request.screenshot.as_deref() {
         let screenshot = checked_screenshot(screenshot)?;
         state
@@ -924,6 +976,45 @@ pub async fn heartbeat(
             .await;
     }
     Ok(Json(current))
+}
+
+/// Student side: one picture of the screen, between heartbeats. Memory only:
+/// a recent heartbeat already checked the seat, so the database is not asked.
+pub async fn screen(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Path(member): Path<String>,
+    ApiJson(request): ApiJson<ScreenUpload>,
+) -> Result<Json<ScreenAnswer>, AppError> {
+    let member_id = uuid(&member, "memberId")?;
+    // The opened student sends about four pictures a second; everyone else one.
+    let watched = state.exam_live.is_watched(&member_id).await;
+    let limiter = if watched {
+        &state.exam_watched_screen_limiter
+    } else {
+        &state.exam_screen_limiter
+    };
+    if !limiter.check(member_id.clone()).await {
+        return Err(AppError::RateLimited);
+    }
+    let room_id = state
+        .exam_live
+        .seat_room(&member_id, &auth.user_id)
+        .await
+        .ok_or_else(|| AppError::Conflict("send a heartbeat first".into()))?;
+    let screenshot = checked_screenshot(&request.screenshot)?;
+    state
+        .exam_live
+        .put_screen(&member_id, &room_id, screenshot, now_unix())
+        .await;
+    Ok(Json(ScreenAnswer {
+        live_screen_ms: if watched {
+            WATCHED_SCREEN_MS
+        } else {
+            LIVE_SCREEN_MS
+        },
+        screen_large: watched,
+    }))
 }
 
 /// Student side: read the current rules without reporting anything, used

@@ -1,6 +1,7 @@
 import { get, writable } from 'svelte/store';
-import { examLocked, guardApps, normalizeUnlockCode, verifyUnlockCode, type ExamHeartbeat, type ExamPolicy, type ExamUnlockCheck } from '../lib/exam';
+import { examLocked, guardApps, normalizeUnlockCode, verifyUnlockCode, type ExamHeartbeat, type ExamPolicy, type ExamScreenPace, type ExamUnlockCheck } from '../lib/exam';
 import { examCaptureScreen, examGuardApply, examGuardReport, examGuardStop } from '../lib/platform';
+import { screenChanged, screenSignature } from '../lib/screenSignature';
 import { session } from './session';
 
 /** The student seat survives a restart, so quitting is no way out of an exam. */
@@ -8,6 +9,12 @@ const SEAT_KEY = 'sanser.exam.seat.v1';
 /** Longest exam the server allows, plus margin: past it the seat is let go even offline. */
 const OFFLINE_RELEASE_MS = 9 * 60 * 60 * 1000;
 const MAX_PENDING = 50;
+/** An unchanged screen is still sent this often, so the grid shows the seat is alive. */
+const UNCHANGED_SCREEN_MS = 10_000;
+/** Never faster than this, whatever the server says. */
+const MIN_SCREEN_MS = 200;
+/** Breathing room between two captures, even when a capture took longer than the pace. */
+const MIN_CAPTURE_GAP_MS = 50;
 
 export interface ExamSeatState {
   policy: ExamPolicy | null;
@@ -48,10 +55,82 @@ export function createExamSeat() {
   let pending: ExamHeartbeat['violations'] = [];
   let lastShotAt = 0;
   let running = false;
+  let screenTimer: number | null = null;
+  let lastSignature: Uint8Array | null = null;
+  let lastScreenAt = 0;
+  let lastScreenLarge = false;
+  /** Bumped on stop, so a capture still in flight does not start a second loop. */
+  let screenLoop = 0;
+  let screenBusy = false;
+  /** The newest pace: from the last heartbeat, or sooner from the last picture's answer. */
+  let pace: ExamScreenPace | null = null;
+
+  function stopScreens(): void {
+    if (screenTimer !== null) window.clearTimeout(screenTimer);
+    screenTimer = null;
+    screenLoop += 1;
+    lastSignature = null;
+    lastScreenAt = 0;
+    pace = null;
+  }
 
   function stopTimer(): void {
     if (timer !== null) window.clearTimeout(timer);
     timer = null;
+    stopScreens();
+  }
+
+  /** Newer servers take screens between heartbeats, every second when they change. */
+  function liveScreens(policy: ExamPolicy | null): policy is ExamPolicy & { liveScreenSeconds: number } {
+    return typeof policy?.liveScreenSeconds === 'number' && policy.liveScreenSeconds > 0;
+  }
+
+  /** Time between pictures: about 250 ms while watched, one second otherwise. */
+  function policyPace(policy: ExamPolicy & { liveScreenSeconds: number }): ExamScreenPace {
+    const ms = typeof policy.liveScreenMs === 'number' && policy.liveScreenMs > 0 ? policy.liveScreenMs : policy.liveScreenSeconds * 1000;
+    return { liveScreenMs: ms, screenLarge: policy.screenLarge === true };
+  }
+
+  async function screenTick(loop: number): Promise<void> {
+    screenTimer = null;
+    const current = get(store).policy;
+    const seat = readSeat();
+    if (loop !== screenLoop || !running || !seat || !liveScreens(current)) return;
+    screenBusy = true;
+    const startedAt = Date.now();
+    try {
+      const large = (pace ?? policyPace(current)).screenLarge;
+      const jpeg = await examCaptureScreen(large);
+      const signature = await screenSignature(jpeg);
+      const due = Date.now() - lastScreenAt >= UNCHANGED_SCREEN_MS || large !== lastScreenLarge;
+      if (due || screenChanged(lastSignature, signature)) {
+        const client = session.client();
+        if (client && loop === screenLoop) {
+          const answer = await client.examScreen(seat.memberId, jpeg);
+          if (loop === screenLoop && typeof answer.liveScreenMs === 'number') pace = answer;
+          lastSignature = signature;
+          lastScreenAt = Date.now();
+          lastScreenLarge = large;
+        }
+      }
+    } catch {
+      // No picture this second, or no heartbeat yet (409): the next second tries again.
+    } finally {
+      screenBusy = false;
+    }
+    const next = get(store).policy;
+    // A stop in the meantime bumped the loop number; a start waited for this capture.
+    if (loop === screenLoop && liveScreens(next)) {
+      // The capture itself counts: a 400 ms capture leaves 600 ms of a second.
+      const every = Math.max(MIN_SCREEN_MS, (pace ?? policyPace(next)).liveScreenMs);
+      screenTimer = window.setTimeout(() => void screenTick(loop), Math.max(MIN_CAPTURE_GAP_MS, every - (Date.now() - startedAt)));
+    }
+  }
+
+  function startScreens(): void {
+    if (screenTimer !== null || screenBusy || !running) return;
+    const loop = screenLoop;
+    screenTimer = window.setTimeout(() => void screenTick(loop), 0);
   }
 
   async function release(finished: ExamSeatState['finished'], policy: ExamPolicy | null): Promise<void> {
@@ -85,7 +164,7 @@ export function createExamSeat() {
       pending = [...pending, ...report.violations].slice(-MAX_PENDING);
       if (!report.running) await examGuardApply(guardApps(current), current.blockAi, current.memberState === 'paused').catch(() => undefined);
       let screenshot: string | undefined;
-      if (Date.now() - lastShotAt >= current.screenSeconds * 1000) {
+      if (!liveScreens(current) && Date.now() - lastShotAt >= current.screenSeconds * 1000) {
         screenshot = await examCaptureScreen(current.screenSeconds < 10).catch(() => undefined);
         lastShotAt = Date.now();
       }
@@ -96,6 +175,7 @@ export function createExamSeat() {
       store.update((state) => ({ ...state, lastSyncAt: Date.now(), error: null }));
       await enforce(policy);
       nextSeconds = policy.heartbeatSeconds;
+      if (liveScreens(policy)) { pace = policyPace(policy); startScreens(); }
     } catch (error) {
       // Offline: stay locked and keep the violations for the next heartbeat.
       store.update((state) => ({ ...state, error: message(error, 'The supervisor could not be reached') }));
