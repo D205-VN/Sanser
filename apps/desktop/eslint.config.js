@@ -3,7 +3,8 @@ import svelte from 'eslint-plugin-svelte';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist/', 'src-tauri/target/', '.svelte-kit/'] },
+  // src-tauri/src/exam_guard/*.js runs in macOS osascript (JXA), not a browser.
+  { ignores: ['dist/', 'src-tauri/target/', '.svelte-kit/', 'src-tauri/src/exam_guard/'] },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   ...svelte.configs['flat/recommended'],

@@ -7,6 +7,7 @@
   import HostPrivacySettings from '../components/HostPrivacySettings.svelte';
   import BlockedApps from '../components/BlockedApps.svelte';
   import ReportProblem from '../components/ReportProblem.svelte';
+  import StreamAdvisor from '../components/StreamAdvisor.svelte';
   import { normalizeServerUrl } from '../lib/api';
   import type { LoginSession, NetworkMode, Preferences, QualityProfile, RuntimeStatus, SettingsSection, VideoCodec } from '../lib/types';
   import { exportDiagnostics, loginItemStatus, setLoginItem, type LoginItemStatus } from '../lib/platform';
@@ -228,6 +229,7 @@
             {/each}
           </div>
         </article>
+        <StreamAdvisor {runtime} />
       {:else if active === 'video'}
         <article class="card card-body settings-card stack">
           <div><h2 class="card-title">{$t('Video')}</h2><p class="card-subtitle">{$t('Editing a video option switches to Custom. Presets use the values listed in Stream.')}</p></div>

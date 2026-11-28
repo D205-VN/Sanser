@@ -1,8 +1,10 @@
 pub mod account;
+pub mod advisor;
 pub mod auth;
 pub mod devices;
 pub mod docs;
 pub mod email_verification;
+pub mod exams;
 pub mod guest;
 pub mod history;
 pub mod network;

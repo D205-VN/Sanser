@@ -12,7 +12,8 @@
     { page: 'computers', label: tk('Computers') },
     { page: 'host', label: tk('Host') },
     { page: 'session', label: tk('Active session') },
-    { page: 'history', label: tk('History') }
+    { page: 'history', label: tk('History') },
+    { page: 'exam', label: tk('Exam') }
   ];
   const secondary: { page: Page; label: string }[] = [
     { page: 'settings', label: tk('Settings') },

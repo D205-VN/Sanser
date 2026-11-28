@@ -2551,3 +2551,274 @@ async fn wake_on_lan_details_are_opt_in_host_only_and_account_scoped() {
     assert!(listed_host.get("wakeOnLan").is_none());
     server.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn exam_rooms_lock_students_until_the_supervisor_ends_them() {
+    let Some(server) = TestServer::new().await else {
+        return;
+    };
+    let teacher = server.register("teacher@example.test").await;
+    let teacher = teacher["accessToken"]
+        .as_str()
+        .expect("teacher token")
+        .to_owned();
+    let student = server.register("student@example.test").await;
+    let student = student["accessToken"]
+        .as_str()
+        .expect("student token")
+        .to_owned();
+    let other = server.register("other@example.test").await;
+    let other = other["accessToken"]
+        .as_str()
+        .expect("other token")
+        .to_owned();
+    let device = Uuid::new_v4().to_string();
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/devices/register",
+            Some(json!({"id": device, "name": "Lab PC 7", "platform": "windows-x86_64", "deviceRole": "host", "nativeTransport": true, "codecs": ["h264"]})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, room, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exams",
+            Some(json!({"title": "Toán 10A", "allowedApps": [{"id": "WINWORD.EXE", "name": "Word"}], "hours": 2})),
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{room}");
+    let room_id = room["id"].as_str().expect("room id").to_owned();
+    let code = room["code"].as_str().expect("code").to_owned();
+    assert_eq!(code.len(), 6);
+    assert_eq!(room["blockAi"], true);
+
+    // A wrong code and someone else's device are refused.
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exam-members",
+            Some(json!({"code": "222222", "deviceId": device, "displayName": "An"})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exam-members",
+            Some(json!({"code": code, "deviceId": device, "displayName": "An"})),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, policy, _) = server
+        .request(Method::POST, "/api/v2/exam-members", Some(json!({"code": code.to_lowercase(), "deviceId": device, "displayName": "Nguyễn An"})), Some(&student))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let member = policy["memberId"].as_str().expect("member").to_owned();
+    assert_eq!(policy["roomState"], "open");
+    assert_eq!(policy["memberState"], "active");
+    assert_eq!(policy["allowedApps"][0]["id"], "WINWORD.EXE");
+    assert_eq!(policy["supervisorName"], "Test User");
+
+    // Only the student account can report for the seat.
+    let heartbeat = |violations: Value, screenshot: Option<String>| json!({"foregroundApp": "Microsoft Word", "violations": violations, "screenshot": screenshot});
+    let path = format!("/api/v2/exam-members/{member}/heartbeat");
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &path,
+            Some(heartbeat(json!([]), None)),
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let jpeg = STANDARD.encode([0xFF, 0xD8, 0xFF, 0xE0, 0, 16]);
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            &path,
+            Some(heartbeat(
+                json!([{"kind": "ai-app", "detail": "ChatGPT"}]),
+                Some(jpeg.clone()),
+            )),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &path,
+            Some(heartbeat(json!([{"kind": "made-up", "detail": "x"}]), None)),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, detail, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exams/{room_id}"),
+            None,
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["members"][0]["displayName"], "Nguyễn An");
+    assert_eq!(detail["members"][0]["online"], true);
+    assert_eq!(detail["members"][0]["foregroundApp"], "Microsoft Word");
+    assert_eq!(detail["members"][0]["violationCount"], 1);
+    assert_eq!(detail["violations"][0]["kind"], "ai-app");
+    // The student cannot read the supervisor view.
+    let (status, _, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exams/{room_id}"),
+            None,
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, screens, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exams/{room_id}/screens?since=0"),
+            None,
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(screens[0]["jpegBase64"], jpeg.as_str());
+    assert_eq!(screens[0]["memberId"], member.as_str());
+
+    // Watching closely speeds the student up; pausing reaches them on the next heartbeat.
+    let action = format!("/api/v2/exams/{room_id}/members/{member}/action");
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &action,
+            Some(json!({"action": "watch"})),
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            &action,
+            Some(json!({"action": "pause"})),
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, policy, _) = server
+        .request(
+            Method::POST,
+            &path,
+            Some(heartbeat(json!([]), None)),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(policy["memberState"], "paused");
+    assert_eq!(policy["heartbeatSeconds"], 2);
+
+    // A second open room cannot take the same computer.
+    let (_, second, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exams",
+            Some(json!({"title": "Văn"})),
+            Some(&teacher),
+        )
+        .await;
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/exam-members",
+            Some(json!({"code": second["code"], "deviceId": device, "displayName": "An"})),
+            Some(&student),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, ended, _) = server
+        .request(
+            Method::POST,
+            &format!("/api/v2/exams/{room_id}/end"),
+            None,
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ended["state"], "ended");
+    let (_, policy, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exam-members/{member}"),
+            None,
+            Some(&student),
+        )
+        .await;
+    assert_eq!(policy["roomState"], "ended");
+    let (_, screens, _) = server
+        .request(
+            Method::GET,
+            &format!("/api/v2/exams/{room_id}/screens?since=0"),
+            None,
+            Some(&teacher),
+        )
+        .await;
+    assert_eq!(screens, json!([]));
+    server.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires a dedicated TEST_DATABASE_URL; run explicitly with --ignored"]
+async fn stream_advisor_answers_with_rules_when_no_model_is_configured() {
+    let Some(server) = TestServer::new().await else {
+        return;
+    };
+    let auth = server.register("advisor@example.test").await;
+    let access = auth["accessToken"].as_str().expect("token");
+    let (status, body, _) = server
+        .request(Method::GET, "/api/v2/advisor/stream", None, Some(access))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["modelAvailable"], false);
+    let (status, body, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/advisor/stream",
+            Some(json!({
+                "viewer": {"platform": "macos", "displayHeight": 1117, "refreshHz": 120, "codecs": ["h264", "hevc"]},
+                "host": {"platform": "windows", "gpu": "NVIDIA RTX 3060", "codecs": ["h264"]},
+                "network": {"path": "relay", "rttMs": 90},
+                "locale": "vi"
+            })),
+            Some(access),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["source"], "rules");
+    assert_eq!(body["settings"]["codec"], "h264");
+    assert!(body["settings"]["bitrateMbps"].as_u64().expect("bitrate") <= 15);
+    let (status, _, _) = server
+        .request(
+            Method::POST,
+            "/api/v2/advisor/stream",
+            Some(json!({"viewer": {}, "host": {}})),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.close().await;
+}

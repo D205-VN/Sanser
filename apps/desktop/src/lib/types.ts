@@ -1,8 +1,8 @@
-export const SANSER_VERSION = '2.3.35' as const;
+export const SANSER_VERSION = '2.3.36' as const;
 export const PROTOCOL_VERSION = 2 as const;
 export const NATIVE_PROTOCOL = 'Native direct' as const;
 
-export type Page = 'computers' | 'host' | 'session' | 'history' | 'settings' | 'diagnostics' | 'about';
+export type Page = 'computers' | 'host' | 'session' | 'history' | 'exam' | 'settings' | 'diagnostics' | 'about';
 export type SettingsSection =
   | 'general'
   | 'stream'

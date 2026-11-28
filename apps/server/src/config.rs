@@ -44,6 +44,31 @@ pub struct Config {
     /// Resend is used when both are set.
     pub resend: Option<ResendConfig>,
     pub smtp: Option<SmtpConfig>,
+    /// OpenAI-compatible model (LM Studio) behind the stream settings
+    /// advisor. Off when unset; see docs/stream-advisor.md.
+    pub advisor: Option<AdvisorConfig>,
+}
+
+#[derive(Clone)]
+pub struct AdvisorConfig {
+    /// Base address such as `https://lm.example.com` (the server adds `/v1/chat/completions`).
+    pub url: url::Url,
+    pub model: String,
+    pub(crate) api_key: Option<Arc<Zeroizing<String>>>,
+}
+
+impl AdvisorConfig {
+    pub fn new(url: url::Url, model: String, api_key: Option<String>) -> Self {
+        Self {
+            url,
+            model,
+            api_key: api_key.map(|key| Arc::new(Zeroizing::new(key))),
+        }
+    }
+
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref().map(|value| value.as_str())
+    }
 }
 
 /// Resend's HTTPS email API. It needs no SMTP port, so it also works on hosts
@@ -209,6 +234,7 @@ impl Config {
             session_credential_key,
             resend,
             smtp,
+            advisor: advisor_from_env()?,
         };
         config.validate()?;
         Ok(config)
@@ -247,6 +273,7 @@ impl Config {
             session_credential_key: Arc::new(Zeroizing::new(vec![0xA5; 32])),
             resend: None,
             smtp: None,
+            advisor: None,
         };
         config.validate()?;
         Ok(config)
@@ -513,6 +540,37 @@ fn required_env(name: &str) -> Result<String, ConfigError> {
 
 fn valid_sender(from: &str) -> bool {
     from.parse::<lettre::message::Mailbox>().is_ok()
+}
+
+fn advisor_from_env() -> Result<Option<AdvisorConfig>, ConfigError> {
+    let Some(address) = optional_env("ADVISOR_LLM_URL") else {
+        return Ok(None);
+    };
+    let url = url::Url::parse(&address)
+        .ok()
+        .filter(|url| {
+            url.scheme() == "https"
+                || (url.scheme() == "http"
+                    && url.host_str().is_some_and(|host| {
+                        host == "localhost" || host == "127.0.0.1" || host == "[::1]"
+                    }))
+        })
+        .ok_or_else(|| {
+            ConfigError::Invalid(
+                "ADVISOR_LLM_URL must be an https address (http only for localhost)".into(),
+            )
+        })?;
+    let model = optional_env("ADVISOR_LLM_MODEL").unwrap_or_else(|| "qwen2.5-3b-instruct".into());
+    if model.len() > 200 || model.chars().any(char::is_control) {
+        return Err(ConfigError::Invalid(
+            "ADVISOR_LLM_MODEL is not a model name".into(),
+        ));
+    }
+    Ok(Some(AdvisorConfig::new(
+        url,
+        model,
+        optional_env("ADVISOR_LLM_API_KEY"),
+    )))
 }
 
 fn resend_from_env() -> Result<Option<ResendConfig>, ConfigError> {

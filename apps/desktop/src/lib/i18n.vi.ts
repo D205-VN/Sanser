@@ -1,6 +1,7 @@
 // Vietnamese UI strings. Keys are the English source strings used with t()/tk()/translate().
 // Strings that read the same in both languages (brand names, units) are omitted.
 import { VI_SECURITY } from './i18n.vi.security';
+import { VI_EXAM } from './i18n.vi.exam';
 
 export const VI: Record<string, string> = {
   "Network check": "Kiểm tra mạng",
@@ -39,6 +40,7 @@ export const VI: Record<string, string> = {
   "Unable to remove the start-at-login setting": "Không gỡ được cài đặt mở khi đăng nhập",
   "Unable to change the start-at-login setting": "Không đổi được cài đặt mở khi đăng nhập",
   ...VI_SECURITY,
+  ...VI_EXAM,
   "Unable to respond to the invitation": "Không thể phản hồi lời mời",
   "Unable to stop sharing": "Không thể dừng chia sẻ",
   "Workspace": "Làm việc",

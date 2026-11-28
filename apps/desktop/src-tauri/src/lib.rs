@@ -8,6 +8,7 @@ mod engine;
 mod engine_output;
 mod engine_user;
 mod error;
+mod exam_guard;
 mod fec_health;
 mod file_transfer;
 mod login_item;
@@ -57,6 +58,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .manage(collab_window::OverlayState::default())
         .manage(commands::P2pSessionManager::default())
         .manage(relay::RelayManager::default())
+        .manage(exam_guard::ExamGuard::default())
         .setup(|app| {
             if cfg!(target_os = "windows") {
                 tray::install(app)?;
@@ -76,6 +78,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .invoke_handler(app_invoke)
         .build(context)?
         .run(|app, event| {
+            // A student cannot leave an exam by quitting (Cmd+Q, Dock, tray).
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event
+                && app.state::<exam_guard::ExamGuard>().locked()
+            {
+                api.prevent_exit();
+                tray::show_main(app);
+                return;
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 // Explicit exit (including an updater restart) must stop
                 // sidecars before Tauri terminates the process. Drop alone is
@@ -93,6 +103,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn app_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     voice_window::window_event(window, event);
+    if window.label() == "main"
+        && let tauri::WindowEvent::CloseRequested { api, .. } = event
+        && window.state::<exam_guard::ExamGuard>().locked()
+    {
+        api.prevent_close();
+        return;
+    }
     #[cfg(debug_assertions)]
     if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
         eprintln!("Sanser lifecycle: close event label={}", window.label());
@@ -138,6 +155,10 @@ fn app_invoke(invoke: tauri::ipc::Invoke<tauri::Wry>) -> bool {
         windows_uac::configure_windows_uac,
         commands::get_runtime_status,
         running_apps::list_running_apps,
+        exam_guard::exam_guard_apply,
+        exam_guard::exam_guard_report,
+        exam_guard::exam_guard_stop,
+        exam_guard::exam_capture_screen,
         device_identity::get_device_identity,
         device_identity::get_login_device,
         commands::load_preferences,

@@ -210,6 +210,28 @@ export async function wakeOnLanInterfaces(): Promise<WakeInterface[]> {
 }
 
 /** Regular apps running on this computer, for the blocked-apps picker. */
+/** Exam mode: keep only these apps in front (macOS bundle ids or Windows file names). */
+export async function examGuardApply(allowedApps: string[], blockAi: boolean, paused: boolean): Promise<void> {
+  if (!isTauriRuntime()) throw new Error('Exam mode requires the Sanser desktop app');
+  await invoke('exam_guard_apply', { settings: { allowedApps, blockAi, paused } });
+}
+export interface ExamGuardReport {
+  running: boolean;
+  foregroundApp: string | null;
+  violations: { kind: 'left-app' | 'ai-app' | 'ai-site' | 'guard-failed'; detail: string }[];
+}
+export async function examGuardReport(): Promise<ExamGuardReport> {
+  if (!isTauriRuntime()) return { running: false, foregroundApp: null, violations: [] };
+  return invoke<ExamGuardReport>('exam_guard_report');
+}
+export async function examGuardStop(): Promise<void> {
+  if (isTauriRuntime()) await invoke('exam_guard_stop');
+}
+export async function examCaptureScreen(large: boolean): Promise<string> {
+  if (!isTauriRuntime()) throw new Error('Screenshots require the Sanser desktop app');
+  return invoke<string>('exam_capture_screen', { large });
+}
+
 export async function listRunningApps(): Promise<BlockedApp[]> {
   if (!isTauriRuntime()) return [];
   return invoke<BlockedApp[]>('list_running_apps');

@@ -33,6 +33,11 @@ pub async fn request_id(mut request: Request, next: Next) -> Response {
 }
 
 pub async fn rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    // A whole class may share one school address; the exam heartbeat has
+    // its own per-seat limit instead (routes::exams::heartbeat).
+    if exam_heartbeat(request.uri().path()) {
+        return next.run(request).await;
+    }
     let key = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -48,6 +53,12 @@ pub async fn timeout(State(state): State<AppState>, request: Request, next: Next
         Ok(response) => response,
         Err(_) => AppError::Unavailable.into_response(),
     }
+}
+
+fn exam_heartbeat(path: &str) -> bool {
+    path.strip_prefix("/api/v2/exam-members/")
+        .and_then(|rest| rest.strip_suffix("/heartbeat"))
+        .is_some_and(|member| !member.is_empty() && !member.contains('/'))
 }
 
 fn valid_request_id(value: &HeaderValue) -> bool {

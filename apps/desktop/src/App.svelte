@@ -13,6 +13,10 @@
   import History from './pages/History.svelte';
   import HostRecordingNotice from './components/HostRecordingNotice.svelte';
   import Settings from './pages/Settings.svelte';
+  import Exam from './pages/Exam.svelte';
+  import ExamLockScreen from './components/ExamLockScreen.svelte';
+  import { examLocked } from './lib/exam';
+  import { examSeat } from './stores/exam';
   import Welcome from './pages/Welcome.svelte';
   import GuestSession from './pages/GuestSession.svelte';
   import { diagnostics, networkDiagnostics, type DirectRouteHealth, type DirectPathsUpdate } from './stores/diagnostics';
@@ -86,6 +90,7 @@
     host: { section: tk('Workspace'), label: tk('Host') },
     session: { section: tk('Workspace'), label: tk('Active session') },
     history: { section: tk('Workspace'), label: tk('History') },
+    exam: { section: tk('Workspace'), label: tk('Exam') },
     settings: { section: tk('System'), label: tk('Settings') },
     diagnostics: { section: tk('System'), label: tk('Settings') },
     about: { section: tk('System'), label: tk('About Sanser') }
@@ -107,9 +112,32 @@
     }
   });
 
+  // A student computer in an exam: pick the seat up again after a restart,
+  // and leave every remote session so nobody can help from elsewhere.
+  const studentLocked = $derived(examLocked($examSeat.policy));
+  let examTeardown = false;
+  $effect(() => {
+    if (runtime && $session.mode === 'cloud' && !signingOut) void examSeat.resume();
+  });
+  $effect(() => {
+    if (studentLocked && !examTeardown) { examTeardown = true; void leaveSessionsForExam(); }
+    if (!studentLocked) examTeardown = false;
+  });
+
+  async function leaveSessionsForExam(): Promise<void> {
+    const activeSession = $connection.session;
+    const client = session.client();
+    await sharing.shutdown().catch(() => undefined);
+    connection.clear();
+    if (activeSession && client) await client.disconnectSession(activeSession.id).catch(() => undefined);
+    if ($host.online || $host.busy || $host.engineRunning) await host.offline().catch(() => undefined);
+    if (runtime?.capabilities.desktopShell.state === 'available') await Promise.allSettled([stopEngine('host'), stopEngine('client')]);
+    host.setEngineRunning(false);
+  }
+
   $effect(() => {
     const accountId = $session.account?.id ?? null;
-    if (signingOut || accountId === null || !$preferences.host.autoOnline) {
+    if (signingOut || accountId === null || !$preferences.host.autoOnline || studentLocked) {
       autoOnlineAccountId = null;
       return;
     }
@@ -136,7 +164,8 @@
   });
 
   async function signOut(): Promise<void> {
-    if (signingOut) return;
+    // Signing out would end the exam lock; only the supervisor ends it.
+    if (signingOut || examSeat.active()) return;
     signingOut = true;
     signOutError = null;
     try {
@@ -245,6 +274,8 @@
 {:else if $session.mode === 'signedOut'}
   {#if updateAvailable}<div class="welcome-update"><button class="button small ghost" disabled={updateChecking} onclick={() => updater?.checkForUpdates()}>{updateChecking ? $t('Checking…') : $t('Update')}</button></div>{/if}
   <Welcome {runtime} />
+{:else if studentLocked || $examSeat.finished}
+  <ExamLockScreen />
 {:else}
   <ConnectionAlerts />
   <div class="app-shell">
@@ -278,6 +309,7 @@
         {#if page === 'computers'}<Computers {runtime} {navigate} />
         {:else if page === 'host'}<Host {runtime} />
         {:else if page === 'history'}<History />
+        {:else if page === 'exam'}<Exam />
         {:else if page === 'settings' || page === 'diagnostics'}<Settings {runtime} onSignOut={signOut} initialSection={page === 'diagnostics' ? 'diagnostics' : 'stream'} />
         {:else if page === 'about'}<About checking={updateChecking} {updateAvailable} onCheckForUpdates={() => { void updater?.checkForUpdates(); }} />{/if}
       </main>

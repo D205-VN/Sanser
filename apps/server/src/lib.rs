@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 mod events;
+pub mod exam_live;
 pub mod mailer;
 mod middleware;
 pub mod models;
@@ -198,6 +199,33 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v2/sharing/{id}/members/{member}/remove",
             post(routes::sharing::remove),
         )
+        .route(
+            "/api/v2/exams",
+            get(routes::exams::list).post(routes::exams::create),
+        )
+        .route(
+            "/api/v2/exams/{id}",
+            get(routes::exams::get).patch(routes::exams::update),
+        )
+        .route("/api/v2/exams/{id}/end", post(routes::exams::end))
+        .route("/api/v2/exams/{id}/screens", get(routes::exams::screens))
+        .route(
+            "/api/v2/exams/{id}/members/{member}/action",
+            post(routes::exams::member_action),
+        )
+        .route("/api/v2/exam-members", post(routes::exams::join))
+        .route(
+            "/api/v2/exam-members/{member}",
+            get(routes::exams::member_policy),
+        )
+        .route(
+            "/api/v2/exam-members/{member}/heartbeat",
+            post(routes::exams::heartbeat),
+        )
+        .route(
+            "/api/v2/advisor/stream",
+            get(routes::advisor::status).post(routes::advisor::advise),
+        )
         .route("/api/docs", get(routes::docs::page))
         .route("/api/openapi.json", get(routes::docs::openapi))
         .route("/api/v2/health", get(routes::system::health))
@@ -302,6 +330,7 @@ fn spawn_cleanup(state: AppState, cancellation: CancellationToken) -> tokio::tas
                     db::cleanup(&state.pool, now, offline_before, pending_before).await;
                     routes::email_verification::cleanup(&state.pool, now).await;
                     routes::guest::cleanup(&state.pool, now).await;
+                    routes::exams::cleanup(&state.pool, now).await;
                 }
             }
         }

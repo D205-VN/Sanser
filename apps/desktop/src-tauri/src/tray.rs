@@ -71,7 +71,14 @@ pub fn install(app: &App) -> Result<(), Box<dyn std::error::Error>> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             OPEN => show_main(app),
-            QUIT => app.exit(0),
+            QUIT => {
+                // The exit request is refused during an exam (see lib.rs).
+                if app.state::<crate::exam_guard::ExamGuard>().locked() {
+                    show_main(app);
+                } else {
+                    app.exit(0);
+                }
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

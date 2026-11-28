@@ -21,6 +21,8 @@ import type {
   WakeInterface
 } from './types';
 import type { LoginDevice } from './platform';
+import type { ExamApp, ExamHeartbeat, ExamPolicy, ExamRoom, ExamRoomDetail, ExamScreen } from './exam';
+import type { StreamAdvice, StreamAdviceRequest } from './streamAdvisor';
 
 export class ApiError extends Error {
   constructor(
@@ -566,6 +568,54 @@ export class ApiClient {
 
   async revokeLoginSession(id: string): Promise<void> {
     await this.request(`/api/v2/account/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  async examRooms(): Promise<ExamRoom[]> {
+    return this.request<ExamRoom[]>('/api/v2/exams');
+  }
+
+  async createExamRoom(title: string, allowedApps: ExamApp[], blockAi: boolean, hours: number): Promise<ExamRoomDetail> {
+    return this.request<ExamRoomDetail>('/api/v2/exams', { method: 'POST', body: { title, allowedApps, blockAi, hours } });
+  }
+
+  async examRoom(id: string): Promise<ExamRoomDetail> {
+    return this.request<ExamRoomDetail>(`/api/v2/exams/${encodeURIComponent(id)}`);
+  }
+
+  async updateExamRoom(id: string, changes: { allowedApps?: ExamApp[]; blockAi?: boolean }): Promise<ExamRoomDetail> {
+    return this.request<ExamRoomDetail>(`/api/v2/exams/${encodeURIComponent(id)}`, { method: 'PATCH', body: changes });
+  }
+
+  async endExamRoom(id: string): Promise<ExamRoomDetail> {
+    return this.request<ExamRoomDetail>(`/api/v2/exams/${encodeURIComponent(id)}/end`, { method: 'POST' });
+  }
+
+  async examMemberAction(id: string, memberId: string, action: 'pause' | 'resume' | 'remove' | 'watch'): Promise<ExamRoomDetail> {
+    return this.request<ExamRoomDetail>(`/api/v2/exams/${encodeURIComponent(id)}/members/${encodeURIComponent(memberId)}/action`, { method: 'POST', body: { action } });
+  }
+
+  async examScreens(id: string, since: number): Promise<ExamScreen[]> {
+    return this.request<ExamScreen[]>(`/api/v2/exams/${encodeURIComponent(id)}/screens?since=${String(Math.max(0, Math.floor(since)))}`);
+  }
+
+  async joinExam(code: string, deviceId: string, displayName: string): Promise<ExamPolicy> {
+    return this.request<ExamPolicy>('/api/v2/exam-members', { method: 'POST', body: { code, deviceId, displayName } });
+  }
+
+  async examPolicy(memberId: string): Promise<ExamPolicy> {
+    return this.request<ExamPolicy>(`/api/v2/exam-members/${encodeURIComponent(memberId)}`);
+  }
+
+  async examHeartbeat(memberId: string, heartbeat: ExamHeartbeat): Promise<ExamPolicy> {
+    return this.request<ExamPolicy>(`/api/v2/exam-members/${encodeURIComponent(memberId)}/heartbeat`, { method: 'POST', body: heartbeat });
+  }
+
+  async streamAdvisorStatus(): Promise<{ modelAvailable: boolean }> {
+    return this.request<{ modelAvailable: boolean }>('/api/v2/advisor/stream');
+  }
+
+  async streamAdvice(request: StreamAdviceRequest): Promise<StreamAdvice> {
+    return this.request<StreamAdvice>('/api/v2/advisor/stream', { method: 'POST', body: request });
   }
 
   private async request<T = unknown>(

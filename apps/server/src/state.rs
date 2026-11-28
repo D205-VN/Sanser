@@ -30,6 +30,15 @@ pub struct AppState {
     /// Guest code redemption attempts across all clients.
     pub guest_redeem_global_limiter: RateLimiter,
     pub recording_consents: Arc<crate::recording_consent::RecordingConsents>,
+    /// Exam screenshots and watch requests (memory only).
+    pub exam_live: Arc<crate::exam_live::ExamLive>,
+    /// Exam heartbeats per student seat. A class behind one school address
+    /// would trip the per-address limit, so heartbeats are counted here.
+    pub exam_heartbeat_limiter: RateLimiter,
+    /// Exam code attempts per account.
+    pub exam_join_limiter: RateLimiter,
+    /// Stream advisor requests per account (each may run a language model).
+    pub advisor_limiter: RateLimiter,
 }
 
 impl AppState {
@@ -61,6 +70,10 @@ impl AppState {
             guest_redeem_limiter: RateLimiter::new(20, Duration::from_secs(600)),
             guest_redeem_global_limiter: RateLimiter::new(600, Duration::from_secs(60)),
             recording_consents: Arc::default(),
+            exam_live: Arc::default(),
+            exam_heartbeat_limiter: RateLimiter::new(40, Duration::from_secs(60)),
+            exam_join_limiter: RateLimiter::new(20, Duration::from_secs(600)),
+            advisor_limiter: RateLimiter::new(10, Duration::from_secs(600)),
         }
     }
 }

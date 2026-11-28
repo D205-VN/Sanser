@@ -29,6 +29,14 @@ services:
         sync: false
       - key: SMTP_FROM
         sync: false
+      # Optional AI stream advisor behind LM Studio (docs/stream-advisor.md).
+      # Leave unset to use the built-in rules.
+      - key: ADVISOR_LLM_URL
+        sync: false
+      - key: ADVISOR_LLM_MODEL
+        sync: false
+      - key: ADVISOR_LLM_API_KEY
+        sync: false
       - key: NETWORK_MODE
         value: auto
       - key: STUN_URLS
